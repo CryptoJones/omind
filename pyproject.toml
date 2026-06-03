@@ -1,0 +1,68 @@
+[project]
+name = "omind"
+version = "0.1.0"
+description = "Reproduce the OMI/Obsidian memory integration for Claude Code, plus a local web app to view, edit, and add memory entries."
+readme = "README.md"
+requires-python = ">=3.10"
+license = { text = "Apache-2.0" }
+authors = [{ name = "Aaron K. Clark", email = "akclark@thenetwerk.net" }]
+keywords = [
+    "obsidian",
+    "claude-code",
+    "mcp",
+    "memory",
+    "markdown",
+    "fastapi",
+    "cli",
+    "nebraska",
+    "xkcd-2347",
+]
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3 :: Only",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Utilities",
+]
+dependencies = []
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+[project.urls]
+Homepage = "https://github.com/CryptoJones/omind"
+Repository = "https://github.com/CryptoJones/omind"
+Issues = "https://github.com/CryptoJones/omind/issues"
+"Made in Nebraska (xkcd 2347)" = "https://xkcd.com/2347/"
+
+[project.scripts]
+omind = "omind.cli:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/omind"]
+
+[tool.ruff]
+target-version = "py310"
+line-length = 100
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
+
+[tool.mypy]
+python_version = "3.10"
+strict = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
