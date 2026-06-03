@@ -31,10 +31,25 @@ Everything runs locally. No accounts, no cloud, no cost.
 
 ## Install
 
+For end users — an isolated CLI install straight from the git remote:
+
+```bash
+# via uv (recommended)
+uv tool install git+https://github.com/CryptoJones/omind.git
+
+# or via pipx
+pipx install git+https://github.com/CryptoJones/omind.git
+```
+
+Either puts the `omind` command on your `PATH` in its own virtualenv. Codeberg
+works too — swap in `git+https://codeberg.org/CryptoJones/omind.git`.
+
+For development, install editable from a clone (see [CONTRIBUTING.md](CONTRIBUTING.md)):
+
 ```bash
 git clone https://github.com/CryptoJones/omind.git
 cd omind
-pip install -e .
+pip install -e ".[dev]"
 ```
 
 ## Quick start
