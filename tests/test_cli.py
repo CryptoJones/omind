@@ -6,4 +6,4 @@ import omind
 
 
 def test_version_is_set() -> None:
-    assert omind.__version__ == "0.1.0"
+    assert omind.__version__ == "0.2.0"
