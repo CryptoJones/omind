@@ -76,6 +76,54 @@ def test_full_crud_cycle(client: TestClient, omi_dir: Path) -> None:
     assert (omi_dir / seeds.INDEX_FILENAME).is_file()
 
 
+def test_get_exposes_version(client: TestClient) -> None:
+    client.post("/api/notes", json={"title": "Ver"})
+    body = client.get("/api/notes/Ver.md").json()
+    assert body["version"]
+
+
+def test_stale_version_returns_409(client: TestClient) -> None:
+    client.post("/api/notes", json={"title": "Race"})
+    stale = client.get("/api/notes/Race.md").json()["version"]
+    # An external write bumps the version.
+    client.put("/api/notes/Race.md/raw", json={"content": "# Race\n\nexternal\n"})
+
+    conflicted = client.put(
+        "/api/notes/Race.md",
+        params={"expected_version": stale},
+        json={"title": "Race", "summary": "mine"},
+    )
+    assert conflicted.status_code == 409
+
+    # Omitting the version forces the write (the overwrite path).
+    forced = client.put("/api/notes/Race.md", json={"title": "Race", "summary": "mine"})
+    assert forced.status_code == 200
+    assert "mine" in client.get("/api/notes/Race.md").json()["raw"]
+
+
+def test_raw_stale_version_returns_409(client: TestClient) -> None:
+    client.post("/api/notes", json={"title": "RawRace"})
+    stale = client.get("/api/notes/RawRace.md").json()["version"]
+    client.put("/api/notes/RawRace.md/raw", json={"content": "# RawRace\n\nexternal\n"})
+    res = client.put(
+        "/api/notes/RawRace.md/raw",
+        params={"expected_version": stale},
+        json={"content": "# RawRace\n\nmine\n"},
+    )
+    assert res.status_code == 409
+
+
+def test_backlinks_endpoint(client: TestClient) -> None:
+    client.post("/api/notes", json={"title": "Hub"})
+    client.post("/api/notes", json={"title": "Spoke", "connections": ["Hub"]})
+    links = client.get("/api/notes/Hub.md/backlinks").json()
+    assert [link["filename"] for link in links] == ["Spoke.md"]
+
+
+def test_backlinks_missing_returns_404(client: TestClient) -> None:
+    assert client.get("/api/notes/ghost.md/backlinks").status_code == 404
+
+
 def test_tags_endpoint(client: TestClient) -> None:
     client.post("/api/notes", json={"title": "One", "tags": ["alpha", "beta"]})
     client.post("/api/notes", json={"title": "Two", "tags": ["beta", "gamma"]})

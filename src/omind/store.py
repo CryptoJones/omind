@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -41,6 +42,15 @@ class NoteError(Exception):
 
 class NoteNotFoundError(NoteError):
     """Raised when a requested note does not exist."""
+
+
+class NoteConflictError(Exception):
+    """Raised when a note changed on disk since the caller last read it.
+
+    Deliberately NOT a :class:`NoteError`: the web layer maps it to HTTP 409
+    (the write is valid, the *base version* is stale), whereas NoteError maps
+    to 400.
+    """
 
 
 @dataclass
@@ -250,30 +260,57 @@ class OmiStore:
 
     # -- reads --------------------------------------------------------------
 
-    def list_notes(self) -> list[NoteSummary]:
+    def _note_paths(self) -> Iterator[Path]:
+        """Yield the user-visible note files (skips reserved + dotfiles)."""
         if not self.omi_dir.is_dir():
-            return []
-        summaries: list[NoteSummary] = []
+            return
         for path in self.omi_dir.glob("*.md"):
             if path.name in RESERVED_FILENAMES or path.name.startswith("."):
                 continue
-            fields = parse_note(path.read_text(encoding="utf-8"))
-            title = fields.title or path.stem
-            snippet = fields.summary or fields.details
-            snippet = re.sub(r"\s+", " ", snippet).strip()
-            if len(snippet) > 200:
-                snippet = snippet[:197].rstrip() + "..."
-            summaries.append(
-                NoteSummary(
-                    filename=path.name,
-                    title=title,
-                    tags=fields.tags,
-                    created=fields.created,
-                    summary=snippet,
-                )
-            )
+            yield path
+
+    def _summarize(self, path: Path, text: str | None = None) -> NoteSummary:
+        if text is None:
+            text = path.read_text(encoding="utf-8")
+        fields = parse_note(text)
+        snippet = re.sub(r"\s+", " ", fields.summary or fields.details).strip()
+        if len(snippet) > 200:
+            snippet = snippet[:197].rstrip() + "..."
+        return NoteSummary(
+            filename=path.name,
+            title=fields.title or path.stem,
+            tags=fields.tags,
+            created=fields.created,
+            summary=snippet,
+        )
+
+    def list_notes(self) -> list[NoteSummary]:
+        summaries = [self._summarize(p) for p in self._note_paths()]
         summaries.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return summaries
+
+    def backlinks(self, name: str) -> list[NoteSummary]:
+        """Notes that ``[[wikilink]]`` to the given note (by title or stem)."""
+        target = self.safe_name(name)
+        if not target.is_file():
+            raise NoteNotFoundError(f"note not found: {name!r}")
+        target_text = target.read_text(encoding="utf-8")
+        stem = target.name[:-3] if target.name.endswith(".md") else target.name
+        identifiers = {stem.strip().lower()}
+        title = parse_note(target_text).title.strip().lower()
+        if title:
+            identifiers.add(title)
+
+        results: list[NoteSummary] = []
+        for path in self._note_paths():
+            if path.resolve() == target.resolve():
+                continue
+            text = path.read_text(encoding="utf-8")
+            link_targets = {t.strip().lower() for t in _WIKILINK_RE.findall(text)}
+            if link_targets & identifiers:
+                results.append(self._summarize(path, text))
+        results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
+        return results
 
     def read_note(self, name: str) -> str:
         path = self.safe_name(name)
@@ -284,6 +321,19 @@ class OmiStore:
     def read_fields(self, name: str) -> NoteFields:
         return parse_note(self.read_note(name))
 
+    def note_version(self, name: str) -> str:
+        """An opaque token for a note's on-disk state (mtime + size).
+
+        Empty string when the note does not exist yet. Callers pass the token
+        they last saw back to :meth:`write_note`; a mismatch means someone else
+        (Claude Code's MCP, Hermes' cron, another tab) wrote in the meantime.
+        """
+        path = self.safe_name(name)
+        if not path.is_file():
+            return ""
+        st = path.stat()
+        return f"{st.st_mtime_ns}-{st.st_size}"
+
     def all_tags(self) -> list[str]:
         tags: set[str] = set()
         for summary in self.list_notes():
@@ -292,8 +342,15 @@ class OmiStore:
 
     # -- writes -------------------------------------------------------------
 
-    def write_note(self, name: str, content: str) -> str:
+    def write_note(self, name: str, content: str, expected_version: str | None = None) -> str:
         path = self.safe_name(name)
+        if expected_version is not None and path.is_file():
+            current = self.note_version(name)
+            if current != expected_version:
+                raise NoteConflictError(
+                    f"note {name!r} changed on disk (expected {expected_version!r}, "
+                    f"found {current!r})"
+                )
         self.omi_dir.mkdir(parents=True, exist_ok=True)
         path.write_text(content, encoding="utf-8")
         self.update_index()
@@ -310,10 +367,12 @@ class OmiStore:
             raise NoteError(f"a note named {filename!r} already exists")
         return self.write_note(filename, render_fields(fields))
 
-    def update_note(self, name: str, fields: NoteFields) -> str:
+    def update_note(
+        self, name: str, fields: NoteFields, expected_version: str | None = None
+    ) -> str:
         # Validate target exists, then overwrite with rendered fields.
         self.read_note(name)
-        return self.write_note(name, render_fields(fields))
+        return self.write_note(name, render_fields(fields), expected_version=expected_version)
 
     def delete_note(self, name: str) -> None:
         path = self.safe_name(name)

@@ -7,7 +7,7 @@ OMI/Obsidian memory tooling for Claude Code: reproduce the integration on any ma
 [![Codeberg](https://img.shields.io/badge/Codeberg-CryptoJones%2Fomind-2185D0?logo=codeberg&logoColor=white)](https://codeberg.org/CryptoJones/omind)
 [![GitHub](https://img.shields.io/badge/GitHub-CryptoJones%2Fomind-181717?logo=github&logoColor=white)](https://github.com/CryptoJones/omind)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-v0.3.0-orange)]()
+[![Version](https://img.shields.io/badge/version-v1.0.0-orange)]()
 
 > Mirrored on both [GitHub](https://github.com/CryptoJones/omind) and
 > [Codeberg](https://codeberg.org/CryptoJones/omind). Issues filed on
@@ -32,6 +32,15 @@ reads and writes as long-term memory. `omind` does two things with it:
   and add** memory entries in that same folder, without opening Obsidian. Ships
   with five themes and a switchable UI in six languages (English, Spanish,
   French, Arabic, Russian, Chinese), including right-to-left layout for Arabic.
+- **`omind doctor`** — diagnose the wiring in one shot: Node/npx/Claude CLI on
+  `PATH`, the MCP server registered at user scope and pointed at the right
+  folder, and the OMI folder + Obsidian config readable.
+
+The web UI works **fully offline** (fonts, styles, and the Markdown renderer are
+vendored — no CDN). It shows **backlinks** for the open note, refreshes the list
+live as other tools write the folder, guards against clobbering external edits,
+and has keyboard shortcuts (`/` search, `n` new, `j`/`k` to move, `Ctrl`/`Cmd`+`S`
+to save, `Esc` to cancel).
 
 Everything runs locally. No accounts, no cloud, no cost.
 
@@ -78,6 +87,14 @@ Preview what setup *would* do without changing anything:
 ```bash
 omind setup --vault "$HOME/Documents/Obsidian Vault" --dry-run
 ```
+
+Check that everything is wired up correctly:
+
+```bash
+omind doctor --vault "$HOME/Documents/Obsidian Vault"
+```
+
+See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
 

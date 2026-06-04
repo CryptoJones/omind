@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "0.3.0"
+version = "1.0.0"
 description = "Reproduce the OMI/Obsidian memory integration for Claude Code, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -56,6 +56,8 @@ build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/omind"]
+# Tailwind build inputs are dev-only; the compiled output is vendored in static/.
+exclude = ["src/omind/web/tailwind"]
 
 [tool.ruff]
 target-version = "py310"

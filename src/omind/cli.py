@@ -15,7 +15,13 @@ import sys
 from pathlib import Path
 
 from omind import __version__
-from omind.provision import ProvisionError, SetupConfig, default_vault_path, run_setup
+from omind.provision import (
+    ProvisionError,
+    SetupConfig,
+    default_vault_path,
+    run_doctor,
+    run_setup,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -24,7 +30,7 @@ def build_parser() -> argparse.ArgumentParser:
         description="OMI/Obsidian memory tooling for Claude Code.",
     )
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
-    sub = parser.add_subparsers(dest="command", metavar="{setup,serve}")
+    sub = parser.add_subparsers(dest="command", metavar="{setup,serve,doctor}")
 
     setup = sub.add_parser("setup", help="provision the OMI/Obsidian MCP wiring for Claude Code")
     setup.add_argument(
@@ -66,6 +72,22 @@ def build_parser() -> argparse.ArgumentParser:
     serve.add_argument("--port", type=int, default=8765, help="bind port (default: 8765)")
     serve.add_argument("--reload", action="store_true", help="auto-reload on code changes (dev)")
 
+    doctor = sub.add_parser("doctor", help="diagnose the OMI/Obsidian MCP wiring")
+    doctor.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    doctor.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+    doctor.add_argument(
+        "--server-name",
+        default="obsidian",
+        help="name the MCP server is registered under (default: obsidian)",
+    )
+
     return parser
 
 
@@ -83,6 +105,15 @@ def _run_setup(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _run_doctor(args: argparse.Namespace) -> int:
+    config = SetupConfig(
+        vault=args.vault,
+        folder=args.folder,
+        server_name=args.server_name,
+    )
+    return run_doctor(config)
 
 
 def _run_serve(args: argparse.Namespace) -> int:
@@ -114,6 +145,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_setup(args)
     if args.command == "serve":
         return _run_serve(args)
+    if args.command == "doctor":
+        return _run_doctor(args)
     parser.print_help()
     return 0
 

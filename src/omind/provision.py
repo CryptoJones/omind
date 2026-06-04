@@ -230,3 +230,111 @@ class Provisioner:
 def run_setup(config: SetupConfig, log: Logger = print) -> list[str]:
     """Convenience wrapper: build a :class:`Provisioner` and run it."""
     return Provisioner(config=config, log=log).run()
+
+
+@dataclass
+class CheckResult:
+    """One diagnostic line from :func:`diagnose`."""
+
+    key: str
+    level: str  # "ok" | "warn" | "fail"
+    message: str
+
+
+def diagnose(config: SetupConfig) -> list[CheckResult]:
+    """Inspect the wiring `omind setup` creates and report what's healthy.
+
+    Pure inspection — touches nothing. ``fail`` means memory won't work until
+    fixed; ``warn`` means it'll work but something is off or merely cosmetic.
+    """
+    results: list[CheckResult] = []
+
+    for tool, why in (
+        ("node", "obsidian-mcp runs on Node.js"),
+        ("npx", "npx launches the obsidian-mcp package"),
+        ("claude", "the Claude Code CLI registers the MCP server"),
+    ):
+        if shutil.which(tool) is not None:
+            results.append(CheckResult(f"tool:{tool}", "ok", f"{tool} found on PATH"))
+        else:
+            results.append(CheckResult(f"tool:{tool}", "fail", f"{tool} not found — {why}"))
+
+    omi = config.omi_dir
+    if omi.is_dir():
+        results.append(CheckResult("omi_dir", "ok", f"OMI folder readable: {omi}"))
+    else:
+        results.append(
+            CheckResult("omi_dir", "fail", f"OMI folder missing: {omi} (run `omind setup`)")
+        )
+
+    app_json = omi / ".obsidian" / "app.json"
+    if app_json.is_file():
+        results.append(CheckResult("obsidian_config", "ok", f"Obsidian config present: {app_json}"))
+    else:
+        results.append(
+            CheckResult(
+                "obsidian_config",
+                "fail",
+                f"missing {app_json} — obsidian-mcp needs it to start",
+            )
+        )
+
+    missing_seeds = [
+        name
+        for name in (seeds.MEMORY_TEMPLATE_FILENAME, seeds.INDEX_FILENAME)
+        if not (omi / name).is_file()
+    ]
+    if missing_seeds:
+        results.append(
+            CheckResult("seeds", "warn", f"missing seed file(s): {', '.join(missing_seeds)}")
+        )
+    else:
+        results.append(CheckResult("seeds", "ok", "seed files present (template + index)"))
+
+    prov = Provisioner(config=config, log=lambda _msg: None)
+    server = prov.registered_server()
+    name = config.server_name
+    target = str(omi)
+    if server is None:
+        results.append(
+            CheckResult(
+                "mcp_registration",
+                "fail",
+                f"MCP server '{name}' not registered at user scope (run `omind setup`)",
+            )
+        )
+    else:
+        path = prov._server_path(server)
+        if path == target:
+            results.append(
+                CheckResult("mcp_registration", "ok", f"MCP server '{name}' -> {target}")
+            )
+        else:
+            results.append(
+                CheckResult(
+                    "mcp_registration",
+                    "warn",
+                    f"MCP server '{name}' points at {path!r}, expected {target!r}",
+                )
+            )
+
+    return results
+
+
+def run_doctor(config: SetupConfig, log: Logger = print) -> int:
+    """Print the diagnostic checklist; return an exit code (0 = healthy)."""
+    log(f"omind doctor -> {config.omi_dir}")
+    symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
+    results = diagnose(config)
+    for result in results:
+        log(f"  [{symbols[result.level]}] {result.message}")
+    fails = sum(1 for r in results if r.level == "fail")
+    warns = sum(1 for r in results if r.level == "warn")
+    if fails:
+        log(f"\n{fails} problem(s), {warns} warning(s). Run `omind setup` to repair the wiring.")
+        return 1
+    if warns:
+        log(f"\nHealthy, with {warns} warning(s) above.")
+        return 0
+    log("\nAll checks passed.")
+    return 0

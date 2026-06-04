@@ -19,7 +19,13 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
-from omind.store import NoteError, NoteFields, NoteNotFoundError, OmiStore
+from omind.store import (
+    NoteConflictError,
+    NoteError,
+    NoteFields,
+    NoteNotFoundError,
+    OmiStore,
+)
 
 STATIC_DIR = Path(__file__).parent / "static"
 
@@ -66,7 +72,12 @@ def create_app(omi_dir: Path | str) -> FastAPI:
     def get_note(name: str) -> dict[str, object]:
         raw = _guard(lambda: store.read_note(name))
         fields = _guard(lambda: store.read_fields(name))
-        return {"filename": name, "raw": raw, "fields": fields.to_dict()}
+        version = _guard(lambda: store.note_version(name))
+        return {"filename": name, "raw": raw, "fields": fields.to_dict(), "version": version}
+
+    @app.get("/api/notes/{name}/backlinks")
+    def get_backlinks(name: str) -> list[dict[str, object]]:
+        return [asdict(s) for s in _guard(lambda: store.backlinks(name))]
 
     @app.post("/api/notes", status_code=201)
     def create_note(payload: NoteFieldsModel) -> dict[str, str]:
@@ -74,15 +85,23 @@ def create_app(omi_dir: Path | str) -> FastAPI:
         return {"filename": filename}
 
     @app.put("/api/notes/{name}")
-    def update_note_structured(name: str, payload: NoteFieldsModel) -> dict[str, str]:
-        filename = _guard(lambda: store.update_note(name, payload.to_fields()))
+    def update_note_structured(
+        name: str, payload: NoteFieldsModel, expected_version: str | None = None
+    ) -> dict[str, str]:
+        filename = _guard(
+            lambda: store.update_note(name, payload.to_fields(), expected_version=expected_version)
+        )
         return {"filename": filename}
 
     @app.put("/api/notes/{name}/raw")
-    def update_note_raw(name: str, payload: RawUpdate) -> dict[str, str]:
+    def update_note_raw(
+        name: str, payload: RawUpdate, expected_version: str | None = None
+    ) -> dict[str, str]:
         # Validate the note exists, then overwrite its bytes verbatim.
         _guard(lambda: store.read_note(name))
-        filename = _guard(lambda: store.write_note(name, payload.content))
+        filename = _guard(
+            lambda: store.write_note(name, payload.content, expected_version=expected_version)
+        )
         return {"filename": filename}
 
     @app.delete("/api/notes/{name}", status_code=204)
@@ -101,6 +120,8 @@ def _guard(fn: Callable[[], T]) -> T:
         return fn()
     except NoteNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except NoteConflictError as exc:
+        raise HTTPException(status_code=409, detail=str(exc)) from exc
     except NoteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc
 
