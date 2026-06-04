@@ -38,6 +38,14 @@ def isolate_claude(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return cfg
 
 
+@pytest.fixture(autouse=True)
+def isolate_server_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Keep the managed install dir + EOF guard inside tmp, never real ~/.claude."""
+    home = tmp_path / "mcp-servers"
+    monkeypatch.setattr(provision, "mcp_servers_dir", lambda: home)
+    return home
+
+
 def _config(tmp_path: Path, **kw: object) -> SetupConfig:
     return SetupConfig(vault=tmp_path / "vault", **kw)  # type: ignore[arg-type]
 
@@ -47,6 +55,21 @@ def _quiet(_: str) -> None:
 
 
 def _write_server_config(cfg: Path, omi_path: str) -> None:
+    """Write a registered server in the current leak-free node form."""
+    server = {
+        "command": "node",
+        "args": [
+            "--require",
+            str(provision.eof_guard_path()),
+            str(provision.obsidian_mcp_entry()),
+            omi_path,
+        ],
+    }
+    cfg.write_text(json.dumps({"mcpServers": {"obsidian": server}}))
+
+
+def _write_legacy_server_config(cfg: Path, omi_path: str) -> None:
+    """Write the old, leak-prone ``npx -y obsidian-mcp`` registration."""
     server = {"command": "npx", "args": ["-y", "obsidian-mcp", omi_path]}
     cfg.write_text(json.dumps({"mcpServers": {"obsidian": server}}))
 
@@ -57,6 +80,9 @@ def _provision_files(config: SetupConfig) -> None:
     (obs / "app.json").write_text("{}")
     (config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME).write_text("x")
     (config.omi_dir / seeds.INDEX_FILENAME).write_text("x")
+    guard = provision.eof_guard_path()
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    guard.write_text(seeds.EOF_GUARD_JS)
 
 
 def test_default_vault_path_shape() -> None:
@@ -85,7 +111,12 @@ def test_real_run_creates_files_and_registers(
     assert (obs / "core-plugins.json").is_file()
     assert (config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME).is_file()
     assert (config.omi_dir / seeds.INDEX_FILENAME).is_file()
+    assert provision.eof_guard_path().is_file()
+    assert any(c[:2] == ["npm", "install"] for c in fake_subprocess)
     assert fake_subprocess[-2][:6] == ["claude", "mcp", "add", "-s", "user", "obsidian"]
+    add_cmd = fake_subprocess[-2]
+    assert "node" in add_cmd and "--require" in add_cmd
+    assert "npx" not in add_cmd
     assert fake_subprocess[-1][:3] == ["claude", "mcp", "get"]
 
 
@@ -120,6 +151,19 @@ def test_changed_path_triggers_reregistration(
     assert any(c[:3] == ["claude", "mcp", "add"] for c in fake_subprocess)
 
 
+def test_migrates_legacy_npx_registration(
+    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    # Old leak-prone form, already pointing at the right folder: must still migrate.
+    _write_legacy_server_config(isolate_claude, str(config.omi_dir))
+    Provisioner(config, log=_quiet).run()
+    assert any(c[:3] == ["claude", "mcp", "remove"] for c in fake_subprocess)
+    add_cmd = next(c for c in fake_subprocess if c[:3] == ["claude", "mcp", "add"])
+    assert "node" in add_cmd and "--require" in add_cmd
+    assert "npx" not in add_cmd
+
+
 def test_obsidian_dir_is_a_file_errors(
     tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
 ) -> None:
@@ -134,10 +178,10 @@ def test_missing_prereq_errors(
     tmp_path: Path, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        provision.shutil, "which", lambda name: None if name == "npx" else f"/usr/bin/{name}"
+        provision.shutil, "which", lambda name: None if name == "npm" else f"/usr/bin/{name}"
     )
     config = _config(tmp_path)
-    with pytest.raises(ProvisionError, match="npx"):
+    with pytest.raises(ProvisionError, match="npm"):
         Provisioner(config, log=_quiet).run()
 
 
@@ -186,3 +230,27 @@ def test_doctor_warns_on_path_mismatch(
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["mcp_registration"].level == "warn"
     assert provision.run_doctor(config, log=_quiet) == 0  # warnings don't fail
+
+
+def test_doctor_warns_on_legacy_npx_form(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_legacy_server_config(isolate_claude, str(config.omi_dir))
+    results = {r.key: r for r in provision.diagnose(config)}
+    # right path, wrong (leak-prone) command form -> warn, not ok
+    assert results["mcp_registration"].level == "warn"
+    assert "npx" in results["mcp_registration"].message
+    assert provision.run_doctor(config, log=_quiet) == 0
+
+
+def test_doctor_warns_on_missing_eof_guard(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, str(config.omi_dir))
+    provision.eof_guard_path().unlink()  # simulate a pre-migration setup
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["eof_guard"].level == "warn"

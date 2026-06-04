@@ -35,6 +35,35 @@ def claude_config_path() -> Path:
     return Path.home() / ".claude" / ".claude.json"
 
 
+# obsidian-mcp version pinned to the install layout below (entry at
+# build/main.js). Bump together with any move to a newer release.
+OBSIDIAN_MCP_VERSION = "1.0.6"
+
+
+def mcp_servers_dir() -> Path:
+    """Stable home for omind-managed MCP server installs and the EOF guard.
+
+    Deliberately *not* the npx cache (``~/.npm/_npx/<hash>/``), which npm can
+    garbage-collect out from under a registered server.
+    """
+    return Path.home() / ".claude" / "mcp-servers"
+
+
+def server_install_dir() -> Path:
+    """Where ``obsidian-mcp`` is installed (an npm prefix we control)."""
+    return mcp_servers_dir() / "obsidian"
+
+
+def obsidian_mcp_entry() -> Path:
+    """The obsidian-mcp entry script inside :func:`server_install_dir`."""
+    return server_install_dir() / "node_modules" / "obsidian-mcp" / "build" / "main.js"
+
+
+def eof_guard_path() -> Path:
+    """The stdin-EOF preload that stops the server orphaning on exit."""
+    return mcp_servers_dir() / seeds.EOF_GUARD_FILENAME
+
+
 @dataclass
 class SetupConfig:
     vault: Path
@@ -77,7 +106,7 @@ class Provisioner:
         """Return missing required executables; raise unless dry-run."""
         required = {
             "node": "obsidian-mcp runs on Node.js",
-            "npx": "npx launches the obsidian-mcp package",
+            "npm": "npm installs the obsidian-mcp package",
             "claude": "the Claude Code CLI registers the MCP server",
         }
         missing = [tool for tool in required if shutil.which(tool) is None]
@@ -85,14 +114,14 @@ class Provisioner:
             details = "; ".join(f"{t} ({required[t]})" for t in missing)
             message = (
                 f"missing required tool(s): {details}. "
-                "Install Node.js (for node/npx) and the Claude Code CLI, then re-run."
+                "Install Node.js (for node/npm) and the Claude Code CLI, then re-run."
             )
             if self.config.dry_run:
                 self.log(f"  WARNING: {message}")
             else:
                 raise ProvisionError(message)
         else:
-            self.log("  prerequisites present: node, npx, claude")
+            self.log("  prerequisites present: node, npm, claude")
         return missing
 
     def ensure_vault(self) -> None:
@@ -128,6 +157,29 @@ class Provisioner:
         )
         self._write_if_absent(self.config.omi_dir / seeds.INDEX_FILENAME, index_seed)
 
+    def ensure_server_install(self) -> None:
+        """Install obsidian-mcp to a stable prefix and write the stdin-EOF guard.
+
+        Registering a direct ``node`` command needs both a path that won't be
+        garbage-collected (unlike the npx cache) and the preload that stops the
+        server orphaning when Claude Code exits.
+        """
+        self._write_if_absent(eof_guard_path(), seeds.EOF_GUARD_JS)
+        entry = obsidian_mcp_entry()
+        if entry.is_file() and not self.config.force:
+            self.log(f"  obsidian-mcp already installed: {entry}")
+            return
+        install_dir = server_install_dir()
+        self._record(f"install obsidian-mcp@{OBSIDIAN_MCP_VERSION} into {install_dir}")
+        if not self.config.dry_run:
+            install_dir.mkdir(parents=True, exist_ok=True)
+            self._run(
+                [
+                    "npm", "install", "--prefix", str(install_dir),
+                    f"obsidian-mcp@{OBSIDIAN_MCP_VERSION}", "--no-audit", "--no-fund",
+                ]
+            )
+
     def registered_server(self) -> dict[str, object] | None:
         path = claude_config_path()
         if not path.is_file():
@@ -149,27 +201,51 @@ class Provisioner:
             return str(args[-1])
         return None
 
+    @staticmethod
+    def _is_direct_node(server: dict[str, object]) -> bool:
+        """True if the server uses the leak-free ``node --require`` command.
+
+        The old ``npx -y obsidian-mcp`` form orphans the Node process on exit
+        (see docs/troubleshooting.md), so we treat it as out of date.
+        """
+        if server.get("command") != "node":
+            return False
+        args = server.get("args")
+        return isinstance(args, list) and "--require" in args
+
+    def _server_command(self, target: str) -> list[str]:
+        return [
+            "node",
+            "--require", str(eof_guard_path()),
+            str(obsidian_mcp_entry()),
+            target,
+        ]
+
     def register_mcp(self) -> None:
         target = str(self.config.omi_dir)
         existing = self.registered_server()
-        if existing is not None and self._server_path(existing) == target and not self.config.force:
+        up_to_date = (
+            existing is not None
+            and self._server_path(existing) == target
+            and self._is_direct_node(existing)
+        )
+        if up_to_date and not self.config.force:
             self.log(f"  MCP server '{self.config.server_name}' already points at {target}")
             return
         if existing is not None:
+            form = "node" if self._is_direct_node(existing) else "legacy npx"
             self._record(
                 f"remove existing MCP server '{self.config.server_name}' "
-                f"(was {self._server_path(existing)!r})"
+                f"({form}, was {self._server_path(existing)!r})"
             )
             self._run(["claude", "mcp", "remove", self.config.server_name, "-s", "user"])
         self._record(
             f"register MCP server '{self.config.server_name}' -> "
-            f"npx -y obsidian-mcp {target!r} (user scope)"
+            f"node --require {eof_guard_path()} {obsidian_mcp_entry()} {target!r} (user scope)"
         )
         self._run(
-            [
-                "claude", "mcp", "add", "-s", "user", self.config.server_name,
-                "--", "npx", "-y", "obsidian-mcp", target,
-            ]
+            ["claude", "mcp", "add", "-s", "user", self.config.server_name, "--"]
+            + self._server_command(target)
         )
 
     def verify(self) -> None:
@@ -206,7 +282,7 @@ class Provisioner:
                 capture_output=True,
                 text=True,
             )
-        except FileNotFoundError as exc:  # claude / npx vanished mid-run
+        except FileNotFoundError as exc:  # claude / npm / node vanished mid-run
             raise ProvisionError(f"command not found: {cmd[0]}") from exc
         except subprocess.CalledProcessError as exc:
             detail = (exc.stderr or exc.stdout or "").strip()
@@ -220,6 +296,7 @@ class Provisioner:
         self.ensure_vault()
         self.ensure_obsidian_config()
         self.seed_memory_files()
+        self.ensure_server_install()
         self.register_mcp()
         self.verify()
         if not self.config.dry_run:
@@ -251,7 +328,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     for tool, why in (
         ("node", "obsidian-mcp runs on Node.js"),
-        ("npx", "npx launches the obsidian-mcp package"),
+        ("npm", "npm installs the obsidian-mcp package"),
         ("claude", "the Claude Code CLI registers the MCP server"),
     ):
         if shutil.which(tool) is not None:
@@ -305,11 +382,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
         )
     else:
         path = prov._server_path(server)
-        if path == target:
-            results.append(
-                CheckResult("mcp_registration", "ok", f"MCP server '{name}' -> {target}")
-            )
-        else:
+        if path != target:
             results.append(
                 CheckResult(
                     "mcp_registration",
@@ -317,6 +390,32 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
                     f"MCP server '{name}' points at {path!r}, expected {target!r}",
                 )
             )
+        elif not Provisioner._is_direct_node(server):
+            results.append(
+                CheckResult(
+                    "mcp_registration",
+                    "warn",
+                    f"MCP server '{name}' uses the leak-prone npx command; "
+                    "run `omind setup` to migrate it to the direct-node form",
+                )
+            )
+        else:
+            results.append(
+                CheckResult("mcp_registration", "ok", f"MCP server '{name}' -> {target}")
+            )
+
+    guard = eof_guard_path()
+    if guard.is_file():
+        results.append(CheckResult("eof_guard", "ok", f"stdin-EOF guard present: {guard}"))
+    else:
+        results.append(
+            CheckResult(
+                "eof_guard",
+                "warn",
+                f"missing stdin-EOF guard {guard} — run `omind setup` "
+                "(the server may orphan when Claude Code exits)",
+            )
+        )
 
     return results
 

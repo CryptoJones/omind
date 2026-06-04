@@ -5,6 +5,37 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.1.0] - 2026-06-04
+
+Fixes a process leak in the provisioned MCP server: `obsidian-mcp` instances
+piled up as orphans, one per Claude Code session, and tool calls could appear to
+hang. See [docs/troubleshooting.md](docs/troubleshooting.md) for the full
+diagnosis.
+
+### Fixed
+
+- `obsidian-mcp` no longer orphans when Claude Code exits. The root cause was
+  two-fold: the server never exits on stdin EOF (its file watcher keeps Node
+  alive), and the `npx -y obsidian-mcp` wrapper chain swallowed the termination
+  signal before it reached Node.
+
+### Changed
+
+- `omind setup` now registers the server as a direct
+  `node --require <eof-guard> <obsidian-mcp> <vault>/OMI` command instead of
+  `npx -y obsidian-mcp`. `obsidian-mcp` is installed to a stable prefix
+  (`~/.claude/mcp-servers/obsidian`) rather than relying on the
+  garbage-collectable npx cache, and a small stdin-EOF guard preload makes the
+  server exit cleanly on disconnect. Existing `npx`-form registrations are
+  migrated automatically on the next `omind setup`.
+- Prerequisite check now requires `npm` (used to install the pinned server)
+  rather than `npx`.
+
+### Added
+
+- `omind doctor` flags a registration still using the leak-prone `npx` form and
+  a missing stdin-EOF guard, and points to `omind setup` to repair them.
+
 ## [1.0.0] - 2026-06-03
 
 First stable release. The web UI now runs fully offline and tolerates the OMI
@@ -57,6 +88,7 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
   OMI memory notes, with structured-form and raw-Markdown editing.
 - End-user install methods and a `CONTRIBUTING` guide.
 
+[1.1.0]: https://github.com/CryptoJones/omind/releases/tag/v1.1.0
 [1.0.0]: https://github.com/CryptoJones/omind/releases/tag/v1.0.0
 [0.3.0]: https://github.com/CryptoJones/omind/releases/tag/v0.3.0
 [0.2.0]: https://github.com/CryptoJones/omind/releases/tag/v0.2.0
