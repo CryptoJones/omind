@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "1.0.0"
+version = "1.1.0"
 description = "Reproduce the OMI/Obsidian memory integration for Claude Code, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"

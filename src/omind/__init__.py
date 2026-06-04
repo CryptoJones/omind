@@ -2,4 +2,4 @@
 # Copyright 2026 Aaron K. Clark
 """omind — OMI/Obsidian memory tooling for Claude Code."""
 
-__version__ = "1.0.0"
+__version__ = "1.1.0"

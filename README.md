@@ -7,7 +7,7 @@ OMI/Obsidian memory tooling for Claude Code: reproduce the integration on any ma
 [![Codeberg](https://img.shields.io/badge/Codeberg-CryptoJones%2Fomind-2185D0?logo=codeberg&logoColor=white)](https://codeberg.org/CryptoJones/omind)
 [![GitHub](https://img.shields.io/badge/GitHub-CryptoJones%2Fomind-181717?logo=github&logoColor=white)](https://github.com/CryptoJones/omind)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-v1.0.0-orange)]()
+[![Version](https://img.shields.io/badge/version-v1.1.0-orange)]()
 
 > Mirrored on both [GitHub](https://github.com/CryptoJones/omind) and
 > [Codeberg](https://codeberg.org/CryptoJones/omind). Issues filed on
@@ -32,9 +32,10 @@ reads and writes as long-term memory. `omind` does two things with it:
   and add** memory entries in that same folder, without opening Obsidian. Ships
   with five themes and a switchable UI in six languages (English, Spanish,
   French, Arabic, Russian, Chinese), including right-to-left layout for Arabic.
-- **`omind doctor`** — diagnose the wiring in one shot: Node/npx/Claude CLI on
-  `PATH`, the MCP server registered at user scope and pointed at the right
-  folder, and the OMI folder + Obsidian config readable.
+- **`omind doctor`** — diagnose the wiring in one shot: Node/npm/Claude CLI on
+  `PATH`, the MCP server registered at user scope (in the leak-free direct-`node`
+  form) and pointed at the right folder, the stdin-EOF guard in place, and the
+  OMI folder + Obsidian config readable.
 
 The web UI works **fully offline** (fonts, styles, and the Markdown renderer are
 vendored — no CDN). It shows **backlinks** for the open note, refreshes the list

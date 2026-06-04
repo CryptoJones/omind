@@ -44,6 +44,22 @@ OBSIDIAN_CONFIG_FILES = {
     "appearance.json": APPEARANCE_JSON,
 }
 
+# Node preload that guarantees obsidian-mcp exits when its stdin (the MCP client
+# pipe) closes. The server's chokidar file watcher otherwise keeps the Node
+# event loop alive, so the process orphans when Claude Code exits. Registering
+# the server as a direct `node --require <this file> ...` command (instead of
+# `npx -y obsidian-mcp`) also lets Claude Code's terminating signal reach Node
+# directly rather than being swallowed by the npx/npm wrapper chain.
+EOF_GUARD_FILENAME = "obsidian-exit-on-eof.js"
+EOF_GUARD_JS = """\
+// Managed by omind. Exit obsidian-mcp when its stdin (the MCP client pipe)
+// closes; the chokidar file watcher otherwise keeps the Node event loop alive
+// and the process orphans when Claude Code exits.
+const die = () => process.exit(0);
+process.stdin.on("end", die);
+process.stdin.on("close", die);
+"""
+
 # The structured note template. Section headings here are the contract that
 # omind.store parses against, so keep them in sync with store.SECTIONS.
 MEMORY_TEMPLATE = """\
