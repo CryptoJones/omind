@@ -12,6 +12,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - CI now runs `mypy src`. The project was already `strict = true` in
   `pyproject.toml`, but neither the GitHub Actions nor the Woodpecker
   pipeline actually invoked the type checker.
+- CI now runs `pip-audit`. Both pipelines scan the resolved dependency
+  tree for known CVEs after the `mypy src` step; `pip-audit>=2.10.0` is
+  in the `dev` extra so the scan reproduces locally.
 - Internal: `OmindProvisioner.check_prereqs()` is now `-> None`. It only
   ever raises or logs — nothing consumed the missing-tools list it used to
   return.
