@@ -19,4 +19,5 @@ jobs:
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: mypy src
+      - run: pip-audit
       - run: pytest -v

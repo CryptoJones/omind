@@ -10,4 +10,5 @@ steps:
       - pip install -e .[dev]
       - ruff check .
       - mypy src
+      - pip-audit
       - pytest -v
