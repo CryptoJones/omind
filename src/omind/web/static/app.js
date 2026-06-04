@@ -113,7 +113,7 @@ function renderSidebar() {
   const notes = filteredNotes();
   listEl.innerHTML = "";
   if (notes.length === 0) {
-    listEl.innerHTML = `<li class="px-2 py-6 text-center font-mono text-[10px] uppercase tracking-widest text-ink-faint">no cards match</li>`;
+    listEl.innerHTML = `<li class="px-2 py-6 text-center font-mono text-[10px] uppercase tracking-widest text-ink-faint">no matches</li>`;
   }
   notes.forEach((n, i) => {
     const li = document.createElement("li");
@@ -131,7 +131,7 @@ function renderSidebar() {
   });
   const total = state.notes.length;
   const shown = notes.length;
-  countEl.textContent = shown === total ? `${total} card${total === 1 ? "" : "s"}` : `${shown}/${total}`;
+  countEl.textContent = shown === total ? `${total} note${total === 1 ? "" : "s"}` : `${shown}/${total}`;
 }
 
 // ---- Main pane ------------------------------------------------------------
@@ -143,9 +143,9 @@ function renderEmpty() {
   contentEl.innerHTML = `
     <div class="empty">
       <div class="card-glyph"></div>
-      <div class="empty-title">The catalog is open.</div>
-      <p class="font-mono text-[11px] uppercase tracking-[0.2em]">
-        Select a card &nbsp;·&nbsp; or press <span class="text-stamp">+ New Card</span>
+      <div class="empty-title">No memory selected</div>
+      <p class="font-mono text-[11px] uppercase tracking-[0.18em]">
+        Pick a note &nbsp;·&nbsp; or press <span class="text-stamp">+ New</span>
       </p>
     </div>`;
 }
@@ -182,7 +182,7 @@ function renderView(data) {
     <article class="sheet">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <div class="sheet-eyebrow">Memory&nbsp;·&nbsp;${escapeHtml(data.filename)}</div>
+          <div class="sheet-eyebrow">${escapeHtml(data.filename)}</div>
           <h2 class="sheet-title">${escapeHtml(f.title || stem(data.filename))}</h2>
         </div>
         <div class="seg shrink-0">
@@ -193,7 +193,7 @@ function renderView(data) {
       ${metaRow(f)}
       <div class="prose-omi mt-5">${renderMarkdown(data.raw)}</div>
       <div class="mt-8 flex justify-end gap-2 border-t border-rule pt-4">
-        <button class="btn btn-danger" data-act="delete">Delete card</button>
+        <button class="btn btn-danger" data-act="delete">Delete</button>
       </div>
     </article>`;
   contentEl.querySelector('[data-act="edit"]').onclick = () => openEdit(data);
@@ -207,7 +207,7 @@ function wireInlineLinks() {
     a.addEventListener("click", () => {
       const target = noteByName(a.dataset.note);
       if (target) openNote(target.filename);
-      else toast(`No card titled "${a.dataset.note}" yet`);
+      else toast(`No note "${a.dataset.note}" yet`);
     });
   });
   contentEl.querySelectorAll(".hash-tag").forEach((s) => {
@@ -241,8 +241,8 @@ function actionsToText(items) {
 function formMarkup(f, { isNew }) {
   return `
     <article class="sheet">
-      <div class="sheet-eyebrow">${isNew ? "New memory card" : "Editing · " + escapeHtml(state.current)}</div>
-      <input id="f-title" class="title-input mt-1" placeholder="Card title…" value="${escapeHtml(f.title || "")}" />
+      <div class="sheet-eyebrow">${isNew ? "New note" : "Editing · " + escapeHtml(state.current)}</div>
+      <input id="f-title" class="title-input mt-1" placeholder="Title…" value="${escapeHtml(f.title || "")}" />
 
       <div class="mt-5 grid grid-cols-2 gap-4">
         <div>
@@ -294,7 +294,7 @@ function formMarkup(f, { isNew }) {
         <div>${isNew ? "" : '<button class="btn btn-danger" data-act="delete">Delete</button>'}</div>
         <div class="flex gap-2">
           <button class="btn btn-ghost" data-act="cancel">Cancel</button>
-          <button class="btn btn-primary" data-act="save">${isNew ? "File card" : "Save"}</button>
+          <button class="btn btn-primary" data-act="save">${isNew ? "Create" : "Save"}</button>
         </div>
       </div>
     </article>`;
@@ -341,7 +341,7 @@ function wireForm({ isNew, original }) {
         const { filename } = await api("POST", "/api/notes", fields);
         await refresh();
         openNote(filename);
-        toast("Card filed.");
+        toast("Created.");
       } else {
         const { filename } = await api("PUT", `/api/notes/${encodeURIComponent(state.current)}`, fields);
         await refresh();
@@ -394,12 +394,12 @@ function openRaw(data) {
 // ---- Delete ---------------------------------------------------------------
 
 async function deleteNote(name) {
-  if (!confirm(`Delete card "${stem(name)}"? This removes the file.`)) return;
+  if (!confirm(`Delete "${stem(name)}"? This removes the file.`)) return;
   try {
     await api("DELETE", `/api/notes/${encodeURIComponent(name)}`);
     await refresh();
     renderEmpty();
-    toast("Card removed.");
+    toast("Deleted.");
   } catch (e) {
     toast(e.message);
   }
@@ -423,12 +423,39 @@ searchEl.addEventListener("input", () => {
 });
 $("#new-btn").addEventListener("click", openNew);
 
+// ---- Theme switcher -------------------------------------------------------
+
+const THEMES = ["midnight", "carbon", "dusk", "paper", "mint"];
+
+function applyTheme(name) {
+  const theme = THEMES.includes(name) ? name : "midnight";
+  document.documentElement.dataset.theme = theme;
+  try {
+    localStorage.setItem("omind-theme", theme);
+  } catch (_) {}
+  document.querySelectorAll(".swatch").forEach((s) => {
+    s.classList.toggle("active", s.dataset.theme === theme);
+  });
+}
+
+function initTheme() {
+  let saved = "midnight";
+  try {
+    saved = localStorage.getItem("omind-theme") || saved;
+  } catch (_) {}
+  applyTheme(saved);
+  document.querySelectorAll(".swatch").forEach((s) => {
+    s.addEventListener("click", () => applyTheme(s.dataset.theme));
+  });
+}
+initTheme();
+
 (async function boot() {
   try {
     await refresh();
     renderEmpty();
   } catch (e) {
-    contentEl.innerHTML = `<div class="empty"><div class="empty-title">Couldn't load the catalog.</div><p class="font-mono text-xs">${escapeHtml(
+    contentEl.innerHTML = `<div class="empty"><div class="empty-title">Couldn't load notes.</div><p class="font-mono text-xs">${escapeHtml(
       e.message,
     )}</p></div>`;
   }
