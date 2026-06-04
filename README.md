@@ -15,6 +15,10 @@ OMI/Obsidian memory tooling for Claude Code: reproduce the integration on any ma
 
 ---
 
+![omind web UI — viewing a memory note in the Midnight theme](docs/screenshot.png)
+
+*The `omind serve` web UI viewing a memory note in the Midnight theme — one of five built-in themes.*
+
 ## What it does
 
 **OMI** ("Open Mind Interface") is a folder of Markdown notes that an AI agent
