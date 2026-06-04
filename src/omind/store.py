@@ -27,7 +27,8 @@ from omind.seeds import (
     RESERVED_FILENAMES,
 )
 
-_TAG_RE = re.compile(r"#([A-Za-z0-9_][A-Za-z0-9_/-]*)")
+# \w is Unicode-aware for str patterns, so non-Latin tags (e.g. #память) round-trip.
+_TAG_RE = re.compile(r"#(\w[\w/-]*)")
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _ACTION_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s?(.*)$")
 _BULLET_RE = re.compile(r"^\s*-\s+(.*)$")

@@ -46,6 +46,12 @@ def test_render_parse_round_trip() -> None:
     assert parsed == fields
 
 
+@pytest.mark.parametrize("tag", ["память", "记忆", "ذاكرة", "café", "tag_1/sub"])
+def test_non_latin_tags_round_trip(tag: str) -> None:
+    parsed = parse_note(render_fields(NoteFields(title="X", tags=[tag])))
+    assert parsed.tags == [tag]
+
+
 def test_render_fills_created_when_blank() -> None:
     md = render_fields(NoteFields(title="X"))
     assert "- Created:" in md

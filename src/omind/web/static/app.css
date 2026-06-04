@@ -145,8 +145,36 @@ body,
 }
 
 .sidebar {
-  border-right: 1px solid var(--border);
+  border-inline-end: 1px solid var(--border);
   background: var(--bg-elev);
+}
+
+/* ---- Language select --------------------------------------------------- */
+
+.lang-select {
+  font-family: var(--font-ui);
+  font-size: 12px;
+  font-weight: 600;
+  color: var(--text-soft);
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 0.3rem 0.5rem;
+  cursor: pointer;
+  max-width: 7.5rem;
+}
+.lang-select:hover {
+  color: var(--text);
+  border-color: var(--border-strong);
+}
+.lang-select:focus {
+  outline: none;
+  border-color: var(--accent);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+.lang-select option {
+  background: var(--surface);
+  color: var(--text);
 }
 
 /* ---- Theme swatches ---------------------------------------------------- */
@@ -252,7 +280,7 @@ body,
 .index-card.active::before {
   content: "";
   position: absolute;
-  left: 0;
+  inset-inline-start: 0;
   top: 0.55rem;
   bottom: 0.55rem;
   width: 3px;
@@ -340,7 +368,7 @@ body,
   color: var(--text-faint);
   letter-spacing: 0.08em;
   text-transform: uppercase;
-  margin-right: 0.35rem;
+  margin-inline-end: 0.35rem;
 }
 
 .date-stamp {
@@ -373,12 +401,12 @@ body,
 }
 .prose-omi p { margin: 0.7rem 0; color: var(--text-soft); }
 .prose-omi strong { color: var(--text); font-weight: 600; }
-.prose-omi ul { margin: 0.5rem 0; padding-left: 1.2rem; list-style: none; }
+.prose-omi ul { margin: 0.5rem 0; padding-inline-start: 1.2rem; list-style: none; }
 .prose-omi li { margin: 0.3rem 0; position: relative; color: var(--text-soft); }
 .prose-omi li::before {
   content: "";
   position: absolute;
-  left: -0.95rem;
+  inset-inline-start: -0.95rem;
   top: 0.68em;
   width: 4px;
   height: 4px;
@@ -599,7 +627,7 @@ body,
   height: 6px;
   border-radius: 50%;
   background: var(--accent);
-  margin-right: 0.55rem;
+  margin-inline-end: 0.55rem;
   vertical-align: middle;
 }
 .toast.show { transform: translateX(-50%) translateY(0); }
@@ -616,4 +644,26 @@ body,
 ::-webkit-scrollbar-thumb:hover {
   background: var(--text-faint);
   background-clip: content-box;
+}
+
+/* ============================================================ RTL ======== */
+/* Arabic is cursive: the monospace font, letter-spacing, and uppercasing used
+   to style Latin "labels" mangle it. For RTL, fall back to the UI font with
+   normal casing and spacing. Latin-only bits (dates) keep their mono look. */
+
+[dir="rtl"] .sheet-eyebrow,
+[dir="rtl"] .field-label,
+[dir="rtl"] .field-hint,
+[dir="rtl"] .seg button,
+[dir="rtl"] .meta-row,
+[dir="rtl"] .meta-row .label,
+[dir="rtl"] .prose-omi h2,
+[dir="rtl"] .index-card .ic-meta,
+[dir="rtl"] .toast,
+[dir="rtl"] #search,
+[dir="rtl"] #note-count,
+[dir="rtl"] #tagline {
+  font-family: var(--font-ui);
+  letter-spacing: normal;
+  text-transform: none;
 }
