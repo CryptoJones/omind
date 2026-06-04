@@ -1,11 +1,27 @@
 <!DOCTYPE html>
 <!-- SPDX-License-Identifier: Apache-2.0 -->
 <!-- Copyright 2026 Aaron K. Clark -->
-<html lang="en" class="h-full" data-theme="midnight">
+<html lang="en" dir="ltr" class="h-full" data-theme="midnight">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
   <title>omind</title>
+
+  <!-- Apply saved theme + language before paint to avoid a flash of defaults. -->
+  <script>
+    (function () {
+      try {
+        var el = document.documentElement;
+        var th = localStorage.getItem("omind-theme");
+        if (th) el.setAttribute("data-theme", th);
+        var lg = localStorage.getItem("omind-lang");
+        if (lg) {
+          el.setAttribute("lang", lg);
+          el.setAttribute("dir", lg === "ar" ? "rtl" : "ltr");
+        }
+      } catch (e) {}
+    })();
+  </script>
 
   <link rel="preconnect" href="https://fonts.googleapis.com" />
   <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
@@ -44,7 +60,7 @@
         <h1 class="font-display text-2xl font-extrabold leading-none tracking-tight">
           <span class="text-stamp">om</span><span>ind</span>
         </h1>
-        <p class="hidden font-mono text-[10px] uppercase tracking-[0.24em] text-ink-faint sm:block">
+        <p id="tagline" class="hidden font-mono text-[10px] uppercase tracking-[0.24em] text-ink-faint sm:block">
           memory
         </p>
       </div>
@@ -58,6 +74,7 @@
           <button class="swatch" data-theme="paper" aria-label="Paper theme"></button>
           <button class="swatch" data-theme="mint" aria-label="Mint theme"></button>
         </div>
+        <select id="lang-select" class="lang-select" aria-label="Language"></select>
         <button id="new-btn" class="btn btn-primary" type="button">+ New</button>
       </div>
     </header>
