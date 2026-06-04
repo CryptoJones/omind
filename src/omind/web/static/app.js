@@ -8,6 +8,7 @@ const state = {
   query: "",
   activeTag: null,
   current: null, // filename
+  currentVersion: "", // mtime+size token of the open note, for conflict detection
   mode: "empty", // empty | view | edit | raw | new
   lang: "en",
 };
@@ -45,6 +46,8 @@ const I18N = {
     savedToast: "Saved.", deletedToast: "Deleted.", loadError: "Couldn't load notes.",
     noNoteYet: 'No note "{name}" yet', filteredTo: "Filtered to #{tag}",
     confirmDelete: 'Delete "{name}"? This removes the file.',
+    conflictPrompt: '"{name}" changed on disk since you opened it. Overwrite with your version?',
+    backlinks: "Backlinks",
   },
   es: {
     tagline: "memoria", search: "buscar…", theme: "Tema", language: "Idioma",
@@ -67,6 +70,8 @@ const I18N = {
     loadError: "No se pudieron cargar las notas.",
     noNoteYet: "Aún no existe la nota «{name}»", filteredTo: "Filtrado por #{tag}",
     confirmDelete: "¿Eliminar «{name}»? Esto borra el archivo.",
+    conflictPrompt: "«{name}» cambió en el disco desde que la abriste. ¿Sobrescribir con tu versión?",
+    backlinks: "Retroenlaces",
   },
   fr: {
     tagline: "mémoire", search: "rechercher…", theme: "Thème", language: "Langue",
@@ -90,6 +95,8 @@ const I18N = {
     loadError: "Impossible de charger les notes.",
     noNoteYet: "Aucune note « {name} » pour l'instant", filteredTo: "Filtré sur #{tag}",
     confirmDelete: "Supprimer « {name} » ? Cela efface le fichier.",
+    conflictPrompt: "« {name} » a changé sur le disque depuis son ouverture. Écraser avec votre version ?",
+    backlinks: "Rétroliens",
   },
   ar: {
     tagline: "ذاكرة", search: "بحث…", theme: "السمة", language: "اللغة",
@@ -111,6 +118,8 @@ const I18N = {
     loadError: "تعذّر تحميل الملاحظات.", noNoteYet: "لا توجد مذكرة «{name}» بعد",
     filteredTo: "تمت التصفية حسب #{tag}",
     confirmDelete: "حذف «{name}»؟ سيؤدي ذلك إلى حذف الملف.",
+    conflictPrompt: "تغيّرت «{name}» على القرص منذ فتحها. هل تريد الكتابة فوقها بنسختك؟",
+    backlinks: "روابط واردة",
   },
   ru: {
     tagline: "память", search: "поиск…", theme: "Тема", language: "Язык",
@@ -132,6 +141,8 @@ const I18N = {
     createdToast: "Создано.", savedToast: "Сохранено.", deletedToast: "Удалено.",
     loadError: "Не удалось загрузить заметки.", noNoteYet: "Заметки «{name}» пока нет",
     filteredTo: "Фильтр по #{tag}", confirmDelete: "Удалить «{name}»? Файл будет удалён.",
+    conflictPrompt: "«{name}» изменилась на диске с момента открытия. Перезаписать вашей версией?",
+    backlinks: "Обратные ссылки",
   },
   zh: {
     tagline: "记忆", search: "搜索…", theme: "主题", language: "语言",
@@ -151,6 +162,8 @@ const I18N = {
     needTitle: "笔记需要一个标题。", createdToast: "已创建。", savedToast: "已保存。",
     deletedToast: "已删除。", loadError: "无法加载笔记。", noNoteYet: "尚无笔记“{name}”",
     filteredTo: "已按 #{tag} 筛选", confirmDelete: "删除“{name}”？这将移除该文件。",
+    conflictPrompt: "“{name}”自打开后已在磁盘上更改。用你的版本覆盖吗？",
+    backlinks: "反向链接",
   },
 };
 
@@ -187,10 +200,29 @@ async function api(method, path, body) {
     try {
       detail = (await res.json()).detail || detail;
     } catch (_) {}
-    throw new Error(detail);
+    const err = new Error(detail);
+    err.status = res.status;
+    throw err;
   }
   if (res.status === 204) return null;
   return res.json();
+}
+
+// PUT a note guarding against external edits. We send the version token we last
+// read; if the file changed underneath us the server answers 409, and we ask
+// the user whether to overwrite (a retry with no version forces the write).
+async function saveWithConflict(path, body, name) {
+  const versioned = state.currentVersion
+    ? `${path}?expected_version=${encodeURIComponent(state.currentVersion)}`
+    : path;
+  try {
+    return await api("PUT", versioned, body);
+  } catch (e) {
+    if (e.status === 409 && confirm(t("conflictPrompt", { name: stem(name) }))) {
+      return api("PUT", path, body);
+    }
+    throw e;
+  }
 }
 
 // ---- Helpers --------------------------------------------------------------
@@ -308,6 +340,7 @@ async function openNote(name) {
   try {
     const data = await api("GET", `/api/notes/${encodeURIComponent(name)}`);
     state.current = name;
+    state.currentVersion = data.version || "";
     state.mode = "view";
     renderSidebar();
     renderView(data);
@@ -346,6 +379,7 @@ function renderView(data) {
       </div>
       ${metaRow(f)}
       <div class="prose-omi mt-5">${renderMarkdown(data.raw)}</div>
+      <div id="backlinks-panel"></div>
       <div class="mt-8 flex justify-end gap-2 border-t border-rule pt-4">
         <button class="btn btn-danger" data-act="delete">${escapeHtml(t("delete"))}</button>
       </div>
@@ -354,6 +388,34 @@ function renderView(data) {
   contentEl.querySelector('[data-act="raw"]').onclick = () => openRaw(data);
   contentEl.querySelector('[data-act="delete"]').onclick = () => deleteNote(data.filename);
   wireInlineLinks();
+  loadBacklinks(data.filename);
+}
+
+async function loadBacklinks(name) {
+  const panel = $("#backlinks-panel");
+  if (!panel) return;
+  try {
+    const links = await api("GET", `/api/notes/${encodeURIComponent(name)}/backlinks`);
+    // The pane may have moved on (user navigated) while the request was in flight.
+    if (state.current !== name || !links.length) return;
+    panel.innerHTML = `
+      <div class="backlinks">
+        <div class="backlinks-head">${escapeHtml(t("backlinks"))}</div>
+        <ul class="backlinks-list">${links
+          .map(
+            (l) =>
+              `<li data-name="${escapeHtml(l.filename)}"><span class="bl-title">${escapeHtml(
+                l.title,
+              )}</span>${l.summary ? `<span class="bl-snippet">${escapeHtml(l.summary)}</span>` : ""}</li>`,
+          )
+          .join("")}</ul>
+      </div>`;
+    panel.querySelectorAll("li[data-name]").forEach((li) => {
+      li.addEventListener("click", () => openNote(li.dataset.name));
+    });
+  } catch (_) {
+    // Backlinks are non-essential; ignore failures.
+  }
 }
 
 function wireInlineLinks() {
@@ -498,7 +560,11 @@ function wireForm({ isNew, original }) {
         openNote(filename);
         toast(t("createdToast"));
       } else {
-        const { filename } = await api("PUT", `/api/notes/${encodeURIComponent(state.current)}`, fields);
+        const { filename } = await saveWithConflict(
+          `/api/notes/${encodeURIComponent(state.current)}`,
+          fields,
+          state.current,
+        );
         await refresh();
         openNote(filename);
         toast(t("savedToast"));
@@ -534,9 +600,11 @@ function openRaw(data) {
   contentEl.querySelector('[data-act="cancel"]').onclick = () => openNote(data.filename);
   contentEl.querySelector('[data-act="save"]').onclick = async () => {
     try {
-      await api("PUT", `/api/notes/${encodeURIComponent(data.filename)}/raw`, {
-        content: $("#f-raw").value,
-      });
+      await saveWithConflict(
+        `/api/notes/${encodeURIComponent(data.filename)}/raw`,
+        { content: $("#f-raw").value },
+        data.filename,
+      );
       await refresh();
       openNote(data.filename);
       toast(t("savedToast"));
@@ -577,6 +645,92 @@ searchEl.addEventListener("input", () => {
   renderSidebar();
 });
 $("#new-btn").addEventListener("click", openNew);
+
+// ---- Live refresh ---------------------------------------------------------
+
+// The OMI folder is also written by Claude Code's MCP and Hermes' cron, so poll
+// for changes. Hold off while an editor is open (don't clobber unsaved input)
+// and while the tab is hidden, and only re-render when the list actually moved.
+const POLL_MS = 5000;
+
+async function pollNotes() {
+  if (state.mode === "edit" || state.mode === "new" || state.mode === "raw") return;
+  if (document.hidden) return;
+  try {
+    const [notes, tags] = await Promise.all([
+      api("GET", "/api/notes"),
+      api("GET", "/api/tags"),
+    ]);
+    if (JSON.stringify([notes, tags]) === JSON.stringify([state.notes, state.tags])) return;
+    state.notes = notes;
+    state.tags = tags;
+    renderSidebar();
+  } catch (_) {
+    // Transient (server restarting, etc.) — try again next tick.
+  }
+}
+
+setInterval(pollNotes, POLL_MS);
+document.addEventListener("visibilitychange", () => {
+  if (!document.hidden) pollNotes();
+});
+
+// ---- Keyboard shortcuts ---------------------------------------------------
+
+function isTyping(el) {
+  return (
+    el &&
+    (el.tagName === "INPUT" ||
+      el.tagName === "TEXTAREA" ||
+      el.tagName === "SELECT" ||
+      el.isContentEditable)
+  );
+}
+
+async function navigateList(delta) {
+  const notes = filteredNotes();
+  if (!notes.length) return;
+  let idx = notes.findIndex((n) => n.filename === state.current);
+  if (idx === -1) idx = delta > 0 ? -1 : 0;
+  idx = Math.max(0, Math.min(notes.length - 1, idx + delta));
+  await openNote(notes[idx].filename);
+  const active = listEl.querySelector(".index-card.active");
+  if (active) active.scrollIntoView({ block: "nearest" });
+}
+
+document.addEventListener("keydown", (e) => {
+  // Cmd/Ctrl+S saves whatever editor is open.
+  if ((e.metaKey || e.ctrlKey) && e.key.toLowerCase() === "s") {
+    const saveBtn = contentEl.querySelector('[data-act="save"]');
+    if (saveBtn) {
+      e.preventDefault();
+      saveBtn.click();
+    }
+    return;
+  }
+  if (e.key === "Escape") {
+    if (document.activeElement === searchEl) return searchEl.blur();
+    const cancelBtn = contentEl.querySelector('[data-act="cancel"]');
+    if (cancelBtn) cancelBtn.click();
+    return;
+  }
+  // Single-key shortcuts: never while typing or with a modifier held.
+  if (isTyping(document.activeElement) || e.metaKey || e.ctrlKey || e.altKey) return;
+  if (e.key === "/") {
+    e.preventDefault();
+    searchEl.focus();
+    searchEl.select();
+  } else if (e.key === "n") {
+    e.preventDefault();
+    openNew();
+  } else if (e.key === "j") {
+    e.preventDefault();
+    navigateList(1);
+  } else if (e.key === "k") {
+    e.preventDefault();
+    navigateList(-1);
+  }
+});
 
 // ---- Theme switcher -------------------------------------------------------
 

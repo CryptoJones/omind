@@ -11,6 +11,7 @@ import pytest
 from omind import seeds
 from omind.store import (
     ActionItem,
+    NoteConflictError,
     NoteError,
     NoteFields,
     NoteNotFoundError,
@@ -100,6 +101,54 @@ def test_update_note_overwrites(store: OmiStore) -> None:
     store.update_note(name, NoteFields(title="Edit Me", summary="after"))
     assert "after" in store.read_note(name)
     assert "before" not in store.read_note(name)
+
+
+def test_note_version_changes_on_write(store: OmiStore) -> None:
+    name = store.create_note(NoteFields(title="Versioned"))
+    v1 = store.note_version(name)
+    assert v1
+    assert store.note_version("missing.md") == ""
+    store.write_note(name, store.read_note(name) + "\nextra\n")
+    assert store.note_version(name) != v1
+
+
+def test_write_with_stale_version_raises_conflict(store: OmiStore) -> None:
+    name = store.create_note(NoteFields(title="Contested", summary="orig"))
+    stale = store.note_version(name)
+    # Someone else writes the file (Claude Code MCP, Hermes cron, another tab).
+    store.write_note(name, store.read_note(name) + "\nexternal edit\n")
+    mine = NoteFields(title="Contested", summary="mine")
+    with pytest.raises(NoteConflictError):
+        store.update_note(name, mine, expected_version=stale)
+    # A matching version (or no version) writes cleanly.
+    store.update_note(name, mine, expected_version=store.note_version(name))
+    assert "mine" in store.read_note(name)
+
+
+def test_write_without_expected_version_skips_check(store: OmiStore) -> None:
+    name = store.create_note(NoteFields(title="Forced"))
+    store.write_note(name, store.read_note(name) + "\nchanged\n")
+    # No expected_version → last-write-wins, no conflict raised.
+    store.write_note(name, "# Forced\noverwritten\n")
+    assert "overwritten" in store.read_note(name)
+
+
+def test_backlinks_finds_referrers(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Target", summary="t"))
+    store.create_note(NoteFields(title="Referrer", summary="r", connections=["Target"]))
+    store.create_note(NoteFields(title="Unrelated", summary="u"))
+    assert [link.filename for link in store.backlinks("Target.md")] == ["Referrer.md"]
+
+
+def test_backlinks_match_link_anywhere_in_body(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Alpha", summary="a"))
+    store.write_note("Beta.md", "# Beta\n\n## Details\nSee [[Alpha]] for more.\n")
+    assert [link.filename for link in store.backlinks("Alpha.md")] == ["Beta.md"]
+
+
+def test_backlinks_missing_raises(store: OmiStore) -> None:
+    with pytest.raises(NoteNotFoundError):
+        store.backlinks("ghost.md")
 
 
 def test_delete_removes_file_and_index_entry(store: OmiStore) -> None:

@@ -646,6 +646,62 @@ body,
   background-clip: content-box;
 }
 
+/* ========================================================== BACKLINKS == */
+
+.backlinks {
+  margin-top: 2rem;
+  padding-top: 1.1rem;
+  border-top: 1px solid var(--border);
+}
+.backlinks-head {
+  font-family: "JetBrains Mono", monospace;
+  font-size: 10px;
+  letter-spacing: 0.16em;
+  text-transform: uppercase;
+  color: var(--text-faint);
+  margin-bottom: 0.6rem;
+}
+.backlinks-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-direction: column;
+  gap: 0.4rem;
+}
+.backlinks-list li {
+  cursor: pointer;
+  padding: 0.5rem 0.7rem;
+  border: 1px solid var(--border);
+  border-radius: calc(var(--radius) - 4px);
+  background: var(--bg-elev);
+  transition: border-color 0.15s, transform 0.15s;
+}
+.backlinks-list li:hover {
+  border-color: var(--accent);
+  transform: translateX(2px);
+}
+[dir="rtl"] .backlinks-list li:hover {
+  transform: translateX(-2px);
+}
+.backlinks-list .bl-title {
+  display: block;
+  font-family: var(--font-ui);
+  font-weight: 600;
+  font-size: 0.92rem;
+  color: var(--text);
+}
+.backlinks-list .bl-snippet {
+  display: block;
+  font-size: 0.8rem;
+  line-height: 1.35;
+  color: var(--text-soft);
+  margin-top: 0.15rem;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
 /* ============================================================ RTL ======== */
 /* Arabic is cursive: the monospace font, letter-spacing, and uppercasing used
    to style Latin "labels" mangle it. For RTL, fall back to the UI font with
@@ -659,6 +715,7 @@ body,
 [dir="rtl"] .meta-row .label,
 [dir="rtl"] .prose-omi h2,
 [dir="rtl"] .index-card .ic-meta,
+[dir="rtl"] .backlinks-head,
 [dir="rtl"] .toast,
 [dir="rtl"] #search,
 [dir="rtl"] #note-count,

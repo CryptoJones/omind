@@ -51,6 +51,14 @@ def _write_server_config(cfg: Path, omi_path: str) -> None:
     cfg.write_text(json.dumps({"mcpServers": {"obsidian": server}}))
 
 
+def _provision_files(config: SetupConfig) -> None:
+    obs = config.omi_dir / ".obsidian"
+    obs.mkdir(parents=True)
+    (obs / "app.json").write_text("{}")
+    (config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME).write_text("x")
+    (config.omi_dir / seeds.INDEX_FILENAME).write_text("x")
+
+
 def test_default_vault_path_shape() -> None:
     path = default_vault_path()
     assert path.name == "Obsidian Vault"
@@ -141,3 +149,40 @@ def test_idempotent_files_on_rerun(
     Provisioner(config, log=_quiet).run()  # must not raise
     template = config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME
     assert template.read_text() == seeds.MEMORY_TEMPLATE
+
+
+def test_doctor_healthy_when_provisioned(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, str(config.omi_dir))
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["omi_dir"].level == "ok"
+    assert results["obsidian_config"].level == "ok"
+    assert results["seeds"].level == "ok"
+    assert results["mcp_registration"].level == "ok"
+    assert provision.run_doctor(config, log=_quiet) == 0
+
+
+def test_doctor_flags_missing_setup(
+    tmp_path: Path, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    config = _config(tmp_path)
+    levels = {r.key: r.level for r in provision.diagnose(config)}
+    assert levels["omi_dir"] == "fail"
+    assert levels["obsidian_config"] == "fail"
+    assert levels["mcp_registration"] == "fail"
+    assert provision.run_doctor(config, log=_quiet) == 1
+
+
+def test_doctor_warns_on_path_mismatch(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, "/some/other/path")
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["mcp_registration"].level == "warn"
+    assert provision.run_doctor(config, log=_quiet) == 0  # warnings don't fail
