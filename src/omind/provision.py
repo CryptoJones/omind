@@ -102,8 +102,8 @@ class Provisioner:
 
     # -- steps --------------------------------------------------------------
 
-    def check_prereqs(self) -> list[str]:
-        """Return missing required executables; raise unless dry-run."""
+    def check_prereqs(self) -> None:
+        """Raise (unless dry-run) when a required executable is missing."""
         required = {
             "node": "obsidian-mcp runs on Node.js",
             "npm": "npm installs the obsidian-mcp package",
@@ -122,7 +122,6 @@ class Provisioner:
                 raise ProvisionError(message)
         else:
             self.log("  prerequisites present: node, npm, claude")
-        return missing
 
     def ensure_vault(self) -> None:
         self._record(f"create OMI folder {self.config.omi_dir}")

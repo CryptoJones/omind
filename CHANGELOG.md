@@ -5,6 +5,24 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Changed
+
+- CI now runs `mypy src`. The project was already `strict = true` in
+  `pyproject.toml`, but neither the GitHub Actions nor the Woodpecker
+  pipeline actually invoked the type checker.
+- Internal: `OmindProvisioner.check_prereqs()` is now `-> None`. It only
+  ever raises or logs — nothing consumed the missing-tools list it used to
+  return.
+
+### Removed
+
+- Dead `.prose-omi li.task` CSS rule. The bundled `marked` renders task
+  list items as plain `<li>`, so the selector never matched anything.
+- Stale `store.SECTIONS` reference in the `seeds.py` template comment —
+  no such symbol exists; the actual parse contract is `store.parse_note`.
+
 ## [1.1.0] - 2026-06-04
 
 Fixes a process leak in the provisioned MCP server: `obsidian-mcp` instances

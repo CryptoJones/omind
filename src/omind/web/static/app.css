@@ -449,8 +449,6 @@ body,
 }
 .hash-tag:hover { filter: brightness(1.12); }
 
-.prose-omi li.task { list-style: none; }
-
 /* ============================================================ FORMS ====== */
 
 .field-label {
