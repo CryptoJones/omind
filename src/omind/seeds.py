@@ -60,8 +60,9 @@ process.stdin.on("end", die);
 process.stdin.on("close", die);
 """
 
-# The structured note template. Section headings here are the contract that
-# omind.store parses against, so keep them in sync with store.SECTIONS.
+# The structured note template. The `## ` headings here are the contract
+# omind.store.parse_note reads against — keep them in sync with the section
+# names it looks up.
 MEMORY_TEMPLATE = """\
 # OMI Memory Template
 
