@@ -47,10 +47,22 @@ Everything runs locally. No accounts, no cloud, no cost.
 
 ## Install
 
-For end users — an isolated CLI install straight from the git remote:
+**One-step bootstrap** (checks/installs dependencies, installs omind, verifies):
 
 ```bash
-# via uv (recommended)
+# clone, then:
+scripts/bootstrap.sh                       # or: --remote codeberg, --vault PATH
+```
+
+It auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
+you), checks for `node`/`npm`/`claude` with install guidance if any are missing,
+then runs `omind setup` + `omind doctor`. Note: omind has **no Docker
+dependency** — only Node.js and the Claude Code CLI.
+
+**Manual** — an isolated CLI install straight from the git remote:
+
+```bash
+# via uv (recommended — also provides a compatible Python if the system one is <3.10)
 uv tool install git+https://github.com/CryptoJones/omind.git
 
 # or via pipx

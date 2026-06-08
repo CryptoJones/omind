@@ -32,7 +32,20 @@ def default_vault_path() -> Path:
 
 
 def claude_config_path() -> Path:
-    return Path.home() / ".claude" / ".claude.json"
+    """Path to the Claude Code CLI config that holds ``mcpServers``.
+
+    Claude Code stores this at ``~/.claude.json``. Earlier omind versions looked
+    inside ``~/.claude/`` — a directory that never holds the user-scope MCP
+    registration — so ``registered_server()`` always returned ``None``, making
+    ``doctor`` report a false "not registered" and ``setup`` re-run
+    ``claude mcp add`` into an "already exists" error. Fall back to the old
+    location only if the canonical file is absent.
+    """
+    primary = Path.home() / ".claude.json"
+    legacy = Path.home() / ".claude" / ".claude.json"
+    if not primary.is_file() and legacy.is_file():
+        return legacy
+    return primary
 
 
 # obsidian-mcp version pinned to the install layout below (entry at

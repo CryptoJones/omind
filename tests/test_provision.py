@@ -254,3 +254,46 @@ def test_doctor_warns_on_missing_eof_guard(
     provision.eof_guard_path().unlink()  # simulate a pre-migration setup
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["eof_guard"].level == "warn"
+
+
+def test_claude_config_path_is_home_dotclaude_json(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: the config holding mcpServers is ~/.claude.json, not ~/.claude/.
+
+    Pointing at ~/.claude/.claude.json (which never exists) made
+    registered_server() always return None — a false 'not registered' in doctor
+    and a spurious 'already exists' on setup re-run.
+    """
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".claude.json").write_text("{}", encoding="utf-8")
+    assert provision.claude_config_path() == tmp_path / ".claude.json"
+
+
+def test_claude_config_path_falls_back_to_legacy_when_only_legacy_exists(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """If only the old ~/.claude/.claude.json exists, keep using it."""
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    legacy = tmp_path / ".claude" / ".claude.json"
+    legacy.parent.mkdir(parents=True)
+    legacy.write_text("{}", encoding="utf-8")
+    assert provision.claude_config_path() == legacy
+
+
+def test_doctor_finds_server_via_canonical_config_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_tools: None
+) -> None:
+    """End-to-end: with a real ~/.claude.json, doctor sees the registration.
+
+    This is the bug we hit live — doctor reported 'not registered' although
+    `claude mcp get` showed the server connected at user scope.
+    """
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: home))
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(home / ".claude.json", str(config.omi_dir))
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["mcp_registration"].level == "ok"

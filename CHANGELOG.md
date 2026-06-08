@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `claude_config_path()` pointed at `~/.claude/.claude.json`, which never
+  exists — Claude Code stores `mcpServers` in `~/.claude.json`. As a result
+  `registered_server()` always returned `None`, so `omind doctor` reported a
+  false `[✗] MCP server 'obsidian' not registered at user scope` even when
+  `claude mcp get obsidian` showed it Connected, and `omind setup` re-runs hit
+  `claude mcp add` → `already exists` (exit 1) instead of being idempotent. Now
+  reads `~/.claude.json`, falling back to the legacy path only if the canonical
+  file is absent. Added regression tests in `tests/test_provision.py`.
+
 ### Changed
 
 - CI now runs `mypy src`. The project was already `strict = true` in
