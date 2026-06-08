@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- `omind export` / `omind import` to store and load the entire OMI dataset on
+  request. Two formats via `--format`: `json` (a human-readable, diffable
+  bundle of every note's raw Markdown + parsed fields; the derived `index.md`
+  is omitted and regenerated on import) and `targz` (a byte-for-byte snapshot
+  of the whole OMI folder, including `.obsidian/`, for full-fidelity
+  migration). `import` auto-detects the format by extension. Import identity is
+  the filename and is content-aware: new notes are added, byte-identical ones
+  are no-ops, and notes whose content differs are skipped (on-disk copy kept)
+  unless `--force` is given. Imports never delete; archive members are
+  path-traversal guarded. New module `src/omind/transfer.py` with tests.
+
 ### Fixed
 
 - `claude_config_path()` pointed at `~/.claude/.claude.json`, which never

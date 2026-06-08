@@ -107,6 +107,21 @@ Check that everything is wired up correctly:
 omind doctor --vault "$HOME/Documents/Obsidian Vault"
 ```
 
+Back up or migrate the whole memory dataset:
+
+```bash
+# export — json (default; portable & diffable) or targz (full-fidelity snapshot)
+omind export --vault "$HOME/Documents/Obsidian Vault" --out omi-export.json
+omind export --vault "$HOME/Documents/Obsidian Vault" --format targz --out omi.tar.gz
+
+# import — format auto-detected by extension
+omind import omi-export.json --vault "$HOME/Documents/Obsidian Vault"
+```
+
+Import adds new notes and leaves identical ones untouched; a note whose content
+differs is kept as-is on disk and reported, unless you pass `--force`. Imports
+never delete.
+
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## License
