@@ -35,6 +35,11 @@ HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
 JOURNAL_TAGS = ("session-journal", "omi")
 _TARGET_LIMIT = 80
 
+# Notes whose *content* is injected verbatim at SessionStart so OMI is in
+# context whether or not the agent remembers to read it. Order = priming order.
+PRIMING_FILES = ("index.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
+_PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood context
+
 
 def _now(now: datetime | None) -> datetime:
     return now if now is not None else datetime.now()
@@ -179,17 +184,55 @@ def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) ->
         return
 
 
+def _read_priming_note(path: Path) -> str | None:
+    """Return a note's text (capped), or ``None`` if unreadable. Never raises."""
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    if len(text) > _PRIMING_FILE_CHAR_CAP:
+        text = text[:_PRIMING_FILE_CHAR_CAP] + "\n…[truncated]"
+    return text
+
+
+def build_session_start_context(omi_dir: Path | str) -> str:
+    """Build the SessionStart ``additionalContext`` payload.
+
+    Injects the *content* of the OMI priming notes (:data:`PRIMING_FILES`)
+    directly so the vault is in context at session start without depending on
+    the agent issuing reads. Falls back to a read-the-vault reminder if no
+    priming note can be read. Never raises.
+    """
+    directory = Path(omi_dir)
+    sections: list[str] = []
+    for name in PRIMING_FILES:
+        body = _read_priming_note(directory / name)
+        if body is not None:
+            sections.append(f"===== OMI/{name} =====\n{body.rstrip()}")
+
+    header = (
+        "OMI memory is the source of truth (do NOT use Claude Code's built-in "
+        "memory). The OMI vault lives at "
+        f"{directory}. Its priming notes are injected below — treat them as "
+        "already read. Read any [[wikilinked]] note you need before acting."
+    )
+    if not sections:
+        return (
+            header
+            + " (Priming notes could not be read this session; read index.md, "
+            "Memory Workflow.md, and CLAUDE CODE PERSONALITY.md from the vault "
+            "directly.)"
+        )
+    return header + "\n\n" + "\n\n".join(sections)
+
+
 def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -> None:
-    """Emit a SessionStart ``additionalContext`` reminder to read OMI. Never raises."""
+    """Emit OMI priming-note content as SessionStart ``additionalContext``. Never raises."""
     sink = out if out is not None else sys.stdout
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": (
-                "OMI memory is the source of truth. Read the OMI vault at "
-                f"{omi_dir} (start with index.md, Memory Workflow.md, and "
-                "CLAUDE CODE PERSONALITY.md) before acting."
-            ),
+            "additionalContext": build_session_start_context(omi_dir),
         }
     }
     try:

@@ -183,6 +183,28 @@ def test_run_hook_session_start_emits_context_no_journal(tmp_path: Path) -> None
     assert not list(tmp_path.glob("Session Journal*.md"))  # no journal written
 
 
+def test_session_start_injects_priming_note_content(tmp_path: Path) -> None:
+    (tmp_path / "index.md").write_text("RECENT: [[Some Memory]]", encoding="utf-8")
+    (tmp_path / "Memory Workflow.md").write_text("OMI is the source", encoding="utf-8")
+    (tmp_path / "CLAUDE CODE PERSONALITY.md").write_text("You are Dix", encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "RECENT: [[Some Memory]]" in ctx  # content injected, not just a reminder
+    assert "You are Dix" in ctx
+    assert "===== OMI/index.md =====" in ctx
+
+
+def test_session_start_caps_runaway_note(tmp_path: Path) -> None:
+    (tmp_path / "index.md").write_text("x" * (hooks._PRIMING_FILE_CHAR_CAP + 500), encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "…[truncated]" in ctx
+
+
+def test_session_start_falls_back_when_no_notes(tmp_path: Path) -> None:
+    ctx = hooks.build_session_start_context(tmp_path)  # empty vault
+    assert "source of truth" in ctx
+    assert "could not be read" in ctx
+
+
 def test_run_hook_stop_records_turn_line(tmp_path: Path) -> None:
     hooks.run_hook("Stop", tmp_path, stdin=io.StringIO('{"session_id": "qq"}'))
     text = (tmp_path / hooks.journal_name()).read_text(encoding="utf-8")
