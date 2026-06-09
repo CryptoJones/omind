@@ -12,8 +12,11 @@ rejects path traversal so a request can never escape the OMI directory.
 
 from __future__ import annotations
 
+import contextlib
+import fcntl
 import os
 import re
+import tempfile
 from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -27,6 +30,33 @@ from omind.seeds import (
     INDEX_RECENT_HEADING,
     RESERVED_FILENAMES,
 )
+
+# Inter-process write lock for an OMI folder. Concurrent Claude Code sessions
+# (and the web app, cron) are separate processes, so an advisory ``flock`` on a
+# shared file is what serializes their writes. Readers never take it — atomic
+# renames (see :func:`_atomic_write`) keep every read consistent.
+LOCK_FILENAME = ".omi.lock"
+
+
+def _atomic_write(path: Path, text: str) -> None:
+    """Write ``text`` to ``path`` atomically: same-dir temp file + ``os.replace``.
+
+    On POSIX ``os.replace`` is an atomic rename, so a concurrent reader sees
+    either the old file or the new one in full — never a half-written file.
+    """
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".md")
+    try:
+        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+            fh.write(text)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 # \w is Unicode-aware for str patterns, so non-Latin tags (e.g. #память) round-trip.
 _TAG_RE = re.compile(r"#(\w[\w/-]*)")
@@ -225,6 +255,27 @@ class OmiStore:
     def __init__(self, omi_dir: Path | str) -> None:
         self.omi_dir = Path(omi_dir).expanduser()
 
+    # -- concurrency --------------------------------------------------------
+
+    @contextlib.contextmanager
+    def _write_lock(self) -> Iterator[None]:
+        """Hold the OMI folder's inter-process exclusive write lock.
+
+        Serializes writers across separate processes — concurrent Claude Code
+        sessions, the web UI, cron — so two saves can't interleave a note write
+        with another's ``index.md`` regeneration. Held once per public write
+        operation; the unlocked ``_write_index`` body runs inside it.
+        """
+        self.omi_dir.mkdir(parents=True, exist_ok=True)
+        lock_path = self.omi_dir / LOCK_FILENAME
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX)
+            yield
+        finally:
+            fcntl.flock(fd, fcntl.LOCK_UN)
+            os.close(fd)
+
     # -- naming / safety ----------------------------------------------------
 
     def safe_name(self, name: str) -> Path:
@@ -344,16 +395,18 @@ class OmiStore:
 
     def write_note(self, name: str, content: str, expected_version: str | None = None) -> str:
         path = self.safe_name(name)
-        if expected_version is not None and path.is_file():
-            current = self.note_version(name)
-            if current != expected_version:
-                raise NoteConflictError(
-                    f"note {name!r} changed on disk (expected {expected_version!r}, "
-                    f"found {current!r})"
-                )
-        self.omi_dir.mkdir(parents=True, exist_ok=True)
-        path.write_text(content, encoding="utf-8")
-        self.update_index()
+        with self._write_lock():
+            # Re-check the optimistic-concurrency token *inside* the lock so the
+            # check-then-write is atomic against another process's save.
+            if expected_version is not None and path.is_file():
+                current = self.note_version(name)
+                if current != expected_version:
+                    raise NoteConflictError(
+                        f"note {name!r} changed on disk (expected {expected_version!r}, "
+                        f"found {current!r})"
+                    )
+            _atomic_write(path, content)
+            self._write_index()
         return path.name
 
     def create_note(self, fields: NoteFields) -> str:
@@ -380,13 +433,23 @@ class OmiStore:
             raise NoteError(f"refusing to delete reserved file: {path.name}")
         if not path.is_file():
             raise NoteNotFoundError(f"note not found: {name!r}")
-        path.unlink()
-        self.update_index()
+        with self._write_lock():
+            path.unlink()
+            self._write_index()
 
     # -- index --------------------------------------------------------------
 
     def update_index(self) -> None:
-        """Regenerate the `Recent Memories` wikilink list in index.md."""
+        """Regenerate the `Recent Memories` wikilink list in index.md (locked)."""
+        with self._write_lock():
+            self._write_index()
+
+    def _write_index(self) -> None:
+        """Regenerate index.md. Caller MUST hold :meth:`_write_lock`.
+
+        Read-modify-write on the shared index.md, so it only runs under the
+        write lock; the standalone entry point is :meth:`update_index`.
+        """
         index_path = self.omi_dir / INDEX_FILENAME
         existing = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
         if INDEX_RECENT_HEADING in existing:
@@ -398,5 +461,4 @@ class OmiStore:
         for summary in self.list_notes():
             stem = summary.filename[:-3] if summary.filename.endswith(".md") else summary.filename
             lines.append(f"- [[{stem}]]")
-        self.omi_dir.mkdir(parents=True, exist_ok=True)
-        index_path.write_text("\n".join(lines).rstrip() + "\n", encoding="utf-8")
+        _atomic_write(index_path, "\n".join(lines).rstrip() + "\n")

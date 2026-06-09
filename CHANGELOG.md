@@ -9,6 +9,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Inter-process write safety so concurrent Claude Code sessions (and the web UI
+  and cron) can read and write the same OMI folder at once without corrupting
+  it. `OmiStore` now serializes every write under an advisory `flock` on a
+  shared `.omi.lock`, and all note/index writes go through an atomic same-dir
+  temp-file + `os.replace`, so a reader never sees a half-written file and two
+  saves can't interleave a note write with another save's `index.md`
+  regeneration. The optimistic-concurrency check (`note_version`) is now
+  re-validated inside the lock. Reads stay lock-free (atomic renames keep them
+  consistent). The lock and temp files are dotfiles, excluded from listings,
+  exports, and imports. Verified with a 24-process concurrency test.
+- `omind reindex` — regenerate `index.md`'s Recent Memories list under the same
+  write lock. Lets a session that wrote a note file directly (the reliable path
+  when the Obsidian MCP stalls on permission prompts) refresh the index safely
+  instead of hand-editing the shared `index.md` and racing other sessions.
+- SessionStart hook now injects the OMI priming notes' *content* (`index.md`,
+  `Memory Workflow.md`, `CLAUDE CODE PERSONALITY.md`) directly into context
+  instead of only emitting a "go read OMI" reminder — so the vault is present
+  at session start whether or not the agent issues reads. Per-file 16K cap
+  guards context; falls back to the read-the-vault reminder if no note is
+  readable.
 - Auto-memory hooks: `omind setup` now idempotently installs Claude Code hooks
   (PostToolUse, Stop, SessionStart) into `~/.claude/settings.json` so every
   agent action is recorded into a per-day OMI journal note

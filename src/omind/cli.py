@@ -8,6 +8,7 @@ Subcommands:
   * ``omind doctor`` — diagnose the wiring.
   * ``omind export`` — write the entire OMI dataset to a json or tar.gz bundle.
   * ``omind import`` — load an OMI dataset bundle back into a folder.
+  * ``omind reindex`` — regenerate index.md under the inter-process write lock.
 """
 
 from __future__ import annotations
@@ -35,7 +36,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
-        dest="command", metavar="{setup,serve,doctor,export,import,hook}"
+        dest="command", metavar="{setup,serve,doctor,export,import,reindex,hook}"
     )
 
     setup = sub.add_parser("setup", help="provision the OMI/Obsidian MCP wiring for Claude Code")
@@ -134,6 +135,21 @@ def build_parser() -> argparse.ArgumentParser:
         help="overwrite notes whose content differs (default: keep on-disk copy)",
     )
 
+    reindex = sub.add_parser(
+        "reindex",
+        help="regenerate index.md's Recent Memories list under the write lock "
+        "(safe to run from a session that wrote a note file directly)",
+    )
+    reindex.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    reindex.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+
     hook = sub.add_parser(
         "hook", help="(internal) record one Claude Code action into the OMI journal"
     )
@@ -229,6 +245,15 @@ def _run_import(args: argparse.Namespace) -> int:
     return 1 if (result.conflicts and not args.force) else 0
 
 
+def _run_reindex(args: argparse.Namespace) -> int:
+    from omind.store import OmiStore
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    OmiStore(omi_dir).update_index()  # locked + atomic
+    print(f"reindexed {omi_dir / 'index.md'}")
+    return 0
+
+
 def _run_hook(args: argparse.Namespace) -> int:
     omi_dir = (args.vault / args.folder).expanduser()
     return run_hook(args.event, omi_dir)  # always 0; must never block the agent
@@ -247,6 +272,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_export(args)
     if args.command == "import":
         return _run_import(args)
+    if args.command == "reindex":
+        return _run_reindex(args)
     if args.command == "hook":
         return _run_hook(args)
     parser.print_help()

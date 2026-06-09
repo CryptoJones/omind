@@ -4,12 +4,14 @@
 
 from __future__ import annotations
 
+import multiprocessing
 from pathlib import Path
 
 import pytest
 
 from omind import seeds
 from omind.store import (
+    LOCK_FILENAME,
     ActionItem,
     NoteConflictError,
     NoteError,
@@ -208,3 +210,50 @@ def test_update_index_preserves_intro(store: OmiStore) -> None:
     assert "Keep me." in text
     assert "[[New One]]" in text
     assert "[[old]]" not in text  # recent list regenerated
+
+
+# -- concurrency -------------------------------------------------------------
+
+
+def test_lock_and_temp_files_excluded_from_listing(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Visible"))
+    assert (store.omi_dir / LOCK_FILENAME).is_file()  # lock created on first write
+    names = {s.filename for s in store.list_notes()}
+    assert names == {"Visible.md"}  # lock + any temp files never listed
+    assert LOCK_FILENAME not in names
+
+
+def test_atomic_write_leaves_no_temp_files(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Clean"))
+    leftovers = [p.name for p in store.omi_dir.glob(".tmp-*")]
+    assert leftovers == []
+
+
+def _worker_create(args: tuple[str, int]) -> None:
+    omi_dir, i = args
+    OmiStore(omi_dir).create_note(NoteFields(title=f"Note {i:03d}", summary=f"n{i}"))
+
+
+def test_concurrent_processes_keep_index_consistent(tmp_path: Path) -> None:
+    """N separate processes each create a note; index.md must list all N intact."""
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    n = 24
+    ctx = multiprocessing.get_context("fork")
+    with ctx.Pool(processes=8) as pool:
+        pool.map(_worker_create, [(str(omi), i) for i in range(n)])
+
+    store = OmiStore(omi)
+    # Every note file landed, none torn (each parses to its own title).
+    titles = {s.title for s in store.list_notes()}
+    assert titles == {f"Note {i:03d}" for i in range(n)}
+
+    # index.md is well-formed: the Recent list has exactly N wikilinks, no dupes,
+    # no torn lines — proof the read-modify-write serialized under the lock.
+    index = (omi / seeds.INDEX_FILENAME).read_text(encoding="utf-8")
+    assert seeds.INDEX_RECENT_HEADING in index
+    links = [ln for ln in index.splitlines() if ln.startswith("- [[")]
+    assert len(links) == n
+    assert len(set(links)) == n
+    for i in range(n):
+        assert f"- [[Note {i:03d}]]" in links
