@@ -24,9 +24,10 @@ from __future__ import annotations
 
 import json
 import tarfile
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Callable
+from typing import Any
 
 from omind import __version__, seeds
 from omind.store import OmiStore, parse_note, today
@@ -106,10 +107,7 @@ def export_dataset(
     out = Path(out_path).expanduser()
     out.parent.mkdir(parents=True, exist_ok=True)
 
-    if fmt == "json":
-        note_count = _export_json(omi, out)
-    else:
-        note_count = _export_targz(omi, out)
+    note_count = _export_json(omi, out) if fmt == "json" else _export_targz(omi, out)
 
     log(f"exported {note_count} note(s) from {omi} -> {out} ({fmt})")
     return ExportResult(path=out, fmt=fmt, note_count=note_count)

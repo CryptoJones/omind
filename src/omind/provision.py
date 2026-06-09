@@ -16,8 +16,10 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
+from typing import Any
 
 from omind import seeds
+from omind.hooks import HANDLED_EVENTS, HOOK_MARKER
 
 Logger = Callable[[str], None]
 
@@ -46,6 +48,45 @@ def claude_config_path() -> Path:
     if not primary.is_file() and legacy.is_file():
         return legacy
     return primary
+
+
+def claude_settings_path() -> Path:
+    """Path to Claude Code's ``settings.json`` — where hooks live.
+
+    Distinct from :func:`claude_config_path` (``~/.claude.json``, which holds
+    ``mcpServers``). Hooks, theme, and permission config live in
+    ``~/.claude/settings.json``.
+    """
+    return Path.home() / ".claude" / "settings.json"
+
+
+def _entry_has_omind_marker(entry: object) -> bool:
+    """True if a hooks-array entry was installed by omind (command has the marker)."""
+    if not isinstance(entry, dict):
+        return False
+    hook_list = entry.get("hooks")
+    if not isinstance(hook_list, list):
+        return False
+    for hook in hook_list:
+        if isinstance(hook, dict):
+            command = hook.get("command")
+            if isinstance(command, str) and HOOK_MARKER in command:
+                return True
+    return False
+
+
+def _entry_command_text(entry: object) -> str:
+    """Concatenated command strings of a hooks-array entry (for path inspection)."""
+    parts: list[str] = []
+    if isinstance(entry, dict):
+        hook_list = entry.get("hooks")
+        if isinstance(hook_list, list):
+            for hook in hook_list:
+                if isinstance(hook, dict):
+                    command = hook.get("command")
+                    if isinstance(command, str):
+                        parts.append(command)
+    return " ".join(parts)
 
 
 # obsidian-mcp version pinned to the install layout below (entry at
@@ -260,6 +301,88 @@ class Provisioner:
             + self._server_command(target)
         )
 
+    def _hook_command(self, event: str) -> str:
+        """The shell command Claude Code runs for one hook event.
+
+        Uses the absolute path to the ``omind`` executable when resolvable, so
+        the hook fires even if the shell Claude Code spawns lacks ``~/.local/bin``
+        on PATH. Falls back to bare ``omind`` (still contains ``HOOK_MARKER``).
+        """
+        omind_exe = shutil.which("omind") or "omind"
+        # The "<exe> hook" prefix always contains HOOK_MARKER ("omind hook"),
+        # which provision uses to find/replace omind's own entries.
+        return (
+            f'{omind_exe} hook {event} --vault "{self.config.vault}" '
+            f"--folder {self.config.folder}"
+        )
+
+    def _omind_hook_entries(self) -> dict[str, list[dict[str, Any]]]:
+        """The hooks-array entry omind owns, per handled event."""
+        entries: dict[str, list[dict[str, Any]]] = {}
+        for event in HANDLED_EVENTS:
+            entry: dict[str, Any] = {
+                "hooks": [{"type": "command", "command": self._hook_command(event)}]
+            }
+            if event == "PostToolUse":
+                entry = {"matcher": "*", **entry}
+            entries[event] = [entry]
+        return entries
+
+    def _read_settings(self, path: Path) -> dict[str, Any]:
+        """Load settings.json as a dict; raise rather than clobber bad/foreign JSON."""
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError as exc:
+            raise ProvisionError(
+                f"{path} is not valid JSON ({exc}); refusing to overwrite. "
+                "Fix or remove it and re-run."
+            ) from exc
+        if not isinstance(data, dict):
+            raise ProvisionError(
+                f"{path} does not contain a JSON object; refusing to overwrite."
+            )
+        return data
+
+    def ensure_hooks_installed(self) -> None:
+        """Idempotently merge omind's auto-memory hooks into settings.json.
+
+        Replaces only omind's own entries (identified by ``HOOK_MARKER``), leaving
+        user-authored hooks and every other settings key untouched. Re-registers
+        when the embedded vault path drifts. Writes only when something changed
+        (or ``--force``).
+        """
+        path = claude_settings_path()
+        data = self._read_settings(path)
+        hooks_cfg = data.get("hooks")
+        if not isinstance(hooks_cfg, dict):
+            hooks_cfg = {}
+        desired = self._omind_hook_entries()
+
+        changed = False
+        for event in HANDLED_EVENTS:
+            existing = hooks_cfg.get(event)
+            existing_list = existing if isinstance(existing, list) else []
+            kept = [e for e in existing_list if not _entry_has_omind_marker(e)]
+            merged = kept + desired[event]
+            if merged != existing_list:
+                changed = True
+            hooks_cfg[event] = merged
+
+        if not changed and not self.config.force:
+            self.log(f"  auto-memory hooks already installed in {path}")
+            return
+
+        data["hooks"] = hooks_cfg
+        self._record(
+            "install auto-memory hooks (PostToolUse, Stop, SessionStart) in "
+            f"{path}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
     def verify(self) -> None:
         if self.config.dry_run:
             return
@@ -310,6 +433,7 @@ class Provisioner:
         self.seed_memory_files()
         self.ensure_server_install()
         self.register_mcp()
+        self.ensure_hooks_installed()
         self.verify()
         if not self.config.dry_run:
             self.log("Done. Restart Claude Code to load the OMI memory tools.")
@@ -429,7 +553,58 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
             )
         )
 
+    results.append(_diagnose_hooks(claude_settings_path(), config))
+
     return results
+
+
+def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
+    """Inspect settings.json for omind's auto-memory hooks (pure read)."""
+    if not settings_path.is_file():
+        return CheckResult(
+            "hooks",
+            "fail",
+            f"auto-memory hooks not installed: {settings_path} missing (run `omind setup`)",
+        )
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except json.JSONDecodeError:
+        return CheckResult("hooks", "fail", f"{settings_path} is not valid JSON")
+    hooks_cfg = data.get("hooks") if isinstance(data, dict) else None
+    if not isinstance(hooks_cfg, dict):
+        return CheckResult(
+            "hooks", "fail", "no auto-memory hooks in settings.json (run `omind setup`)"
+        )
+
+    expected_vault = str(config.vault)
+    missing: list[str] = []
+    path_mismatch = False
+    for event in HANDLED_EVENTS:
+        entries = hooks_cfg.get(event)
+        found = None
+        if isinstance(entries, list):
+            found = next((e for e in entries if _entry_has_omind_marker(e)), None)
+        if found is None:
+            missing.append(event)
+        elif expected_vault not in _entry_command_text(found):
+            path_mismatch = True
+
+    if missing:
+        return CheckResult(
+            "hooks",
+            "fail",
+            f"auto-memory hook(s) missing for {', '.join(missing)} (run `omind setup`)",
+        )
+    if path_mismatch:
+        return CheckResult(
+            "hooks",
+            "warn",
+            f"auto-memory hooks point at a different vault than {expected_vault!r}; "
+            "run `omind setup`",
+        )
+    return CheckResult(
+        "hooks", "ok", "auto-memory hooks installed (PostToolUse, Stop, SessionStart)"
+    )
 
 
 def run_doctor(config: SetupConfig, log: Logger = print) -> int:

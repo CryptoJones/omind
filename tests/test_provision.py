@@ -46,6 +46,14 @@ def isolate_server_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path
     return home
 
 
+@pytest.fixture(autouse=True)
+def isolate_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Never touch the real ~/.claude/settings.json when (un)installing hooks."""
+    settings = tmp_path / "settings.json"
+    monkeypatch.setattr(provision, "claude_settings_path", lambda: settings)
+    return settings
+
+
 def _config(tmp_path: Path, **kw: object) -> SetupConfig:
     return SetupConfig(vault=tmp_path / "vault", **kw)  # type: ignore[arg-type]
 
@@ -83,6 +91,11 @@ def _provision_files(config: SetupConfig) -> None:
     guard = provision.eof_guard_path()
     guard.parent.mkdir(parents=True, exist_ok=True)
     guard.write_text(seeds.EOF_GUARD_JS)
+
+
+def _install_hooks(config: SetupConfig) -> None:
+    """Write the auto-memory hooks into the isolated settings.json."""
+    Provisioner(config, log=_quiet).ensure_hooks_installed()
 
 
 def test_default_vault_path_shape() -> None:
@@ -201,11 +214,13 @@ def test_doctor_healthy_when_provisioned(
     config = _config(tmp_path)
     _provision_files(config)
     _write_server_config(isolate_claude, str(config.omi_dir))
+    _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["omi_dir"].level == "ok"
     assert results["obsidian_config"].level == "ok"
     assert results["seeds"].level == "ok"
     assert results["mcp_registration"].level == "ok"
+    assert results["hooks"].level == "ok"
     assert provision.run_doctor(config, log=_quiet) == 0
 
 
@@ -227,6 +242,7 @@ def test_doctor_warns_on_path_mismatch(
     config = _config(tmp_path)
     _provision_files(config)
     _write_server_config(isolate_claude, "/some/other/path")
+    _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["mcp_registration"].level == "warn"
     assert provision.run_doctor(config, log=_quiet) == 0  # warnings don't fail
@@ -238,6 +254,7 @@ def test_doctor_warns_on_legacy_npx_form(
     config = _config(tmp_path)
     _provision_files(config)
     _write_legacy_server_config(isolate_claude, str(config.omi_dir))
+    _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
     # right path, wrong (leak-prone) command form -> warn, not ok
     assert results["mcp_registration"].level == "warn"
@@ -297,3 +314,126 @@ def test_doctor_finds_server_via_canonical_config_path(
     _write_server_config(home / ".claude.json", str(config.omi_dir))
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["mcp_registration"].level == "ok"
+
+
+# -- auto-memory hooks (settings.json) --------------------------------------
+
+
+def _omind_entries(settings: Path, event: str) -> list[dict[str, object]]:
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    return [e for e in data["hooks"][event] if provision._entry_has_omind_marker(e)]
+
+
+def test_setup_installs_hooks_idempotently(tmp_path: Path, isolate_settings: Path) -> None:
+    config = _config(tmp_path)
+    _install_hooks(config)
+    _install_hooks(config)  # second run must not duplicate
+    for event in provision.HANDLED_EVENTS:
+        entries = _omind_entries(isolate_settings, event)
+        assert len(entries) == 1
+        cmd = provision._entry_command_text(entries[0])
+        assert f"hook {event}" in cmd  # the `hook <event>` subcommand is present
+        assert provision.HOOK_MARKER in cmd  # detectable marker
+        assert str(config.vault) in cmd
+
+
+def test_setup_preserves_existing_settings_keys(tmp_path: Path, isolate_settings: Path) -> None:
+    isolate_settings.write_text(
+        json.dumps({"theme": "dark", "skipDangerousModePermissionPrompt": True})
+    )
+    _install_hooks(_config(tmp_path))
+    data = json.loads(isolate_settings.read_text(encoding="utf-8"))
+    assert data["theme"] == "dark"
+    assert data["skipDangerousModePermissionPrompt"] is True
+    assert "hooks" in data
+
+
+def test_setup_preserves_user_hooks(tmp_path: Path, isolate_settings: Path) -> None:
+    user_entry = {"hooks": [{"type": "command", "command": "echo mine"}]}
+    isolate_settings.write_text(json.dumps({"hooks": {"PostToolUse": [user_entry]}}))
+    _install_hooks(_config(tmp_path))
+    entries = json.loads(isolate_settings.read_text(encoding="utf-8"))["hooks"]["PostToolUse"]
+    assert user_entry in entries  # untouched
+    assert any(provision._entry_has_omind_marker(e) for e in entries)
+    assert len(entries) == 2
+
+
+def test_hook_path_drift_triggers_update(tmp_path: Path, isolate_settings: Path) -> None:
+    stale_cmd = 'omind hook PostToolUse --vault "/old/vault" --folder OMI'
+    stale = {
+        "matcher": "*",
+        "hooks": [{"type": "command", "command": stale_cmd}],
+    }
+    isolate_settings.write_text(json.dumps({"hooks": {"PostToolUse": [stale]}}))
+    config = _config(tmp_path)
+    _install_hooks(config)
+    entries = _omind_entries(isolate_settings, "PostToolUse")
+    assert len(entries) == 1
+    text = provision._entry_command_text(entries[0])
+    assert str(config.vault) in text
+    assert "/old/vault" not in text
+
+
+def test_corrupt_settings_json_errors(tmp_path: Path, isolate_settings: Path) -> None:
+    isolate_settings.write_text("{ not valid json")
+    with pytest.raises(ProvisionError):
+        _install_hooks(_config(tmp_path))
+
+
+def test_hooks_dry_run_writes_nothing(tmp_path: Path, isolate_settings: Path) -> None:
+    Provisioner(_config(tmp_path, dry_run=True), log=_quiet).ensure_hooks_installed()
+    assert not isolate_settings.exists()
+
+
+def test_doctor_ok_when_hooks_installed(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, str(config.omi_dir))
+    _install_hooks(config)
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["hooks"].level == "ok"
+
+
+def test_doctor_fail_when_hooks_absent(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, str(config.omi_dir))
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["hooks"].level == "fail"
+    assert provision.run_doctor(config, log=_quiet) == 1
+
+
+def test_doctor_warns_on_hook_path_mismatch(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, isolate_settings: Path
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, str(config.omi_dir))
+    isolate_settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    event: [
+                        {
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": (
+                                        f'omind hook {event} --vault "/elsewhere" --folder OMI'
+                                    ),
+                                }
+                            ]
+                        }
+                    ]
+                    for event in provision.HANDLED_EVENTS
+                }
+            }
+        )
+    )
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["hooks"].level == "warn"
+    assert provision.run_doctor(config, log=_quiet) == 0

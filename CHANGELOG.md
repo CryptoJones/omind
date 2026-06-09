@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Auto-memory hooks: `omind setup` now idempotently installs Claude Code hooks
+  (PostToolUse, Stop, SessionStart) into `~/.claude/settings.json` so every
+  agent action is recorded into a per-day OMI journal note
+  (`Session Journal YYYY-MM-DD.md`, tagged `#session-journal`) — complementing
+  hand-authored curated notes. The hook handler is a new internal subcommand
+  `omind hook <event>` (new module `src/omind/hooks.py`): it reads the hook's
+  stdin JSON and appends one bullet under an `O_APPEND`+`flock` write (never
+  blocks or fails the agent), while SessionStart injects a "read OMI" reminder.
+  The merge preserves existing settings keys and user-authored hooks, replaces
+  only omind's own entries (matched by an `omind hook` marker), and updates on
+  vault-path drift. `omind doctor` verifies the hooks are installed. With tests.
 - `omind export` / `omind import` to store and load the entire OMI dataset on
   request. Two formats via `--format`: `json` (a human-readable, diffable
   bundle of every note's raw Markdown + parsed fields; the derived `index.md`

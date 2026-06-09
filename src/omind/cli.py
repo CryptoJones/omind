@@ -18,6 +18,7 @@ import sys
 from pathlib import Path
 
 from omind import __version__
+from omind.hooks import HANDLED_EVENTS, run_hook
 from omind.provision import (
     ProvisionError,
     SetupConfig,
@@ -34,7 +35,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
-        dest="command", metavar="{setup,serve,doctor,export,import}"
+        dest="command", metavar="{setup,serve,doctor,export,import,hook}"
     )
 
     setup = sub.add_parser("setup", help="provision the OMI/Obsidian MCP wiring for Claude Code")
@@ -133,6 +134,24 @@ def build_parser() -> argparse.ArgumentParser:
         help="overwrite notes whose content differs (default: keep on-disk copy)",
     )
 
+    hook = sub.add_parser(
+        "hook", help="(internal) record one Claude Code action into the OMI journal"
+    )
+    hook.add_argument(
+        "event",
+        choices=list(HANDLED_EVENTS),
+        help="the Claude Code hook event name",
+    )
+    hook.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    hook.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+
     return parser
 
 
@@ -210,6 +229,11 @@ def _run_import(args: argparse.Namespace) -> int:
     return 1 if (result.conflicts and not args.force) else 0
 
 
+def _run_hook(args: argparse.Namespace) -> int:
+    omi_dir = (args.vault / args.folder).expanduser()
+    return run_hook(args.event, omi_dir)  # always 0; must never block the agent
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -223,6 +247,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_export(args)
     if args.command == "import":
         return _run_import(args)
+    if args.command == "hook":
+        return _run_hook(args)
     parser.print_help()
     return 0
 
