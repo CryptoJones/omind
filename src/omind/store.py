@@ -13,7 +13,6 @@ rejects path traversal so a request can never escape the OMI directory.
 from __future__ import annotations
 
 import contextlib
-import fcntl
 import os
 import re
 import tempfile
@@ -23,6 +22,7 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+from omind import filelock
 from omind.seeds import (
     INDEX_FILENAME,
     INDEX_INTRO,
@@ -308,10 +308,10 @@ class OmiStore:
         lock_path = self.omi_dir / LOCK_FILENAME
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            filelock.lock_fd(fd)
             yield
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            filelock.unlock_fd(fd)
             os.close(fd)
 
     # -- naming / safety ----------------------------------------------------

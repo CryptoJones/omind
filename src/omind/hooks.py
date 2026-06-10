@@ -27,13 +27,14 @@ Design constraints:
 
 from __future__ import annotations
 
-import fcntl
 import json
 import os
 import sys
 from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
+
+from omind import filelock
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
@@ -208,13 +209,13 @@ def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) ->
         path = directory / name
         fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
         try:
-            fcntl.flock(fd, fcntl.LOCK_EX)
+            filelock.lock_fd(fd)
             if os.fstat(fd).st_size == 0:
                 os.write(fd, journal_header(name, now).encode("utf-8"))
             text = line if line.endswith("\n") else line + "\n"
             os.write(fd, text.encode("utf-8"))
         finally:
-            fcntl.flock(fd, fcntl.LOCK_UN)
+            filelock.unlock_fd(fd)
             os.close(fd)
     except OSError:
         return

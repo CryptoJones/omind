@@ -9,6 +9,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- omind now runs on Windows: the POSIX-only `fcntl.flock` imports in the store
+  and the journal hot path crashed every command at import time
+  (`ModuleNotFoundError: No module named 'fcntl'`). New `omind.filelock` shim
+  locks via `fcntl.flock` on POSIX and `msvcrt.locking` on Windows, preserving
+  the single-writer guarantees on both. Found live while provisioning OpenClaw
+  on a Windows 11 VM. With tests.
+
 - `index.md` regeneration no longer wipes descriptions: each Recent Memories
   line now renders as `- [[note]] — {summary}` from the note's own `## Summary`
   (collapsed, ≤100 chars), with a one-time lock-protected migration that copies
