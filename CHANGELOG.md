@@ -7,7 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- External commands (`npm`, `claude`, `restic`, `rsync`, `systemctl`, …) now
+  run with a timeout (10 minutes by default; 1 hour for the snapshot-producing
+  backup calls), so a stalled npm install or a restic hung on a dead SFTP link
+  fails loudly instead of wedging `omind setup` or the unattended backup timer
+  forever. The subprocess plumbing previously duplicated between provisioning
+  and backup (Windows `.cmd`-shim resolution, output capture, error mapping)
+  now lives in one shared module, `omind.proc`. With tests.
 
 ## [1.2.0] - 2026-06-10
 
