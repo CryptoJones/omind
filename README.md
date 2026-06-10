@@ -34,8 +34,13 @@ reads and writes as long-term memory. `omind` does two things with it:
   French, Arabic, Russian, Chinese), including right-to-left layout for Arabic.
 - **`omind doctor`** — diagnose the wiring in one shot: Node/npm/Claude CLI on
   `PATH`, the MCP server registered at user scope (in the leak-free direct-`node`
-  form) and pointed at the right folder, the stdin-EOF guard in place, and the
-  OMI folder + Obsidian config readable.
+  form) and pointed at the right folder, the stdin-EOF guard in place, the
+  OMI folder + Obsidian config readable, backup health (unconfigured /
+  last-success age / failing), and whether the auto-memory hooks have recorded
+  any recent failures.
+- **`omind backup`** — encrypted, unattended off-machine backup of the OMI
+  folder, wrapping [restic](https://restic.net/) (see
+  [Encrypted backup](#encrypted-backup) below).
 
 The web UI works **fully offline** (fonts, styles, and the Markdown renderer are
 vendored — no CDN). It shows **backlinks** for the open note, refreshes the list
@@ -141,6 +146,35 @@ omind import omi-export.json --vault "$HOME/Documents/Obsidian Vault"
 Import adds new notes and leaves identical ones untouched; a note whose content
 differs is kept as-is on disk and reported, unless you pass `--force`. Imports
 never delete.
+
+## Encrypted backup
+
+The vault is long-term memory on one disk; `omind backup` keeps an encrypted
+copy off-machine, wrapping [restic](https://restic.net/):
+
+```bash
+# one-time: generate the password file (0600) and create the encrypted repo
+omind backup init --repo sftp:host:/path     # or a local path, s3:, b2:, …
+
+# snapshot now, with 7-daily / 4-weekly / 6-monthly retention
+omind backup run
+
+# restic check + restore the latest snapshot's index.md and diff it live
+omind backup verify
+
+# unattended: a daily systemd user timer running `backup run`
+omind backup install-timer
+```
+
+Every external command runs with a timeout, so a restic hung on a dead link
+fails loudly instead of wedging the timer; three consecutive failures write a
+`BACKUP FAILING` note into the vault so the problem surfaces in session
+priming, and `omind doctor` reports backup health either way. If restic is
+absent, `run` degrades to unencrypted rsync `--link-dest` snapshots and doctor
+warns about the degradation.
+
+**Copy `~/.config/omind/backup.pass` somewhere safe off-machine.** It encrypts
+every snapshot; losing it with the disk makes the backups unreadable.
 
 ## Other agents: Hermes Agent and OpenClaw
 

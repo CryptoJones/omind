@@ -15,7 +15,8 @@ Issues and pull requests on **either** are welcome. Commits land on both.
 
 ## Development setup
 
-Requires Python 3.10+ (CI runs 3.10, 3.11, and 3.12).
+Requires Python 3.10+ (CI runs 3.10–3.14 on Linux, plus 3.10 and 3.14 on
+Windows — omind is supported on both).
 
 ```bash
 git clone https://github.com/CryptoJones/omind.git
@@ -46,14 +47,25 @@ supported Python version; if you only have one locally, CI covers the matrix.
 
 ```
 src/omind/
-├── cli.py          argparse entry point: `setup` and `serve` subcommands
-├── provision.py    `omind setup` — idempotent obsidian-mcp wiring
-├── seeds.py        captured .obsidian JSON + Memory Template / index constants
+├── cli.py          argparse entry point: one `_run_*` handler per subcommand
+├── provision.py    `omind setup`/`doctor` — idempotent obsidian-mcp wiring
+├── agents.py       Hermes/OpenClaw provisioners (subclass provision.py's)
+├── quickstart.py   `omind quickstart` — the manual steps `setup` automates
+├── backup.py       `omind backup` — encrypted restic backup + systemd timer
+├── hooks.py        `omind hook` — auto-journal hook handlers + SessionStart priming
+├── journal.py      journal migration + weekly `omind rollup`
+├── transfer.py     `omind export`/`import` — json / tar.gz dataset bundles
+├── notes.py        `upsert_note` — the single write entry point for external writers
 ├── store.py        framework-free note CRUD + template parse/render + index
+├── seeds.py        seed content: captured .obsidian JSON + note templates
+├── paths.py        canonical filenames (single source of truth for names)
+├── proc.py         shared subprocess runner: capture, timeouts, Windows shims
+├── filelock.py     portable flock shim (fcntl on POSIX, msvcrt on Windows)
 └── web/
     ├── app.py      FastAPI routes (JSON API) + static mount
     └── static/     the single-page UI (index.html, app.js, app.css)
-tests/              pytest suites mirroring the modules above
+tests/              pytest suites mirroring the modules above (+ conftest.py
+                    isolating XDG_STATE_HOME for every test)
 ```
 
 `store.py` has no web dependency — it is the file-I/O core that both the CLI and
