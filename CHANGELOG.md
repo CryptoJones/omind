@@ -9,6 +9,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- External commands (`npm`, `claude`, `restic`, `rsync`, `systemctl`, …) now
+  run with a timeout (10 minutes by default; 1 hour for the snapshot-producing
+  backup calls), so a stalled npm install or a restic hung on a dead SFTP link
+  fails loudly instead of wedging `omind setup` or the unattended backup timer
+  forever. The subprocess plumbing previously duplicated between provisioning
+  and backup (Windows `.cmd`-shim resolution, output capture, error mapping)
+  now lives in one shared module, `omind.proc`. With tests.
+
+- Windows part 3, courtesy of the new windows-latest CI legs:
+  `omind setup` re-runs no longer duplicate the auto-memory hooks on Windows —
+  `shutil.which` resolves the hook command to `omind.EXE`, which the literal
+  `"omind hook"` marker match didn't recognize as omind's own entry (doctor
+  reported the hooks missing for the same reason). Re-importing a bundle over
+  a vault written through Windows text mode no longer flags every note as a
+  conflict (newline-insensitive comparison). The journal hot path and the
+  backup password file now open with `O_BINARY`/`newline="\n"` so CRT text
+  mode can't rewrite their bytes. With tests; the suite now runs on
+  windows-latest (Python 3.10 and 3.14) in CI.
+
 - Hook errors are no longer invisible: the hook handlers still never block or
   fail the agent, but every swallowed error now leaves a one-line breadcrumb
   in `~/.local/state/omind/hook-failures.log` (size-capped, best-effort), and

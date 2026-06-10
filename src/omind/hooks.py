@@ -247,7 +247,10 @@ def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) ->
         directory.mkdir(parents=True, exist_ok=True)
         name = journal_name(now)
         path = directory / name
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        # O_BINARY: on Windows, os.open defaults to the CRT's text mode, which
+        # would rewrite the \n in our bytes to \r\n mid-write.
+        binary = getattr(os, "O_BINARY", 0)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | binary, 0o644)
         try:
             filelock.lock_fd(fd)
             if os.fstat(fd).st_size == 0:

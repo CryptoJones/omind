@@ -372,7 +372,10 @@ def test_concurrent_processes_keep_index_consistent(tmp_path: Path) -> None:
     omi = tmp_path / "OMI"
     omi.mkdir()
     n = 24
-    ctx = multiprocessing.get_context("fork")
+    # fork is unavailable on Windows (and 3.14 makes spawn the default
+    # everywhere); the worker is a module-level function, so spawn works too.
+    method = "fork" if "fork" in multiprocessing.get_all_start_methods() else "spawn"
+    ctx = multiprocessing.get_context(method)
     with ctx.Pool(processes=8) as pool:
         pool.map(_worker_create, [(str(omi), i) for i in range(n)])
 
