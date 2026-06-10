@@ -153,6 +153,12 @@ def _run(
     Output is always captured so a restic error can never leak repository
     details (or worse) into a systemd journal line we don't control.
     """
+    if os.name == "nt":
+        # CreateProcess won't resolve restic.cmd-style shims from a bare
+        # name; shutil.which finds the executable with its extension.
+        resolved = shutil.which(cmd[0])
+        if resolved:
+            cmd = [resolved, *cmd[1:]]
     try:
         return subprocess.run(
             cmd,

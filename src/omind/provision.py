@@ -444,6 +444,12 @@ class Provisioner:
     ) -> subprocess.CompletedProcess[str]:
         if self.config.dry_run:
             return subprocess.CompletedProcess(cmd, 0, "", "")
+        if os.name == "nt":
+            # CreateProcess won't resolve npm.cmd / claude.cmd from a bare
+            # name; shutil.which finds the shim with its extension.
+            resolved = shutil.which(cmd[0])
+            if resolved:
+                cmd = [resolved, *cmd[1:]]
         try:
             return subprocess.run(
                 cmd,

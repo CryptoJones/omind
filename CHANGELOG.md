@@ -9,6 +9,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Windows part 2: subprocess calls (`npm`, `claude`, `restic`, …) now resolve
+  the executable via `shutil.which` on Windows before spawning, so `.cmd`
+  shims like `npm.cmd` run — `CreateProcess` does not resolve them from a bare
+  name, which broke `omind setup` at the obsidian-mcp install step on the
+  win11-openclaw box. POSIX path untouched.
+
 - omind now runs on Windows: the POSIX-only `fcntl.flock` imports in the store
   and the journal hot path crashed every command at import time
   (`ModuleNotFoundError: No module named 'fcntl'`). New `omind.filelock` shim
