@@ -42,9 +42,7 @@ _Nothing yet._
   vault root, so they no longer pollute note listings, the regenerated index,
   or SessionStart priming. `omind setup` and `omind reindex` migrate existing
   `Session Journal *.md` from the root (and the legacy `logs/` location) under
-  the write lock, idempotently. New `omind rollup [--week]` compacts a week of
-  dailies into one summary note and archives or deletes the raw files
-  (default retention 30 days). With tests.
+  the write lock, idempotently. With tests.
 
 - `omind hook` journaling no longer marks a tool action as `(error)` just because
   its response carries a `stderr` field — git, curl, npm and friends write
@@ -53,6 +51,10 @@ _Nothing yet._
   `exit_code`/`returncode`. With tests.
 
 ### Added
+
+- `omind rollup [--week]` — compact a week of daily session journals into one
+  summary note each, then archive (default, to `Journal/Archive/`) or delete
+  the raw dailies; default retention 30 days. With tests.
 
 - `omind backup` — encrypted, unattended off-machine backup of the OMI folder,
   wrapping restic: `init` (generates `~/.config/omind/backup.pass`, 0600,

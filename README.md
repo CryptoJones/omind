@@ -7,7 +7,7 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 [![Codeberg](https://img.shields.io/badge/Codeberg-CryptoJones%2Fomind-2185D0?logo=codeberg&logoColor=white)](https://codeberg.org/CryptoJones/omind)
 [![GitHub](https://img.shields.io/badge/GitHub-CryptoJones%2Fomind-181717?logo=github&logoColor=white)](https://github.com/CryptoJones/omind)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
-[![Version](https://img.shields.io/badge/version-v1.2.0-orange)]()
+[![Version](https://img.shields.io/github/v/tag/CryptoJones/omind?label=version&color=orange)](https://github.com/CryptoJones/omind/tags)
 
 > Mirrored on both [GitHub](https://github.com/CryptoJones/omind) and
 > [Codeberg](https://codeberg.org/CryptoJones/omind). Issues filed on
