@@ -88,6 +88,18 @@ Provision the Claude Code MCP wiring (idempotent; safe to re-run):
 omind setup --vault "$HOME/Documents/Obsidian Vault"
 ```
 
+Prefer to wire things in yourself? Print the same steps as copy-paste shell
+commands and JSON, personalized to your paths — nothing is changed for you:
+
+```bash
+omind quickstart --vault "$HOME/Documents/Obsidian Vault"
+```
+
+It covers all four pieces (memory folder scaffold, MCP server install + stdin-EOF
+guard, user-scope registration, auto-memory hooks), each independently
+applicable. The annotated walkthrough lives in
+[docs/manual-setup.md](docs/manual-setup.md).
+
 Run the web UI over the same memory folder:
 
 ```bash
