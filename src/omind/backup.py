@@ -197,7 +197,9 @@ def init_backup(repo: str, log: Logger = print) -> None:
             f"refusing to overwrite existing password file: {passfile} "
             "(it decrypts every existing snapshot)"
         ) from None
-    with os.fdopen(fd, "w", encoding="utf-8") as fh:
+    # newline="\n" so Windows text mode can't smuggle a \r into the file
+    # (restic trims it, but the password bytes should be identical everywhere).
+    with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
         fh.write(secrets.token_urlsafe(32) + "\n")
     os.chmod(passfile, 0o600)
     log(f"  wrote password file {passfile} (0600) — copy it somewhere safe, never commit it")

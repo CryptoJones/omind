@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -76,6 +77,16 @@ def claude_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+# A hook command we own: the omind executable (Windows resolves it to
+# omind.EXE / omind.cmd, so the literal HOOK_MARKER substring isn't enough)
+# followed by the `hook` subcommand.
+_HOOK_COMMAND_RE = re.compile(r"omind(?:\.exe|\.cmd|\.bat)?[\"']?\s+hook\b", re.IGNORECASE)
+
+
+def _command_is_omind_hook(command: str) -> bool:
+    return HOOK_MARKER in command or bool(_HOOK_COMMAND_RE.search(command))
+
+
 def _entry_has_omind_marker(entry: object) -> bool:
     """True if a hooks-array entry was installed by omind (command has the marker)."""
     if not isinstance(entry, dict):
@@ -86,7 +97,7 @@ def _entry_has_omind_marker(entry: object) -> bool:
     for hook in hook_list:
         if isinstance(hook, dict):
             command = hook.get("command")
-            if isinstance(command, str) and HOOK_MARKER in command:
+            if isinstance(command, str) and _command_is_omind_hook(command):
                 return True
     return False
 

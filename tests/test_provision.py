@@ -6,7 +6,7 @@ from __future__ import annotations
 
 import json
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -34,7 +34,9 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(list(cmd))
+        # Record by bare name: on Windows the provisioner resolves cmd[0] via
+        # shutil.which (patched to /usr/bin/<name> by fake_tools).
+        calls.append([PurePosixPath(cmd[0]).name, *cmd[1:]])
         return subprocess.CompletedProcess(cmd, 0, "obsidian: Connected", "")
 
     monkeypatch.setattr(provision.subprocess, "run", fake_run)
@@ -370,7 +372,7 @@ def test_setup_installs_hooks_idempotently(tmp_path: Path, isolate_settings: Pat
         assert len(entries) == 1
         cmd = provision._entry_command_text(entries[0])
         assert f"hook {event}" in cmd  # the `hook <event>` subcommand is present
-        assert provision.HOOK_MARKER in cmd  # detectable marker
+        assert provision._command_is_omind_hook(cmd)  # detectable as ours (omind.EXE on Windows)
         assert str(config.vault) in cmd
 
 
@@ -474,3 +476,24 @@ def test_doctor_warns_on_hook_path_mismatch(
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["hooks"].level == "warn"
     assert provision.run_doctor(config, log=_quiet) == 0
+
+
+# -- hook-entry recognition across platforms ------------------------------------
+
+
+def test_entry_marker_recognizes_windows_resolved_exe() -> None:
+    """shutil.which on Windows resolves omind to omind.EXE — still ours."""
+    for command in (
+        'omind hook PostToolUse --vault "/home/u/vault" --folder OMI',
+        'C:\\Users\\u\\Scripts\\omind.EXE hook PostToolUse --vault "C:\\v" --folder OMI',
+        'C:\\Users\\u\\Scripts\\omind.cmd hook Stop --vault "C:\\v" --folder OMI',
+        '/home/u/.local/bin/omind hook Stop --vault "/home/u/vault" --folder OMI',
+    ):
+        entry = {"hooks": [{"type": "command", "command": command}]}
+        assert provision._entry_has_omind_marker(entry), command
+
+
+def test_entry_marker_ignores_foreign_commands() -> None:
+    for command in ("echo mine", "myomindish hooks", "omind doctor --vault x"):
+        entry = {"hooks": [{"type": "command", "command": command}]}
+        assert not provision._entry_has_omind_marker(entry), command
