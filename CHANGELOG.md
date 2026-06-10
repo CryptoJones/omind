@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [1.3.0] - 2026-06-10
+
 ### Fixed
 
 - External commands (`npm`, `claude`, `restic`, `rsync`, `systemctl`, …) now
@@ -34,6 +38,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `omind doctor` warns when that log has entries from the last 7 days.
   Previously a full disk or a permissions change meant the session journal
   just silently stopped existing. With tests.
+
+### Changed
+
+- The canonical OMI filenames (`INDEX_FILENAME`, `MEMORY_TEMPLATE_FILENAME`,
+  `RESERVED_FILENAMES`, `EOF_GUARD_FILENAME`, `AGENT_SKILL_FILENAME`) moved
+  from `omind.seeds` to the new `omind.paths` module; `omind.seeds` no longer
+  exports them. Embedders importing those names must update their imports —
+  the CLI is unaffected.
+- CI now runs the full suite on Windows (Python 3.10 and 3.14) alongside
+  Linux 3.10–3.14, and the CLI subcommand wiring (serve/export/import/doctor/
+  backup/setup) gained end-to-end integration tests.
 
 ## [1.2.0] - 2026-06-10
 
