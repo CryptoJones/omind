@@ -3,7 +3,8 @@
 """Command-line entry point for omind.
 
 Subcommands:
-  * ``omind setup``  — provision the OMI/Obsidian MCP wiring for Claude Code.
+  * ``omind setup``  — provision the OMI/Obsidian MCP wiring for an AI agent
+    (``--agent`` claude (default), hermes, or openclaw).
   * ``omind serve``  — run the local web UI over an OMI memory folder.
   * ``omind doctor`` — diagnose the wiring.
   * ``omind export`` — write the entire OMI dataset to a json or tar.gz bundle.
@@ -21,13 +22,13 @@ import sys
 from pathlib import Path
 
 from omind import __version__
+from omind.agents import AGENT_CHOICES, diagnose_for, run_setup_for
 from omind.hooks import HANDLED_EVENTS, run_hook
 from omind.provision import (
     ProvisionError,
     SetupConfig,
     default_vault_path,
     run_doctor,
-    run_setup,
 )
 
 
@@ -41,7 +42,9 @@ def build_parser() -> argparse.ArgumentParser:
         dest="command", metavar="{setup,quickstart,serve,doctor,export,import,reindex,note,hook}"
     )
 
-    setup = sub.add_parser("setup", help="provision the OMI/Obsidian MCP wiring for Claude Code")
+    setup = sub.add_parser(
+        "setup", help="provision the OMI/Obsidian MCP wiring for an AI agent"
+    )
     setup.add_argument(
         "--vault",
         type=Path,
@@ -50,6 +53,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.add_argument(
         "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+    setup.add_argument(
+        "--agent",
+        choices=AGENT_CHOICES,
+        default="claude",
+        help="which agent to provision (default: claude — the Claude Code CLI)",
     )
     setup.add_argument(
         "--server-name",
@@ -82,6 +91,12 @@ def build_parser() -> argparse.ArgumentParser:
         "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
     )
     quickstart.add_argument(
+        "--agent",
+        choices=AGENT_CHOICES,
+        default="claude",
+        help="which agent the steps target (default: claude — the Claude Code CLI)",
+    )
+    quickstart.add_argument(
         "--server-name",
         default="obsidian",
         help="name to register the MCP server under (default: obsidian)",
@@ -110,6 +125,12 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument(
         "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+    doctor.add_argument(
+        "--agent",
+        choices=AGENT_CHOICES,
+        default="claude",
+        help="which agent's wiring to diagnose (default: claude — the Claude Code CLI)",
     )
     doctor.add_argument(
         "--server-name",
@@ -225,9 +246,10 @@ def _run_setup(args: argparse.Namespace) -> int:
         server_name=args.server_name,
         dry_run=args.dry_run,
         force=args.force,
+        agent=args.agent,
     )
     try:
-        run_setup(config)
+        run_setup_for(config)
     except ProvisionError as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
@@ -241,6 +263,7 @@ def _run_quickstart(args: argparse.Namespace) -> int:
         vault=args.vault,
         folder=args.folder,
         server_name=args.server_name,
+        agent=args.agent,
     )
     print(build_quickstart(config))
     return 0
@@ -251,8 +274,9 @@ def _run_doctor(args: argparse.Namespace) -> int:
         vault=args.vault,
         folder=args.folder,
         server_name=args.server_name,
+        agent=args.agent,
     )
-    return run_doctor(config)
+    return run_doctor(config, diagnose_fn=diagnose_for)
 
 
 def _run_serve(args: argparse.Namespace) -> int:

@@ -111,3 +111,48 @@ Use the template to create new memory notes. Link memories using Obsidian's [[wi
 
 # Files that are scaffolding, not memories -- excluded from listings.
 RESERVED_FILENAMES = frozenset({MEMORY_TEMPLATE_FILENAME, INDEX_FILENAME})
+
+AGENT_SKILL_FILENAME = "SKILL.md"
+
+# Memory skill installed into an agent's skills directory by `omind setup
+# --agent hermes|openclaw`. Both agents discover skills as a folder holding a
+# SKILL.md with name/description frontmatter. Placeholders: {vault}, {folder},
+# {omi_dir}.
+AGENT_SKILL_TEMPLATE = """\
+---
+name: omind-omi-memory
+description: >-
+  Persist long-term memories as clean, single-insight Markdown notes in the
+  OMI Obsidian folder through omind's safe write path. Use when asked to
+  remember something, or when an insight is worth keeping across sessions.
+---
+
+# OMI memory (via omind)
+
+Long-term memory lives in `{omi_dir}` — one Markdown note per insight,
+readable by every agent on this machine. The `obsidian` MCP server is already
+pointed at that folder; use its tools to read and search memory.
+
+## Writing memory — always through omind
+
+Never write files into the OMI folder directly: a raw write can interleave
+with another agent's write and corrupt the index. Create or update notes
+through the single-writer CLI (an upsert — re-running with the same title
+updates the note in place):
+
+```bash
+omind note --title "Short Descriptive Title" \\
+  --summary "one-line summary of the insight" \\
+  --tags "topic,subtopic" \\
+  --vault "{vault}" --folder "{folder}" <<'BODY'
+The full insight, in plain Markdown. Link related notes with real
+[[wikilinks]] so the memory graph stays connected.
+BODY
+```
+
+Rules:
+
+- One note per insight, with a descriptive title — never a combined dump.
+- Real `[[wikilinks]]` to related notes; tags are plain comma-separated words.
+- `index.md` is maintained by omind — never edit it by hand.
+"""
