@@ -33,6 +33,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `omind backup` — encrypted, unattended off-machine backup of the OMI folder,
+  wrapping restic: `init` (generates `~/.config/omind/backup.pass`, 0600,
+  refuses overwrite), `run` (snapshot + 7d/4w/6m retention; 3 consecutive
+  failures upsert a `BACKUP FAILING` note through the single-writer path so it
+  surfaces in priming, success clears it), `verify` (restic check + restore the
+  latest index.md to a temp dir and diff), and `install-timer` (daily systemd
+  user timer). Degrades to rsync `--link-dest` dated snapshots when restic is
+  absent. `omind doctor` reports backup health for every agent (unconfigured /
+  last-success age / failing). New module `src/omind/backup.py`; the password
+  never reaches a command line or log. With tests (all subprocess calls
+  mocked).
+
 - SessionStart priming now injects the newest `Session State YYYY-MM-DD` handoff
   note and the last 20 action bullets of the newest auto-journal (labeled
   "recent actions (auto-journal)"), after the static priming files. A 48k-char

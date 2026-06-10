@@ -13,6 +13,7 @@ Subcommands:
   * ``omind quickstart`` — print the manual-wiring steps `setup` automates.
   * ``omind note`` — safely create/update one OMI note through OmiStore.
   * ``omind rollup`` — compact weeks of daily session journals into summaries.
+  * ``omind backup`` — encrypted off-machine backup of the OMI folder (restic).
 """
 
 from __future__ import annotations
@@ -26,6 +27,7 @@ from omind import __version__
 from omind.agents import AGENT_CHOICES, diagnose_for, run_setup_for
 from omind.hooks import HANDLED_EVENTS, run_hook
 from omind.provision import (
+    CheckResult,
     ProvisionError,
     SetupConfig,
     default_vault_path,
@@ -41,7 +43,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{setup,quickstart,serve,doctor,export,import,reindex,note,rollup,hook}",
+        metavar="{setup,quickstart,serve,doctor,backup,export,import,reindex,note,rollup,hook}",
     )
 
     setup = sub.add_parser(
@@ -139,6 +141,39 @@ def build_parser() -> argparse.ArgumentParser:
         default="obsidian",
         help="name the MCP server is registered under (default: obsidian)",
     )
+
+    backup = sub.add_parser(
+        "backup", help="encrypted off-machine backup of the OMI folder (restic)"
+    )
+    bsub = backup.add_subparsers(
+        dest="backup_command",
+        metavar="{init,run,verify,install-timer}",
+        required=True,
+    )
+    backup_init = bsub.add_parser(
+        "init",
+        help="generate the password file (0600) and initialize the encrypted restic repository",
+    )
+    backup_init.add_argument(
+        "--repo",
+        required=True,
+        help="restic repository spec (e.g. sftp:host:/path or a local path)",
+    )
+    for name, helptext in (
+        ("run", "back up the OMI folder, then apply 7d/4w/6m retention"),
+        ("verify", "restic check + diff the latest snapshot's index.md against the live file"),
+        ("install-timer", "install a daily systemd user timer running `omind backup run`"),
+    ):
+        backup_sub = bsub.add_parser(name, help=helptext)
+        backup_sub.add_argument(
+            "--vault",
+            type=Path,
+            default=default_vault_path(),
+            help="path to the Obsidian vault (default: %(default)s)",
+        )
+        backup_sub.add_argument(
+            "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+        )
 
     export = sub.add_parser("export", help="write the entire OMI dataset to a bundle")
     export.add_argument(
@@ -304,6 +339,13 @@ def _run_quickstart(args: argparse.Namespace) -> int:
     return 0
 
 
+def _diagnose_with_backup(config: SetupConfig) -> list[CheckResult]:
+    """The agent's wiring checks plus the agent-independent backup check."""
+    from omind.backup import diagnose_backup
+
+    return diagnose_for(config) + diagnose_backup(config)
+
+
 def _run_doctor(args: argparse.Namespace) -> int:
     config = SetupConfig(
         vault=args.vault,
@@ -311,7 +353,37 @@ def _run_doctor(args: argparse.Namespace) -> int:
         server_name=args.server_name,
         agent=args.agent,
     )
-    return run_doctor(config, diagnose_fn=diagnose_for)
+    return run_doctor(config, diagnose_fn=_diagnose_with_backup)
+
+
+def _run_backup(args: argparse.Namespace) -> int:
+    from omind.backup import (
+        BackupError,
+        init_backup,
+        install_timer,
+        run_backup,
+        verify_backup,
+    )
+
+    try:
+        if args.backup_command == "init":
+            init_backup(args.repo)
+            return 0
+        if args.backup_command == "run":
+            run_backup((args.vault / args.folder).expanduser())
+            return 0
+        if args.backup_command == "verify":
+            results = verify_backup((args.vault / args.folder).expanduser())
+            symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
+            for result in results:
+                print(f"  [{symbols[result.level]}] {result.message}")
+            return 1 if any(r.level == "fail" for r in results) else 0
+        # install-timer
+        install_timer(SetupConfig(vault=args.vault, folder=args.folder))
+        return 0
+    except BackupError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
 
 
 def _run_serve(args: argparse.Namespace) -> int:
@@ -453,6 +525,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_serve(args)
     if args.command == "doctor":
         return _run_doctor(args)
+    if args.command == "backup":
+        return _run_backup(args)
     if args.command == "export":
         return _run_export(args)
     if args.command == "import":
