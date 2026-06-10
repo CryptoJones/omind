@@ -256,6 +256,69 @@ def test_session_start_falls_back_when_no_notes(tmp_path: Path) -> None:
     assert "could not be read" in ctx
 
 
+# -- session-start dynamic priming (session state + journal tail) -------------
+
+
+def _write_priming_files(omi: Path, body: str | None = None) -> None:
+    for name in hooks.PRIMING_FILES:
+        (omi / name).write_text(body if body is not None else f"BODY OF {name}",
+                                encoding="utf-8")
+
+
+def test_session_start_injects_newest_session_state_by_name(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path)
+    (tmp_path / "Session State 2026-06-01.md").write_text("OLD STATE", encoding="utf-8")
+    (tmp_path / "Session State 2026-06-09.md").write_text("NEW STATE", encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "NEW STATE" in ctx  # newest filename wins
+    assert "OLD STATE" not in ctx  # older handoffs stay out of context
+    assert "===== OMI/Session State 2026-06-09.md (latest session state) =====" in ctx
+
+
+def test_session_start_missing_session_state_degrades_to_static(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path)
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "BODY OF index.md" in ctx  # static priming unchanged
+    assert "Session State" not in ctx
+    assert "auto-journal" not in ctx
+
+
+def test_session_start_journal_tail_is_last_bullets_only(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path)
+    old = datetime(2026, 6, 1, 9, 0, 0)
+    hooks.append_entry(tmp_path, "- 09:00 [session old00000] PostToolUse Bash -> OLD-J (ok)", old)
+    for i in range(hooks._JOURNAL_TAIL_BULLETS + 5):
+        bullet = f"- 14:32 [session abcd1234] PostToolUse Bash -> c{i:02d} (ok)"
+        hooks.append_entry(tmp_path, bullet, _NOW)
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "recent actions (auto-journal)" in ctx
+    assert "OLD-J" not in ctx  # only the newest journal is primed
+    assert "-> c24 (ok)" in ctx  # newest bullets kept
+    assert "-> c04 (ok)" not in ctx  # bullets beyond the tail dropped
+    tail = [ln for ln in ctx.splitlines() if ln.startswith("- 14:32 [session abcd1234]")]
+    assert len(tail) == hooks._JOURNAL_TAIL_BULLETS
+    assert "- Created:" not in ctx  # metadata list lines are not action bullets
+
+
+def test_session_start_total_cap_truncates_dynamic_first(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path, body="s" * 13_990 + " STATIC-END")  # ~42k static
+    state = tmp_path / "Session State 2026-06-09.md"
+    state.write_text("d" * hooks._PRIMING_FILE_CHAR_CAP, encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert len(ctx) <= hooks._TOTAL_CONTEXT_CHAR_CAP
+    assert ctx.count("STATIC-END") == len(hooks.PRIMING_FILES)  # static never cut
+    assert "dddd" in ctx  # session state partially injected …
+    assert ctx.endswith("…[truncated]")  # … and truncated to fit the budget
+
+
+def test_session_start_drops_dynamic_when_static_fills_cap(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path, body="s" * hooks._PRIMING_FILE_CHAR_CAP)  # ~48k static
+    (tmp_path / "Session State 2026-06-09.md").write_text("DYNAMIC-STATE", encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "DYNAMIC-STATE" not in ctx  # no room: dynamic dropped, static intact
+    assert ctx.count("s" * hooks._PRIMING_FILE_CHAR_CAP) == len(hooks.PRIMING_FILES)
+
+
 def test_run_hook_stop_records_turn_line(tmp_path: Path) -> None:
     hooks.run_hook("Stop", tmp_path, stdin=io.StringIO('{"session_id": "qq"}'))
     text = (hooks.journal_dir(tmp_path) / hooks.journal_name()).read_text(encoding="utf-8")

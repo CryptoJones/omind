@@ -46,6 +46,15 @@ _TARGET_LIMIT = 80
 PRIMING_FILES = ("index.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
 _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood context
 
+# Dynamic priming: the newest handoff note and the tail of today's auto-journal
+# are injected after the static files, under a whole-payload budget. Static
+# files always win the budget; dynamic sections truncate (or drop) first.
+_SESSION_STATE_GLOB = "Session State *.md"
+_JOURNAL_GLOB = "Session Journal *.md"
+_JOURNAL_TAIL_BULLETS = 20
+_TOTAL_CONTEXT_CHAR_CAP = 48_000
+_TRUNCATION_MARKER = "\n…[truncated]"
+
 
 def _now(now: datetime | None) -> datetime:
     return now if now is not None else datetime.now()
@@ -218,8 +227,44 @@ def _read_priming_note(path: Path) -> str | None:
     except OSError:
         return None
     if len(text) > _PRIMING_FILE_CHAR_CAP:
-        text = text[:_PRIMING_FILE_CHAR_CAP] + "\n…[truncated]"
+        text = text[:_PRIMING_FILE_CHAR_CAP] + _TRUNCATION_MARKER
     return text
+
+
+def _latest_by_name(directory: Path, pattern: str) -> Path | None:
+    """Newest note matching ``pattern``, by filename descending. Never raises.
+
+    Filenames embed ``YYYY-MM-DD``, so a plain lexicographic sort is also a
+    chronological sort.
+    """
+    try:
+        matches = sorted(directory.glob(pattern), key=lambda p: p.name, reverse=True)
+    except OSError:
+        return None
+    return matches[0] if matches else None
+
+
+def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
+    """Last ``limit`` action bullets of a journal note, or ``None``. Never raises.
+
+    Only bullets under ``## Actions`` count — the ``## Metadata`` list lines are
+    not actions and are skipped.
+    """
+    try:
+        text = path.read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return None
+    in_actions = False
+    bullets: list[str] = []
+    for line in text.splitlines():
+        if line.strip() == "## Actions":
+            in_actions = True
+            continue
+        if in_actions and line.startswith("- "):
+            bullets.append(line)
+    if not bullets:
+        return None
+    return "\n".join(bullets[-limit:])
 
 
 def build_session_start_context(omi_dir: Path | str) -> str:
@@ -227,8 +272,12 @@ def build_session_start_context(omi_dir: Path | str) -> str:
 
     Injects the *content* of the OMI priming notes (:data:`PRIMING_FILES`)
     directly so the vault is in context at session start without depending on
-    the agent issuing reads. Falls back to a read-the-vault reminder if no
-    priming note can be read. Never raises.
+    the agent issuing reads, then two dynamic sections: the newest
+    ``Session State YYYY-MM-DD`` handoff note and the last
+    :data:`_JOURNAL_TAIL_BULLETS` bullets of the newest auto-journal. The whole
+    payload is capped at :data:`_TOTAL_CONTEXT_CHAR_CAP` chars — static files
+    always win the budget; dynamic sections truncate (or drop) first. Falls
+    back to a read-the-vault reminder if nothing can be read. Never raises.
     """
     directory = Path(omi_dir)
     sections: list[str] = []
@@ -237,20 +286,49 @@ def build_session_start_context(omi_dir: Path | str) -> str:
         if body is not None:
             sections.append(f"===== OMI/{name} =====\n{body.rstrip()}")
 
+    dynamic: list[str] = []
+    state_path = _latest_by_name(directory, _SESSION_STATE_GLOB)
+    if state_path is not None:
+        body = _read_priming_note(state_path)
+        if body is not None:
+            dynamic.append(
+                f"===== OMI/{state_path.name} (latest session state) =====\n{body.rstrip()}"
+            )
+    # Journals live in Journal/ since the relocation; fall back to the vault
+    # root for a not-yet-migrated vault.
+    journal_path = _latest_by_name(journal_dir(directory), _JOURNAL_GLOB) or _latest_by_name(
+        directory, _JOURNAL_GLOB
+    )
+    if journal_path is not None:
+        tail = _journal_tail(journal_path)
+        if tail is not None:
+            dynamic.append(
+                f"===== OMI/{journal_path.name} — recent actions (auto-journal) =====\n{tail}"
+            )
+
     header = (
         "OMI memory is the source of truth (do NOT use Claude Code's built-in "
         "memory). The OMI vault lives at "
         f"{directory}. Its priming notes are injected below — treat them as "
         "already read. Read any [[wikilinked]] note you need before acting."
     )
-    if not sections:
+    if not sections and not dynamic:
         return (
             header
             + " (Priming notes could not be read this session; read index.md, "
             "Memory Workflow.md, and CLAUDE CODE PERSONALITY.md from the vault "
             "directly.)"
         )
-    return header + "\n\n" + "\n\n".join(sections)
+
+    payload = "\n\n".join([header, *sections])  # static sections are never cut
+    for section in dynamic:
+        remaining = _TOTAL_CONTEXT_CHAR_CAP - len(payload) - len("\n\n")
+        if remaining <= len(_TRUNCATION_MARKER):
+            break  # no useful room left for dynamic content
+        if len(section) > remaining:
+            section = section[: remaining - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+        payload += "\n\n" + section
+    return payload
 
 
 def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -> None:

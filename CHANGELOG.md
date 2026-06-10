@@ -25,6 +25,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SessionStart priming now injects the newest `Session State YYYY-MM-DD` handoff
+  note and the last 20 action bullets of the newest auto-journal (labeled
+  "recent actions (auto-journal)"), after the static priming files. A 48k-char
+  total payload cap keeps the static files whole and truncates the dynamic
+  sections first, so a restarted session picks up "where we left off" without
+  reading anything by hand. With tests.
+
 - `omind setup --agent hermes|openclaw` — provision **Hermes Agent** and
   **OpenClaw** against the same OMI folder and the same obsidian-mcp install as
   Claude Code. Registers the stdio MCP server in the agent's own config
