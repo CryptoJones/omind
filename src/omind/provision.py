@@ -20,7 +20,8 @@ from pathlib import Path
 from typing import Any, ClassVar
 
 from omind import seeds
-from omind.hooks import HANDLED_EVENTS, HOOK_MARKER
+from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
+from omind.journal import find_stray_journals, migrate_journals
 
 Logger = Callable[[str], None]
 
@@ -226,6 +227,22 @@ class Provisioner:
             + "\n"
         )
         self._write_if_absent(self.config.omi_dir / seeds.INDEX_FILENAME, index_seed)
+
+    def migrate_journal_notes(self) -> None:
+        """Move stray daily journals (vault-folder root, legacy ``logs/``) into
+        ``Journal/`` and regenerate the index. Idempotent and lock-protected —
+        see :func:`omind.journal.migrate_journals`.
+        """
+        strays = find_stray_journals(self.config.omi_dir)
+        if not strays:
+            self.log("  session journals already in Journal/, nothing to migrate")
+            return
+        self._record(
+            f"move {len(strays)} session journal(s) into "
+            f"{self.config.omi_dir / JOURNAL_DIRNAME} and reindex"
+        )
+        if not self.config.dry_run:
+            migrate_journals(self.config.omi_dir)
 
     def ensure_server_install(self) -> None:
         """Install obsidian-mcp to a stable prefix and write the stdin-EOF guard.
@@ -453,6 +470,7 @@ class Provisioner:
         self.ensure_vault()
         self.ensure_obsidian_config()
         self.seed_memory_files()
+        self.migrate_journal_notes()
         self.ensure_server_install()
         self.integrate()
         self.verify()

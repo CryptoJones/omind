@@ -52,6 +52,61 @@ def test_reindex_regenerates_index_for_directly_written_note(tmp_path: Path) -> 
     assert "[[Hand Written]]" in index
 
 
+def test_reindex_migrates_stray_journals_into_journal_subfolder(tmp_path: Path) -> None:
+    from omind import hooks
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    name = "Session Journal 2026-06-01.md"
+    (omi / name).write_text(hooks.journal_header(name), encoding="utf-8")
+    rc = main(["reindex", "--vault", str(tmp_path), "--folder", "OMI"])
+    assert rc == 0
+    assert (omi / "Journal" / name).is_file()
+    assert not (omi / name).exists()
+    assert "Session Journal" not in (omi / "index.md").read_text(encoding="utf-8")
+
+
+def test_rollup_subcommand_parses() -> None:
+    args = build_parser().parse_args(["rollup", "--week", "2026-W24", "--delete"])
+    assert args.command == "rollup"
+    assert args.week == "2026-W24"
+    assert args.retain_days == 30
+    assert args.delete is True
+
+
+def test_rollup_rejects_bad_week(capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(["rollup", "--week", "next-week"])
+    assert rc == 1
+    assert "--week" in capsys.readouterr().err
+
+
+def test_rollup_compacts_a_week_of_journals(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from omind import hooks
+
+    omi = tmp_path / "OMI"
+    jdir = omi / "Journal"
+    jdir.mkdir(parents=True)
+    name = "Session Journal 2026-06-08.md"
+    (jdir / name).write_text(
+        hooks.journal_header(name)
+        + "- 09:00 [session aaaa1111] PostToolUse Bash -> `make` (ok)\n",
+        encoding="utf-8",
+    )
+    rc = main(["rollup", "--week", "2026-W24", "--vault", str(tmp_path), "--folder", "OMI"])
+    assert rc == 0
+    assert "Session Journal Rollup 2026-W24.md" in capsys.readouterr().out
+    assert (jdir / "Session Journal Rollup 2026-W24.md").is_file()
+    assert (jdir / "Archive" / name).is_file()
+
+
+def test_rollup_nothing_to_do(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    rc = main(["rollup", "--vault", str(tmp_path), "--folder", "OMI"])
+    assert rc == 0
+    assert "nothing to roll up" in capsys.readouterr().out
+
+
 def test_note_subcommand_parses() -> None:
     args = build_parser().parse_args(
         ["note", "--title", "An Insight", "--tags", "a,b", "--folder", "OMI"]
