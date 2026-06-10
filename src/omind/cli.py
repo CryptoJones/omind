@@ -9,6 +9,7 @@ Subcommands:
   * ``omind export`` — write the entire OMI dataset to a json or tar.gz bundle.
   * ``omind import`` — load an OMI dataset bundle back into a folder.
   * ``omind reindex`` — regenerate index.md under the inter-process write lock.
+  * ``omind quickstart`` — print the manual-wiring steps `setup` automates.
 """
 
 from __future__ import annotations
@@ -36,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
-        dest="command", metavar="{setup,serve,doctor,export,import,reindex,hook}"
+        dest="command", metavar="{setup,quickstart,serve,doctor,export,import,reindex,hook}"
     )
 
     setup = sub.add_parser("setup", help="provision the OMI/Obsidian MCP wiring for Claude Code")
@@ -63,6 +64,26 @@ def build_parser() -> argparse.ArgumentParser:
         "--force",
         action="store_true",
         help="overwrite existing seed files and re-register the MCP server",
+    )
+
+    quickstart = sub.add_parser(
+        "quickstart",
+        help="print copy-paste manual-wiring steps (what `setup` would do, as "
+        "shell commands and JSON personalized to your paths)",
+    )
+    quickstart.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    quickstart.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+    quickstart.add_argument(
+        "--server-name",
+        default="obsidian",
+        help="name to register the MCP server under (default: obsidian)",
     )
 
     serve = sub.add_parser("serve", help="run the local web UI over an OMI memory folder")
@@ -187,6 +208,18 @@ def _run_setup(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_quickstart(args: argparse.Namespace) -> int:
+    from omind.quickstart import build_quickstart
+
+    config = SetupConfig(
+        vault=args.vault,
+        folder=args.folder,
+        server_name=args.server_name,
+    )
+    print(build_quickstart(config))
+    return 0
+
+
 def _run_doctor(args: argparse.Namespace) -> int:
     config = SetupConfig(
         vault=args.vault,
@@ -264,6 +297,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "setup":
         return _run_setup(args)
+    if args.command == "quickstart":
+        return _run_quickstart(args)
     if args.command == "serve":
         return _run_serve(args)
     if args.command == "doctor":
