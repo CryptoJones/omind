@@ -37,6 +37,16 @@ from omind.seeds import (
 # renames (see :func:`_atomic_write`) keep every read consistent.
 LOCK_FILENAME = ".omi.lock"
 
+# index.md is the primary SessionStart priming payload (16k char cap in
+# omind.hooks), so the Recent Memories list is capped rather than unbounded.
+RECENT_LIMIT = 25
+# Per-entry description budget for the Recent Memories list.
+_INDEX_DESC_LIMIT = 100
+# Written into the regenerated region so we can tell a new-format index (entry
+# descriptions generated from note summaries) from an old bare-link one whose
+# `— description` annotations were written by hand and need migrating.
+_INDEX_GENERATED_MARKER = "<!-- entry descriptions are generated from note Summary sections -->"
+
 
 def _atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically: same-dir temp file + ``os.replace``.
@@ -64,6 +74,12 @@ _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _ACTION_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s?(.*)$")
 _BULLET_RE = re.compile(r"^\s*-\s+(.*)$")
 _ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
+# A Recent Memories entry: `- [[stem]]`, optionally annotated `— description`.
+_INDEX_ENTRY_RE = re.compile(r"^-\s*\[\[([^\]]+)\]\](?:\s+[—–-]+\s+(.+))?\s*$")
+_SUMMARY_HEADING_RE = re.compile(r"^##\s+Summary\s*$")
+# Per-day journal notes written by omind.hooks; auto-recorded noise that would
+# otherwise crowd hand-curated memories out of the capped index list.
+_JOURNAL_NOTE_RE = re.compile(r"^Session Journal .*\.md$")
 
 
 class NoteError(Exception):
@@ -247,6 +263,28 @@ def render_fields(f: NoteFields) -> str:
     out.append("")
 
     return "\n".join(out).rstrip() + "\n"
+
+
+def _collapse(text: str, limit: int) -> str:
+    """Collapse whitespace to one line and truncate to ``limit`` characters."""
+    collapsed = re.sub(r"\s+", " ", text).strip()
+    if len(collapsed) > limit:
+        collapsed = collapsed[: limit - 3].rstrip() + "..."
+    return collapsed
+
+
+def _with_summary(md: str, summary: str) -> str:
+    """Return ``md`` with ``summary`` inserted into its (empty) Summary section.
+
+    Surgical line edit rather than a parse/render round-trip so a hand-curated
+    note keeps any sections the template doesn't know about. Appends a fresh
+    ``## Summary`` section when the note has none.
+    """
+    lines = md.splitlines()
+    for i, line in enumerate(lines):
+        if _SUMMARY_HEADING_RE.match(line):
+            return "\n".join([*lines[: i + 1], summary, *lines[i + 1 :]]).rstrip() + "\n"
+    return md.rstrip() + f"\n\n## Summary\n{summary}\n"
 
 
 class OmiStore:
@@ -449,16 +487,59 @@ class OmiStore:
 
         Read-modify-write on the shared index.md, so it only runs under the
         write lock; the standalone entry point is :meth:`update_index`.
+
+        Each Recent Memories entry is rendered as ``- [[stem]] — summary``
+        (summary collapsed to one line, ≤ :data:`_INDEX_DESC_LIMIT` chars), the
+        list is capped at :data:`RECENT_LIMIT` newest-first entries, and
+        journal notes are excluded. Hand-written ``— description`` annotations
+        on the old bare-link format are migrated into the notes themselves by
+        :meth:`_migrate_index_descriptions` before the list is regenerated.
         """
         index_path = self.omi_dir / INDEX_FILENAME
         existing = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
+        self._migrate_index_descriptions(existing)
         if INDEX_RECENT_HEADING in existing:
             intro = existing.split(INDEX_RECENT_HEADING, 1)[0].rstrip()
         else:
             intro = existing.rstrip() or INDEX_INTRO.rstrip()
 
-        lines = [intro, "", INDEX_RECENT_HEADING, INDEX_RECENT_COMMENT]
-        for summary in self.list_notes():
+        notes = [s for s in self.list_notes() if not _JOURNAL_NOTE_RE.match(s.filename)]
+        lines = [intro, "", INDEX_RECENT_HEADING, INDEX_RECENT_COMMENT, _INDEX_GENERATED_MARKER]
+        for summary in notes[:RECENT_LIMIT]:
             stem = summary.filename[:-3] if summary.filename.endswith(".md") else summary.filename
-            lines.append(f"- [[{stem}]]")
+            description = _collapse(summary.summary, _INDEX_DESC_LIMIT)
+            lines.append(f"- [[{stem}]] — {description}" if description else f"- [[{stem}]]")
+        if len(notes) > RECENT_LIMIT:
+            lines.extend(["", f"*({len(notes)} notes total)*"])
         _atomic_write(index_path, "\n".join(lines).rstrip() + "\n")
+
+    def _migrate_index_descriptions(self, existing: str) -> None:
+        """Copy hand-written index descriptions into empty note Summaries.
+
+        One-time migration for the old bare-link index format: a Recent
+        Memories line carrying a hand-written ``— description`` whose note has
+        an empty ``## Summary`` gets the description copied into that section,
+        so regeneration renders it instead of destroying it. Notes that already
+        have a summary are left alone. A new-format index (marked with
+        :data:`_INDEX_GENERATED_MARKER`) carries only generated descriptions,
+        so it is never migrated — that is what makes the migration one-time and
+        idempotent. Caller MUST hold :meth:`_write_lock`.
+        """
+        if INDEX_RECENT_HEADING not in existing or _INDEX_GENERATED_MARKER in existing:
+            return
+        recent = existing.split(INDEX_RECENT_HEADING, 1)[1]
+        for line in recent.splitlines():
+            entry = _INDEX_ENTRY_RE.match(line.strip())
+            if not entry or not entry.group(2):
+                continue
+            description = entry.group(2).strip()
+            try:
+                path = self.safe_name(entry.group(1).strip())
+            except NoteError:
+                continue
+            if path.name in RESERVED_FILENAMES or not path.is_file():
+                continue
+            text = path.read_text(encoding="utf-8")
+            if parse_note(text).summary.strip():
+                continue
+            _atomic_write(path, _with_summary(text, description))

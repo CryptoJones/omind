@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `index.md` regeneration no longer wipes descriptions: each Recent Memories
+  line now renders as `- [[note]] — {summary}` from the note's own `## Summary`
+  (collapsed, ≤100 chars), with a one-time lock-protected migration that copies
+  existing hand-written index descriptions into notes whose Summary was empty.
+  The list is capped at the 25 newest notes (with an `*(N notes total)*`
+  footer) so the SessionStart priming payload stops growing unbounded, and
+  top-level `Session Journal *.md` strays are excluded. With tests.
+
 - Daily auto-journal notes now live in a `Journal/` subfolder instead of the
   vault root, so they no longer pollute note listings, the regenerated index,
   or SessionStart priming. `omind setup` and `omind reindex` migrate existing
