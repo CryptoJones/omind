@@ -24,7 +24,9 @@ jobs:
       - uses: actions/setup-python@v5
         with:
           python-version: ${{ matrix.python-version }}
-      - run: python -m pip install -U pip
+      # setuptools too: the windows-latest Python 3.10 toolcache bundles a
+      # vulnerable 65.5.0 that pip-audit (rightly) flags.
+      - run: python -m pip install -U pip setuptools
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: mypy src
