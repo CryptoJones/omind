@@ -12,6 +12,7 @@ import pytest
 from omind import seeds
 from omind.store import (
     LOCK_FILENAME,
+    RECENT_LIMIT,
     ActionItem,
     NoteConflictError,
     NoteError,
@@ -212,6 +213,138 @@ def test_update_index_preserves_intro(store: OmiStore) -> None:
     assert "[[old]]" not in text  # recent list regenerated
 
 
+# -- index descriptions / cap / migration -------------------------------------
+
+
+def _index_text(store: OmiStore) -> str:
+    return (store.omi_dir / seeds.INDEX_FILENAME).read_text(encoding="utf-8")
+
+
+def _recent_links(store: OmiStore) -> list[str]:
+    return [ln for ln in _index_text(store).splitlines() if ln.startswith("- [[")]
+
+
+def test_index_renders_summary_as_description(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Described", summary="A crisp one-liner."))
+    assert "- [[Described]] — A crisp one-liner." in _recent_links(store)
+
+
+def test_index_note_without_summary_renders_bare_link(store: OmiStore) -> None:
+    store.write_note("Bare.md", "# Bare\n\n## Metadata\n- Created: 2026-06-01\n\n## Summary\n\n")
+    assert _recent_links(store) == ["- [[Bare]]"]
+
+
+def test_index_description_collapsed_to_one_line_and_100_chars(store: OmiStore) -> None:
+    long_summary = "word " * 60  # multi-word, ~300 chars
+    store.create_note(NoteFields(title="Wordy", summary="first\nsecond   line\n" + long_summary))
+    [line] = _recent_links(store)
+    prefix = "- [[Wordy]] — "
+    description = line[len(prefix) :]
+    assert "\n" not in description
+    assert "first second line word" in description  # whitespace collapsed
+    assert len(description) <= 100
+    assert description.endswith("...")
+
+
+def test_index_regeneration_is_idempotent(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Stable", summary="keep this description"))
+    store.update_index()
+    first = _index_text(store)
+    store.update_index()
+    assert _index_text(store) == first
+    assert "- [[Stable]] — keep this description" in first  # survives regen
+
+
+def test_index_caps_at_recent_limit_with_total_line(store: OmiStore) -> None:
+    n = RECENT_LIMIT + 5
+    for i in range(n):
+        store.create_note(
+            NoteFields(title=f"Note {i:02d}", summary=f"s{i}", created=f"2026-01-{i + 1:02d}")
+        )
+    links = _recent_links(store)
+    assert len(links) == RECENT_LIMIT
+    # Newest-first: the most recent note leads, the oldest five fall off.
+    assert links[0].startswith(f"- [[Note {n - 1:02d}]]")
+    assert links[-1].startswith("- [[Note 05]]")
+    assert _index_text(store).rstrip().endswith(f"*({n} notes total)*")
+
+
+def test_index_under_limit_has_no_total_line(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Lonely", summary="s"))
+    assert "notes total" not in _index_text(store)
+
+
+def test_index_excludes_journal_notes(store: OmiStore) -> None:
+    (store.omi_dir / "Session Journal 2026-06-10.md").write_text(
+        "# Session Journal 2026-06-10\n\n## Summary\nAuto-recorded journal.\n\n## Actions\n- x\n",
+        encoding="utf-8",
+    )
+    store.create_note(NoteFields(title="Curated", summary="s"))
+    index = _index_text(store)
+    assert "[[Curated]]" in index
+    assert "Session Journal" not in index
+
+
+def test_migration_copies_hand_description_into_empty_summary(store: OmiStore) -> None:
+    (store.omi_dir / "Old.md").write_text(
+        "# Old\n\n## Metadata\n- Created: 2026-05-01\n\n## Summary\n\n## Details\nbody\n",
+        encoding="utf-8",
+    )
+    old_index = (
+        f"{seeds.INDEX_INTRO}\n{seeds.INDEX_RECENT_HEADING}\n- [[Old]] — hand-written gloss\n"
+    )
+    (store.omi_dir / seeds.INDEX_FILENAME).write_text(old_index, encoding="utf-8")
+    store.update_index()
+    assert store.read_fields("Old.md").summary == "hand-written gloss"
+    assert "- [[Old]] — hand-written gloss" in _recent_links(store)
+    assert "## Details\nbody" in store.read_note("Old.md")  # surgical edit, body intact
+    # Idempotent: a second regeneration changes neither note nor index.
+    note, index = store.read_note("Old.md"), _index_text(store)
+    store.update_index()
+    assert store.read_note("Old.md") == note
+    assert _index_text(store) == index
+
+
+def test_migration_adds_summary_section_when_missing(store: OmiStore) -> None:
+    (store.omi_dir / "Loose.md").write_text("# Loose\n\nFree-form note.\n", encoding="utf-8")
+    (store.omi_dir / seeds.INDEX_FILENAME).write_text(
+        seeds.INDEX_RECENT_HEADING + "\n- [[Loose]] — kept gloss\n", encoding="utf-8"
+    )
+    store.update_index()
+    assert store.read_fields("Loose.md").summary == "kept gloss"
+    assert "Free-form note." in store.read_note("Loose.md")
+    assert "- [[Loose]] — kept gloss" in _recent_links(store)
+
+
+def test_migration_leaves_existing_summary_alone(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Authored", summary="real summary"))
+    (store.omi_dir / seeds.INDEX_FILENAME).write_text(
+        seeds.INDEX_RECENT_HEADING + "\n- [[Authored]] — stale hand gloss\n", encoding="utf-8"
+    )
+    store.update_index()
+    assert store.read_fields("Authored.md").summary == "real summary"
+    assert "- [[Authored]] — real summary" in _recent_links(store)
+    assert "stale hand gloss" not in _index_text(store)
+
+
+def test_migration_skipped_for_generated_index(store: OmiStore) -> None:
+    """A generated description must not be migrated back into a blanked note."""
+    name = store.create_note(NoteFields(title="Rewritten", summary="old generated desc"))
+    # User deliberately rewrites the note raw, with no Summary section at all.
+    store.write_note(name, "# Rewritten\n\nraw body\n")
+    assert store.read_note(name) == "# Rewritten\n\nraw body\n"
+    assert _recent_links(store) == ["- [[Rewritten]]"]
+
+
+def test_migration_ignores_dangling_and_bare_entries(store: OmiStore) -> None:
+    (store.omi_dir / seeds.INDEX_FILENAME).write_text(
+        seeds.INDEX_RECENT_HEADING + "\n- [[Ghost]] — desc for missing note\n- [[Also Ghost]]\n",
+        encoding="utf-8",
+    )
+    store.update_index()  # must not raise or resurrect entries
+    assert _recent_links(store) == []
+
+
 # -- concurrency -------------------------------------------------------------
 
 
@@ -256,4 +389,4 @@ def test_concurrent_processes_keep_index_consistent(tmp_path: Path) -> None:
     assert len(links) == n
     assert len(set(links)) == n
     for i in range(n):
-        assert f"- [[Note {i:03d}]]" in links
+        assert f"- [[Note {i:03d}]] — n{i}" in links
