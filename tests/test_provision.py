@@ -10,7 +10,7 @@ from pathlib import Path, PurePosixPath
 
 import pytest
 
-from omind import provision, seeds
+from omind import paths, provision, seeds
 from omind.provision import Provisioner, ProvisionError, SetupConfig, default_vault_path
 
 # Captured before the autouse isolate_settings fixture patches the module attribute,
@@ -98,8 +98,8 @@ def _provision_files(config: SetupConfig) -> None:
     obs = config.omi_dir / ".obsidian"
     obs.mkdir(parents=True)
     (obs / "app.json").write_text("{}")
-    (config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME).write_text("x")
-    (config.omi_dir / seeds.INDEX_FILENAME).write_text("x")
+    (config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).write_text("x")
+    (config.omi_dir / paths.INDEX_FILENAME).write_text("x")
     guard = provision.eof_guard_path()
     guard.parent.mkdir(parents=True, exist_ok=True)
     guard.write_text(seeds.EOF_GUARD_JS)
@@ -134,8 +134,8 @@ def test_real_run_creates_files_and_registers(
     obs = config.omi_dir / ".obsidian"
     assert (obs / "app.json").is_file()
     assert (obs / "core-plugins.json").is_file()
-    assert (config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME).is_file()
-    assert (config.omi_dir / seeds.INDEX_FILENAME).is_file()
+    assert (config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).is_file()
+    assert (config.omi_dir / paths.INDEX_FILENAME).is_file()
     assert provision.eof_guard_path().is_file()
     assert any(c[:2] == ["npm", "install"] for c in fake_subprocess)
     assert fake_subprocess[-2][:6] == ["claude", "mcp", "add", "-s", "user", "obsidian"]
@@ -150,7 +150,7 @@ def test_no_clobber_of_existing_seed(
 ) -> None:
     config = _config(tmp_path)
     config.omi_dir.mkdir(parents=True)
-    template = config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME
+    template = config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME
     template.write_text("DO NOT TOUCH")
     Provisioner(config, log=_quiet).run()
     assert template.read_text() == "DO NOT TOUCH"
@@ -216,7 +216,7 @@ def test_idempotent_files_on_rerun(
     config = _config(tmp_path)
     Provisioner(config, log=_quiet).run()
     Provisioner(config, log=_quiet).run()  # must not raise
-    template = config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME
+    template = config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME
     assert template.read_text() == seeds.MEMORY_TEMPLATE
 
 

@@ -17,7 +17,7 @@ import json
 
 import yaml
 
-from omind import seeds
+from omind import paths, seeds
 from omind.agents import (
     AgentProvisioner,
     HermesProvisioner,
@@ -86,7 +86,7 @@ def _build_agent_quickstart(config: SetupConfig) -> str:
 
     omi = config.omi_dir
     scaffold_block, guard_block = _scaffold_and_server_blocks(config)
-    skill_path = prov.skill_dir() / seeds.AGENT_SKILL_FILENAME
+    skill_path = prov.skill_dir() / paths.AGENT_SKILL_FILENAME
     skill_content = seeds.AGENT_SKILL_TEMPLATE.format(
         vault=config.vault, folder=config.folder, omi_dir=omi
     )

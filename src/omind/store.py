@@ -23,13 +23,8 @@ from pathlib import Path
 from typing import Any
 
 from omind import filelock
-from omind.seeds import (
-    INDEX_FILENAME,
-    INDEX_INTRO,
-    INDEX_RECENT_COMMENT,
-    INDEX_RECENT_HEADING,
-    RESERVED_FILENAMES,
-)
+from omind.paths import INDEX_FILENAME, RESERVED_FILENAMES
+from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 
 # Inter-process write lock for an OMI folder. Concurrent Claude Code sessions
 # (and the web app, cron) are separate processes, so an advisory ``flock`` on a

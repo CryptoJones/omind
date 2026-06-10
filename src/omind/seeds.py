@@ -5,7 +5,8 @@
 These constants capture the exact files an OMI memory folder needs so that
 `obsidian-mcp` accepts it as a vault and Claude Code (or the omind web UI) has
 a template and index to work from. Nothing here is clobbered if it already
-exists on disk -- see :mod:`omind.provision`.
+exists on disk -- see :mod:`omind.provision`. The canonical *filenames* these
+seeds land in live in :mod:`omind.paths`.
 """
 
 from __future__ import annotations
@@ -50,7 +51,7 @@ OBSIDIAN_CONFIG_FILES = {
 # the server as a direct `node --require <this file> ...` command (instead of
 # `npx -y obsidian-mcp`) also lets Claude Code's terminating signal reach Node
 # directly rather than being swallowed by the npx/npm wrapper chain.
-EOF_GUARD_FILENAME = "obsidian-exit-on-eof.js"
+# (Installed as omind.paths.EOF_GUARD_FILENAME.)
 EOF_GUARD_JS = """\
 // Managed by omind. Exit obsidian-mcp when its stdin (the MCP client pipe)
 // closes; the chokidar file watcher otherwise keeps the Node event loop alive
@@ -88,9 +89,6 @@ MEMORY_TEMPLATE = """\
 - Source:
 """
 
-MEMORY_TEMPLATE_FILENAME = "Memory Template.md"
-INDEX_FILENAME = "index.md"
-
 # Heading that begins the auto-maintained wikilink list in index.md. Everything
 # before it is preserved verbatim on update; everything after is regenerated.
 INDEX_RECENT_HEADING = "## Recent Memories"
@@ -108,11 +106,6 @@ This vault contains memories and knowledge for the OMI system.
 ## Usage
 Use the template to create new memory notes. Link memories using Obsidian's [[wikilink]] syntax.
 """
-
-# Files that are scaffolding, not memories -- excluded from listings.
-RESERVED_FILENAMES = frozenset({MEMORY_TEMPLATE_FILENAME, INDEX_FILENAME})
-
-AGENT_SKILL_FILENAME = "SKILL.md"
 
 # Memory skill installed into an agent's skills directory by `omind setup
 # --agent hermes|openclaw`. Both agents discover skills as a folder holding a
