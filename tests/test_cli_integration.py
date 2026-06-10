@@ -15,7 +15,7 @@ from __future__ import annotations
 import json
 import os
 import subprocess
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 import pytest
@@ -49,7 +49,9 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(list(cmd))
+        # Record by bare name: on Windows backup._run resolves cmd[0] via
+        # shutil.which (patched here to /usr/bin/<name>).
+        calls.append([PurePosixPath(cmd[0]).name, *cmd[1:]])
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(backup.subprocess, "run", fake_run)
@@ -200,7 +202,8 @@ def test_backup_init_creates_password_file_and_repo(
     assert rc == 0
     passfile = tmp_path / "xdg" / "omind" / "backup.pass"
     assert passfile.is_file()
-    assert passfile.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # POSIX permission bits don't exist on Windows
+        assert passfile.stat().st_mode & 0o777 == 0o600
     assert ["restic", "init"] in fake_subprocess
 
 
