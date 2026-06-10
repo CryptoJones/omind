@@ -12,9 +12,11 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,7 +24,9 @@ from typing import Any, ClassVar
 
 from omind import paths, seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
+from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
+from omind.proc import run_command
 
 Logger = Callable[[str], None]
 
@@ -75,6 +79,16 @@ def claude_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
+# A hook command we own: the omind executable (Windows resolves it to
+# omind.EXE / omind.cmd, so the literal HOOK_MARKER substring isn't enough)
+# followed by the `hook` subcommand.
+_HOOK_COMMAND_RE = re.compile(r"omind(?:\.exe|\.cmd|\.bat)?[\"']?\s+hook\b", re.IGNORECASE)
+
+
+def _command_is_omind_hook(command: str) -> bool:
+    return HOOK_MARKER in command or bool(_HOOK_COMMAND_RE.search(command))
+
+
 def _entry_has_omind_marker(entry: object) -> bool:
     """True if a hooks-array entry was installed by omind (command has the marker)."""
     if not isinstance(entry, dict):
@@ -85,7 +99,7 @@ def _entry_has_omind_marker(entry: object) -> bool:
     for hook in hook_list:
         if isinstance(hook, dict):
             command = hook.get("command")
-            if isinstance(command, str) and HOOK_MARKER in command:
+            if isinstance(command, str) and _command_is_omind_hook(command):
                 return True
     return False
 
@@ -424,7 +438,6 @@ class Provisioner:
         result = self._run(
             ["claude", "mcp", "get", self.config.server_name],
             check=False,
-            capture=True,
         )
         out = (result.stdout or "") + (result.stderr or "")
         if "Connected" in out:
@@ -441,28 +454,10 @@ class Provisioner:
         cmd: list[str],
         *,
         check: bool = True,
-        capture: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if self.config.dry_run:
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        if os.name == "nt":
-            # CreateProcess won't resolve npm.cmd / claude.cmd from a bare
-            # name; shutil.which finds the shim with its extension.
-            resolved = shutil.which(cmd[0])
-            if resolved:
-                cmd = [resolved, *cmd[1:]]
-        try:
-            return subprocess.run(
-                cmd,
-                check=check,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:  # claude / npm / node vanished mid-run
-            raise ProvisionError(f"command not found: {cmd[0]}") from exc
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or "").strip()
-            raise ProvisionError(f"command failed: {' '.join(cmd)}\n{detail}") from exc
+        return run_command(cmd, error=ProvisionError, check=check)
 
     # -- orchestration ------------------------------------------------------
 
@@ -610,6 +605,8 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     results.append(_diagnose_hooks(claude_settings_path(), config))
 
+    results.append(_diagnose_hook_failures())
+
     return results
 
 
@@ -659,6 +656,39 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         )
     return CheckResult(
         "hooks", "ok", "auto-memory hooks installed (PostToolUse, Stop, SessionStart)"
+    )
+
+
+#: A failure-log entry younger than this many days makes doctor warn.
+_HOOK_FAILURE_FRESH_DAYS = 7
+
+
+def _diagnose_hook_failures() -> CheckResult:
+    """Surface the hooks' swallowed-error breadcrumbs (pure read).
+
+    The hook handlers must never fail the agent, so they swallow errors into
+    :func:`omind.hooks.failure_log_path`; doctor is where that becomes visible.
+    """
+    path = hook_failure_log_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        return CheckResult("hook_failures", "ok", "no recorded hook failures")
+    if stat.st_size == 0:
+        return CheckResult("hook_failures", "ok", "no recorded hook failures")
+    age_days = (time.time() - stat.st_mtime) / 86400
+    if age_days > _HOOK_FAILURE_FRESH_DAYS:
+        return CheckResult(
+            "hook_failures",
+            "ok",
+            f"hook failures recorded, but none in the last "
+            f"{_HOOK_FAILURE_FRESH_DAYS} days ({path})",
+        )
+    return CheckResult(
+        "hook_failures",
+        "warn",
+        f"hook failure(s) recorded in the last {_HOOK_FAILURE_FRESH_DAYS} days — "
+        f"journaling may be silently failing; see {path}",
     )
 
 

@@ -15,7 +15,11 @@ Obsidian ``[[wikilinks]]`` stay folder-agnostic, so existing
 Design constraints:
 
 * **Never block or fail the agent.** Every entry point swallows errors and the
-  CLI handler always exits 0. A garbled or empty stdin is tolerated.
+  CLI handler always exits 0. A garbled or empty stdin is tolerated. Swallowed
+  errors are not silent, though: each leaves a one-line breadcrumb in
+  :func:`failure_log_path` (best-effort), and ``omind doctor`` warns when that
+  log has recent entries — otherwise a full disk or a permissions change means
+  the journal just silently stops existing.
 * **Hot-path cheap.** The journal is written with a raw ``O_APPEND`` + advisory
   ``flock`` so rapid, concurrent hook fire serializes without interleaving. We
   deliberately bypass :class:`omind.store.OmiStore` (whose every write
@@ -55,6 +59,42 @@ _JOURNAL_GLOB = "Session Journal *.md"
 _JOURNAL_TAIL_BULLETS = 20
 _TOTAL_CONTEXT_CHAR_CAP = 48_000
 _TRUNCATION_MARKER = "\n…[truncated]"
+
+
+#: Past this size the failure log restarts instead of appending — a repeating
+#: failure (cron + full disk) must never grow it unbounded.
+_FAILURE_LOG_CAP_BYTES = 262_144
+
+
+def failure_log_path() -> Path:
+    """Where swallowed hook errors leave a trace, outside the (possibly broken)
+    vault: ``$XDG_STATE_HOME/omind/hook-failures.log`` (default
+    ``~/.local/state/omind/hook-failures.log``)."""
+    env = os.environ.get("XDG_STATE_HOME")
+    base = Path(env).expanduser() if env else Path.home() / ".local" / "state"
+    return base / "omind" / "hook-failures.log"
+
+
+def _record_failure(context: str, exc: BaseException) -> None:
+    """Append a one-line breadcrumb for a swallowed error. Never raises.
+
+    Deliberately not the vault (whose unwritability is the most likely cause)
+    and deliberately tiny: timestamp, where, repr of the error.
+    """
+    try:
+        path = failure_log_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        mode = "a"
+        try:
+            if path.stat().st_size > _FAILURE_LOG_CAP_BYTES:
+                mode = "w"
+        except OSError:
+            pass
+        stamp = datetime.now().isoformat(timespec="seconds")
+        with open(path, mode, encoding="utf-8") as fh:
+            fh.write(f"{stamp} {context}: {exc!r}\n")
+    except Exception:
+        return
 
 
 def _now(now: datetime | None) -> datetime:
@@ -207,7 +247,10 @@ def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) ->
         directory.mkdir(parents=True, exist_ok=True)
         name = journal_name(now)
         path = directory / name
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+        # O_BINARY: on Windows, os.open defaults to the CRT's text mode, which
+        # would rewrite the \n in our bytes to \r\n mid-write.
+        binary = getattr(os, "O_BINARY", 0)
+        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | binary, 0o644)
         try:
             filelock.lock_fd(fd)
             if os.fstat(fd).st_size == 0:
@@ -217,8 +260,8 @@ def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) ->
         finally:
             filelock.unlock_fd(fd)
             os.close(fd)
-    except OSError:
-        return
+    except OSError as exc:
+        _record_failure(f"append_entry({omi_dir})", exc)
 
 
 def _read_priming_note(path: Path) -> str | None:
@@ -343,8 +386,8 @@ def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -
     }
     try:
         sink.write(json.dumps(payload) + "\n")
-    except Exception:
-        return
+    except Exception as exc:
+        _record_failure(f"emit_session_start_context({omi_dir})", exc)
 
 
 def run_hook(
@@ -363,6 +406,7 @@ def run_hook(
         line = format_entry(event, event_name=event_name)
         if line:
             append_entry(omi_dir, line)
-    except Exception:
+    except Exception as exc:
+        _record_failure(f"run_hook({event_name}, {omi_dir})", exc)
         return 0
     return 0
