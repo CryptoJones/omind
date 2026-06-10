@@ -135,6 +135,42 @@ def test_format_entry_empty_event_is_recorded() -> None:
     assert "[session unknown]" in line
 
 
+# -- _extract_outcome --------------------------------------------------------
+
+
+def test_outcome_stderr_only_is_ok() -> None:
+    # healthy tools (git, curl, npm, dnf…) write progress/warnings to stderr
+    assert hooks._extract_outcome({"stdout": "done", "stderr": "warning: detached HEAD"}) == "ok"
+
+
+def test_outcome_explicit_is_error() -> None:
+    assert hooks._extract_outcome({"is_error": True}) == "error"
+
+
+def test_outcome_success_false_is_error() -> None:
+    assert hooks._extract_outcome({"success": False}) == "error"
+
+
+def test_outcome_nonzero_exit_code_is_error() -> None:
+    assert hooks._extract_outcome({"exit_code": 1}) == "error"
+
+
+def test_outcome_zero_exit_code_with_stderr_is_ok() -> None:
+    assert hooks._extract_outcome({"exit_code": 0, "stderr": "Cloning into 'repo'…"}) == "ok"
+
+
+def test_outcome_empty_response_is_ok() -> None:
+    assert hooks._extract_outcome({}) == "ok"
+
+
+def test_outcome_empty_error_string_is_ok() -> None:
+    assert hooks._extract_outcome({"error": ""}) == "ok"
+
+
+def test_outcome_nonempty_error_dict_is_error() -> None:
+    assert hooks._extract_outcome({"error": {"code": -32000, "message": "boom"}}) == "error"
+
+
 # -- read_event --------------------------------------------------------------
 
 
