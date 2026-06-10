@@ -9,7 +9,7 @@ from pathlib import Path
 
 import pytest
 
-from omind import seeds
+from omind import paths, seeds
 from omind.store import (
     LOCK_FILENAME,
     RECENT_LIMIT,
@@ -66,14 +66,14 @@ def test_create_note_writes_file_and_index(store: OmiStore) -> None:
     name = store.create_note(NoteFields(title="My First Card", summary="hi", tags=["omi"]))
     assert name == "My First Card.md"
     assert (store.omi_dir / name).is_file()
-    index = (store.omi_dir / seeds.INDEX_FILENAME).read_text()
+    index = (store.omi_dir / paths.INDEX_FILENAME).read_text()
     assert "[[My First Card]]" in index
     assert seeds.INDEX_RECENT_HEADING in index
 
 
 def test_list_excludes_reserved_files(store: OmiStore) -> None:
-    (store.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME).write_text(seeds.MEMORY_TEMPLATE)
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text("# index")
+    (store.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).write_text(seeds.MEMORY_TEMPLATE)
+    (store.omi_dir / paths.INDEX_FILENAME).write_text("# index")
     store.create_note(NoteFields(title="Real Note", summary="s"))
     names = [n.filename for n in store.list_notes()]
     assert names == ["Real Note.md"]
@@ -158,7 +158,7 @@ def test_delete_removes_file_and_index_entry(store: OmiStore) -> None:
     name = store.create_note(NoteFields(title="Doomed"))
     store.delete_note(name)
     assert not (store.omi_dir / name).exists()
-    assert "[[Doomed]]" not in (store.omi_dir / seeds.INDEX_FILENAME).read_text()
+    assert "[[Doomed]]" not in (store.omi_dir / paths.INDEX_FILENAME).read_text()
 
 
 def test_delete_missing_raises(store: OmiStore) -> None:
@@ -167,9 +167,9 @@ def test_delete_missing_raises(store: OmiStore) -> None:
 
 
 def test_delete_reserved_rejected(store: OmiStore) -> None:
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text("# index")
+    (store.omi_dir / paths.INDEX_FILENAME).write_text("# index")
     with pytest.raises(NoteError):
-        store.delete_note(seeds.INDEX_FILENAME)
+        store.delete_note(paths.INDEX_FILENAME)
 
 
 def test_read_missing_raises(store: OmiStore) -> None:
@@ -204,9 +204,9 @@ def test_safe_name_appends_md(store: OmiStore) -> None:
 
 def test_update_index_preserves_intro(store: OmiStore) -> None:
     intro = "# Custom Intro\n\nKeep me.\n\n" + seeds.INDEX_RECENT_HEADING + "\n- [[old]]\n"
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text(intro)
+    (store.omi_dir / paths.INDEX_FILENAME).write_text(intro)
     store.create_note(NoteFields(title="New One"))
-    text = (store.omi_dir / seeds.INDEX_FILENAME).read_text()
+    text = (store.omi_dir / paths.INDEX_FILENAME).read_text()
     assert "# Custom Intro" in text
     assert "Keep me." in text
     assert "[[New One]]" in text
@@ -217,7 +217,7 @@ def test_update_index_preserves_intro(store: OmiStore) -> None:
 
 
 def _index_text(store: OmiStore) -> str:
-    return (store.omi_dir / seeds.INDEX_FILENAME).read_text(encoding="utf-8")
+    return (store.omi_dir / paths.INDEX_FILENAME).read_text(encoding="utf-8")
 
 
 def _recent_links(store: OmiStore) -> list[str]:
@@ -293,7 +293,7 @@ def test_migration_copies_hand_description_into_empty_summary(store: OmiStore) -
     old_index = (
         f"{seeds.INDEX_INTRO}\n{seeds.INDEX_RECENT_HEADING}\n- [[Old]] — hand-written gloss\n"
     )
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text(old_index, encoding="utf-8")
+    (store.omi_dir / paths.INDEX_FILENAME).write_text(old_index, encoding="utf-8")
     store.update_index()
     assert store.read_fields("Old.md").summary == "hand-written gloss"
     assert "- [[Old]] — hand-written gloss" in _recent_links(store)
@@ -307,7 +307,7 @@ def test_migration_copies_hand_description_into_empty_summary(store: OmiStore) -
 
 def test_migration_adds_summary_section_when_missing(store: OmiStore) -> None:
     (store.omi_dir / "Loose.md").write_text("# Loose\n\nFree-form note.\n", encoding="utf-8")
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text(
+    (store.omi_dir / paths.INDEX_FILENAME).write_text(
         seeds.INDEX_RECENT_HEADING + "\n- [[Loose]] — kept gloss\n", encoding="utf-8"
     )
     store.update_index()
@@ -318,7 +318,7 @@ def test_migration_adds_summary_section_when_missing(store: OmiStore) -> None:
 
 def test_migration_leaves_existing_summary_alone(store: OmiStore) -> None:
     store.create_note(NoteFields(title="Authored", summary="real summary"))
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text(
+    (store.omi_dir / paths.INDEX_FILENAME).write_text(
         seeds.INDEX_RECENT_HEADING + "\n- [[Authored]] — stale hand gloss\n", encoding="utf-8"
     )
     store.update_index()
@@ -337,7 +337,7 @@ def test_migration_skipped_for_generated_index(store: OmiStore) -> None:
 
 
 def test_migration_ignores_dangling_and_bare_entries(store: OmiStore) -> None:
-    (store.omi_dir / seeds.INDEX_FILENAME).write_text(
+    (store.omi_dir / paths.INDEX_FILENAME).write_text(
         seeds.INDEX_RECENT_HEADING + "\n- [[Ghost]] — desc for missing note\n- [[Also Ghost]]\n",
         encoding="utf-8",
     )
@@ -383,7 +383,7 @@ def test_concurrent_processes_keep_index_consistent(tmp_path: Path) -> None:
 
     # index.md is well-formed: the Recent list has exactly N wikilinks, no dupes,
     # no torn lines — proof the read-modify-write serialized under the lock.
-    index = (omi / seeds.INDEX_FILENAME).read_text(encoding="utf-8")
+    index = (omi / paths.INDEX_FILENAME).read_text(encoding="utf-8")
     assert seeds.INDEX_RECENT_HEADING in index
     links = [ln for ln in index.splitlines() if ln.startswith("- [[")]
     assert len(links) == n

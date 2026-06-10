@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from omind import seeds
+from omind import paths
 from omind.web.app import create_app
 
 
@@ -73,7 +73,7 @@ def test_full_crud_cycle(client: TestClient, omi_dir: Path) -> None:
     assert client.get(f"/api/notes/{name}").status_code == 404
 
     # index.md was maintained
-    assert (omi_dir / seeds.INDEX_FILENAME).is_file()
+    assert (omi_dir / paths.INDEX_FILENAME).is_file()
 
 
 def test_get_exposes_version(client: TestClient) -> None:

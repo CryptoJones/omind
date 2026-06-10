@@ -26,7 +26,7 @@ from typing import Any, ClassVar
 
 import yaml
 
-from omind import seeds
+from omind import paths, seeds
 from omind.provision import (
     CheckResult,
     Logger,
@@ -128,7 +128,7 @@ class AgentProvisioner(Provisioner):
         return {"command": command[0], "args": command[1:]}
 
     def install_memory_skill(self) -> None:
-        skill = self.skill_dir() / seeds.AGENT_SKILL_FILENAME
+        skill = self.skill_dir() / paths.AGENT_SKILL_FILENAME
         content = seeds.AGENT_SKILL_TEMPLATE.format(
             vault=self.config.vault,
             folder=self.config.folder,
@@ -334,7 +334,7 @@ def _diagnose_agent(provisioner: AgentProvisioner) -> list[CheckResult]:
 
     results.append(_diagnose_eof_guard())
 
-    skill = provisioner.skill_dir() / seeds.AGENT_SKILL_FILENAME
+    skill = provisioner.skill_dir() / paths.AGENT_SKILL_FILENAME
     if skill.is_file():
         results.append(CheckResult(f"{key}_skill", "ok", f"memory skill installed: {skill}"))
     else:

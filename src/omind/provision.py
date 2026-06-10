@@ -20,7 +20,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-from omind import seeds
+from omind import paths, seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
 from omind.journal import find_stray_journals, migrate_journals
 
@@ -130,7 +130,7 @@ def obsidian_mcp_entry() -> Path:
 
 def eof_guard_path() -> Path:
     """The stdin-EOF preload that stops the server orphaning on exit."""
-    return mcp_servers_dir() / seeds.EOF_GUARD_FILENAME
+    return mcp_servers_dir() / paths.EOF_GUARD_FILENAME
 
 
 @dataclass
@@ -216,7 +216,7 @@ class Provisioner:
 
     def seed_memory_files(self) -> None:
         self._write_if_absent(
-            self.config.omi_dir / seeds.MEMORY_TEMPLATE_FILENAME,
+            self.config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME,
             seeds.MEMORY_TEMPLATE,
         )
         index_seed = (
@@ -227,7 +227,7 @@ class Provisioner:
             + seeds.INDEX_RECENT_COMMENT
             + "\n"
         )
-        self._write_if_absent(self.config.omi_dir / seeds.INDEX_FILENAME, index_seed)
+        self._write_if_absent(self.config.omi_dir / paths.INDEX_FILENAME, index_seed)
 
     def migrate_journal_notes(self) -> None:
         """Move stray daily journals (vault-folder root, legacy ``logs/``) into
@@ -536,7 +536,7 @@ def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
 
     missing_seeds = [
         name
-        for name in (seeds.MEMORY_TEMPLATE_FILENAME, seeds.INDEX_FILENAME)
+        for name in (paths.MEMORY_TEMPLATE_FILENAME, paths.INDEX_FILENAME)
         if not (omi / name).is_file()
     ]
     if missing_seeds:

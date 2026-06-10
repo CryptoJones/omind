@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 import yaml
 
-from omind import agents, provision, seeds
+from omind import agents, paths, provision, seeds
 from omind.agents import (
     HermesProvisioner,
     OpenClawProvisioner,
@@ -128,7 +128,7 @@ def test_hermes_setup_registers_server_and_skill(
     assert data["model"] == {"provider": "openrouter"}
     assert data["toolsets"] == ["hermes-cli"]
 
-    skill = agents.hermes_skill_dir() / seeds.AGENT_SKILL_FILENAME
+    skill = agents.hermes_skill_dir() / paths.AGENT_SKILL_FILENAME
     text = skill.read_text(encoding="utf-8")
     assert str(config.omi_dir) in text
     assert "omind note" in text
@@ -204,7 +204,7 @@ def test_hermes_skill_not_clobbered_without_force(
     tmp_path: Path, hermes_home: Path
 ) -> None:
     config = _config(tmp_path, "hermes")
-    skill = agents.hermes_skill_dir() / seeds.AGENT_SKILL_FILENAME
+    skill = agents.hermes_skill_dir() / paths.AGENT_SKILL_FILENAME
     skill.parent.mkdir(parents=True)
     skill.write_text("user-customized", encoding="utf-8")
     run_setup_for(config, log=_quiet)
@@ -231,7 +231,7 @@ def test_openclaw_setup_registers_server_and_skill(
     assert server["args"][-1] == str(config.omi_dir)
     assert data["agents"] == {"defaults": {"workspace": "~/clawd"}}  # untouched
 
-    skill = agents.openclaw_skill_dir() / seeds.AGENT_SKILL_FILENAME
+    skill = agents.openclaw_skill_dir() / paths.AGENT_SKILL_FILENAME
     assert "omind note" in skill.read_text(encoding="utf-8")
 
 

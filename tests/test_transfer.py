@@ -11,7 +11,7 @@ from pathlib import Path
 
 import pytest
 
-from omind import seeds
+from omind import paths
 from omind.store import NoteFields, OmiStore
 from omind.transfer import (
     EXPORT_VERSION,
@@ -66,7 +66,7 @@ def test_export_json_writes_manifest_and_excludes_index(tmp_path: Path) -> None:
     assert bundle["note_count"] == 2
     names = {n["filename"] for n in bundle["notes"]}
     assert names == {"Alpha.md", "Beta.md"}
-    assert seeds.INDEX_FILENAME not in names
+    assert paths.INDEX_FILENAME not in names
     # parsed fields ride along
     alpha = next(n for n in bundle["notes"] if n["filename"] == "Alpha.md")
     assert alpha["fields"]["title"] == "Alpha"
@@ -93,8 +93,8 @@ def test_json_round_trip_into_fresh_folder(tmp_path: Path) -> None:
     assert sorted(result.added) == ["Alpha.md", "Beta.md"]
     assert (dest / "Alpha.md").is_file()
     # index.md is regenerated, not imported
-    assert (dest / seeds.INDEX_FILENAME).is_file()
-    assert "[[Alpha]]" in (dest / seeds.INDEX_FILENAME).read_text(encoding="utf-8")
+    assert (dest / paths.INDEX_FILENAME).is_file()
+    assert "[[Alpha]]" in (dest / paths.INDEX_FILENAME).read_text(encoding="utf-8")
 
 
 def test_reimport_is_all_unchanged(tmp_path: Path) -> None:

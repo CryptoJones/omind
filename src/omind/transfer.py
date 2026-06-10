@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from omind import __version__, seeds
+from omind import __version__, paths
 from omind.store import OmiStore, parse_note, today
 
 Logger = Callable[[str], None]
@@ -86,7 +86,7 @@ def _exportable_md(omi_dir: Path) -> list[Path]:
     return sorted(
         p
         for p in omi_dir.glob("*.md")
-        if p.name != seeds.INDEX_FILENAME and not p.name.startswith(".")
+        if p.name != paths.INDEX_FILENAME and not p.name.startswith(".")
     )
 
 
@@ -147,7 +147,7 @@ def _export_targz(omi: Path, out: Path) -> int:
             if (
                 path.suffix == ".md"
                 and path.parent == omi
-                and path.name != seeds.INDEX_FILENAME
+                and path.name != paths.INDEX_FILENAME
                 and not path.name.startswith(".")
             ):
                 note_count += 1
@@ -229,7 +229,7 @@ def _import_json(omi: Path, src: Path, force: bool, result: ImportResult) -> Non
         content = entry.get("content")
         if not filename or not isinstance(content, str):
             continue
-        if filename == seeds.INDEX_FILENAME:  # derived; never import
+        if filename == paths.INDEX_FILENAME:  # derived; never import
             continue
         try:
             target = store.safe_name(filename)  # rejects traversal, ensures .md, in-dir
@@ -249,7 +249,7 @@ def _import_targz(omi: Path, src: Path, force: bool, result: ImportResult) -> No
             # Traversal guard: every member must land inside the OMI dir.
             if target != omi_resolved and omi_resolved not in target.parents:
                 raise TransferError(f"archive member escapes the OMI directory: {rel!r}")
-            if Path(rel).name == seeds.INDEX_FILENAME and Path(rel).parent == Path("."):
+            if Path(rel).name == paths.INDEX_FILENAME and Path(rel).parent == Path("."):
                 continue  # derived top-level index; regenerated after import
             extracted = tar.extractfile(member)
             if extracted is None:

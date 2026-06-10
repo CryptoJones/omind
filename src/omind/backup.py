@@ -38,8 +38,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from omind.notes import upsert_note
+from omind.paths import INDEX_FILENAME
 from omind.provision import CheckResult, Logger, SetupConfig
-from omind.seeds import INDEX_FILENAME
 from omind.store import NoteError, NoteFields, NoteNotFoundError, OmiStore
 
 PASS_FILENAME = "backup.pass"
