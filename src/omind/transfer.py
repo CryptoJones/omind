@@ -203,7 +203,10 @@ def _classify_and_write(
         result.added.append(label)
         return
     existing = target.read_bytes()
-    if existing == data:
+    # Newline-insensitive comparison: a note written through text mode on
+    # Windows is CRLF on disk while bundles always carry LF — that's the same
+    # content, not a conflict.
+    if existing.replace(b"\r\n", b"\n") == data.replace(b"\r\n", b"\n"):
         result.unchanged.append(label)
     elif force:
         target.write_bytes(data)

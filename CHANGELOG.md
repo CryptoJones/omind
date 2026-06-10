@@ -7,7 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- Windows part 3, courtesy of the new windows-latest CI legs:
+  `omind setup` re-runs no longer duplicate the auto-memory hooks on Windows —
+  `shutil.which` resolves the hook command to `omind.EXE`, which the literal
+  `"omind hook"` marker match didn't recognize as omind's own entry (doctor
+  reported the hooks missing for the same reason). Re-importing a bundle over
+  a vault written through Windows text mode no longer flags every note as a
+  conflict (newline-insensitive comparison). The journal hot path and the
+  backup password file now open with `O_BINARY`/`newline="\n"` so CRT text
+  mode can't rewrite their bytes. With tests; the suite now runs on
+  windows-latest (Python 3.10 and 3.14) in CI.
 
 ## [1.2.0] - 2026-06-10
 
