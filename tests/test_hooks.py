@@ -10,6 +10,8 @@ import threading
 from datetime import datetime
 from pathlib import Path
 
+import pytest
+
 from omind import hooks
 from omind.store import OmiStore, parse_note
 
@@ -346,3 +348,61 @@ def test_concurrent_appends_serialize(tmp_path: Path) -> None:
     assert len(bullets) == n  # no lost writes
     assert all(_BULLET_RE.match(b) for b in bullets)  # no torn/interleaved lines
     assert text.count("# Session Journal") == 1  # exactly one header
+
+
+# -- failure breadcrumbs -------------------------------------------------------
+
+
+def test_append_entry_failure_leaves_breadcrumb(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    blocker = tmp_path / "not-a-vault"
+    blocker.write_text("a file where the OMI folder should be", encoding="utf-8")
+    hooks.append_entry(blocker, "- 14:32 [session abcd1234] PostToolUse Bash (ok)")
+    log = hooks.failure_log_path()
+    assert log.is_file()
+    assert "append_entry" in log.read_text(encoding="utf-8")
+
+
+def test_breadcrumb_write_failure_is_itself_swallowed(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The state dir is also unwritable (a file sits where it should be):
+    # the breadcrumb attempt must not turn a swallowed error into a raise.
+    state_blocker = tmp_path / "state-blocker"
+    state_blocker.write_text("x", encoding="utf-8")
+    monkeypatch.setenv("XDG_STATE_HOME", str(state_blocker))
+    vault_blocker = tmp_path / "not-a-vault"
+    vault_blocker.write_text("x", encoding="utf-8")
+    hooks.append_entry(vault_blocker, "- bullet")  # must simply return
+
+
+def test_failure_log_restarts_past_the_cap(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    log = hooks.failure_log_path()
+    log.parent.mkdir(parents=True)
+    log.write_text("x" * (hooks._FAILURE_LOG_CAP_BYTES + 1), encoding="utf-8")
+    blocker = tmp_path / "not-a-vault"
+    blocker.write_text("x", encoding="utf-8")
+    hooks.append_entry(blocker, "- bullet")
+    text = log.read_text(encoding="utf-8")
+    assert len(text) < hooks._FAILURE_LOG_CAP_BYTES
+    assert not text.startswith("x")
+    assert "append_entry" in text
+
+
+def test_run_hook_breadcrumbs_unexpected_errors_and_still_returns_0(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+
+    def boom(*args: object, **kwargs: object) -> str:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(hooks, "format_entry", boom)
+    rc = hooks.run_hook("PostToolUse", tmp_path / "OMI", stdin=io.StringIO("{}"))
+    assert rc == 0
+    assert "run_hook" in hooks.failure_log_path().read_text(encoding="utf-8")
