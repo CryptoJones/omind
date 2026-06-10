@@ -19,9 +19,9 @@ keeps an encrypted off-machine copy instead:
 When restic is absent, ``run`` degrades to an rsync ``--link-dest`` dated
 snapshot copy and ``omind doctor`` reports the degradation as a warning.
 
-All subprocess calls go through :func:`_run` (the :mod:`omind.provision`
-pattern) so tests can fake ``subprocess.run`` and never touch a real restic,
-rsync, or systemctl. The password is never printed or logged.
+All subprocess calls go through :func:`omind.proc.run_command` (via
+:func:`_run`) so tests can fake ``subprocess.run`` and never touch a real
+restic, rsync, or systemctl. The password is never printed or logged.
 """
 
 from __future__ import annotations
@@ -38,6 +38,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from omind.notes import upsert_note
+from omind.proc import DEFAULT_TIMEOUT, run_command
 from omind.provision import CheckResult, Logger, SetupConfig
 from omind.seeds import INDEX_FILENAME
 from omind.store import NoteError, NoteFields, NoteNotFoundError, OmiStore
@@ -143,35 +144,19 @@ def save_config(config: BackupConfig) -> None:
 # -- subprocess plumbing --------------------------------------------------------
 
 
+SNAPSHOT_TIMEOUT = 3600.0
+"""Ceiling for the snapshot-producing calls (restic backup / rsync), which can
+legitimately run long over a slow link; everything else gets the shared default."""
+
+
 def _run(
     cmd: list[str],
     *,
     env: dict[str, str] | None = None,
+    timeout: float = DEFAULT_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
-    """Run a command, mapping the usual failures to :class:`BackupError`.
-
-    Output is always captured so a restic error can never leak repository
-    details (or worse) into a systemd journal line we don't control.
-    """
-    if os.name == "nt":
-        # CreateProcess won't resolve restic.cmd-style shims from a bare
-        # name; shutil.which finds the executable with its extension.
-        resolved = shutil.which(cmd[0])
-        if resolved:
-            cmd = [resolved, *cmd[1:]]
-    try:
-        return subprocess.run(
-            cmd,
-            check=True,
-            capture_output=True,
-            text=True,
-            env=env,
-        )
-    except FileNotFoundError as exc:
-        raise BackupError(f"command not found: {cmd[0]}") from exc
-    except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "").strip()
-        raise BackupError(f"command failed: {' '.join(cmd)}\n{detail}") from exc
+    """Run a command, mapping the usual failures to :class:`BackupError`."""
+    return run_command(cmd, error=BackupError, env=env, timeout=timeout)
 
 
 def restic_available() -> bool:
@@ -267,7 +252,7 @@ def _require_config() -> BackupConfig:
 
 def _restic_backup(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
     env = _restic_env(config.repo)
-    _run(["restic", "backup", str(omi_dir)], env=env)
+    _run(["restic", "backup", str(omi_dir)], env=env, timeout=SNAPSHOT_TIMEOUT)
     log(f"  backed up {omi_dir}")
     _run(
         [
@@ -308,7 +293,7 @@ def _rsync_backup(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
         # Hard-link unchanged files against the previous snapshot (sibling dir).
         cmd.append(f"--link-dest=../{config.last_snapshot}")
     cmd.extend([f"{omi_dir}/", f"{dest}/{stamp}/"])
-    _run(cmd)
+    _run(cmd, timeout=SNAPSHOT_TIMEOUT)
     config.last_snapshot = stamp
     log(f"  rsync snapshot written: {dest}/{stamp}/ (unencrypted — install restic)")
 

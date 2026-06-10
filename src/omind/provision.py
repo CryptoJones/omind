@@ -24,6 +24,7 @@ from typing import Any, ClassVar
 from omind import seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
 from omind.journal import find_stray_journals, migrate_journals
+from omind.proc import run_command
 
 Logger = Callable[[str], None]
 
@@ -435,7 +436,6 @@ class Provisioner:
         result = self._run(
             ["claude", "mcp", "get", self.config.server_name],
             check=False,
-            capture=True,
         )
         out = (result.stdout or "") + (result.stderr or "")
         if "Connected" in out:
@@ -452,28 +452,10 @@ class Provisioner:
         cmd: list[str],
         *,
         check: bool = True,
-        capture: bool = False,
     ) -> subprocess.CompletedProcess[str]:
         if self.config.dry_run:
             return subprocess.CompletedProcess(cmd, 0, "", "")
-        if os.name == "nt":
-            # CreateProcess won't resolve npm.cmd / claude.cmd from a bare
-            # name; shutil.which finds the shim with its extension.
-            resolved = shutil.which(cmd[0])
-            if resolved:
-                cmd = [resolved, *cmd[1:]]
-        try:
-            return subprocess.run(
-                cmd,
-                check=check,
-                capture_output=True,
-                text=True,
-            )
-        except FileNotFoundError as exc:  # claude / npm / node vanished mid-run
-            raise ProvisionError(f"command not found: {cmd[0]}") from exc
-        except subprocess.CalledProcessError as exc:
-            detail = (exc.stderr or exc.stdout or "").strip()
-            raise ProvisionError(f"command failed: {' '.join(cmd)}\n{detail}") from exc
+        return run_command(cmd, error=ProvisionError, check=check)
 
     # -- orchestration ------------------------------------------------------
 
