@@ -1,6 +1,6 @@
 # omind
 
-OMI/Obsidian memory tooling for Claude Code: reproduce the integration on any machine, plus a local web app to view, edit, and add memory entries.
+OMI/Obsidian memory tooling for AI agents: reproduce the integration on any machine, plus a local web app to view, edit, and add memory entries.
 
 [![Tests](https://github.com/CryptoJones/omind/actions/workflows/test.yml/badge.svg)](https://github.com/CryptoJones/omind/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?logo=apache)](LICENSE)
