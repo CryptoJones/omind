@@ -11,6 +11,7 @@ clobbered, and the MCP server is only (re)registered when its path differs.
 from __future__ import annotations
 
 import json
+import os
 import shutil
 import subprocess
 from collections.abc import Callable
@@ -36,13 +37,21 @@ def default_vault_path() -> Path:
 def claude_config_path() -> Path:
     """Path to the Claude Code CLI config that holds ``mcpServers``.
 
-    Claude Code stores this at ``~/.claude.json``. Earlier omind versions looked
-    inside ``~/.claude/`` — a directory that never holds the user-scope MCP
-    registration — so ``registered_server()`` always returned ``None``, making
-    ``doctor`` report a false "not registered" and ``setup`` re-run
-    ``claude mcp add`` into an "already exists" error. Fall back to the old
-    location only if the canonical file is absent.
+    When ``CLAUDE_CONFIG_DIR`` is set, the CLI keeps this file at
+    ``$CLAUDE_CONFIG_DIR/.claude.json`` — unconditionally, so omind must
+    mirror that even if a stale ``~/.claude.json`` also exists (reading the
+    stale file made ``doctor`` report a false "not registered" and ``setup``
+    re-run ``claude mcp add`` into an "already exists" error).
+
+    Without the env var, Claude Code stores it at ``~/.claude.json``. Earlier
+    omind versions looked inside ``~/.claude/`` — a directory that never holds
+    the user-scope MCP registration absent ``CLAUDE_CONFIG_DIR`` — producing
+    the same false negatives. Fall back to that old location only if the
+    canonical file is absent.
     """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / ".claude.json"
     primary = Path.home() / ".claude.json"
     legacy = Path.home() / ".claude" / ".claude.json"
     if not primary.is_file() and legacy.is_file():
@@ -55,8 +64,12 @@ def claude_settings_path() -> Path:
 
     Distinct from :func:`claude_config_path` (``~/.claude.json``, which holds
     ``mcpServers``). Hooks, theme, and permission config live in
-    ``~/.claude/settings.json``.
+    ``~/.claude/settings.json`` — or ``$CLAUDE_CONFIG_DIR/settings.json``
+    when the env var relocates the config directory.
     """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    if config_dir:
+        return Path(config_dir) / "settings.json"
     return Path.home() / ".claude" / "settings.json"
 
 
