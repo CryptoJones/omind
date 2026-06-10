@@ -78,6 +78,38 @@ Every machine runs an identical **omind node**:
 - The CLI scaffold, the ruff + mypy-strict + pip-audit CI bar, and the
   dual-mirror (GitHub + Codeberg) shipping flow.
 
+## Node types & the single-writer rule
+
+A node is any machine that holds a replica and runs the store + the replication
+daemon. Two kinds of writer live on a node:
+
+- **Claude Code** (plus the `omind serve` web UI and cron) — already write
+  through `OmiStore`, so they inherit the `.omi.lock` flock, the atomic
+  `os.replace`, and the `note_version` compare-and-swap.
+- **hermes-agent** — Hermes is a **first-class node**, not merely a sync source.
+  It is Python and already uses the same primitives (`os.replace`,
+  `fcntl.flock`), so it runs omind natively.
+
+**Invariant: every OMI writer on a node goes through `OmiStore` — no raw
+writes.** The within-node concurrency guarantee holds only if all writers
+serialize under the one shared lock; a single raw `write_file()` into the OMI
+folder can interleave with the replication daemon's git commit or clobber a
+concurrent store write, defeating the `note_version` CAS.
+
+Today Hermes' `hermes-omi-memory-sync` skill writes raw
+(`write_file(".../OMI/<title>.md", ...)`). To make Hermes a safe node, it writes
+**in-process through omind** instead:
+
+```python
+from omind.store import OmiStore, NoteFields
+store = OmiStore(omi_dir)
+store.create_note(NoteFields(title=..., summary=..., details=..., tags=[...]))
+```
+
+This inherits the lock, the atomic write, and the `note_version` CAS — and, as a
+bonus, emits omind's clean note format rather than Hermes' §-block dump, ending
+the long-standing format divergence between the two writers.
+
 ## The conflict model (the core)
 
 A mesh accepts **eventual consistency**: two nodes can edit the same note while
