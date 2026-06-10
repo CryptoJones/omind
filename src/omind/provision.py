@@ -17,7 +17,7 @@ import subprocess
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, ClassVar
 
 from omind import seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER
@@ -138,6 +138,7 @@ class SetupConfig:
     server_name: str = "obsidian"
     dry_run: bool = False
     force: bool = False
+    agent: str = "claude"
 
     @property
     def omi_dir(self) -> Path:
@@ -149,6 +150,14 @@ class Provisioner:
     config: SetupConfig
     log: Logger = print
     actions: list[str] = field(default_factory=list)
+
+    #: tool -> why it is needed; subclasses for other agents override this.
+    REQUIRED_TOOLS: ClassVar[dict[str, str]] = {
+        "node": "obsidian-mcp runs on Node.js",
+        "npm": "npm installs the obsidian-mcp package",
+        "claude": "the Claude Code CLI registers the MCP server",
+    }
+    DONE_MESSAGE: ClassVar[str] = "Done. Restart Claude Code to load the OMI memory tools."
 
     # -- helpers ------------------------------------------------------------
 
@@ -171,24 +180,19 @@ class Provisioner:
 
     def check_prereqs(self) -> None:
         """Raise (unless dry-run) when a required executable is missing."""
-        required = {
-            "node": "obsidian-mcp runs on Node.js",
-            "npm": "npm installs the obsidian-mcp package",
-            "claude": "the Claude Code CLI registers the MCP server",
-        }
+        required = self.REQUIRED_TOOLS
         missing = [tool for tool in required if shutil.which(tool) is None]
         if missing:
             details = "; ".join(f"{t} ({required[t]})" for t in missing)
             message = (
-                f"missing required tool(s): {details}. "
-                "Install Node.js (for node/npm) and the Claude Code CLI, then re-run."
+                f"missing required tool(s): {details}. Install them, then re-run."
             )
             if self.config.dry_run:
                 self.log(f"  WARNING: {message}")
             else:
                 raise ProvisionError(message)
         else:
-            self.log("  prerequisites present: node, npm, claude")
+            self.log(f"  prerequisites present: {', '.join(required)}")
 
     def ensure_vault(self) -> None:
         self._record(f"create OMI folder {self.config.omi_dir}")
@@ -438,6 +442,11 @@ class Provisioner:
 
     # -- orchestration ------------------------------------------------------
 
+    def integrate(self) -> None:
+        """The agent-specific wiring; subclasses for other agents override this."""
+        self.register_mcp()
+        self.ensure_hooks_installed()
+
     def run(self) -> list[str]:
         self.log(f"omind setup -> {self.config.omi_dir}")
         self.check_prereqs()
@@ -445,11 +454,10 @@ class Provisioner:
         self.ensure_obsidian_config()
         self.seed_memory_files()
         self.ensure_server_install()
-        self.register_mcp()
-        self.ensure_hooks_installed()
+        self.integrate()
         self.verify()
         if not self.config.dry_run:
-            self.log("Done. Restart Claude Code to load the OMI memory tools.")
+            self.log(self.DONE_MESSAGE)
         return self.actions
 
 
@@ -467,24 +475,20 @@ class CheckResult:
     message: str
 
 
-def diagnose(config: SetupConfig) -> list[CheckResult]:
-    """Inspect the wiring `omind setup` creates and report what's healthy.
-
-    Pure inspection — touches nothing. ``fail`` means memory won't work until
-    fixed; ``warn`` means it'll work but something is off or merely cosmetic.
-    """
+def _diagnose_tools(tools: dict[str, str]) -> list[CheckResult]:
+    """One PATH check per required tool (tool -> why it is needed)."""
     results: list[CheckResult] = []
-
-    for tool, why in (
-        ("node", "obsidian-mcp runs on Node.js"),
-        ("npm", "npm installs the obsidian-mcp package"),
-        ("claude", "the Claude Code CLI registers the MCP server"),
-    ):
+    for tool, why in tools.items():
         if shutil.which(tool) is not None:
             results.append(CheckResult(f"tool:{tool}", "ok", f"{tool} found on PATH"))
         else:
             results.append(CheckResult(f"tool:{tool}", "fail", f"{tool} not found — {why}"))
+    return results
 
+
+def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
+    """The agent-independent checks: OMI folder, Obsidian config, seed files."""
+    results: list[CheckResult] = []
     omi = config.omi_dir
     if omi.is_dir():
         results.append(CheckResult("omi_dir", "ok", f"OMI folder readable: {omi}"))
@@ -516,6 +520,30 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
         )
     else:
         results.append(CheckResult("seeds", "ok", "seed files present (template + index)"))
+    return results
+
+
+def _diagnose_eof_guard() -> CheckResult:
+    guard = eof_guard_path()
+    if guard.is_file():
+        return CheckResult("eof_guard", "ok", f"stdin-EOF guard present: {guard}")
+    return CheckResult(
+        "eof_guard",
+        "warn",
+        f"missing stdin-EOF guard {guard} — run `omind setup` "
+        "(the server may orphan when the agent exits)",
+    )
+
+
+def diagnose(config: SetupConfig) -> list[CheckResult]:
+    """Inspect the wiring `omind setup` creates and report what's healthy.
+
+    Pure inspection — touches nothing. ``fail`` means memory won't work until
+    fixed; ``warn`` means it'll work but something is off or merely cosmetic.
+    """
+    results = _diagnose_tools(Provisioner.REQUIRED_TOOLS)
+    results.extend(_diagnose_omi_folder(config))
+    omi = config.omi_dir
 
     prov = Provisioner(config=config, log=lambda _msg: None)
     server = prov.registered_server()
@@ -553,18 +581,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
                 CheckResult("mcp_registration", "ok", f"MCP server '{name}' -> {target}")
             )
 
-    guard = eof_guard_path()
-    if guard.is_file():
-        results.append(CheckResult("eof_guard", "ok", f"stdin-EOF guard present: {guard}"))
-    else:
-        results.append(
-            CheckResult(
-                "eof_guard",
-                "warn",
-                f"missing stdin-EOF guard {guard} — run `omind setup` "
-                "(the server may orphan when Claude Code exits)",
-            )
-        )
+    results.append(_diagnose_eof_guard())
 
     results.append(_diagnose_hooks(claude_settings_path(), config))
 
@@ -620,11 +637,15 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     )
 
 
-def run_doctor(config: SetupConfig, log: Logger = print) -> int:
+def run_doctor(
+    config: SetupConfig,
+    log: Logger = print,
+    diagnose_fn: Callable[[SetupConfig], list[CheckResult]] = diagnose,
+) -> int:
     """Print the diagnostic checklist; return an exit code (0 = healthy)."""
     log(f"omind doctor -> {config.omi_dir}")
     symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
-    results = diagnose(config)
+    results = diagnose_fn(config)
     for result in results:
         log(f"  [{symbols[result.level]}] {result.message}")
     fails = sum(1 for r in results if r.level == "fail")

@@ -142,6 +142,41 @@ Import adds new notes and leaves identical ones untouched; a note whose content
 differs is kept as-is on disk and reported, unless you pass `--force`. Imports
 never delete.
 
+## Other agents: Hermes Agent and OpenClaw
+
+Claude Code is the default, but the same OMI folder can back any agent. `omind
+setup --agent ...` provisions two more out of the box:
+
+```bash
+omind setup --agent hermes   --vault "$HOME/Documents/Obsidian Vault"   # Hermes Agent
+omind setup --agent openclaw --vault "$HOME/Documents/Obsidian Vault"   # OpenClaw
+```
+
+Each does the same three things, adjusted for where that agent keeps its
+config:
+
+1. The shared steps — OMI folder scaffold, `obsidian-mcp` install, stdin-EOF
+   guard — identical to the Claude Code path, so all agents talk to **one**
+   memory folder through one server install.
+2. Registers the MCP server where the agent looks for it: the `mcp_servers`
+   block in `~/.hermes/config.yaml` (Hermes Agent), or the `mcp.servers` block
+   in `~/.openclaw/openclaw.json` (OpenClaw — legacy `~/.clawdbot` /
+   `~/.moltbot` installs are detected too). Only omind's own entry is ever
+   touched; a config file that doesn't parse is never overwritten.
+3. Installs an `omind-omi-memory` skill into the agent's skills directory that
+   teaches it to **read** memory through the MCP tools and **write** it through
+   `omind note` — the single-writer path that keeps concurrently running
+   agents from corrupting the folder (see
+   [docs/mesh.md](docs/mesh.md) → "Node types & the single-writer rule").
+
+`omind doctor --agent hermes|openclaw` diagnoses that agent's wiring, and
+`omind quickstart --agent hermes|openclaw` prints the manual steps (YAML/JSON
+snippets personalized to your paths) if you'd rather merge them in yourself.
+
+The auto-memory journal hooks remain Claude Code-only for now — Hermes Agent
+and OpenClaw emit different hook payloads; their actions reach OMI through the
+skill instead.
+
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
 ## Roadmap: the memory mesh

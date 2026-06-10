@@ -9,6 +9,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `omind setup --agent hermes|openclaw` — provision **Hermes Agent** and
+  **OpenClaw** against the same OMI folder and the same obsidian-mcp install as
+  Claude Code. Registers the stdio MCP server in the agent's own config
+  (`mcp_servers` in `~/.hermes/config.yaml`, `mcp.servers` in
+  `~/.openclaw/openclaw.json` — legacy `~/.clawdbot`/`~/.moltbot` roots and
+  config names detected), merging only omind's entry and refusing to overwrite
+  a config it cannot parse, and installs an `omind-omi-memory` skill that
+  routes the agent's memory writes through the single-writer `omind note`
+  path. `omind doctor --agent ...` and `omind quickstart --agent ...` gain the
+  matching diagnosis and manual steps. New module `src/omind/agents.py`; new
+  runtime dependency PyYAML. With tests.
 - `omind note` — create or update a single OMI note from the command line through
   the safe write path (the `.omi.lock` flock + atomic `os.replace` + `note_version`
   re-check), rendering the canonical note format. Upserts by title (creates, or
