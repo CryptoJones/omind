@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import subprocess
 from datetime import datetime, timedelta, timezone
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 
 import pytest
 
@@ -20,6 +20,14 @@ from omind import backup
 from omind.backup import BackupConfig, BackupError, diagnose_backup
 from omind.cli import build_parser, main
 from omind.provision import SetupConfig
+
+
+def _bare(cmd: list[str]) -> list[str]:
+    """Record commands by bare executable name: on Windows the code under test
+    resolves cmd[0] via shutil.which (which the fixtures patch to
+    /usr/bin/<name>), and the assertions here are about *what* ran, not where
+    it was found."""
+    return [PurePosixPath(cmd[0]).name, *cmd[1:]]
 
 REPO = "sftp:pluto:/backups/omi"
 
@@ -36,7 +44,7 @@ def fake_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
-        calls.append(list(cmd))
+        calls.append(_bare(cmd))
         return subprocess.CompletedProcess(cmd, 0, "", "")
 
     monkeypatch.setattr(backup.subprocess, "run", fake_run)
@@ -253,6 +261,7 @@ def _fake_restore(
     calls: list[list[str]] = []
 
     def fake_run(cmd: list[str], **kwargs: object) -> subprocess.CompletedProcess[str]:
+        cmd = _bare(cmd)
         calls.append(list(cmd))
         if cmd[:2] == ["restic", "restore"]:
             target = Path(cmd[cmd.index("--target") + 1])

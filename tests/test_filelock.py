@@ -4,7 +4,7 @@
 
 Serialization under contention is covered end-to-end by the store and hooks
 concurrency tests; this exercises the shim's own contract on the host
-platform. Windows behavior is verified live on the win11-openclaw box.
+platform (including the windows-latest CI legs).
 """
 
 from __future__ import annotations
@@ -14,9 +14,13 @@ from pathlib import Path
 
 from omind import filelock
 
+# On Windows os.open defaults to the CRT's text mode; O_BINARY keeps the
+# written bytes literal, matching how the journal hot path opens files.
+_O_BINARY = getattr(os, "O_BINARY", 0)
+
 
 def test_lock_unlock_roundtrip(tmp_path: Path) -> None:
-    fd = os.open(tmp_path / "lockfile", os.O_WRONLY | os.O_CREAT, 0o644)
+    fd = os.open(tmp_path / "lockfile", os.O_WRONLY | os.O_CREAT | _O_BINARY, 0o644)
     try:
         filelock.lock_fd(fd)
         filelock.unlock_fd(fd)
@@ -29,7 +33,7 @@ def test_lock_unlock_roundtrip(tmp_path: Path) -> None:
 def test_lock_works_on_empty_and_append_fds(tmp_path: Path) -> None:
     """The journal locks an O_APPEND fd on a possibly empty file."""
     path = tmp_path / "journal.md"
-    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT, 0o644)
+    fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | _O_BINARY, 0o644)
     try:
         filelock.lock_fd(fd)
         os.write(fd, b"- entry\n")
