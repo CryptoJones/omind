@@ -14,6 +14,7 @@ import json
 import os
 import shutil
 import subprocess
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -661,6 +662,21 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     )
 
 
+def _doctor_symbols() -> dict[str, str]:
+    """Check-line markers, degraded to ASCII when stdout can't encode them.
+
+    Windows consoles often report cp1252, which has no ✓/✗ — printing them
+    would crash doctor on the exact machine being diagnosed.
+    """
+    symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
+    encoding = getattr(sys.stdout, "encoding", None) or "ascii"
+    try:
+        "✓✗".encode(encoding)
+    except (UnicodeEncodeError, LookupError):
+        return {"ok": "+", "warn": "!", "fail": "x"}
+    return symbols
+
+
 def run_doctor(
     config: SetupConfig,
     log: Logger = print,
@@ -668,7 +684,7 @@ def run_doctor(
 ) -> int:
     """Print the diagnostic checklist; return an exit code (0 = healthy)."""
     log(f"omind doctor -> {config.omi_dir}")
-    symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
+    symbols = _doctor_symbols()
     results = diagnose_fn(config)
     for result in results:
         log(f"  [{symbols[result.level]}] {result.message}")

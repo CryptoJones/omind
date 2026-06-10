@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- `omind doctor` no longer crashes on consoles that can't encode `✓`/`✗`
+  (Windows cp1252): the check markers degrade to ASCII (`+`/`!`/`x`) when
+  stdout's encoding can't represent them.
+
 - Windows part 2: subprocess calls (`npm`, `claude`, `restic`, …) now resolve
   the executable via `shutil.which` on Windows before spawning, so `.cmd`
   shims like `npm.cmd` run — `CreateProcess` does not resolve them from a bare
