@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   reused by external writers — e.g. Hermes' `hermes-omi-memory-sync` skill — so no
   one writes OMI raw. See `docs/mesh.md` → "Node types & the single-writer rule".
   With tests.
+- `extras/omi_write.py` — a tracked, standalone reference helper that writes one
+  OMI note through the safe path (`omind.notes.upsert_note`), with env-based vault
+  resolution (`OMIND_OMI_DIR` / `OBSIDIAN_VAULT_PATH`) and a source-tree import
+  fallback. Equivalent to `omind note`, but as a single file embedders (e.g.
+  Hermes' `hermes-omi-memory-sync` skill) can drop in. Excluded from the wheel.
 
 - Inter-process write safety so concurrent Claude Code sessions (and the web UI
   and cron) can read and write the same OMI folder at once without corrupting
