@@ -15,6 +15,7 @@ import os
 import shutil
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -22,6 +23,7 @@ from typing import Any, ClassVar
 
 from omind import seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
+from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
 
 Logger = Callable[[str], None]
@@ -610,6 +612,8 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     results.append(_diagnose_hooks(claude_settings_path(), config))
 
+    results.append(_diagnose_hook_failures())
+
     return results
 
 
@@ -659,6 +663,39 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         )
     return CheckResult(
         "hooks", "ok", "auto-memory hooks installed (PostToolUse, Stop, SessionStart)"
+    )
+
+
+#: A failure-log entry younger than this many days makes doctor warn.
+_HOOK_FAILURE_FRESH_DAYS = 7
+
+
+def _diagnose_hook_failures() -> CheckResult:
+    """Surface the hooks' swallowed-error breadcrumbs (pure read).
+
+    The hook handlers must never fail the agent, so they swallow errors into
+    :func:`omind.hooks.failure_log_path`; doctor is where that becomes visible.
+    """
+    path = hook_failure_log_path()
+    try:
+        stat = path.stat()
+    except OSError:
+        return CheckResult("hook_failures", "ok", "no recorded hook failures")
+    if stat.st_size == 0:
+        return CheckResult("hook_failures", "ok", "no recorded hook failures")
+    age_days = (time.time() - stat.st_mtime) / 86400
+    if age_days > _HOOK_FAILURE_FRESH_DAYS:
+        return CheckResult(
+            "hook_failures",
+            "ok",
+            f"hook failures recorded, but none in the last "
+            f"{_HOOK_FAILURE_FRESH_DAYS} days ({path})",
+        )
+    return CheckResult(
+        "hook_failures",
+        "warn",
+        f"hook failure(s) recorded in the last {_HOOK_FAILURE_FRESH_DAYS} days — "
+        f"journaling may be silently failing; see {path}",
     )
 
 

@@ -474,3 +474,46 @@ def test_doctor_warns_on_hook_path_mismatch(
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["hooks"].level == "warn"
     assert provision.run_doctor(config, log=_quiet) == 0
+
+
+# -- hook failure breadcrumbs in doctor ----------------------------------------
+
+
+def test_diagnose_hook_failures_ok_when_no_log(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    result = provision._diagnose_hook_failures()
+    assert result.level == "ok"
+
+
+def test_diagnose_hook_failures_warns_on_recent_entries(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import hooks
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    log = hooks.failure_log_path()
+    log.parent.mkdir(parents=True)
+    log.write_text("2026-06-10T12:00:00 append_entry(/x): OSError()\n", encoding="utf-8")
+    result = provision._diagnose_hook_failures()
+    assert result.level == "warn"
+    assert str(log) in result.message
+
+
+def test_diagnose_hook_failures_ok_when_entries_are_stale(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import os
+    import time
+
+    from omind import hooks
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    log = hooks.failure_log_path()
+    log.parent.mkdir(parents=True)
+    log.write_text("old failure\n", encoding="utf-8")
+    stale = time.time() - 8 * 86400
+    os.utime(log, (stale, stale))
+    result = provision._diagnose_hook_failures()
+    assert result.level == "ok"

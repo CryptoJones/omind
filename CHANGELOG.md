@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- Hook errors are no longer invisible: the hook handlers still never block or
+  fail the agent, but every swallowed error now leaves a one-line breadcrumb
+  in `~/.local/state/omind/hook-failures.log` (size-capped, best-effort), and
+  `omind doctor` warns when that log has entries from the last 7 days.
+  Previously a full disk or a permissions change meant the session journal
+  just silently stopped existing. With tests.
 
 ## [1.2.0] - 2026-06-10
 
