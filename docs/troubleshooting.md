@@ -1,5 +1,29 @@
 # Troubleshooting
 
+## Where omind logs
+
+omind has no central log file; each piece logs where it runs. When something
+misbehaves, look in this order:
+
+1. **`omind doctor`** — run it first. It checks the whole wiring (tools, MCP
+   registration, hooks, backup health) and points at the relevant log when a
+   check warns.
+2. **Foreground commands** (`setup`, `backup run`, `export`, …) print
+   everything to stdout/stderr — there is no hidden file copy.
+3. **The unattended backup timer** logs to the systemd user journal:
+   `journalctl --user -u omind-backup.service`. Three consecutive failures
+   also write a `BACKUP FAILING` note into the vault itself, so the problem
+   surfaces in session priming.
+4. **The auto-memory hooks** never block or fail the agent, so their errors
+   are swallowed by design — but every swallowed error leaves a one-line
+   breadcrumb in **`~/.local/state/omind/hook-failures.log`**
+   (`$XDG_STATE_HOME/omind/hook-failures.log`). If the session journal
+   stops growing, read that file; `omind doctor` warns when it has entries
+   from the last 7 days. The log restarts past 256 KiB, so it never grows
+   unbounded. Delete it to clear the doctor warning once the cause is fixed.
+5. **The web UI** (`omind serve`) logs uvicorn request/error output to the
+   terminal it runs in.
+
 ## The MCP server "times out", and `obsidian-mcp` processes pile up
 
 ### Symptoms
