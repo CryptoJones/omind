@@ -117,14 +117,25 @@ def _extract_target(tool_input: object) -> str:
 
 
 def _extract_outcome(tool_response: object) -> str:
-    """``error`` if the response looks failed, else ``ok``."""
-    if isinstance(tool_response, dict) and (
-        tool_response.get("error")
-        or tool_response.get("is_error")
-        or tool_response.get("stderr")
+    """``error`` only on explicit failure indicators, else ``ok``.
+
+    Trusted signals (in order): truthy ``is_error``, ``success is False``,
+    non-empty ``error``, nonzero ``exit_code``/``returncode``. ``stderr`` alone
+    is NOT evidence of failure — healthy tools (git, curl, npm, dnf…) write
+    progress and warnings there.
+    """
+    if not isinstance(tool_response, dict):
+        return "ok"
+    if (
+        tool_response.get("is_error")
         or tool_response.get("success") is False
+        or tool_response.get("error")
     ):
         return "error"
+    for key in ("exit_code", "returncode"):
+        code = tool_response.get(key)
+        if isinstance(code, int) and code != 0:
+            return "error"
     return "ok"
 
 

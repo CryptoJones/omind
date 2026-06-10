@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- `omind hook` journaling no longer marks a tool action as `(error)` just because
+  its response carries a `stderr` field — git, curl, npm and friends write
+  progress there on success. Only explicit failure signals count now:
+  `is_error`, `success: false`, a non-empty `error` field, or a nonzero
+  `exit_code`/`returncode`. With tests.
+
 ### Added
 
 - `omind setup --agent hermes|openclaw` — provision **Hermes Agent** and
