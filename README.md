@@ -119,6 +119,14 @@ Check that everything is wired up correctly:
 omind doctor --vault "$HOME/Documents/Obsidian Vault"
 ```
 
+Add or update a single memory note safely — it creates the note, or updates it
+in place if the title already exists, through the same locked, atomic write path
+every other tool uses (body comes from stdin):
+
+```bash
+echo "the body of the note" | omind note --title "An Insight" --tags thesis,attention
+```
+
 Back up or migrate the whole memory dataset:
 
 ```bash

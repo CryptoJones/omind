@@ -9,6 +9,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- `omind note` — create or update a single OMI note from the command line through
+  the safe write path (the `.omi.lock` flock + atomic `os.replace` + `note_version`
+  re-check), rendering the canonical note format. Upserts by title (creates, or
+  updates in place); body is read from stdin so multi-line content pipes cleanly.
+  New module `src/omind/notes.py` (`upsert_note`) is the single write entry point
+  reused by external writers — e.g. Hermes' `hermes-omi-memory-sync` skill — so no
+  one writes OMI raw. See `docs/mesh.md` → "Node types & the single-writer rule".
+  With tests.
+
 - Inter-process write safety so concurrent Claude Code sessions (and the web UI
   and cron) can read and write the same OMI folder at once without corrupting
   it. `OmiStore` now serializes every write under an advisory `flock` on a
