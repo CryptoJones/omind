@@ -10,6 +10,7 @@ can assert the password file is referenced — and the password itself never is.
 
 from __future__ import annotations
 
+import os
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path, PurePosixPath
@@ -121,7 +122,8 @@ def test_init_creates_password_file_0600_and_repo(
     backup.init_backup(REPO, log=logged.append)
     passfile = backup.password_path()
     assert passfile.is_file()
-    assert passfile.stat().st_mode & 0o777 == 0o600
+    if os.name != "nt":  # POSIX permission bits don't exist on Windows
+        assert passfile.stat().st_mode & 0o777 == 0o600
     secret = passfile.read_text(encoding="utf-8").strip()
     assert len(secret) >= 32
     # The password is never printed, logged, or put on a command line.

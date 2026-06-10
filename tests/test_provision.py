@@ -372,7 +372,7 @@ def test_setup_installs_hooks_idempotently(tmp_path: Path, isolate_settings: Pat
         assert len(entries) == 1
         cmd = provision._entry_command_text(entries[0])
         assert f"hook {event}" in cmd  # the `hook <event>` subcommand is present
-        assert provision.HOOK_MARKER in cmd  # detectable marker
+        assert provision._command_is_omind_hook(cmd)  # detectable as ours (omind.EXE on Windows)
         assert str(config.vault) in cmd
 
 
