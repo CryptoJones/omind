@@ -9,6 +9,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Daily auto-journal notes now live in a `Journal/` subfolder instead of the
+  vault root, so they no longer pollute note listings, the regenerated index,
+  or SessionStart priming. `omind setup` and `omind reindex` migrate existing
+  `Session Journal *.md` from the root (and the legacy `logs/` location) under
+  the write lock, idempotently. New `omind rollup [--week]` compacts a week of
+  dailies into one summary note and archives or deletes the raw files
+  (default retention 30 days). With tests.
+
 - `omind hook` journaling no longer marks a tool action as `(error)` just because
   its response carries a `stderr` field — git, curl, npm and friends write
   progress there on success. Only explicit failure signals count now:

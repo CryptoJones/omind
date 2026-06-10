@@ -4,8 +4,13 @@
 
 `omind setup` installs Claude Code hooks (PostToolUse, Stop, SessionStart) that
 invoke ``omind hook <event>``. Each PostToolUse/Stop invocation appends one
-bullet to a per-day journal note in the OMI folder, giving a deterministic
-"every action" trail that complements Dix's hand-authored curated notes.
+bullet to a per-day journal note in the OMI folder's ``Journal/`` subfolder,
+giving a deterministic "every action" trail that complements Dix's
+hand-authored curated notes. Keeping dailies one level down means the
+top-level-only glob in :meth:`omind.store.OmiStore._note_paths` skips them, so
+they never accumulate in listings or the regenerated ``index.md`` — while
+Obsidian ``[[wikilinks]]`` stay folder-agnostic, so existing
+``[[Session Journal …]]`` links keep resolving.
 
 Design constraints:
 
@@ -32,6 +37,7 @@ from typing import Any, TextIO
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
+JOURNAL_DIRNAME = "Journal"  # subfolder keeping dailies out of listings/index
 JOURNAL_TAGS = ("session-journal", "omi")
 _TARGET_LIMIT = 80
 
@@ -52,6 +58,15 @@ def _date_str(now: datetime | None = None) -> str:
 def journal_name(now: datetime | None = None) -> str:
     """Deterministic per-day journal filename: ``Session Journal YYYY-MM-DD.md``."""
     return f"Session Journal {_date_str(now)}.md"
+
+
+def journal_dir(omi_dir: Path | str) -> Path:
+    """The journal subfolder: ``<omi_dir>/Journal``.
+
+    ``OmiStore._note_paths`` only globs top-level ``*.md``, so notes in here
+    drop out of listings and the regenerated index automatically.
+    """
+    return Path(omi_dir) / JOURNAL_DIRNAME
 
 
 def short_session_id(session_id: object) -> str:
@@ -170,14 +185,15 @@ def format_entry(
 
 
 def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) -> None:
-    """Append one bullet to today's journal under an exclusive lock. Never raises.
+    """Append one bullet to today's journal (in ``Journal/``) under an exclusive
+    lock. Never raises.
 
     Creates the note with :func:`journal_header` on first write (header + bullet
     are written together under the lock, so a torn header can't occur). Uses
     ``O_APPEND`` + ``flock(LOCK_EX)`` so concurrent hook processes serialize.
     """
     try:
-        directory = Path(omi_dir)
+        directory = journal_dir(omi_dir)
         directory.mkdir(parents=True, exist_ok=True)
         name = journal_name(now)
         path = directory / name

@@ -12,6 +12,7 @@ Subcommands:
   * ``omind reindex`` — regenerate index.md under the inter-process write lock.
   * ``omind quickstart`` — print the manual-wiring steps `setup` automates.
   * ``omind note`` — safely create/update one OMI note through OmiStore.
+  * ``omind rollup`` — compact weeks of daily session journals into summaries.
 """
 
 from __future__ import annotations
@@ -39,7 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
-        dest="command", metavar="{setup,quickstart,serve,doctor,export,import,reindex,note,hook}"
+        dest="command",
+        metavar="{setup,quickstart,serve,doctor,export,import,reindex,note,rollup,hook}",
     )
 
     setup = sub.add_parser(
@@ -218,6 +220,39 @@ def build_parser() -> argparse.ArgumentParser:
         "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
     )
 
+    rollup = sub.add_parser(
+        "rollup",
+        help="compact weeks of daily session journals into one summary note each, "
+        "then archive (default) or delete the dailies",
+    )
+    rollup.add_argument(
+        "--week",
+        default=None,
+        metavar="YYYY-Www",
+        help="roll up exactly this ISO week now (default: every week older than "
+        "the retention window)",
+    )
+    rollup.add_argument(
+        "--retain-days",
+        type=int,
+        default=30,
+        help="keep raw dailies this many days before rolling them up (default: 30)",
+    )
+    rollup.add_argument(
+        "--delete",
+        action="store_true",
+        help="delete rolled-up dailies instead of archiving them to Journal/Archive/",
+    )
+    rollup.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    rollup.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+
     hook = sub.add_parser(
         "hook", help="(internal) record one Claude Code action into the OMI journal"
     )
@@ -329,9 +364,13 @@ def _run_import(args: argparse.Namespace) -> int:
 
 
 def _run_reindex(args: argparse.Namespace) -> int:
+    from omind.journal import migrate_journals
     from omind.store import OmiStore
 
     omi_dir = (args.vault / args.folder).expanduser()
+    moved = migrate_journals(omi_dir)  # locked; idempotent no-op on a clean vault
+    if moved:
+        print(f"moved {len(moved)} session journal(s) into Journal/")
     OmiStore(omi_dir).update_index()  # locked + atomic
     print(f"reindexed {omi_dir / 'index.md'}")
     return 0
@@ -368,6 +407,36 @@ def _run_note(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_rollup(args: argparse.Namespace) -> int:
+    import re
+
+    from omind.journal import migrate_journals, rollup_journals
+
+    if args.week is not None and not re.fullmatch(r"\d{4}-W\d{2}", args.week):
+        print(f"error: --week must look like 2026-W24, got {args.week!r}", file=sys.stderr)
+        return 1
+    omi_dir = (args.vault / args.folder).expanduser()
+    moved = migrate_journals(omi_dir)  # sweep strays first so they roll up too
+    if moved:
+        print(f"moved {len(moved)} session journal(s) into Journal/")
+    results = rollup_journals(
+        omi_dir, week=args.week, retain_days=args.retain_days, delete=args.delete
+    )
+    if not results:
+        print("nothing to roll up")
+        return 0
+    for result in results:
+        if args.delete:
+            fate = f"deleted {len(result.deleted)}"
+        else:
+            fate = f"archived {len(result.archived)}"
+        print(
+            f"{result.week}: {len(result.days)} day(s) -> "
+            f"{result.rollup_filename} ({fate} dailies)"
+        )
+    return 0
+
+
 def _run_hook(args: argparse.Namespace) -> int:
     omi_dir = (args.vault / args.folder).expanduser()
     return run_hook(args.event, omi_dir)  # always 0; must never block the agent
@@ -392,6 +461,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_reindex(args)
     if args.command == "note":
         return _run_note(args)
+    if args.command == "rollup":
+        return _run_rollup(args)
     if args.command == "hook":
         return _run_hook(args)
     parser.print_help()

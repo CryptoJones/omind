@@ -18,7 +18,7 @@ _BULLET_RE = re.compile(r"^- \d\d:\d\d \[session [\w]+\] ")
 
 
 def _read_journal(omi: Path, now: datetime = _NOW) -> str:
-    return (omi / hooks.journal_name(now)).read_text(encoding="utf-8")
+    return (hooks.journal_dir(omi) / hooks.journal_name(now)).read_text(encoding="utf-8")
 
 
 def _action_bullets(text: str) -> list[str]:
@@ -47,6 +47,10 @@ def test_journal_name_is_accepted_by_store_safe_name(tmp_path: Path) -> None:
     assert resolved.name == "Session Journal 2026-06-09.md"
 
 
+def test_journal_dir_is_journal_subfolder(tmp_path: Path) -> None:
+    assert hooks.journal_dir(tmp_path) == tmp_path / "Journal"
+
+
 # -- append / header ---------------------------------------------------------
 
 
@@ -58,6 +62,16 @@ def test_append_creates_header_when_absent(tmp_path: Path) -> None:
     assert "session-journal" in fields.tags
     assert "## Actions" in text
     assert len(_action_bullets(text)) == 1
+
+
+def test_append_lands_in_journal_subfolder_and_stays_unindexed(tmp_path: Path) -> None:
+    hooks.append_entry(tmp_path, "- 14:32 [session abcd1234] PostToolUse Edit -> x.py (ok)", _NOW)
+    assert (tmp_path / "Journal" / hooks.journal_name(_NOW)).is_file()
+    assert not (tmp_path / hooks.journal_name(_NOW)).exists()  # nothing at top level
+    store = OmiStore(tmp_path)
+    assert store.list_notes() == []  # top-level-only glob skips Journal/
+    store.update_index()
+    assert "Session Journal" not in (tmp_path / "index.md").read_text(encoding="utf-8")
 
 
 def test_append_is_additive_single_header(tmp_path: Path) -> None:
@@ -198,7 +212,8 @@ def test_run_hook_returns_zero_and_records(tmp_path: Path) -> None:
                         '"tool_input": {"file_path": "a.txt"}}')
     rc = hooks.run_hook("PostToolUse", tmp_path, stdin=stdin)
     assert rc == 0
-    bullets = _action_bullets((tmp_path / hooks.journal_name()).read_text(encoding="utf-8"))
+    journal = hooks.journal_dir(tmp_path) / hooks.journal_name()
+    bullets = _action_bullets(journal.read_text(encoding="utf-8"))
     assert len(bullets) == 1
 
 
@@ -216,7 +231,7 @@ def test_run_hook_session_start_emits_context_no_journal(tmp_path: Path) -> None
     rc = hooks.run_hook("SessionStart", tmp_path, stdin=io.StringIO(""), stdout=out)
     assert rc == 0
     assert "additionalContext" in out.getvalue()
-    assert not list(tmp_path.glob("Session Journal*.md"))  # no journal written
+    assert not list(tmp_path.rglob("Session Journal*.md"))  # no journal written
 
 
 def test_session_start_injects_priming_note_content(tmp_path: Path) -> None:
@@ -243,7 +258,7 @@ def test_session_start_falls_back_when_no_notes(tmp_path: Path) -> None:
 
 def test_run_hook_stop_records_turn_line(tmp_path: Path) -> None:
     hooks.run_hook("Stop", tmp_path, stdin=io.StringIO('{"session_id": "qq"}'))
-    text = (tmp_path / hooks.journal_name()).read_text(encoding="utf-8")
+    text = (hooks.journal_dir(tmp_path) / hooks.journal_name()).read_text(encoding="utf-8")
     assert "Stop -> turn ended" in text
 
 
