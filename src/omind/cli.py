@@ -34,7 +34,7 @@ from omind.provision import (
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="omind",
-        description="OMI/Obsidian memory tooling for Claude Code.",
+        description="OMI/Obsidian memory tooling for AI agents.",
     )
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
