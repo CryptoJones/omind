@@ -136,6 +136,18 @@ never delete.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
+## Roadmap: the memory mesh
+
+The next major version (2.0.0) turns omind from a single-machine tool into a
+**git-backed mesh** — every machine runs a full local memory node, and the nodes
+replicate to one another **peer-to-peer over git**, so memory is shared across
+the house with **no central server** and full offline operation. Concurrent
+writes build on the existing per-node write safety (advisory `flock` + atomic
+`os.replace` + `note_version` compare-and-swap) and add cross-node **Lamport
+versioning** with a field-level merge; "deleting" a note **disables** it (hidden,
+restorable) rather than tombstoning it. See **[docs/mesh.md](docs/mesh.md)** for
+the full design.
+
 ## License
 
 Apache 2.0. See [LICENSE](LICENSE).

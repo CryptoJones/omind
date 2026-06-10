@@ -50,6 +50,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   are no-ops, and notes whose content differs are skipped (on-disk copy kept)
   unless `--force` is given. Imports never delete; archive members are
   path-traversal guarded. New module `src/omind/transfer.py` with tests.
+- `docs/mesh.md` — design for the 2.0.0 **git-backed memory mesh**: full
+  peer-to-peer replication of the OMI folder over git (no central server, full
+  offline operation), building on the existing per-node write safety with
+  cross-node Lamport versioning, a field-level conflict merge over `NoteFields`,
+  and **soft-delete** (disable / restore) instead of tombstoned hard deletes.
+  Design only — not yet implemented. Linked from the README roadmap.
 
 ### Fixed
 
