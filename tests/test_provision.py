@@ -13,6 +13,16 @@ import pytest
 from omind import provision, seeds
 from omind.provision import Provisioner, ProvisionError, SetupConfig, default_vault_path
 
+# Captured before the autouse isolate_settings fixture patches the module attribute,
+# so the path-resolution tests can exercise the real function.
+_real_claude_settings_path = provision.claude_settings_path
+
+
+@pytest.fixture(autouse=True)
+def clear_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Keep the dev machine's CLAUDE_CONFIG_DIR from leaking into path resolution."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
 
 @pytest.fixture
 def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -296,6 +306,33 @@ def test_claude_config_path_falls_back_to_legacy_when_only_legacy_exists(
     legacy.parent.mkdir(parents=True)
     legacy.write_text("{}", encoding="utf-8")
     assert provision.claude_config_path() == legacy
+
+
+def test_claude_config_path_honors_claude_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Regression: CLAUDE_CONFIG_DIR relocates the CLI config wholesale.
+
+    With the env var set, the CLI reads/writes $CLAUDE_CONFIG_DIR/.claude.json
+    even when a stale ~/.claude.json exists — reading the stale file made
+    doctor report a false 'not registered' and setup abort on 'already exists'.
+    """
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    (tmp_path / ".claude.json").write_text("{}", encoding="utf-8")  # stale decoy
+    config_dir = tmp_path / "custom-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    assert provision.claude_config_path() == config_dir / ".claude.json"
+
+
+def test_claude_settings_path_default_and_claude_config_dir(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """settings.json follows the config dir: ~/.claude by default, env var wins."""
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    assert _real_claude_settings_path() == tmp_path / ".claude" / "settings.json"
+    config_dir = tmp_path / "custom-claude"
+    monkeypatch.setenv("CLAUDE_CONFIG_DIR", str(config_dir))
+    assert _real_claude_settings_path() == config_dir / "settings.json"
 
 
 def test_doctor_finds_server_via_canonical_config_path(
