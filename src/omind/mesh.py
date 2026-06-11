@@ -19,9 +19,11 @@ import json
 import os
 import re
 import secrets
+import shutil
 import socket
 import subprocess
 import sys
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
@@ -507,3 +509,162 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
         store.update_index_locked()
         _commit_locked(omi_dir, node_id, f"omind: purge {target.name} from {node_id}")
     log(f"purged {target.name} (tombstoned for every node)")
+
+
+# -- daemon ---------------------------------------------------------------------
+
+
+def _should_sync(
+    now: float,
+    last_sync: float,
+    signal_mtime: float | None,
+    cfg: NodeConfig,
+) -> bool:
+    """The daemon's trigger decision (pure, unit-tested).
+
+    Sync when the interval elapsed, or when a write signal is newer than the
+    last sync AND has sat for the debounce window (so a burst of writes from
+    one agent turn batches into a single commit+sync).
+    """
+    if now - last_sync >= cfg.interval_seconds:
+        return True
+    if signal_mtime is None or signal_mtime <= last_sync:
+        return False
+    return now - signal_mtime >= cfg.debounce_seconds
+
+
+def run_daemon(
+    omi_dir: Path,
+    cfg: NodeConfig,
+    log: Logger = print,
+    *,
+    _max_tick_seconds: float | None = None,
+) -> int:
+    """Replicate continuously: interval sync + on-write debounced sync.
+
+    Runs until SIGTERM/SIGINT (clean exit 0). ``_max_tick_seconds`` bounds the
+    loop for tests only.
+    """
+    from omind.paths import sync_signal_path
+
+    omi_dir = Path(omi_dir).expanduser()
+    signal_file = sync_signal_path(omi_dir)
+    stop = {"flag": False}
+
+    def _terminate(_signum: int, _frame: object) -> None:
+        stop["flag"] = True
+
+    # SIGTERM only exists as a signal on POSIX; Windows gets Ctrl+C/SIGINT.
+    import signal as signal_mod
+
+    if hasattr(signal_mod, "SIGTERM"):
+        signal_mod.signal(signal_mod.SIGTERM, _terminate)
+
+    log(f"omind mesh daemon: {omi_dir} as {cfg.node_id} (interval {cfg.interval_seconds}s)")
+    last_sync = 0.0  # epoch start -> first tick syncs immediately
+    started = time.time()
+    try:
+        while not stop["flag"]:
+            now = time.time()
+            if _max_tick_seconds is not None and now - started >= _max_tick_seconds:
+                break
+            signal_mtime: float | None
+            try:
+                signal_mtime = signal_file.stat().st_mtime
+            except OSError:
+                signal_mtime = None
+            if _should_sync(now, last_sync, signal_mtime, cfg):
+                try:
+                    report = sync(omi_dir, cfg.node_id, log=log)
+                    if not report.ok:
+                        log("sync finished with peer errors (see above)")
+                except MeshError as exc:
+                    log(f"sync failed: {_first_line(str(exc))}")
+                last_sync = time.time()
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
+    log("omind mesh daemon: stopped")
+    return 0
+
+
+# -- service install -----------------------------------------------------------------
+
+MESH_SERVICE_UNIT = "omind-mesh.service"
+MESH_LAUNCHD_LABEL = "net.thenetwerk.omind-mesh"
+
+
+def install_service(vault: Path, folder: str, log: Logger = print) -> None:
+    """Install + start the replication daemon as a user-level service.
+
+    systemd user unit on Linux (Restart=on-failure — a crashed daemon comes
+    back; a SIGTERM'd one stays stopped), launchd agent on macOS. Windows:
+    prints the schtasks one-liner instead (no auto-install in 2.0).
+    """
+    omi_dir = (vault / folder).expanduser()
+    if load_node_config(omi_dir) is None:
+        raise MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
+    omind_exe = shutil.which("omind") or "omind"
+    daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder {folder}'
+
+    if sys.platform == "linux":
+        from omind.backup import systemd_user_dir
+
+        unit_dir = systemd_user_dir()
+        unit_dir.mkdir(parents=True, exist_ok=True)
+        unit = (
+            "[Unit]\n"
+            "Description=omind mesh replication daemon\n"
+            "\n"
+            "[Service]\n"
+            "Type=simple\n"
+            f"ExecStart={daemon_cmd}\n"
+            "Restart=on-failure\n"
+            "RestartSec=30\n"
+            "\n"
+            "[Install]\n"
+            "WantedBy=default.target\n"
+        )
+        (unit_dir / MESH_SERVICE_UNIT).write_text(unit, encoding="utf-8")
+        log(f"wrote {unit_dir / MESH_SERVICE_UNIT}")
+        run_command(["systemctl", "--user", "daemon-reload"], error=MeshError)
+        run_command(["systemctl", "--user", "enable", "--now", MESH_SERVICE_UNIT], error=MeshError)
+        log(f"enabled {MESH_SERVICE_UNIT}")
+        return
+
+    if sys.platform == "darwin":
+        agents = Path.home() / "Library" / "LaunchAgents"
+        agents.mkdir(parents=True, exist_ok=True)
+        plist_path = agents / f"{MESH_LAUNCHD_LABEL}.plist"
+        args = [omind_exe, "mesh", "daemon", "--vault", str(vault), "--folder", folder]
+        args_xml = "\n".join(f"      <string>{a}</string>" for a in args)
+        plist = (
+            '<?xml version="1.0" encoding="UTF-8"?>\n'
+            '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '
+            '"http://www.apple.com/DTDs/PropertyList-1.0.dtd">\n'
+            '<plist version="1.0">\n'
+            "  <dict>\n"
+            "    <key>Label</key>\n"
+            f"    <string>{MESH_LAUNCHD_LABEL}</string>\n"
+            "    <key>ProgramArguments</key>\n"
+            "    <array>\n"
+            f"{args_xml}\n"
+            "    </array>\n"
+            "    <key>KeepAlive</key>\n"
+            "    <true/>\n"
+            "    <key>RunAtLoad</key>\n"
+            "    <true/>\n"
+            "  </dict>\n"
+            "</plist>\n"
+        )
+        plist_path.write_text(plist, encoding="utf-8")
+        log(f"wrote {plist_path}")
+        uid = os.getuid()
+        run_command(
+            ["launchctl", "bootstrap", f"gui/{uid}", str(plist_path)], error=MeshError, check=False
+        )
+        log(f"loaded {MESH_LAUNCHD_LABEL}")
+        return
+
+    log("Windows: auto-install is not supported in 2.0; run the daemon at logon with:")
+    log(f'  schtasks /Create /SC ONLOGON /TN omind-mesh /TR "{daemon_cmd}"')

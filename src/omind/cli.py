@@ -124,7 +124,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     msub = mesh.add_subparsers(
         dest="mesh_command",
-        metavar="{init,add-peer,remove-peer,sync,clone,purge}",
+        metavar="{init,add-peer,remove-peer,sync,daemon,install-service,clone,purge}",
         required=True,
     )
     mesh_init_p = msub.add_parser(
@@ -142,6 +142,13 @@ def build_parser() -> argparse.ArgumentParser:
     mesh_sync.add_argument(
         "--peer", action="append", default=None, help="sync only this peer (repeatable)"
     )
+    mesh_daemon = msub.add_parser(
+        "daemon", help="run the replication loop (interval sync + on-write debounce)"
+    )
+    mesh_install = msub.add_parser(
+        "install-service",
+        help="install the replication daemon as a user service (systemd/launchd)",
+    )
     mesh_clone = msub.add_parser("clone", help="seed a fresh node from a peer")
     mesh_clone.add_argument("url", help="git URL of an existing node")
     mesh_purge = msub.add_parser(
@@ -150,7 +157,16 @@ def build_parser() -> argparse.ArgumentParser:
         "delete only archives — this is the rare exception",
     )
     mesh_purge.add_argument("note", help="note filename (e.g. 'Old Note.md')")
-    for mp in (mesh_init_p, mesh_add_peer, mesh_remove_peer, mesh_sync, mesh_clone, mesh_purge):
+    for mp in (
+        mesh_init_p,
+        mesh_add_peer,
+        mesh_remove_peer,
+        mesh_sync,
+        mesh_daemon,
+        mesh_install,
+        mesh_clone,
+        mesh_purge,
+    ):
         mp.add_argument(
             "--vault",
             type=Path,
@@ -450,10 +466,13 @@ def _run_backup(args: argparse.Namespace) -> int:
 
 def _run_node(args: argparse.Namespace) -> int:
     # Imported lazily: the mcp SDK is only needed when actually serving.
+    from omind.mesh import load_node_config
     from omind.server import run_node
 
     omi_dir = (args.vault / args.folder).expanduser()
-    return run_node(omi_dir)
+    # With a mesh identity, every MCP write stamps the next Lamport rev.
+    cfg = load_node_config(omi_dir)
+    return run_node(omi_dir, node_id=cfg.node_id if cfg else None)
 
 
 def _run_mesh(args: argparse.Namespace) -> int:
@@ -485,6 +504,15 @@ def _run_mesh(args: argparse.Namespace) -> int:
             if not report.peers:
                 print("no peers configured (committed local changes only)")
             return 0 if report.ok else 1
+        elif args.mesh_command == "daemon":
+            cfg = mesh.load_node_config(omi_dir)
+            if cfg is None:
+                raise mesh.MeshError(
+                    f"not a mesh node yet — run `omind mesh init` first ({omi_dir})"
+                )
+            return mesh.run_daemon(omi_dir, cfg)
+        elif args.mesh_command == "install-service":
+            mesh.install_service(args.vault, args.folder)
         elif args.mesh_command == "clone":
             mesh.clone(args.url, omi_dir)
             print(f"node ready at {omi_dir}; next: omind setup")
