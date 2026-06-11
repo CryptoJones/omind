@@ -47,6 +47,10 @@ class NoteFieldsModel(BaseModel):
     connections: list[str] = []
     action_items: list[ActionItemModel] = []
     references: list[str] = []
+    # Mesh metadata (docs/mesh.md), round-tripped so a structured save does not
+    # strip a note's Lamport rev or silently resurrect an archived note.
+    rev: str = ""
+    disabled: bool = False
 
     def to_fields(self) -> NoteFields:
         return NoteFields.from_dict(self.model_dump())
@@ -61,12 +65,17 @@ def create_app(omi_dir: Path | str) -> FastAPI:
     app = FastAPI(title="omind", description="OMI memory web UI")
 
     @app.get("/api/notes")
-    def list_notes() -> list[dict[str, object]]:
-        return [asdict(s) for s in store.list_notes()]
+    def list_notes(include_disabled: bool = False) -> list[dict[str, object]]:
+        return [asdict(s) for s in store.list_notes(include_disabled=include_disabled)]
 
     @app.get("/api/tags")
     def list_tags() -> list[str]:
         return store.all_tags()
+
+    @app.get("/api/meta")
+    def get_meta() -> dict[str, object]:
+        # mesh tells the UI whether DELETE archives (restorable) or removes.
+        return {"mesh": store.mesh_mode()}
 
     @app.get("/api/notes/{name}")
     def get_note(name: str) -> dict[str, object]:
@@ -108,6 +117,10 @@ def create_app(omi_dir: Path | str) -> FastAPI:
     def delete_note(name: str) -> None:
         _guard(lambda: store.delete_note(name))
 
+    @app.post("/api/notes/{name}/restore")
+    def restore_note(name: str) -> dict[str, str]:
+        return {"filename": _guard(lambda: store.restore_note(name))}
+
     if STATIC_DIR.is_dir():
         app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
 
@@ -121,6 +134,8 @@ def _guard(fn: Callable[[], T]) -> T:
     except NoteNotFoundError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except NoteConflictError as exc:
+        # Another writer — or a mesh sync merging a peer's edit — updated the
+        # note since this client read it; the client should reload and reapply.
         raise HTTPException(status_code=409, detail=str(exc)) from exc
     except NoteError as exc:
         raise HTTPException(status_code=400, detail=str(exc)) from exc

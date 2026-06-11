@@ -722,3 +722,38 @@ body,
   letter-spacing: normal;
   text-transform: none;
 }
+
+/* ---- Archived (soft-deleted) notes ---------------------------------------- */
+
+.arch-badge {
+  display: inline-block;
+  margin-inline-start: 0.35rem;
+  padding: 0.05rem 0.5rem;
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  font-family: "JetBrains Mono", ui-monospace, monospace;
+  font-size: 9px;
+  text-transform: uppercase;
+  letter-spacing: 0.14em;
+  color: var(--text-faint);
+  background: var(--surface-2);
+  vertical-align: middle;
+}
+
+.arch-toggle {
+  font: inherit;
+  text-transform: inherit;
+  letter-spacing: inherit;
+  color: inherit;
+  opacity: 0.7;
+  cursor: pointer;
+}
+
+.arch-toggle:hover {
+  opacity: 1;
+}
+
+.arch-toggle.active {
+  color: var(--accent);
+  opacity: 1;
+}
