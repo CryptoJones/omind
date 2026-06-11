@@ -35,6 +35,30 @@ omind mesh add-peer newbox ssh://newbox/home/you/Documents/Obsidian\ Vault/OMI
 Every node should know every node (full peer-to-peer). An unreachable peer is
 skipped and retried on the next cycle — partitions are normal, not errors.
 
+## Add a seed (and optionally a hosted mirror)
+
+A **seed** is a passive bare repo on a usually-up box — a rendezvous and a
+bootstrap source, not a hub (nodes keep syncing peer-to-peer without it).
+One command provisions it end to end:
+
+```bash
+omind mesh add-seed seed ssh://pluto/home/you/omi-mesh.git \
+    --mirror git@github.com:you/omi-mesh.git
+```
+
+This creates the bare repo over ssh (or at a local path), installs its
+post-receive hook — after every push it points `main` at the freshest node
+ref and, with `--mirror`, mirror-pushes the whole seed to the hosted repo —
+and registers it as a peer on this node. Register the same URL on the other
+nodes with plain `omind mesh add-peer`, and bootstrap new machines with
+`omind mesh clone <seed-or-mirror-url>`.
+
+Notes travel to the mirror **in plaintext** — make the hosted repo private.
+The seed's host needs push access to the mirror (an ssh key GitHub knows).
+The mirror only updates when a node pushes to the seed, so a powered-off
+seed host just means a stale mirror, never lost data. Re-running `add-seed`
+is safe: every step converges.
+
 ## Daily operation
 
 There is nothing to do. The daemon commits local writes (debounced) and syncs

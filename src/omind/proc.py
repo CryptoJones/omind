@@ -36,8 +36,13 @@ def run_command(
     check: bool = True,
     env: dict[str, str] | None = None,
     timeout: float = DEFAULT_TIMEOUT,
+    input_text: str | None = None,
 ) -> subprocess.CompletedProcess[str]:
-    """Run *cmd* with output captured, mapping the usual failures to *error*."""
+    """Run *cmd* with output captured, mapping the usual failures to *error*.
+
+    *input_text* becomes the child's stdin (mesh add-seed streams a hook
+    script to a remote `cat` this way — no temp file on either side).
+    """
     if os.name == "nt":
         # CreateProcess won't resolve npm.cmd / claude.cmd from a bare
         # name; shutil.which finds the shim with its extension.
@@ -52,6 +57,7 @@ def run_command(
             text=True,
             env=env,
             timeout=timeout,
+            input=input_text,
         )
     except FileNotFoundError as exc:
         raise error(f"command not found: {cmd[0]}") from exc

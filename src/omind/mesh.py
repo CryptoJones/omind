@@ -19,6 +19,7 @@ import json
 import os
 import re
 import secrets
+import shlex
 import shutil
 import socket
 import subprocess
@@ -274,6 +275,163 @@ def add_peer(omi_dir: Path, name: str, url: str) -> None:
 
 def remove_peer(omi_dir: Path, name: str) -> None:
     git(omi_dir, "remote", "remove", name)
+
+
+# -- seed (passive bare peer) -----------------------------------------------------
+
+#: Remote name a seed mirrors to (when configured). Generic on purpose — the
+#: mirror host (GitHub, Codeberg, another box) is the operator's choice.
+MIRROR_REMOTE = "mirror"
+
+#: hooks/post-receive installed into every seed. Nodes push only to their
+#: refs/omind/<id> outbox, so a bare seed would never grow a branch; without
+#: one, fetching from a seed yields nothing mergeable and doctor's peer check
+#: reads "never fetched" forever. The hook points main at the freshest outbox
+#: ref after every push, then mirror-pushes everything if a mirror remote is
+#: configured.
+SEED_POST_RECEIVE = """\
+#!/bin/sh
+# Installed by `omind mesh add-seed`; re-running it overwrites local edits.
+newest=$(git for-each-ref --sort=-committerdate --count=1 \
+    --format='%(objectname)' 'refs/omind/*')
+[ -n "$newest" ] && git update-ref refs/heads/main "$newest"
+if git config remote.mirror.url >/dev/null 2>&1; then
+    exec git push --quiet --mirror mirror
+fi
+exit 0
+"""
+
+
+@dataclass
+class SeedTarget:
+    """Where a seed repo lives: the ssh command prefix to reach its host
+    (empty for a local path) and the repo directory on that host."""
+
+    ssh: list[str]
+    path: str
+
+    @property
+    def remote(self) -> bool:
+        return bool(self.ssh)
+
+
+_SCP_LIKE_RE = re.compile(r"^(?P<host>[^/:]+):(?P<path>.+)$")
+_DRIVE_RE = re.compile(r"^[A-Za-z]:[\\/]")
+
+
+def _parse_seed_url(url: str) -> SeedTarget:
+    """Split a git URL into how-to-reach-the-host + on-host path.
+
+    Understands ssh:// URLs, scp-like host:path, and local paths — the forms
+    we can provision a repo at. http(s)/git URLs are fetch-only transports.
+    """
+    if url.startswith("ssh://"):
+        from urllib.parse import urlsplit
+
+        parts = urlsplit(url)
+        if not parts.hostname or not parts.path:
+            raise MeshError(f"unusable ssh URL (need host and path): {url}")
+        host = f"{parts.username}@{parts.hostname}" if parts.username else parts.hostname
+        ssh = ["ssh", *(["-p", str(parts.port)] if parts.port else []), host]
+        # git treats ssh://host/~/x as home-relative; hand the shell ~/x too.
+        path = parts.path[1:] if parts.path.startswith("/~") else parts.path
+        return SeedTarget(ssh=ssh, path=path)
+    if "://" in url:
+        raise MeshError(f"cannot provision a seed over {url.split('://', 1)[0]}://")
+    scp = _SCP_LIKE_RE.match(url)
+    if scp and not _DRIVE_RE.match(url):
+        return SeedTarget(ssh=["ssh", scp.group("host")], path=scp.group("path"))
+    return SeedTarget(ssh=[], path=str(Path(url).expanduser()))
+
+
+def _seed_run(
+    target: SeedTarget, args: list[str], check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    """Run one argv on the seed's host (over ssh when remote, else directly)."""
+    if target.remote:
+        # The remote shell re-parses the command line; quote every word.
+        return run_command(
+            [*target.ssh, " ".join(shlex.quote(a) for a in args)],
+            error=MeshError,
+            check=check,
+            timeout=GIT_TIMEOUT,
+        )
+    return run_command(args, error=MeshError, check=check, timeout=GIT_TIMEOUT)
+
+
+def _seed_git(
+    target: SeedTarget, *args: str, check: bool = False
+) -> subprocess.CompletedProcess[str]:
+    return _seed_run(target, ["git", "-C", target.path, *args], check=check)
+
+
+def _install_seed_hook(target: SeedTarget) -> None:
+    if not target.remote:
+        hook = Path(target.path) / "hooks" / "post-receive"
+        hook.write_text(SEED_POST_RECEIVE, encoding="utf-8")
+        hook.chmod(0o755)
+        return
+    qhook = shlex.quote(f"{target.path}/hooks/post-receive")
+    run_command(
+        [*target.ssh, f"cat > {qhook} && chmod +x {qhook}"],
+        error=MeshError,
+        check=True,
+        timeout=GIT_TIMEOUT,
+        input_text=SEED_POST_RECEIVE,
+    )
+
+
+def add_seed(
+    omi_dir: Path,
+    name: str,
+    url: str,
+    mirror: str | None = None,
+    log: Logger = print,
+) -> None:
+    """Provision a bare seed repo at *url* and register it as a peer.
+
+    A seed is a passive rendezvous, not a hub (docs/mesh.md): nodes keep
+    syncing peer-to-peer without it, but a seed on a usually-up box gives
+    off-LAN machines a meeting point and `mesh clone` a bootstrap source.
+    Creates the bare repo (locally or over ssh), installs the post-receive
+    hook, configures the optional mirror remote, and adds the peer here.
+    Every step converges on re-run instead of failing on existing state.
+    """
+    omi_dir = Path(omi_dir).expanduser()
+    if not re.fullmatch(r"[A-Za-z0-9._-]+", name):
+        raise MeshError(f"invalid peer name: {name!r}")
+    target = _parse_seed_url(url)
+
+    probe = _seed_git(target, "rev-parse", "--is-bare-repository")
+    if probe.returncode == 0:
+        if probe.stdout.strip() != "true":
+            raise MeshError(f"{target.path}: exists and is not a bare repository")
+        log(f"seed repo already present: {target.path}")
+    else:
+        init = _seed_run(target, ["git", "init", "--bare", "--initial-branch=main", target.path])
+        if init.returncode != 0:
+            raise MeshError(f"git init: {_first_line(init.stderr or init.stdout)}")
+        log(f"created bare seed repo: {target.path}")
+
+    if mirror:
+        current = _seed_git(target, "remote", "get-url", MIRROR_REMOTE)
+        if current.returncode != 0:
+            _seed_git(target, "remote", "add", MIRROR_REMOTE, mirror, check=True)
+        elif current.stdout.strip() != mirror:
+            _seed_git(target, "remote", "set-url", MIRROR_REMOTE, mirror, check=True)
+        log(f"mirror remote -> {mirror}")
+    _install_seed_hook(target)
+    log("post-receive hook installed (main pointer + mirror push)")
+
+    existing = peers(omi_dir).get(name)
+    if existing is None:
+        add_peer(omi_dir, name, url)
+        log(f"peer added: {name} -> {url}")
+    elif existing == url:
+        log(f"peer already registered: {name}")
+    else:
+        raise MeshError(f"peer {name} already points at {existing}")
+    log(f"next: `omind mesh sync`, and `omind mesh add-peer {name} <url>` on the other nodes")
 
 
 # -- sync -----------------------------------------------------------------------
