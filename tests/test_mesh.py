@@ -327,6 +327,13 @@ def test_sync_state_recorded_for_doctor(pair: tuple[Path, str, Path, str]) -> No
     assert [p["name"] for p in state["peers"]] == ["b"]
 
 
+def test_peers_with_space_in_url(pair: tuple[Path, str, Path, str]) -> None:
+    a, _, _b, _ = pair
+    url = "ssh://pluto/home/user/Documents/Obsidian Vault/OMI"
+    mesh.add_peer(a, "spaced", url)
+    assert mesh.peers(a)["spaced"] == url
+
+
 def test_remove_peer(pair: tuple[Path, str, Path, str]) -> None:
     a, _, _b, _ = pair
     assert "b" in mesh.peers(a)
