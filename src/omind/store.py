@@ -637,6 +637,16 @@ class OmiStore:
         with self.write_lock():
             self._write_index()
 
+    def update_index_locked(self) -> None:
+        """Regenerate index.md when the caller ALREADY holds :meth:`write_lock`.
+
+        ``flock`` is per-open-file-description, so re-taking the lock from the
+        same process would deadlock — the mesh sync engine, which wraps a whole
+        fetch/merge/regenerate cycle in one lock, calls this instead of
+        :meth:`update_index`.
+        """
+        self._write_index()
+
     def _write_index(self) -> None:
         """Regenerate index.md. Caller MUST hold :meth:`write_lock`.
 
