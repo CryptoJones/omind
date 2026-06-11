@@ -11,6 +11,8 @@ const state = {
   currentVersion: "", // mtime+size token of the open note, for conflict detection
   mode: "empty", // empty | view | edit | raw | new
   lang: "en",
+  showArchived: false, // include soft-deleted (Disabled: true) notes in the list
+  mesh: false, // server-reported: DELETE archives (restorable) instead of removing
 };
 
 // ---- i18n -----------------------------------------------------------------
@@ -48,6 +50,9 @@ const I18N = {
     confirmDelete: 'Delete "{name}"? This removes the file.',
     conflictPrompt: '"{name}" changed on disk since you opened it. Overwrite with your version?',
     backlinks: "Backlinks",
+    archivedToggle: "archived", archivedBadge: "archived", restore: "Restore",
+    restoredToast: "Restored.", archivedToast: "Archived.",
+    confirmArchive: 'Archive "{name}"? It stays restorable.',
   },
   es: {
     tagline: "memoria", search: "buscar…", theme: "Tema", language: "Idioma",
@@ -72,6 +77,9 @@ const I18N = {
     confirmDelete: "¿Eliminar «{name}»? Esto borra el archivo.",
     conflictPrompt: "«{name}» cambió en el disco desde que la abriste. ¿Sobrescribir con tu versión?",
     backlinks: "Retroenlaces",
+    archivedToggle: "archivadas", archivedBadge: "archivada", restore: "Restaurar",
+    restoredToast: "Restaurada.", archivedToast: "Archivada.",
+    confirmArchive: "¿Archivar «{name}»? Podrás restaurarla.",
   },
   fr: {
     tagline: "mémoire", search: "rechercher…", theme: "Thème", language: "Langue",
@@ -97,6 +105,9 @@ const I18N = {
     confirmDelete: "Supprimer « {name} » ? Cela efface le fichier.",
     conflictPrompt: "« {name} » a changé sur le disque depuis son ouverture. Écraser avec votre version ?",
     backlinks: "Rétroliens",
+    archivedToggle: "archivées", archivedBadge: "archivée", restore: "Restaurer",
+    restoredToast: "Restaurée.", archivedToast: "Archivée.",
+    confirmArchive: "Archiver « {name} » ? Restauration possible.",
   },
   ar: {
     tagline: "ذاكرة", search: "بحث…", theme: "السمة", language: "اللغة",
@@ -120,6 +131,9 @@ const I18N = {
     confirmDelete: "حذف «{name}»؟ سيؤدي ذلك إلى حذف الملف.",
     conflictPrompt: "تغيّرت «{name}» على القرص منذ فتحها. هل تريد الكتابة فوقها بنسختك؟",
     backlinks: "روابط واردة",
+    archivedToggle: "المؤرشفة", archivedBadge: "مؤرشفة", restore: "استعادة",
+    restoredToast: "تمت الاستعادة.", archivedToast: "تمت الأرشفة.",
+    confirmArchive: "أرشفة «{name}»؟ يمكن استعادتها لاحقًا.",
   },
   ru: {
     tagline: "память", search: "поиск…", theme: "Тема", language: "Язык",
@@ -143,6 +157,9 @@ const I18N = {
     filteredTo: "Фильтр по #{tag}", confirmDelete: "Удалить «{name}»? Файл будет удалён.",
     conflictPrompt: "«{name}» изменилась на диске с момента открытия. Перезаписать вашей версией?",
     backlinks: "Обратные ссылки",
+    archivedToggle: "архив", archivedBadge: "в архиве", restore: "Восстановить",
+    restoredToast: "Восстановлено.", archivedToast: "В архиве.",
+    confirmArchive: "Архивировать «{name}»? Её можно будет восстановить.",
   },
   zh: {
     tagline: "记忆", search: "搜索…", theme: "主题", language: "语言",
@@ -164,6 +181,9 @@ const I18N = {
     filteredTo: "已按 #{tag} 筛选", confirmDelete: "删除“{name}”？这将移除该文件。",
     conflictPrompt: "“{name}”自打开后已在磁盘上更改。用你的版本覆盖吗？",
     backlinks: "反向链接",
+    archivedToggle: "已归档", archivedBadge: "已归档", restore: "恢复",
+    restoredToast: "已恢复。", archivedToast: "已归档。",
+    confirmArchive: "归档“{name}”？之后仍可恢复。",
   },
 };
 
@@ -307,7 +327,9 @@ function renderSidebar() {
     li.style.animationDelay = `${Math.min(i, 12) * 28}ms`;
     li.dataset.name = n.filename;
     li.innerHTML = `
-      <div class="ic-title">${escapeHtml(n.title)}</div>
+      <div class="ic-title">${escapeHtml(n.title)}${
+        n.disabled ? ` <span class="arch-badge">${escapeHtml(t("archivedBadge"))}</span>` : ""
+      }</div>
       <div class="ic-meta">${escapeHtml(n.created || "undated")}${
         n.tags.length ? " · " + n.tags.slice(0, 3).map((t) => "#" + escapeHtml(t)).join(" ") : ""
       }</div>
@@ -369,7 +391,9 @@ function renderView(data) {
     <article class="sheet">
       <div class="flex items-start justify-between gap-4">
         <div>
-          <div class="sheet-eyebrow">${escapeHtml(data.filename)}</div>
+          <div class="sheet-eyebrow">${escapeHtml(data.filename)}${
+            f.disabled ? ` <span class="arch-badge">${escapeHtml(t("archivedBadge"))}</span>` : ""
+          }</div>
           <h2 class="sheet-title">${escapeHtml(f.title || stem(data.filename))}</h2>
         </div>
         <div class="seg shrink-0">
@@ -381,12 +405,19 @@ function renderView(data) {
       <div class="prose-omi mt-5">${renderMarkdown(data.raw)}</div>
       <div id="backlinks-panel"></div>
       <div class="mt-8 flex justify-end gap-2 border-t border-rule pt-4">
-        <button class="btn btn-danger" data-act="delete">${escapeHtml(t("delete"))}</button>
+        ${
+          f.disabled
+            ? `<button class="btn btn-primary" data-act="restore">${escapeHtml(t("restore"))}</button>`
+            : `<button class="btn btn-danger" data-act="delete">${escapeHtml(t("delete"))}</button>`
+        }
       </div>
     </article>`;
   contentEl.querySelector('[data-act="edit"]').onclick = () => openEdit(data);
   contentEl.querySelector('[data-act="raw"]').onclick = () => openRaw(data);
-  contentEl.querySelector('[data-act="delete"]').onclick = () => deleteNote(data.filename);
+  const del = contentEl.querySelector('[data-act="delete"]');
+  if (del) del.onclick = () => deleteNote(data.filename);
+  const rest = contentEl.querySelector('[data-act="restore"]');
+  if (rest) rest.onclick = () => restoreNote(data.filename);
   wireInlineLinks();
   loadBacklinks(data.filename);
 }
@@ -617,12 +648,24 @@ function openRaw(data) {
 // ---- Delete ---------------------------------------------------------------
 
 async function deleteNote(name) {
-  if (!confirm(t("confirmDelete", { name: stem(name) }))) return;
+  const key = state.mesh ? "confirmArchive" : "confirmDelete";
+  if (!confirm(t(key, { name: stem(name) }))) return;
   try {
     await api("DELETE", `/api/notes/${encodeURIComponent(name)}`);
     await refresh();
     renderEmpty();
-    toast(t("deletedToast"));
+    toast(t(state.mesh ? "archivedToast" : "deletedToast"));
+  } catch (e) {
+    toast(e.message);
+  }
+}
+
+async function restoreNote(name) {
+  try {
+    await api("POST", `/api/notes/${encodeURIComponent(name)}/restore`);
+    await refresh();
+    await openNote(name);
+    toast(t("restoredToast"));
   } catch (e) {
     toast(e.message);
   }
@@ -630,9 +673,11 @@ async function deleteNote(name) {
 
 // ---- Boot -----------------------------------------------------------------
 
+const notesPath = () => (state.showArchived ? "/api/notes?include_disabled=true" : "/api/notes");
+
 async function refresh() {
   const [notes, tags] = await Promise.all([
-    api("GET", "/api/notes"),
+    api("GET", notesPath()),
     api("GET", "/api/tags"),
   ]);
   state.notes = notes;
@@ -646,6 +691,25 @@ searchEl.addEventListener("input", () => {
 });
 $("#new-btn").addEventListener("click", openNew);
 
+// ---- Archived (soft-deleted) notes ------------------------------------------
+
+function renderArchToggle() {
+  const btn = $("#archived-toggle");
+  if (!btn) return;
+  btn.textContent = (state.showArchived ? "☑ " : "☐ ") + t("archivedToggle");
+  btn.classList.toggle("active", state.showArchived);
+}
+
+$("#archived-toggle").addEventListener("click", async () => {
+  state.showArchived = !state.showArchived;
+  renderArchToggle();
+  try {
+    await refresh();
+  } catch (e) {
+    toast(e.message);
+  }
+});
+
 // ---- Live refresh ---------------------------------------------------------
 
 // The OMI folder is also written by Claude Code's MCP and Hermes' cron, so poll
@@ -658,7 +722,7 @@ async function pollNotes() {
   if (document.hidden) return;
   try {
     const [notes, tags] = await Promise.all([
-      api("GET", "/api/notes"),
+      api("GET", notesPath()),
       api("GET", "/api/tags"),
     ]);
     if (JSON.stringify([notes, tags]) === JSON.stringify([state.notes, state.tags])) return;
@@ -771,6 +835,7 @@ function applyStaticI18n() {
   if (tp) tp.title = t("theme");
   const ls = $("#lang-select");
   if (ls) ls.title = t("language");
+  renderArchToggle();
 }
 
 // Re-render the active pane in the new language without dropping unsaved input
@@ -817,6 +882,9 @@ initI18n();
 
 (async function boot() {
   try {
+    api("GET", "/api/meta")
+      .then((m) => (state.mesh = Boolean(m && m.mesh)))
+      .catch(() => {});
     await refresh();
     renderEmpty();
   } catch (e) {

@@ -150,3 +150,62 @@ def test_path_traversal_does_not_leak(client: TestClient, tmp_path: Path) -> Non
         res = client.get(f"/api/notes/{name}")
         assert res.status_code in (400, 404)
         assert "TOPSECRET" not in res.text
+
+
+# -- mesh: archive (soft delete) + restore (docs/mesh.md) ---------------------
+
+
+@pytest.fixture
+def mesh_client(omi_dir: Path) -> Iterator[TestClient]:
+    (omi_dir / ".git").mkdir()  # a git dir marks the folder as replicating
+    with TestClient(create_app(omi_dir)) as c:
+        yield c
+
+
+def test_meta_reports_plain_mode(client: TestClient) -> None:
+    assert client.get("/api/meta").json() == {"mesh": False}
+
+
+def test_meta_reports_mesh_mode(mesh_client: TestClient) -> None:
+    assert mesh_client.get("/api/meta").json() == {"mesh": True}
+
+
+def test_delete_archives_in_mesh_mode(mesh_client: TestClient, omi_dir: Path) -> None:
+    name = mesh_client.post("/api/notes", json={"title": "Keep Me"}).json()["filename"]
+    assert mesh_client.delete(f"/api/notes/{name}").status_code == 204
+
+    assert (omi_dir / name).is_file()  # archived, not removed
+    assert mesh_client.get("/api/notes").json() == []
+    listed = mesh_client.get("/api/notes", params={"include_disabled": "true"}).json()
+    assert [n["filename"] for n in listed] == [name]
+    assert listed[0]["disabled"] is True
+
+    got = mesh_client.get(f"/api/notes/{name}").json()
+    assert got["fields"]["disabled"] is True
+
+    restored = mesh_client.post(f"/api/notes/{name}/restore")
+    assert restored.status_code == 200
+    assert restored.json()["filename"] == name
+    assert [n["filename"] for n in mesh_client.get("/api/notes").json()] == [name]
+
+
+def test_restore_missing_note_404(mesh_client: TestClient) -> None:
+    assert mesh_client.post("/api/notes/Nope.md/restore").status_code == 404
+
+
+def test_delete_still_removes_without_mesh(client: TestClient, omi_dir: Path) -> None:
+    name = client.post("/api/notes", json={"title": "Plain"}).json()["filename"]
+    assert client.delete(f"/api/notes/{name}").status_code == 204
+    assert not (omi_dir / name).exists()
+
+
+def test_structured_update_round_trips_mesh_metadata(mesh_client: TestClient) -> None:
+    """A mesh-aware client PUTting fields back must not strip Disabled."""
+    name = mesh_client.post("/api/notes", json={"title": "Sticky"}).json()["filename"]
+    mesh_client.delete(f"/api/notes/{name}")
+    fields = mesh_client.get(f"/api/notes/{name}").json()["fields"]
+    fields["summary"] = "edited while archived"
+    assert mesh_client.put(f"/api/notes/{name}", json=fields).status_code == 200
+    after = mesh_client.get(f"/api/notes/{name}").json()["fields"]
+    assert after["summary"] == "edited while archived"
+    assert after["disabled"] is True

@@ -361,7 +361,7 @@ class OmiStore:
         self.omi_dir = Path(omi_dir).expanduser()
         self.node_id = node_id
 
-    def _mesh_mode(self) -> bool:
+    def mesh_mode(self) -> bool:
         """True when this folder replicates: deletes must be merge-safe."""
         return self.node_id is not None or (self.omi_dir / ".git").exists()
 
@@ -603,7 +603,7 @@ class OmiStore:
         from any peer still holding it, so deletion soft-deletes via
         :meth:`disable_note`. Non-mesh folders keep the 1.x unlink behavior.
         """
-        if self._mesh_mode():
+        if self.mesh_mode():
             self.disable_note(name)
         else:
             self.purge_note(name)
