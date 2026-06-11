@@ -344,3 +344,41 @@ def test_mesh_init_hardens_permissions(omi_dir: Path) -> None:
     mesh.mesh_init(omi_dir, log=quiet)
     assert (omi_dir.stat().st_mode & 0o777) == 0o700
     assert ((omi_dir / ".git").stat().st_mode & 0o777) == 0o700
+
+
+# -- daemon trigger + loop ---------------------------------------------------------
+
+
+def test_should_sync_interval_elapsed() -> None:
+    cfg = NodeConfig(node_id="n", interval_seconds=300, debounce_seconds=10)
+    assert mesh._should_sync(now=1000.0, last_sync=700.0, signal_mtime=None, cfg=cfg)
+    assert not mesh._should_sync(now=1000.0, last_sync=701.0, signal_mtime=None, cfg=cfg)
+
+
+def test_should_sync_debounced_signal() -> None:
+    cfg = NodeConfig(node_id="n", interval_seconds=300, debounce_seconds=10)
+    # Signal newer than last sync, debounce satisfied -> sync.
+    assert mesh._should_sync(now=1000.0, last_sync=900.0, signal_mtime=985.0, cfg=cfg)
+    # Still inside the debounce window -> wait (writes batch).
+    assert not mesh._should_sync(now=1000.0, last_sync=900.0, signal_mtime=995.0, cfg=cfg)
+    # Signal older than the last sync -> already handled.
+    assert not mesh._should_sync(now=1000.0, last_sync=990.0, signal_mtime=985.0, cfg=cfg)
+
+
+def test_daemon_first_tick_syncs_and_exits(pair: tuple[Path, str, Path, str]) -> None:
+    a, id_a, _b, _ = pair
+    cfg = mesh.load_node_config(a)
+    assert cfg is not None
+    OmiStore(a, node_id=id_a).create_note(NoteFields(title="Daemon Note", summary="s"))
+    rc = mesh.run_daemon(a, cfg, log=quiet, _max_tick_seconds=3.0)
+    assert rc == 0
+    # The first tick committed and pushed local work.
+    assert "Daemon Note.md" in git(a, "ls-files").stdout.splitlines()
+    assert mesh.read_sync_state(a) is not None
+
+
+def test_install_service_requires_init(tmp_path: Path) -> None:
+    omi = tmp_path / "Vault" / "OMI"
+    omi.mkdir(parents=True)
+    with pytest.raises(MeshError, match="mesh init"):
+        mesh.install_service(tmp_path / "Vault", "OMI", log=quiet)
