@@ -119,6 +119,24 @@ def build_parser() -> argparse.ArgumentParser:
         "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
     )
 
+    mesh = sub.add_parser(
+        "mesh", help="peer-to-peer replication of the OMI folder over git (docs/mesh.md)"
+    )
+    msub = mesh.add_subparsers(dest="mesh_command", metavar="{init}", required=True)
+    mesh_init_p = msub.add_parser(
+        "init",
+        help="make the OMI folder a mesh node: git repo, merge driver, node identity",
+    )
+    mesh_init_p.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    mesh_init_p.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+
     serve = sub.add_parser("serve", help="run the local web UI over an OMI memory folder")
     serve.add_argument(
         "--vault",
@@ -407,6 +425,20 @@ def _run_node(args: argparse.Namespace) -> int:
     return run_node(omi_dir)
 
 
+def _run_mesh(args: argparse.Namespace) -> int:
+    from omind.mesh import MeshError, mesh_init
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    try:
+        if args.mesh_command == "init":
+            mesh_init(omi_dir)
+            return 0
+    except MeshError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    return 0
+
+
 def _run_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -544,6 +576,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_quickstart(args)
     if args.command == "node":
         return _run_node(args)
+    if args.command == "mesh":
+        return _run_mesh(args)
     if args.command == "serve":
         return _run_serve(args)
     if args.command == "doctor":
