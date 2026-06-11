@@ -122,20 +122,44 @@ def build_parser() -> argparse.ArgumentParser:
     mesh = sub.add_parser(
         "mesh", help="peer-to-peer replication of the OMI folder over git (docs/mesh.md)"
     )
-    msub = mesh.add_subparsers(dest="mesh_command", metavar="{init}", required=True)
+    msub = mesh.add_subparsers(
+        dest="mesh_command",
+        metavar="{init,add-peer,remove-peer,sync,clone,purge}",
+        required=True,
+    )
     mesh_init_p = msub.add_parser(
         "init",
         help="make the OMI folder a mesh node: git repo, merge driver, node identity",
     )
-    mesh_init_p.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
+    mesh_add_peer = msub.add_parser("add-peer", help="register a peer node (a git remote)")
+    mesh_add_peer.add_argument("name", help="peer name (e.g. pluto)")
+    mesh_add_peer.add_argument("url", help="git URL (e.g. ssh://pluto/~/path/to/OMI)")
+    mesh_remove_peer = msub.add_parser("remove-peer", help="forget a peer node")
+    mesh_remove_peer.add_argument("name")
+    mesh_sync = msub.add_parser(
+        "sync", help="one-shot commit + fetch/merge/push against every reachable peer"
     )
-    mesh_init_p.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    mesh_sync.add_argument(
+        "--peer", action="append", default=None, help="sync only this peer (repeatable)"
     )
+    mesh_clone = msub.add_parser("clone", help="seed a fresh node from a peer")
+    mesh_clone.add_argument("url", help="git URL of an existing node")
+    mesh_purge = msub.add_parser(
+        "purge",
+        help="hard-delete a note from EVERY node (tombstoned); the normal "
+        "delete only archives — this is the rare exception",
+    )
+    mesh_purge.add_argument("note", help="note filename (e.g. 'Old Note.md')")
+    for mp in (mesh_init_p, mesh_add_peer, mesh_remove_peer, mesh_sync, mesh_clone, mesh_purge):
+        mp.add_argument(
+            "--vault",
+            type=Path,
+            default=default_vault_path(),
+            help="path to the Obsidian vault (default: %(default)s)",
+        )
+        mp.add_argument(
+            "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+        )
 
     # Hidden: invoked by git (merge.omi.driver), never by hand.
     merge_driver = sub.add_parser("merge-driver")
@@ -433,14 +457,40 @@ def _run_node(args: argparse.Namespace) -> int:
 
 
 def _run_mesh(args: argparse.Namespace) -> int:
-    from omind.mesh import MeshError, mesh_init
+    from omind import mesh
+    from omind.store import NoteError
 
     omi_dir = (args.vault / args.folder).expanduser()
+
+    def require_node_id() -> str:
+        cfg = mesh.load_node_config(omi_dir)
+        if cfg is None:
+            raise mesh.MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
+        return cfg.node_id
+
     try:
         if args.mesh_command == "init":
-            mesh_init(omi_dir)
-            return 0
-    except MeshError as exc:
+            mesh.mesh_init(omi_dir)
+        elif args.mesh_command == "add-peer":
+            mesh.add_peer(omi_dir, args.name, args.url)
+            print(f"peer added: {args.name} -> {args.url}")
+        elif args.mesh_command == "remove-peer":
+            mesh.remove_peer(omi_dir, args.name)
+            print(f"peer removed: {args.name}")
+        elif args.mesh_command == "sync":
+            report = mesh.sync(omi_dir, require_node_id(), only=args.peer)
+            for ps in report.peers:
+                state = ps.error or ("synced" if ps.pushed else "merged, push pending")
+                print(f"{ps.name}: {state}")
+            if not report.peers:
+                print("no peers configured (committed local changes only)")
+            return 0 if report.ok else 1
+        elif args.mesh_command == "clone":
+            mesh.clone(args.url, omi_dir)
+            print(f"node ready at {omi_dir}; next: omind setup")
+        elif args.mesh_command == "purge":
+            mesh.purge(omi_dir, args.note, require_node_id())
+    except (mesh.MeshError, NoteError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0

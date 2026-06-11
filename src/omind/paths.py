@@ -33,11 +33,19 @@ def state_dir() -> Path:
     return base / "omind"
 
 
+def _omi_dir_digest(omi_dir: Path) -> str:
+    return hashlib.sha256(str(Path(omi_dir).expanduser().resolve()).encode()).hexdigest()[:12]
+
+
 def sync_signal_path(omi_dir: Path) -> Path:
     """The write-signal file the node server touches and the mesh daemon watches.
 
     Keyed by the resolved OMI folder (not the node-id) so the server and the
     daemon agree on the path without sharing any configuration.
     """
-    digest = hashlib.sha256(str(Path(omi_dir).expanduser().resolve()).encode()).hexdigest()[:12]
-    return state_dir() / f"sync-request-{digest}"
+    return state_dir() / f"sync-request-{_omi_dir_digest(omi_dir)}"
+
+
+def sync_state_path(omi_dir: Path) -> Path:
+    """Where `omind mesh sync` records its last outcome (read by doctor)."""
+    return state_dir() / f"mesh-sync-{_omi_dir_digest(omi_dir)}.json"
