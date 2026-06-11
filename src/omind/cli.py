@@ -66,8 +66,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     setup.add_argument(
         "--server-name",
-        default="obsidian",
-        help="name to register the MCP server under (default: obsidian)",
+        default="omi",
+        help="name to register the MCP server under (default: omi)",
+    )
+    setup.add_argument(
+        "--no-mesh",
+        action="store_true",
+        help="skip mesh initialization (single-machine, no replication)",
     )
     setup.add_argument(
         "--dry-run",
@@ -102,8 +107,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     quickstart.add_argument(
         "--server-name",
-        default="obsidian",
-        help="name to register the MCP server under (default: obsidian)",
+        default="omi",
+        help="name to register the MCP server under (default: omi)",
     )
 
     node = sub.add_parser(
@@ -216,8 +221,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     doctor.add_argument(
         "--server-name",
-        default="obsidian",
-        help="name the MCP server is registered under (default: obsidian)",
+        default="omi",
+        help="name the MCP server is registered under (default: omi)",
     )
 
     backup = sub.add_parser(
@@ -395,6 +400,7 @@ def _run_setup(args: argparse.Namespace) -> int:
         dry_run=args.dry_run,
         force=args.force,
         agent=args.agent,
+        no_mesh=args.no_mesh,
     )
     try:
         run_setup_for(config)
@@ -418,10 +424,11 @@ def _run_quickstart(args: argparse.Namespace) -> int:
 
 
 def _diagnose_with_backup(config: SetupConfig) -> list[CheckResult]:
-    """The agent's wiring checks plus the agent-independent backup check."""
+    """The agent's wiring checks plus the backup and mesh checks."""
     from omind.backup import diagnose_backup
+    from omind.mesh import diagnose_mesh
 
-    return diagnose_for(config) + diagnose_backup(config)
+    return diagnose_for(config) + diagnose_mesh(config) + diagnose_backup(config)
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
