@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **obsidian-mcp no longer goes silently deaf after idle** (#49). The MCP SDK's
+  stdio transport can close *without* a stdin EOF, removing its `data` listener
+  while chokidar keeps the process alive; every subsequent request was read and
+  discarded, and agent tool calls hung forever (observed: 40 minutes until
+  manual cancel). The eof-guard preload now runs a transport watchdog: once a
+  transport has attached to stdin, its disappearance exits the process
+  non-zero, so the client sees a dead server immediately. With real-node tests
+  for the watchdog, the original EOF exit, and startup quiescence.
+- The eof-guard is now a **managed file**: `omind setup` refreshes it whenever
+  its content drifts from the shipped version (previously `_write_if_absent`
+  meant existing installs never received guard fixes), and `omind doctor`
+  warns on outdated guard content instead of only on a missing file.
 
 ## [1.3.0] - 2026-06-10
 

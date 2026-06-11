@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -285,6 +286,39 @@ def test_doctor_warns_on_missing_eof_guard(
     assert results["eof_guard"].level == "warn"
 
 
+def test_doctor_warns_on_outdated_eof_guard(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path
+) -> None:
+    """A stale guard (pre-watchdog, issue #49) must surface as a warning."""
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, str(config.omi_dir))
+    provision.eof_guard_path().write_text(
+        'process.stdin.on("end", () => process.exit(0));\n', encoding="utf-8"
+    )
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["eof_guard"].level == "warn"
+    assert "outdated" in results["eof_guard"].message
+
+
+def test_setup_refreshes_outdated_eof_guard(
+    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
+) -> None:
+    """The guard is a managed file: re-running setup updates stale content in
+    place (issue #49 shipped a guard fix that ``_write_if_absent`` would never
+    have delivered to existing installs)."""
+    config = _config(tmp_path)
+    guard = provision.eof_guard_path()
+    guard.parent.mkdir(parents=True, exist_ok=True)
+    guard.write_text("// ancient guard\n", encoding="utf-8")
+    actions = Provisioner(config, log=_quiet).run()
+    assert guard.read_text(encoding="utf-8") == seeds.EOF_GUARD_JS
+    assert any(a.startswith("update") and "exit-on-eof" in a for a in actions)
+    # A second run leaves the now-current guard untouched.
+    actions = Provisioner(config, log=_quiet).run()
+    assert not any(a.startswith("update") and "exit-on-eof" in a for a in actions)
+
+
 def test_claude_config_path_is_home_dotclaude_json(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -540,3 +574,63 @@ def test_entry_marker_ignores_foreign_commands() -> None:
     for command in ("echo mine", "myomindish hooks", "omind doctor --vault x"):
         entry = {"hooks": [{"type": "command", "command": command}]}
         assert not provision._entry_has_omind_marker(entry), command
+
+
+# -- eof-guard behavior (real node) -----------------------------------------
+# These run the actual preload under node and assert its two exit conditions.
+# The watchdog interval is dropped to 25 ms via OMIND_EOF_GUARD_INTERVAL_MS so
+# the tests stay fast.
+
+_node = shutil.which("node")
+
+
+def _run_guarded_node(tmp_path: Path, script: str, *, close_stdin: bool) -> int:
+    import os
+
+    guard = tmp_path / "guard.js"
+    guard.write_text(seeds.EOF_GUARD_JS, encoding="utf-8")
+    proc = subprocess.Popen(
+        [_node, "--require", str(guard), "-e", script],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+        env={**os.environ, "OMIND_EOF_GUARD_INTERVAL_MS": "25"},
+    )
+    try:
+        if close_stdin and proc.stdin is not None:
+            proc.stdin.close()
+        return proc.wait(timeout=15)
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+
+
+@pytest.mark.skipif(_node is None, reason="node not installed")
+def test_eof_guard_exits_when_transport_detaches(tmp_path: Path) -> None:
+    """Issue #49: a transport that detaches from stdin without an EOF must be
+    fatal — otherwise the server lives on deaf and clients hang forever."""
+    script = (
+        "const h = () => {};"
+        "process.stdin.on('data', h);"  # the MCP SDK transport attaches
+        "setInterval(() => {}, 1000);"  # chokidar keeps the loop alive
+        "setTimeout(() => process.stdin.off('data', h), 100);"  # transport closes
+    )
+    assert _run_guarded_node(tmp_path, script, close_stdin=False) == 1
+
+
+@pytest.mark.skipif(_node is None, reason="node not installed")
+def test_eof_guard_exits_cleanly_on_stdin_eof(tmp_path: Path) -> None:
+    """The original orphaning guard still holds: stdin EOF is a clean exit."""
+    script = (
+        "process.stdin.on('data', () => {});"  # transport attached, flowing
+        "setInterval(() => {}, 1000);"
+    )
+    assert _run_guarded_node(tmp_path, script, close_stdin=True) == 0
+
+
+@pytest.mark.skipif(_node is None, reason="node not installed")
+def test_eof_guard_quiet_before_transport_attaches(tmp_path: Path) -> None:
+    """No false positive during startup: zero data listeners before the SDK
+    connects must not trip the watchdog."""
+    script = "setTimeout(() => process.exit(42), 300);"  # outlive several ticks
+    assert _run_guarded_node(tmp_path, script, close_stdin=False) == 42

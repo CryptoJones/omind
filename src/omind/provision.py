@@ -192,6 +192,28 @@ class Provisioner:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
+    def _write_managed(self, path: Path, content: str) -> None:
+        """Write a Managed-by-omind file, refreshing it whenever its content drifts.
+
+        Unlike user-owned seeds (``_write_if_absent``), managed files carry
+        omind's own code; leaving stale copies in place means existing installs
+        never receive fixes (issue #49 shipped a guard fix this way).
+        """
+        if path.exists():
+            try:
+                current: str | None = path.read_text(encoding="utf-8")
+            except OSError:
+                current = None
+            if current == content:
+                self.log(f"  up to date: {path}")
+                return
+            self._record(f"update {path}")
+        else:
+            self._record(f"write {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(content, encoding="utf-8")
+
     # -- steps --------------------------------------------------------------
 
     def check_prereqs(self) -> None:
@@ -264,9 +286,10 @@ class Provisioner:
 
         Registering a direct ``node`` command needs both a path that won't be
         garbage-collected (unlike the npx cache) and the preload that stops the
-        server orphaning when Claude Code exits.
+        server orphaning when Claude Code exits. The guard is a managed file:
+        re-running setup refreshes it whenever omind ships a new version.
         """
-        self._write_if_absent(eof_guard_path(), seeds.EOF_GUARD_JS)
+        self._write_managed(eof_guard_path(), seeds.EOF_GUARD_JS)
         entry = obsidian_mcp_entry()
         if entry.is_file() and not self.config.force:
             self.log(f"  obsidian-mcp already installed: {entry}")
@@ -545,14 +568,26 @@ def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
 
 def _diagnose_eof_guard() -> CheckResult:
     guard = eof_guard_path()
-    if guard.is_file():
-        return CheckResult("eof_guard", "ok", f"stdin-EOF guard present: {guard}")
-    return CheckResult(
-        "eof_guard",
-        "warn",
-        f"missing stdin-EOF guard {guard} — run `omind setup` "
-        "(the server may orphan when the agent exits)",
-    )
+    if not guard.is_file():
+        return CheckResult(
+            "eof_guard",
+            "warn",
+            f"missing stdin-EOF guard {guard} — run `omind setup` "
+            "(the server may orphan when the agent exits)",
+        )
+    try:
+        current: str | None = guard.read_text(encoding="utf-8")
+    except OSError:
+        current = None
+    if current != seeds.EOF_GUARD_JS:
+        return CheckResult(
+            "eof_guard",
+            "warn",
+            f"outdated stdin-EOF guard {guard} — run `omind setup` to refresh it "
+            "(stale guards miss the transport-detach watchdog; tool calls can "
+            "hang forever, see issue #49)",
+        )
+    return CheckResult("eof_guard", "ok", f"stdin-EOF guard present and current: {guard}")
 
 
 def diagnose(config: SetupConfig) -> list[CheckResult]:
