@@ -254,13 +254,15 @@ TOMBSTONES_FILENAME = ".omi-tombstones"
 
 def peers(omi_dir: Path) -> dict[str, str]:
     """The configured peer remotes: name -> fetch URL."""
-    out = git(omi_dir, "remote", "-v").stdout
-    found: dict[str, str] = {}
-    for line in out.splitlines():
-        parts = line.split()
-        if len(parts) >= 3 and parts[2] == "(fetch)":
-            found[parts[0]] = parts[1]
-    return found
+    names = git(omi_dir, "remote").stdout.splitlines()
+    # one get-url per remote rather than parsing `remote -v`, whose
+    # whitespace-delimited output is ambiguous for URLs containing spaces
+    # (the default vault path, "Obsidian Vault", contains one)
+    return {
+        name: git(omi_dir, "remote", "get-url", name).stdout.strip()
+        for name in (n.strip() for n in names)
+        if name
+    }
 
 
 def add_peer(omi_dir: Path, name: str, url: str) -> None:
