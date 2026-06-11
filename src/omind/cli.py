@@ -129,7 +129,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     msub = mesh.add_subparsers(
         dest="mesh_command",
-        metavar="{init,add-peer,remove-peer,sync,daemon,install-service,clone,purge}",
+        metavar="{init,add-peer,add-seed,remove-peer,sync,daemon,install-service,clone,purge}",
         required=True,
     )
     mesh_init_p = msub.add_parser(
@@ -139,6 +139,21 @@ def build_parser() -> argparse.ArgumentParser:
     mesh_add_peer = msub.add_parser("add-peer", help="register a peer node (a git remote)")
     mesh_add_peer.add_argument("name", help="peer name (e.g. pluto)")
     mesh_add_peer.add_argument("url", help="git URL (e.g. ssh://pluto/~/path/to/OMI)")
+    mesh_add_seed = msub.add_parser(
+        "add-seed",
+        help="provision a passive bare seed repo (local path or ssh) and register it as a peer",
+    )
+    mesh_add_seed.add_argument("name", help="peer name for the seed (e.g. seed)")
+    mesh_add_seed.add_argument(
+        "url", help="where the bare repo lives: ssh://host/path, host:path, or a local path"
+    )
+    mesh_add_seed.add_argument(
+        "--mirror",
+        metavar="GIT_URL",
+        default=None,
+        help="mirror the seed to this git URL on every push "
+        "(e.g. a PRIVATE GitHub repo — notes travel in plaintext)",
+    )
     mesh_remove_peer = msub.add_parser("remove-peer", help="forget a peer node")
     mesh_remove_peer.add_argument("name")
     mesh_sync = msub.add_parser(
@@ -165,6 +180,7 @@ def build_parser() -> argparse.ArgumentParser:
     for mp in (
         mesh_init_p,
         mesh_add_peer,
+        mesh_add_seed,
         mesh_remove_peer,
         mesh_sync,
         mesh_daemon,
@@ -500,6 +516,8 @@ def _run_mesh(args: argparse.Namespace) -> int:
         elif args.mesh_command == "add-peer":
             mesh.add_peer(omi_dir, args.name, args.url)
             print(f"peer added: {args.name} -> {args.url}")
+        elif args.mesh_command == "add-seed":
+            mesh.add_seed(omi_dir, args.name, args.url, mirror=args.mirror)
         elif args.mesh_command == "remove-peer":
             mesh.remove_peer(omi_dir, args.name)
             print(f"peer removed: {args.name}")

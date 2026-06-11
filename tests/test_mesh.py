@@ -189,6 +189,73 @@ def test_clone_refuses_non_empty_target(tmp_path: Path, omi_dir: Path) -> None:
         mesh.clone(str(omi_dir), target, log=quiet)
 
 
+def test_parse_seed_url_forms() -> None:
+    t = mesh._parse_seed_url("ssh://akclark@pluto:2222/home/akclark/omi-mesh.git")
+    assert t.ssh == ["ssh", "-p", "2222", "akclark@pluto"]
+    assert t.path == "/home/akclark/omi-mesh.git"
+    t = mesh._parse_seed_url("ssh://pluto/~/omi-mesh.git")
+    assert t.ssh == ["ssh", "pluto"]
+    assert t.path == "~/omi-mesh.git"  # home-relative, like git itself
+    t = mesh._parse_seed_url("pluto:omi-mesh.git")  # scp-like
+    assert t.ssh == ["ssh", "pluto"]
+    assert t.path == "omi-mesh.git"
+    t = mesh._parse_seed_url("/srv/omi-mesh.git")
+    assert t.ssh == [] and t.path == "/srv/omi-mesh.git"
+    with pytest.raises(MeshError, match="https"):
+        mesh._parse_seed_url("https://github.com/x/y.git")
+
+
+def test_add_seed_provisions_and_hook_maintains_main(omi_dir: Path, tmp_path: Path) -> None:
+    """End-to-end over a local path: bare repo + hook + peer; a sync's push
+    must leave the seed with a main at our outbox ref (the hook fires for
+    local pushes too), and the next fetch must yield refs/remotes/seed/main
+    — exactly what doctor's peer check looks for."""
+    cfg = mesh.mesh_init(omi_dir, log=quiet)
+    seed = tmp_path / "seed.git"
+    mesh.add_seed(omi_dir, "seed", str(seed), log=quiet)
+    assert mesh.peers(omi_dir)["seed"] == str(seed)
+    assert (seed / "hooks" / "post-receive").stat().st_mode & 0o100
+
+    assert mesh.sync(omi_dir, cfg.node_id, log=quiet).ok
+    outbox = git(seed, "rev-parse", f"refs/omind/{cfg.node_id}").stdout.strip()
+    assert git(seed, "rev-parse", "refs/heads/main").stdout.strip() == outbox
+    # Sync fetches before it pushes, so the main the hook just minted lands
+    # locally on the NEXT pass — after which doctor's peer check goes green.
+    assert mesh.sync(omi_dir, cfg.node_id, log=quiet).ok
+    assert git(omi_dir, "rev-parse", "--verify", "refs/remotes/seed/main").returncode == 0
+
+
+def test_add_seed_mirror_pushes_everything(omi_dir: Path, tmp_path: Path) -> None:
+    cfg = mesh.mesh_init(omi_dir, log=quiet)
+    mirror = tmp_path / "mirror.git"
+    git(tmp_path, "init", "--bare", "--initial-branch=main", str(mirror))
+    seed = tmp_path / "seed.git"
+    mesh.add_seed(omi_dir, "seed", str(seed), mirror=str(mirror), log=quiet)
+
+    assert mesh.sync(omi_dir, cfg.node_id, log=quiet).ok
+    head = git(omi_dir, "rev-parse", "HEAD").stdout.strip()
+    assert git(mirror, "rev-parse", f"refs/omind/{cfg.node_id}").stdout.strip() == head
+    assert git(mirror, "rev-parse", "refs/heads/main").stdout.strip() == head
+
+
+def test_add_seed_converges_on_rerun(omi_dir: Path, tmp_path: Path) -> None:
+    mesh.mesh_init(omi_dir, log=quiet)
+    seed = tmp_path / "seed.git"
+    mesh.add_seed(omi_dir, "seed", str(seed), log=quiet)
+    mesh.add_seed(omi_dir, "seed", str(seed), mirror="git@example.com:m.git", log=quiet)
+    mesh.add_seed(omi_dir, "seed", str(seed), mirror="git@example.com:n.git", log=quiet)
+    assert git(seed, "remote", "get-url", "mirror").stdout.strip() == "git@example.com:n.git"
+    # Same name pointed elsewhere is a real conflict, not convergence.
+    with pytest.raises(MeshError, match="already points at"):
+        mesh.add_seed(omi_dir, "seed", str(tmp_path / "other.git"), log=quiet)
+
+
+def test_add_seed_refuses_non_bare_target(omi_dir: Path, pair: tuple[Path, str, Path, str]) -> None:
+    a, _, _, _ = pair
+    with pytest.raises(MeshError, match="not a bare repository"):
+        mesh.add_seed(omi_dir, "seed", str(a), log=quiet)
+
+
 def test_partitioned_edits_converge_without_data_loss(
     pair: tuple[Path, str, Path, str],
 ) -> None:

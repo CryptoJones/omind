@@ -216,6 +216,12 @@ This is strictly simpler than tombstoning every delete, and it is reversible.
 - The macmini, being always-on, is a natural **seed** for `omind mesh clone`
   when bootstrapping a new node — but it is a seed, not a hub. Any node can sync
   to any reachable peer.
+- A seed can also be a **dedicated passive bare repo** provisioned with
+  `omind mesh add-seed`: nodes push their outbox refs to it, its post-receive
+  hook points `main` at the freshest one (so fetching from it yields a
+  mergeable branch), and `--mirror` replicates the whole seed to a hosted git
+  repo (keep it **private** — notes travel in plaintext). Losing it loses
+  nothing: every node still holds the full history.
 
 ## CLI surface
 
@@ -224,6 +230,7 @@ This is strictly simpler than tombstoning every delete, and it is reversible.
 | `omind node` | Run the local node MCP server (stdio). |
 | `omind mesh init` | Make OMI a git repo; install the merge driver + `.gitattributes`; write node config (node-id, peers). |
 | `omind mesh add-peer <name> <git-url>` / `remove-peer` | Manage peer remotes. |
+| `omind mesh add-seed <name> <url> [--mirror <git-url>]` | Provision a passive bare seed repo (local path or over ssh) — init, post-receive hook (main pointer + optional mirror push), register as a peer here. Converges on re-run. |
 | `omind mesh sync` | One-shot fetch + merge + push against reachable peers. |
 | `omind mesh daemon` | Interval sync loop + on-write debounce trigger. |
 | `omind mesh clone <url>` | Seed a fresh node from a peer. |

@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.1] - 2026-06-11
+
+### Added
+
+- **`omind mesh add-seed <name> <url> [--mirror <git-url>]`** — provision a
+  passive bare "seed" repo (at a local path or over ssh) and register it as
+  a peer, in one repeatable command. It creates the bare repo, installs a
+  post-receive hook that points `main` at the freshest node outbox ref (a
+  bare seed never grows a branch on its own, which left `doctor`'s peer
+  check reading "never fetched" forever and the seed unfetchable as a
+  relay), and — with `--mirror` — mirror-pushes the whole seed to a hosted
+  git repo (e.g. a private GitHub repository) after every received push.
+  Every step converges on re-run. Docs: a new "Add a seed" runbook section
+  in [docs/mesh-ops.md](docs/mesh-ops.md).
+
 ## [2.0.0] - 2026-06-11
 
 **The memory mesh.** omind goes from a single-machine memory tool to a
