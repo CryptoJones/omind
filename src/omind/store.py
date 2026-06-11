@@ -586,7 +586,14 @@ class OmiStore:
         self, name: str, fields: NoteFields, expected_version: str | None = None
     ) -> str:
         # Validate target exists, then overwrite with rendered fields.
-        self.read_note(name)
+        current = parse_note(self.read_note(name))
+        # A caller that built fresh NoteFields without a rev predates the mesh
+        # fields (e.g. Hermes' upsert); it must not strip the note's revision
+        # or silently resurrect a soft-deleted note.
+        if not fields.rev:
+            fields.rev = current.rev
+            if not fields.disabled:
+                fields.disabled = current.disabled
         return self.write_note(name, render_fields(fields), expected_version=expected_version)
 
     def delete_note(self, name: str) -> None:
