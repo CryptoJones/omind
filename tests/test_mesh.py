@@ -200,7 +200,7 @@ def test_parse_seed_url_forms() -> None:
     assert t.ssh == ["ssh", "pluto"]
     assert t.path == "omi-mesh.git"
     t = mesh._parse_seed_url("/srv/omi-mesh.git")
-    assert t.ssh == [] and t.path == "/srv/omi-mesh.git"
+    assert t.ssh == [] and t.path == str(Path("/srv/omi-mesh.git"))  # \-separators on Windows
     with pytest.raises(MeshError, match="https"):
         mesh._parse_seed_url("https://github.com/x/y.git")
 
@@ -214,7 +214,9 @@ def test_add_seed_provisions_and_hook_maintains_main(omi_dir: Path, tmp_path: Pa
     seed = tmp_path / "seed.git"
     mesh.add_seed(omi_dir, "seed", str(seed), log=quiet)
     assert mesh.peers(omi_dir)["seed"] == str(seed)
-    assert (seed / "hooks" / "post-receive").stat().st_mode & 0o100
+    assert (seed / "hooks" / "post-receive").is_file()
+    if os.name != "nt":  # no exec bits on Windows; git runs hooks via sh there
+        assert (seed / "hooks" / "post-receive").stat().st_mode & 0o100
 
     assert mesh.sync(omi_dir, cfg.node_id, log=quiet).ok
     outbox = git(seed, "rev-parse", f"refs/omind/{cfg.node_id}").stdout.strip()
