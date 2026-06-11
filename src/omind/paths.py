@@ -9,6 +9,10 @@ The seed *content* written into those files lives in :mod:`omind.seeds`.
 
 from __future__ import annotations
 
+import hashlib
+import os
+from pathlib import Path
+
 MEMORY_TEMPLATE_FILENAME = "Memory Template.md"
 INDEX_FILENAME = "index.md"
 
@@ -20,3 +24,20 @@ EOF_GUARD_FILENAME = "obsidian-exit-on-eof.js"
 
 #: Skill manifest name both Hermes and OpenClaw discover in a skill folder.
 AGENT_SKILL_FILENAME = "SKILL.md"
+
+
+def state_dir() -> Path:
+    """omind's state directory: ``$XDG_STATE_HOME/omind`` or ``~/.local/state/omind``."""
+    env = os.environ.get("XDG_STATE_HOME")
+    base = Path(env).expanduser() if env else Path.home() / ".local" / "state"
+    return base / "omind"
+
+
+def sync_signal_path(omi_dir: Path) -> Path:
+    """The write-signal file the node server touches and the mesh daemon watches.
+
+    Keyed by the resolved OMI folder (not the node-id) so the server and the
+    daemon agree on the path without sharing any configuration.
+    """
+    digest = hashlib.sha256(str(Path(omi_dir).expanduser().resolve()).encode()).hexdigest()[:12]
+    return state_dir() / f"sync-request-{digest}"
