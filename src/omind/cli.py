@@ -137,6 +137,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
     )
 
+    # Hidden: invoked by git (merge.omi.driver), never by hand.
+    merge_driver = sub.add_parser("merge-driver")
+    merge_driver.add_argument("base", type=Path)
+    merge_driver.add_argument("ours", type=Path)
+    merge_driver.add_argument("theirs", type=Path)
+    merge_driver.add_argument("path_label", nargs="?", default="")
+
     serve = sub.add_parser("serve", help="run the local web UI over an OMI memory folder")
     serve.add_argument(
         "--vault",
@@ -578,6 +585,10 @@ def main(argv: list[str] | None = None) -> int:
         return _run_node(args)
     if args.command == "mesh":
         return _run_mesh(args)
+    if args.command == "merge-driver":
+        from omind.merge import run_merge_driver
+
+        return run_merge_driver(args.base, args.ours, args.theirs, args.path_label)
     if args.command == "serve":
         return _run_serve(args)
     if args.command == "doctor":
