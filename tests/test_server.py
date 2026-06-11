@@ -11,8 +11,10 @@ from __future__ import annotations
 
 import asyncio
 import json
+import queue
 import subprocess
 import sys
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -175,23 +177,14 @@ def test_reads_do_not_touch_the_sync_signal(server: FastMCP, omi_dir: Path) -> N
 
 def test_stdio_handshake_and_clean_exit_on_eof(tmp_path: Path) -> None:
     """The issue-#49 regression contract: a real `omind node` process answers
-    the MCP handshake and exits 0 the moment its client closes stdin."""
+    the MCP handshake, and exits 0 the moment its client closes stdin.
+
+    Responses are awaited *before* stdin closes — a real client holds the pipe
+    open while requests are in flight; closing early legitimately lets the
+    server drop in-flight work (it raced exactly that way on CI once).
+    """
     vault = tmp_path / "Vault"
     (vault / "OMI").mkdir(parents=True)
-    messages = [
-        {
-            "jsonrpc": "2.0",
-            "id": 1,
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2025-06-18",
-                "capabilities": {},
-                "clientInfo": {"name": "pytest", "version": "0"},
-            },
-        },
-        {"jsonrpc": "2.0", "method": "notifications/initialized"},
-        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
-    ]
     proc = subprocess.Popen(
         [sys.executable, "-m", "omind", "node", "--vault", str(vault), "--folder", "OMI"],
         stdin=subprocess.PIPE,
@@ -199,15 +192,63 @@ def test_stdio_handshake_and_clean_exit_on_eof(tmp_path: Path) -> None:
         stderr=subprocess.PIPE,
         encoding="utf-8",
     )
-    payload = "".join(json.dumps(m) + "\n" for m in messages)
+    assert proc.stdin is not None and proc.stdout is not None
+
+    lines: queue.Queue[str] = queue.Queue()
+
+    def _pump(stdout: Any) -> None:
+        for line in stdout:
+            lines.put(line)
+
+    threading.Thread(target=_pump, args=(proc.stdout,), daemon=True).start()
+
+    def send(msg: dict[str, Any]) -> None:
+        assert proc.stdin is not None
+        proc.stdin.write(json.dumps(msg) + "\n")
+        proc.stdin.flush()
+
+    def recv() -> dict[str, Any]:
+        try:
+            while True:
+                line = lines.get(timeout=60)
+                if line.strip():
+                    return dict(json.loads(line))
+        except queue.Empty:
+            proc.kill()
+            pytest.fail("omind node did not answer within 60s")
+
     try:
-        out, err = proc.communicate(payload, timeout=60)  # close stdin -> EOF
-    except subprocess.TimeoutExpired:
-        proc.kill()
-        pytest.fail("omind node did not exit on stdin EOF (the issue-#49 hang)")
-    assert proc.returncode == 0, err
-    replies = [json.loads(line) for line in out.splitlines() if line.strip()]
-    by_id = {r.get("id"): r for r in replies if "id" in r}
-    assert by_id[1]["result"]["serverInfo"]["name"] == "omi"
-    tool_names = {t["name"] for t in by_id[2]["result"]["tools"]}
-    assert tool_names == EXPECTED_TOOLS
+        send(
+            {
+                "jsonrpc": "2.0",
+                "id": 1,
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2025-06-18",
+                    "capabilities": {},
+                    "clientInfo": {"name": "pytest", "version": "0"},
+                },
+            }
+        )
+        init = recv()
+        assert init["id"] == 1
+        assert init["result"]["serverInfo"]["name"] == "omi"
+
+        send({"jsonrpc": "2.0", "method": "notifications/initialized"})
+        send({"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}})
+        listed = recv()
+        assert listed["id"] == 2
+        assert {t["name"] for t in listed["result"]["tools"]} == EXPECTED_TOOLS
+
+        proc.stdin.close()  # EOF — the server must exit promptly, code 0
+        try:
+            assert proc.wait(timeout=60) == 0
+        except subprocess.TimeoutExpired:
+            proc.kill()
+            pytest.fail("omind node did not exit on stdin EOF (the issue-#49 hang)")
+    finally:
+        if proc.poll() is None:
+            proc.kill()
+        proc.wait()
+        if proc.stderr is not None:
+            proc.stderr.close()
