@@ -2,8 +2,8 @@
 # Copyright 2026 Aaron K. Clark
 """Seed content written into a fresh OMI folder.
 
-These constants capture the exact files an OMI memory folder needs so that
-`obsidian-mcp` accepts it as a vault and Claude Code (or the omind web UI) has
+These constants capture the exact files an OMI memory folder needs so that it
+opens directly as an Obsidian vault and Claude Code (or the omind web UI) has
 a template and index to work from. Nothing here is clobbered if it already
 exists on disk -- see :mod:`omind.provision`. The canonical *filenames* these
 seeds land in live in :mod:`omind.paths`.
@@ -11,9 +11,8 @@ seeds land in live in :mod:`omind.paths`.
 
 from __future__ import annotations
 
-# obsidian-mcp validates a vault by reading <vault>/.obsidian/app.json at
-# startup; without it the server refuses to load. The other two files make the
-# folder a well-formed standalone Obsidian vault.
+# A minimal .obsidian/ config makes the folder a well-formed standalone
+# Obsidian vault, so it opens directly in the Obsidian app.
 APP_JSON = """\
 {
   "livePreview": true,
