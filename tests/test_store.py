@@ -393,3 +393,154 @@ def test_concurrent_processes_keep_index_consistent(tmp_path: Path) -> None:
     assert len(set(links)) == n
     for i in range(n):
         assert f"- [[Note {i:03d}]] — n{i}" in links
+
+
+# -- mesh: Lamport revs + soft delete (docs/mesh.md) -------------------------
+
+
+@pytest.fixture
+def mesh_store(tmp_path: Path) -> OmiStore:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    return OmiStore(omi, node_id="testnode-abc123")
+
+
+def test_rev_and_disabled_round_trip() -> None:
+    fields = NoteFields(title="Meshy", summary="s", rev="12@laptop-3f9a2c", disabled=True)
+    md = render_fields(fields)
+    assert "- Rev: 12@laptop-3f9a2c" in md
+    assert "- Disabled: true" in md
+    parsed = parse_note(md)
+    assert parsed.rev == "12@laptop-3f9a2c"
+    assert parsed.disabled is True
+
+
+def test_legacy_note_round_trips_without_mesh_lines() -> None:
+    md = render_fields(NoteFields(title="Legacy", summary="s", created="2026-06-01"))
+    assert "- Rev:" not in md
+    assert "- Disabled:" not in md
+    parsed = parse_note(md)
+    assert parsed.rev == ""
+    assert parsed.disabled is False
+    # Byte-identical round-trip: render(parse(md)) == md.
+    assert render_fields(parsed) == md
+
+
+def test_mesh_store_stamps_and_ticks_monotonically(mesh_store: OmiStore) -> None:
+    name = mesh_store.create_note(NoteFields(title="Stamped", summary="v1"))
+    first = mesh_store.read_fields(name)
+    assert first.rev == "1@testnode-abc123"
+    mesh_store.update_note(name, first)
+    assert mesh_store.read_fields(name).rev == "2@testnode-abc123"
+
+
+def test_mesh_store_ticks_past_incoming_rev(mesh_store: OmiStore) -> None:
+    """Lamport receive rule: a write carrying a higher foreign rev bumps past it."""
+    name = mesh_store.create_note(NoteFields(title="Foreign", summary="s"))
+    fields = mesh_store.read_fields(name)
+    fields.rev = "7@othernode-9"
+    mesh_store.update_note(name, fields)
+    assert mesh_store.read_fields(name).rev == "8@testnode-abc123"
+
+
+def test_plain_store_never_stamps(store: OmiStore) -> None:
+    name = store.create_note(NoteFields(title="Plain", summary="s"))
+    assert store.read_fields(name).rev == ""
+    assert "- Rev:" not in store.read_note(name)
+
+
+def test_disable_hides_and_restore_unhides(mesh_store: OmiStore) -> None:
+    name = mesh_store.create_note(NoteFields(title="Gone", summary="s", tags=["secret"]))
+    mesh_store.create_note(NoteFields(title="Keeper", summary="links [[Gone]]"))
+    mesh_store.disable_note(name)
+
+    assert name not in [s.filename for s in mesh_store.list_notes()]
+    listed = [s.filename for s in mesh_store.list_notes(include_disabled=True)]
+    assert name in listed
+    assert "secret" not in mesh_store.all_tags()
+    assert (mesh_store.omi_dir / name).is_file()  # never unlinked
+    index = (mesh_store.omi_dir / paths.INDEX_FILENAME).read_text(encoding="utf-8")
+    entries = [ln for ln in index.splitlines() if ln.startswith("- [[")]
+    assert not any(ln.startswith("- [[Gone]]") for ln in entries)
+
+    mesh_store.restore_note(name)
+    restored = mesh_store.read_fields(name)
+    assert restored.disabled is False
+    assert name in [s.filename for s in mesh_store.list_notes()]
+    assert "secret" in mesh_store.all_tags()
+
+
+def test_disabled_note_excluded_from_backlinks(mesh_store: OmiStore) -> None:
+    target = mesh_store.create_note(NoteFields(title="Hub", summary="s"))
+    linker = mesh_store.create_note(NoteFields(title="Spoke", summary="see [[Hub]]"))
+    assert [s.filename for s in mesh_store.backlinks(target)] == [linker]
+    mesh_store.disable_note(linker)
+    assert mesh_store.backlinks(target) == []
+
+
+def test_delete_note_disables_in_mesh_mode(mesh_store: OmiStore) -> None:
+    name = mesh_store.create_note(NoteFields(title="Soft", summary="s"))
+    mesh_store.delete_note(name)
+    assert (mesh_store.omi_dir / name).is_file()
+    assert mesh_store.read_fields(name).disabled is True
+
+
+def test_delete_note_unlinks_without_mesh(store: OmiStore) -> None:
+    name = store.create_note(NoteFields(title="Hard", summary="s"))
+    store.delete_note(name)
+    assert not (store.omi_dir / name).exists()
+
+
+def test_git_dir_implies_mesh_mode(store: OmiStore) -> None:
+    (store.omi_dir / ".git").mkdir()
+    name = store.create_note(NoteFields(title="Replicated", summary="s"))
+    store.delete_note(name)
+    assert (store.omi_dir / name).is_file()
+    assert parse_note((store.omi_dir / name).read_text(encoding="utf-8")).disabled is True
+
+
+def test_purge_note_always_unlinks(mesh_store: OmiStore) -> None:
+    name = mesh_store.create_note(NoteFields(title="Purged", summary="s"))
+    mesh_store.purge_note(name)
+    assert not (mesh_store.omi_dir / name).exists()
+    with pytest.raises(NoteNotFoundError):
+        mesh_store.purge_note(name)
+
+
+def test_disable_refuses_reserved_files(mesh_store: OmiStore) -> None:
+    (mesh_store.omi_dir / paths.INDEX_FILENAME).write_text("# index")
+    with pytest.raises(NoteError):
+        mesh_store.disable_note(paths.INDEX_FILENAME)
+
+
+def test_disable_preserves_unknown_sections(mesh_store: OmiStore) -> None:
+    """Soft delete is a surgical edit — hand-curated sections survive."""
+    md = (
+        "# Custom\n\n## Metadata\n- Created: 2026-06-01\n- Tags: #x\n"
+        "- Related to:\n\n## Summary\ns\n\n## Hand Curated\nprecious\n"
+    )
+    mesh_store.write_note("Custom.md", md)
+    mesh_store.disable_note("Custom.md")
+    text = mesh_store.read_note("Custom.md")
+    assert "## Hand Curated\nprecious" in text
+    assert parse_note(text).disabled is True
+    mesh_store.restore_note("Custom.md")
+    text = mesh_store.read_note("Custom.md")
+    assert "- Disabled:" not in text
+    assert "## Hand Curated\nprecious" in text
+
+
+def test_search_matches_fields_and_filters_disabled(mesh_store: OmiStore) -> None:
+    a = mesh_store.create_note(NoteFields(title="Alpha", summary="quantum cats", tags=["pets"]))
+    mesh_store.create_note(NoteFields(title="Beta", details="quantum dogs", tags=["pets"]))
+    mesh_store.create_note(NoteFields(title="Gamma", summary="classical fish"))
+    hits = {s.filename for s in mesh_store.search("quantum")}
+    assert hits == {"Alpha.md", "Beta.md"}
+    assert {s.filename for s in mesh_store.search("", tag="pets")} == {"Alpha.md", "Beta.md"}
+    assert {s.filename for s in mesh_store.search("QUANTUM CATS")} == {"Alpha.md"}
+    mesh_store.disable_note(a)
+    assert {s.filename for s in mesh_store.search("quantum")} == {"Beta.md"}
+    assert {s.filename for s in mesh_store.search("quantum", include_disabled=True)} == {
+        "Alpha.md",
+        "Beta.md",
+    }

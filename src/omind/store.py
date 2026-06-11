@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any
 
 from omind import filelock
+from omind.clock import Rev, next_rev
 from omind.paths import INDEX_FILENAME, RESERVED_FILENAMES
 from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 
@@ -72,6 +73,11 @@ _ILLEGAL_FILENAME_CHARS = re.compile(r'[\\/:*?"<>|\x00-\x1f]')
 # A Recent Memories entry: `- [[stem]]`, optionally annotated `— description`.
 _INDEX_ENTRY_RE = re.compile(r"^-\s*\[\[([^\]]+)\]\](?:\s+[—–-]+\s+(.+))?\s*$")
 _SUMMARY_HEADING_RE = re.compile(r"^##\s+Summary\s*$")
+_METADATA_HEADING_RE = re.compile(r"^##\s+Metadata\s*$")
+# Mesh metadata lines (see docs/mesh.md): the per-note Lamport revision and
+# the soft-delete flag. Both live in `## Metadata` so Obsidian shows them.
+_REV_LINE_RE = re.compile(r"^\s*-\s*Rev:\s*(\S+)\s*$")
+_DISABLED_LINE_RE = re.compile(r"^\s*-\s*Disabled:\s*true\s*$", re.IGNORECASE)
 # Per-day journal notes written by omind.hooks; auto-recorded noise that would
 # otherwise crowd hand-curated memories out of the capped index list.
 _JOURNAL_NOTE_RE = re.compile(r"^Session Journal .*\.md$")
@@ -113,6 +119,10 @@ class NoteFields:
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
+    # Mesh fields (docs/mesh.md). Empty/False on legacy notes, and rendered
+    # only when set, so a non-mesh note round-trips byte-identical.
+    rev: str = ""
+    disabled: bool = False
 
     def to_dict(self) -> dict[str, Any]:
         return asdict(self)
@@ -138,6 +148,8 @@ class NoteFields:
             connections=[str(c).strip() for c in (data.get("connections") or []) if str(c).strip()],
             action_items=items,
             references=[str(r).strip() for r in (data.get("references") or []) if str(r).strip()],
+            rev=str(data.get("rev", "")).strip(),
+            disabled=bool(data.get("disabled")),
         )
 
 
@@ -150,6 +162,7 @@ class NoteSummary:
     tags: list[str]
     created: str
     summary: str
+    disabled: bool = False
 
 
 def _clean_tag(tag: object) -> str:
@@ -185,6 +198,8 @@ def parse_note(md: str) -> NoteFields:
     meta = sections.get("Metadata", [])
     created = ""
     related_to = ""
+    rev = ""
+    disabled = False
     tags: list[str] = []
     for line in meta:
         if m := re.match(r"^\s*-\s*Created:\s*(.*)$", line):
@@ -193,6 +208,10 @@ def parse_note(md: str) -> NoteFields:
             tags = _TAG_RE.findall(m.group(1))
         elif m := re.match(r"^\s*-\s*Related to:\s*(.*)$", line):
             related_to = m.group(1).strip()
+        elif m := _REV_LINE_RE.match(line):
+            rev = m.group(1).strip()
+        elif _DISABLED_LINE_RE.match(line):
+            disabled = True
 
     connections = _WIKILINK_RE.findall("\n".join(sections.get("Connections", [])))
 
@@ -221,6 +240,8 @@ def parse_note(md: str) -> NoteFields:
         connections=[c.strip() for c in connections if c.strip()],
         action_items=action_items,
         references=references,
+        rev=rev,
+        disabled=disabled,
     )
 
 
@@ -233,6 +254,10 @@ def render_fields(f: NoteFields) -> str:
     tag_str = " ".join(f"#{_clean_tag(t)}" for t in f.tags if _clean_tag(t))
     out.append(f"- Tags: {tag_str}".rstrip())
     out.append(f"- Related to: {f.related_to}".rstrip())
+    if f.rev:
+        out.append(f"- Rev: {f.rev}")
+    if f.disabled:
+        out.append("- Disabled: true")
     out.append("")
 
     out.append("## Summary")
@@ -282,16 +307,68 @@ def _with_summary(md: str, summary: str) -> str:
     return md.rstrip() + f"\n\n## Summary\n{summary}\n"
 
 
-class OmiStore:
-    """CRUD over `*.md` notes in a single OMI folder."""
+def _metadata_line_edit(md: str, pattern: re.Pattern[str], replacement: str | None) -> str:
+    """Set/replace/remove one ``## Metadata`` bullet, leaving the rest untouched.
 
-    def __init__(self, omi_dir: Path | str) -> None:
+    Surgical line edit (like :func:`_with_summary`) so hand-curated notes keep
+    sections the template doesn't know about. Replaces the first line matching
+    ``pattern`` with ``replacement`` (or removes it when ``replacement`` is
+    None); when absent, inserts at the end of the ``## Metadata`` section, or
+    appends a fresh section when the note has none.
+    """
+    lines = md.splitlines()
+    for i, line in enumerate(lines):
+        if pattern.match(line):
+            rest = lines[i + 1 :]
+            middle = [replacement] if replacement is not None else []
+            return "\n".join([*lines[:i], *middle, *rest]).rstrip() + "\n"
+    if replacement is None:
+        return md
+    meta_start = next(
+        (i for i, line in enumerate(lines) if _METADATA_HEADING_RE.match(line)), None
+    )
+    if meta_start is None:
+        return md.rstrip() + f"\n\n## Metadata\n{replacement}\n"
+    # End of the Metadata section = last non-blank line before the next heading.
+    end = meta_start
+    for i in range(meta_start + 1, len(lines)):
+        if lines[i].startswith("#"):
+            break
+        if lines[i].strip():
+            end = i
+    return "\n".join([*lines[: end + 1], replacement, *lines[end + 1 :]]).rstrip() + "\n"
+
+
+def _with_rev(md: str, rev: str) -> str:
+    """Return ``md`` with its ``- Rev:`` metadata line set to ``rev``."""
+    return _metadata_line_edit(md, _REV_LINE_RE, f"- Rev: {rev}")
+
+
+def _with_disabled(md: str, disabled: bool) -> str:
+    """Return ``md`` with its ``- Disabled: true`` flag set or removed."""
+    return _metadata_line_edit(md, _DISABLED_LINE_RE, "- Disabled: true" if disabled else None)
+
+
+class OmiStore:
+    """CRUD over `*.md` notes in a single OMI folder.
+
+    ``node_id`` enables mesh mode (docs/mesh.md): every write stamps the next
+    per-note Lamport revision into ``## Metadata``, and ``delete_note``
+    soft-deletes (sets ``Disabled: true``) instead of unlinking.
+    """
+
+    def __init__(self, omi_dir: Path | str, node_id: str | None = None) -> None:
         self.omi_dir = Path(omi_dir).expanduser()
+        self.node_id = node_id
+
+    def _mesh_mode(self) -> bool:
+        """True when this folder replicates: deletes must be merge-safe."""
+        return self.node_id is not None or (self.omi_dir / ".git").exists()
 
     # -- concurrency --------------------------------------------------------
 
     @contextlib.contextmanager
-    def _write_lock(self) -> Iterator[None]:
+    def write_lock(self) -> Iterator[None]:
         """Hold the OMI folder's inter-process exclusive write lock.
 
         Serializes writers across separate processes — concurrent Claude Code
@@ -308,6 +385,9 @@ class OmiStore:
         finally:
             filelock.unlock_fd(fd)
             os.close(fd)
+
+    # Backward-compatible alias: external writers (Hermes) predate the rename.
+    _write_lock = write_lock
 
     # -- naming / safety ----------------------------------------------------
 
@@ -366,12 +446,40 @@ class OmiStore:
             tags=fields.tags,
             created=fields.created,
             summary=snippet,
+            disabled=fields.disabled,
         )
 
-    def list_notes(self) -> list[NoteSummary]:
-        summaries = [self._summarize(p) for p in self._note_paths()]
+    def list_notes(self, include_disabled: bool = False) -> list[NoteSummary]:
+        summaries: list[NoteSummary] = []
+        for p in self._note_paths():
+            s = self._summarize(p)
+            if include_disabled or not s.disabled:
+                summaries.append(s)
         summaries.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return summaries
+
+    def search(
+        self, query: str, tag: str | None = None, include_disabled: bool = False
+    ) -> list[NoteSummary]:
+        """Case-insensitive substring search over title/summary/details/tags."""
+        needle = query.strip().lower()
+        tag_needle = _clean_tag(tag).lower() if tag else ""
+        results: list[NoteSummary] = []
+        for path in self._note_paths():
+            text = path.read_text(encoding="utf-8")
+            fields = parse_note(text)
+            if fields.disabled and not include_disabled:
+                continue
+            if tag_needle and tag_needle not in (t.lower() for t in fields.tags):
+                continue
+            haystack = "\n".join(
+                [fields.title, fields.summary, fields.details, " ".join(fields.tags), path.stem]
+            ).lower()
+            if needle and needle not in haystack:
+                continue
+            results.append(self._summarize(path, text))
+        results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
+        return results
 
     def backlinks(self, name: str) -> list[NoteSummary]:
         """Notes that ``[[wikilink]]`` to the given note (by title or stem)."""
@@ -392,7 +500,9 @@ class OmiStore:
             text = path.read_text(encoding="utf-8")
             link_targets = {t.strip().lower() for t in _WIKILINK_RE.findall(text)}
             if link_targets & identifiers:
-                results.append(self._summarize(path, text))
+                summary = self._summarize(path, text)
+                if not summary.disabled:
+                    results.append(summary)
         results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return results
 
@@ -428,7 +538,7 @@ class OmiStore:
 
     def write_note(self, name: str, content: str, expected_version: str | None = None) -> str:
         path = self.safe_name(name)
-        with self._write_lock():
+        with self.write_lock():
             # Re-check the optimistic-concurrency token *inside* the lock so the
             # check-then-write is atomic against another process's save.
             if expected_version is not None and path.is_file():
@@ -438,9 +548,28 @@ class OmiStore:
                         f"note {name!r} changed on disk (expected {expected_version!r}, "
                         f"found {current!r})"
                     )
+            if self.node_id is not None and path.name not in RESERVED_FILENAMES:
+                content = self._stamped(path, content)
             _atomic_write(path, content)
             self._write_index()
         return path.name
+
+    def _stamped(self, path: Path, content: str) -> str:
+        """Stamp the next Lamport revision for this node into ``content``.
+
+        Caller MUST hold :meth:`write_lock`. The tick observes the highest
+        revision seen for this note — on disk or already in the incoming
+        content (e.g. a merge result) — per the Lamport receive rule.
+        """
+        if self.node_id is None:
+            return content
+        current: Rev | None = None
+        if path.is_file():
+            current = Rev.parse(parse_note(path.read_text(encoding="utf-8")).rev)
+        incoming = Rev.parse(parse_note(content).rev)
+        if incoming is not None and (current is None or incoming.newer_than(current)):
+            current = incoming
+        return _with_rev(content, str(next_rev(current, self.node_id)))
 
     def create_note(self, fields: NoteFields) -> str:
         if not fields.title.strip():
@@ -461,12 +590,36 @@ class OmiStore:
         return self.write_note(name, render_fields(fields), expected_version=expected_version)
 
     def delete_note(self, name: str) -> None:
+        """Delete a note — mode-aware (docs/mesh.md "Disable instead of delete").
+
+        In mesh mode a hard-removed file would be resurrected by the next sync
+        from any peer still holding it, so deletion soft-deletes via
+        :meth:`disable_note`. Non-mesh folders keep the 1.x unlink behavior.
+        """
+        if self._mesh_mode():
+            self.disable_note(name)
+        else:
+            self.purge_note(name)
+
+    def disable_note(self, name: str) -> str:
+        """Soft-delete: set ``Disabled: true``; hidden from listings, restorable."""
+        path = self.safe_name(name)
+        if path.name in RESERVED_FILENAMES:
+            raise NoteError(f"refusing to disable reserved file: {path.name}")
+        return self.write_note(name, _with_disabled(self.read_note(name), True))
+
+    def restore_note(self, name: str) -> str:
+        """Clear a soft-deleted note's ``Disabled`` flag."""
+        return self.write_note(name, _with_disabled(self.read_note(name), False))
+
+    def purge_note(self, name: str) -> None:
+        """Hard-delete a note file. In a mesh, only `omind mesh purge` may use this."""
         path = self.safe_name(name)
         if path.name in RESERVED_FILENAMES:
             raise NoteError(f"refusing to delete reserved file: {path.name}")
         if not path.is_file():
             raise NoteNotFoundError(f"note not found: {name!r}")
-        with self._write_lock():
+        with self.write_lock():
             path.unlink()
             self._write_index()
 
@@ -474,11 +627,11 @@ class OmiStore:
 
     def update_index(self) -> None:
         """Regenerate the `Recent Memories` wikilink list in index.md (locked)."""
-        with self._write_lock():
+        with self.write_lock():
             self._write_index()
 
     def _write_index(self) -> None:
-        """Regenerate index.md. Caller MUST hold :meth:`_write_lock`.
+        """Regenerate index.md. Caller MUST hold :meth:`write_lock`.
 
         Read-modify-write on the shared index.md, so it only runs under the
         write lock; the standalone entry point is :meth:`update_index`.
@@ -518,7 +671,7 @@ class OmiStore:
         have a summary are left alone. A new-format index (marked with
         :data:`_INDEX_GENERATED_MARKER`) carries only generated descriptions,
         so it is never migrated — that is what makes the migration one-time and
-        idempotent. Caller MUST hold :meth:`_write_lock`.
+        idempotent. Caller MUST hold :meth:`write_lock`.
         """
         if INDEX_RECENT_HEADING not in existing or _INDEX_GENERATED_MARKER in existing:
             return

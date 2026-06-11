@@ -73,6 +73,10 @@ Every machine runs an identical **omind node**:
 ### Reused unchanged
 
 - `OmiStore` (`store.py`) — the entire read/write/search/tag/backlink API.
+  ("Unchanged" means the API shape and call sites; the locked Rev-in-Metadata
+  decision requires `NoteFields`/`parse_note`/`render_fields` to learn the
+  `Rev` and `Disabled` lines, added as defaulted fields so legacy notes
+  round-trip byte-identical.)
 - `parse_note` → `NoteFields` → `render_fields` — the structured model the merge
   driver operates on.
 - The CLI scaffold, the ruff + mypy-strict + pip-audit CI bar, and the
