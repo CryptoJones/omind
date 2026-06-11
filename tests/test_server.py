@@ -1,0 +1,213 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Aaron K. Clark
+"""Tests for omind.server: the `omind node` mesh-node MCP server.
+
+In-process tests drive FastMCP's tool layer directly; one subprocess smoke
+test does a real stdio handshake and asserts the clean-exit-on-EOF contract
+(the regression test for the obsidian-mcp hang class, issue #49).
+"""
+
+from __future__ import annotations
+
+import asyncio
+import json
+import subprocess
+import sys
+from pathlib import Path
+from typing import Any
+
+import pytest
+from mcp.server.fastmcp import FastMCP
+from mcp.server.fastmcp.exceptions import ToolError
+
+from omind.paths import sync_signal_path
+from omind.server import build_server
+
+EXPECTED_TOOLS = {
+    "read-note",
+    "create-note",
+    "edit-note",
+    "search-vault",
+    "list-notes",
+    "delete-note",
+    "restore-note",
+    "backlinks",
+    "list-tags",
+}
+
+
+@pytest.fixture
+def omi_dir(tmp_path: Path) -> Path:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    return omi
+
+
+@pytest.fixture
+def server(omi_dir: Path) -> FastMCP:
+    return build_server(omi_dir, node_id="testnode-abc123")
+
+
+def call(server: FastMCP, name: str, args: dict[str, Any]) -> Any:
+    """Invoke a tool in-process and return its structured result."""
+    _content, structured = asyncio.run(server.call_tool(name, args))
+    return structured
+
+
+def test_exposes_exactly_the_designed_tools(server: FastMCP) -> None:
+    tools = asyncio.run(server.list_tools())
+    assert {t.name for t in tools} == EXPECTED_TOOLS
+    assert all(t.description for t in tools)
+
+
+def test_create_read_round_trip(server: FastMCP, omi_dir: Path) -> None:
+    created = call(
+        server,
+        "create-note",
+        {
+            "title": "Server Note",
+            "summary": "made via mcp",
+            "details": "body",
+            "tags": ["omi", "mesh"],
+            "connections": ["Other Note"],
+            "action_items": ["[x] done thing", "open thing"],
+            "references": ["Source: test"],
+        },
+    )
+    assert created == {"filename": "Server Note.md"}
+    assert (omi_dir / "Server Note.md").is_file()
+
+    got = call(server, "read-note", {"name": "Server Note.md"})
+    assert got["fields"]["title"] == "Server Note"
+    assert got["fields"]["tags"] == ["omi", "mesh"]
+    assert got["fields"]["action_items"] == [
+        {"text": "done thing", "done": True},
+        {"text": "open thing", "done": False},
+    ]
+    assert got["fields"]["rev"] == "1@testnode-abc123"  # node stamps Lamport revs
+    assert got["version"]
+    assert "[[Other Note]]" in got["raw"]
+
+
+def test_edit_note_partial_update(server: FastMCP) -> None:
+    call(server, "create-note", {"title": "Partial", "summary": "old", "tags": ["keep"]})
+    edited = call(server, "edit-note", {"name": "Partial.md", "summary": "new"})
+    assert edited["filename"] == "Partial.md"
+    got = call(server, "read-note", {"name": "Partial.md"})
+    assert got["fields"]["summary"] == "new"
+    assert got["fields"]["tags"] == ["keep"]  # omitted fields untouched
+
+
+def test_edit_note_version_conflict(server: FastMCP) -> None:
+    call(server, "create-note", {"title": "Versioned", "summary": "v1"})
+    stale = call(server, "read-note", {"name": "Versioned.md"})["version"]
+    call(server, "edit-note", {"name": "Versioned.md", "summary": "v2"})
+    with pytest.raises(ToolError, match="changed on disk"):
+        call(
+            server,
+            "edit-note",
+            {"name": "Versioned.md", "summary": "v3", "expected_version": stale},
+        )
+
+
+def test_delete_archives_and_restore(server: FastMCP, omi_dir: Path) -> None:
+    call(server, "create-note", {"title": "Archived", "summary": "s"})
+    deleted = call(server, "delete-note", {"name": "Archived.md"})
+    assert deleted == {"filename": "Archived.md", "status": "archived"}
+    assert (omi_dir / "Archived.md").is_file()  # soft delete, file stays
+
+    names = [n["filename"] for n in call(server, "list-notes", {})["result"]]
+    assert "Archived.md" not in names
+    shown = call(server, "list-notes", {"include_archived": True})["result"]
+    assert any(n["filename"] == "Archived.md" and n["disabled"] for n in shown)
+
+    restored = call(server, "restore-note", {"name": "Archived.md"})
+    assert restored["status"] == "restored"
+    names = [n["filename"] for n in call(server, "list-notes", {})["result"]]
+    assert "Archived.md" in names
+
+
+def test_search_vault(server: FastMCP) -> None:
+    call(server, "create-note", {"title": "Alpha", "summary": "quantum cats", "tags": ["pets"]})
+    call(server, "create-note", {"title": "Beta", "details": "classical dogs", "tags": ["pets"]})
+    hits = call(server, "search-vault", {"query": "quantum"})["result"]
+    assert [h["filename"] for h in hits] == ["Alpha.md"]
+    by_tag = call(server, "search-vault", {"query": "", "tag": "pets"})["result"]
+    assert {h["filename"] for h in by_tag} == {"Alpha.md", "Beta.md"}
+
+
+def test_backlinks_and_tags(server: FastMCP) -> None:
+    call(server, "create-note", {"title": "Hub", "summary": "s", "tags": ["one"]})
+    call(server, "create-note", {"title": "Spoke", "summary": "see [[Hub]]", "tags": ["two"]})
+    links = call(server, "backlinks", {"name": "Hub.md"})["result"]
+    assert [n["filename"] for n in links] == ["Spoke.md"]
+    assert call(server, "list-tags", {})["result"] == ["one", "two"]
+
+
+def test_missing_note_is_a_tool_error(server: FastMCP) -> None:
+    with pytest.raises(ToolError, match="not found"):
+        call(server, "read-note", {"name": "Nope.md"})
+
+
+def test_traversal_is_a_tool_error(server: FastMCP) -> None:
+    with pytest.raises(ToolError, match="path separators"):
+        call(server, "read-note", {"name": "../escape.md"})
+
+
+def test_writes_touch_the_sync_signal(server: FastMCP, omi_dir: Path) -> None:
+    signal = sync_signal_path(omi_dir)
+    assert not signal.exists()
+    call(server, "create-note", {"title": "Trigger", "summary": "s"})
+    assert signal.exists()
+    first = signal.stat().st_mtime_ns
+    call(server, "edit-note", {"name": "Trigger.md", "summary": "again"})
+    assert signal.stat().st_mtime_ns >= first
+
+
+def test_reads_do_not_touch_the_sync_signal(server: FastMCP, omi_dir: Path) -> None:
+    call(server, "create-note", {"title": "Quiet", "summary": "s"})
+    signal = sync_signal_path(omi_dir)
+    signal.unlink()
+    call(server, "read-note", {"name": "Quiet.md"})
+    call(server, "list-notes", {})
+    assert not signal.exists()
+
+
+def test_stdio_handshake_and_clean_exit_on_eof(tmp_path: Path) -> None:
+    """The issue-#49 regression contract: a real `omind node` process answers
+    the MCP handshake and exits 0 the moment its client closes stdin."""
+    vault = tmp_path / "Vault"
+    (vault / "OMI").mkdir(parents=True)
+    messages = [
+        {
+            "jsonrpc": "2.0",
+            "id": 1,
+            "method": "initialize",
+            "params": {
+                "protocolVersion": "2025-06-18",
+                "capabilities": {},
+                "clientInfo": {"name": "pytest", "version": "0"},
+            },
+        },
+        {"jsonrpc": "2.0", "method": "notifications/initialized"},
+        {"jsonrpc": "2.0", "id": 2, "method": "tools/list", "params": {}},
+    ]
+    proc = subprocess.Popen(
+        [sys.executable, "-m", "omind", "node", "--vault", str(vault), "--folder", "OMI"],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        encoding="utf-8",
+    )
+    payload = "".join(json.dumps(m) + "\n" for m in messages)
+    try:
+        out, err = proc.communicate(payload, timeout=60)  # close stdin -> EOF
+    except subprocess.TimeoutExpired:
+        proc.kill()
+        pytest.fail("omind node did not exit on stdin EOF (the issue-#49 hang)")
+    assert proc.returncode == 0, err
+    replies = [json.loads(line) for line in out.splitlines() if line.strip()]
+    by_id = {r.get("id"): r for r in replies if "id" in r}
+    assert by_id[1]["result"]["serverInfo"]["name"] == "omi"
+    tool_names = {t["name"] for t in by_id[2]["result"]["tools"]}
+    assert tool_names == EXPECTED_TOOLS

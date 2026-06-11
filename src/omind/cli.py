@@ -106,6 +106,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="name to register the MCP server under (default: obsidian)",
     )
 
+    node = sub.add_parser(
+        "node", help="run the local mesh-node MCP server over stdio (docs/mesh.md)"
+    )
+    node.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    node.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+
     serve = sub.add_parser("serve", help="run the local web UI over an OMI memory folder")
     serve.add_argument(
         "--vault",
@@ -386,6 +399,14 @@ def _run_backup(args: argparse.Namespace) -> int:
         return 1
 
 
+def _run_node(args: argparse.Namespace) -> int:
+    # Imported lazily: the mcp SDK is only needed when actually serving.
+    from omind.server import run_node
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    return run_node(omi_dir)
+
+
 def _run_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
@@ -521,6 +542,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_setup(args)
     if args.command == "quickstart":
         return _run_quickstart(args)
+    if args.command == "node":
+        return _run_node(args)
     if args.command == "serve":
         return _run_serve(args)
     if args.command == "doctor":
