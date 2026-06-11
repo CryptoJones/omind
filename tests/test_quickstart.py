@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 
 from omind.cli import main
-from omind.provision import OBSIDIAN_MCP_VERSION, Provisioner, SetupConfig
+from omind.provision import Provisioner, SetupConfig
 from omind.quickstart import build_quickstart
 
 
@@ -40,17 +40,19 @@ def test_hooks_json_matches_provisioner(config: SetupConfig) -> None:
     assert data == {"hooks": expected}
 
 
-def test_register_command_is_direct_node_form(config: SetupConfig) -> None:
+def test_register_command_is_omind_node_form(config: SetupConfig) -> None:
     out = build_quickstart(config)
-    assert f"claude mcp add -s user {config.server_name} -- node --require" in out
-    # The vault-target argument is the OMI dir, quoted (paths contain spaces).
-    assert f'"{config.omi_dir}"' in out
+    assert f"claude mcp add -s user {config.server_name} -- " in out
+    assert " node --vault " in out
+    # The vault argument is quoted (paths contain spaces).
+    assert f'"{config.vault}"' in out
+    assert "npx" not in out and "obsidian-mcp" not in out
 
 
-def test_npm_install_pinned_to_stable_prefix(config: SetupConfig) -> None:
+def test_mesh_init_step_present(config: SetupConfig) -> None:
     out = build_quickstart(config)
-    assert f"obsidian-mcp@{OBSIDIAN_MCP_VERSION}" in out
-    assert "_npx" not in out
+    assert f'omind mesh init --vault "{config.vault}" --folder OMI' in out
+    assert "omind mesh add-peer" in out
 
 
 def test_scaffold_includes_all_obsidian_config_files(config: SetupConfig) -> None:

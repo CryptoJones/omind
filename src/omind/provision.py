@@ -1,11 +1,12 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Aaron K. Clark
-"""Idempotently wire up the OMI/Obsidian MCP integration for Claude Code.
+"""Idempotently wire up the OMI memory integration for Claude Code.
 
-`omind setup` reproduces, on any machine, the manual steps that point the
-`obsidian-mcp` server at an OMI folder and register it with the Claude Code CLI
-at user scope. Every step is safe to re-run: existing files are never
-clobbered, and the MCP server is only (re)registered when its path differs.
+`omind setup` reproduces, on any machine, the manual steps that register
+omind's own node MCP server (`omind node`, see docs/mesh.md) with the Claude
+Code CLI at user scope, scaffold the OMI folder, and initialize it as a mesh
+node. Every step is safe to re-run: existing files are never clobbered, and
+the MCP server is only (re)registered when its command differs.
 """
 
 from __future__ import annotations
@@ -118,43 +119,19 @@ def _entry_command_text(entry: object) -> str:
     return " ".join(parts)
 
 
-# obsidian-mcp version pinned to the install layout below (entry at
-# build/main.js). Bump together with any move to a newer release.
-OBSIDIAN_MCP_VERSION = "1.0.6"
-
-
-def mcp_servers_dir() -> Path:
-    """Stable home for omind-managed MCP server installs and the EOF guard.
-
-    Deliberately *not* the npx cache (``~/.npm/_npx/<hash>/``), which npm can
-    garbage-collect out from under a registered server.
-    """
-    return Path.home() / ".claude" / "mcp-servers"
-
-
-def server_install_dir() -> Path:
-    """Where ``obsidian-mcp`` is installed (an npm prefix we control)."""
-    return mcp_servers_dir() / "obsidian"
-
-
-def obsidian_mcp_entry() -> Path:
-    """The obsidian-mcp entry script inside :func:`server_install_dir`."""
-    return server_install_dir() / "node_modules" / "obsidian-mcp" / "build" / "main.js"
-
-
-def eof_guard_path() -> Path:
-    """The stdin-EOF preload that stops the server orphaning on exit."""
-    return mcp_servers_dir() / paths.EOF_GUARD_FILENAME
+#: The retired 1.x server registration (obsidian-mcp); setup removes it.
+LEGACY_SERVER_NAME = "obsidian"
 
 
 @dataclass
 class SetupConfig:
     vault: Path
     folder: str = "OMI"
-    server_name: str = "obsidian"
+    server_name: str = "omi"
     dry_run: bool = False
     force: bool = False
     agent: str = "claude"
+    no_mesh: bool = False
 
     @property
     def omi_dir(self) -> Path:
@@ -169,11 +146,13 @@ class Provisioner:
 
     #: tool -> why it is needed; subclasses for other agents override this.
     REQUIRED_TOOLS: ClassVar[dict[str, str]] = {
-        "node": "obsidian-mcp runs on Node.js",
-        "npm": "npm installs the obsidian-mcp package",
         "claude": "the Claude Code CLI registers the MCP server",
+        "git": "the mesh replicates the memory folder over git",
     }
-    DONE_MESSAGE: ClassVar[str] = "Done. Restart Claude Code to load the OMI memory tools."
+    DONE_MESSAGE: ClassVar[str] = (
+        "Done. Restart Claude Code to load the OMI memory tools. To replicate "
+        "to other machines: `omind mesh add-peer`, then `omind mesh install-service`."
+    )
 
     # -- helpers ------------------------------------------------------------
 
@@ -241,8 +220,9 @@ class Provisioner:
         obsidian_dir = self.config.omi_dir / ".obsidian"
         if obsidian_dir.exists() and not obsidian_dir.is_dir():
             raise ProvisionError(
-                f"{obsidian_dir} exists but is not a directory; obsidian-mcp needs a "
-                ".obsidian/ config folder. Move or remove that file and re-run."
+                f"{obsidian_dir} exists but is not a directory; the folder needs a "
+                ".obsidian/ config to open directly as an Obsidian vault. Move or "
+                "remove that file and re-run."
             )
         self._record(f"ensure {obsidian_dir}/ with app.json, core-plugins.json, appearance.json")
         if not self.config.dry_run:
@@ -281,29 +261,21 @@ class Provisioner:
         if not self.config.dry_run:
             migrate_journals(self.config.omi_dir)
 
-    def ensure_server_install(self) -> None:
-        """Install obsidian-mcp to a stable prefix and write the stdin-EOF guard.
+    def ensure_mesh(self) -> None:
+        """Initialize the folder as a mesh node (git repo, merge driver, identity).
 
-        Registering a direct ``node`` command needs both a path that won't be
-        garbage-collected (unlike the npx cache) and the preload that stops the
-        server orphaning when Claude Code exits. The guard is a managed file:
-        re-running setup refreshes it whenever omind ships a new version.
+        Optional via ``--no-mesh``; idempotent like everything else here. The
+        replication daemon is NOT started as a side effect — that is the
+        explicit `omind mesh install-service` step.
         """
-        self._write_managed(eof_guard_path(), seeds.EOF_GUARD_JS)
-        entry = obsidian_mcp_entry()
-        if entry.is_file() and not self.config.force:
-            self.log(f"  obsidian-mcp already installed: {entry}")
+        if self.config.no_mesh:
+            self.log("  --no-mesh: leaving the folder un-replicated")
             return
-        install_dir = server_install_dir()
-        self._record(f"install obsidian-mcp@{OBSIDIAN_MCP_VERSION} into {install_dir}")
+        self._record(f"initialize mesh node in {self.config.omi_dir}")
         if not self.config.dry_run:
-            install_dir.mkdir(parents=True, exist_ok=True)
-            self._run(
-                [
-                    "npm", "install", "--prefix", str(install_dir),
-                    f"obsidian-mcp@{OBSIDIAN_MCP_VERSION}", "--no-audit", "--no-fund",
-                ]
-            )
+            from omind.mesh import mesh_init
+
+            mesh_init(self.config.omi_dir, log=lambda m: self.log(f"  {m}"))
 
     def registered_server(self) -> dict[str, object] | None:
         path = claude_config_path()
@@ -319,58 +291,81 @@ class Provisioner:
         server = servers.get(self.config.server_name)
         return server if isinstance(server, dict) else None
 
-    @staticmethod
-    def _server_path(server: dict[str, object]) -> str | None:
-        args = server.get("args")
-        if isinstance(args, list) and args:
-            return str(args[-1])
-        return None
+    def _server_command(self) -> list[str]:
+        """The `omind node` invocation the agent runs as its MCP server.
 
-    @staticmethod
-    def _is_direct_node(server: dict[str, object]) -> bool:
-        """True if the server uses the leak-free ``node --require`` command.
-
-        The old ``npx -y obsidian-mcp`` form orphans the Node process on exit
-        (see docs/troubleshooting.md), so we treat it as out of date.
+        Absolute omind path when resolvable: the agent's spawn environment may
+        lack ~/.local/bin on PATH.
         """
-        if server.get("command") != "node":
-            return False
-        args = server.get("args")
-        return isinstance(args, list) and "--require" in args
-
-    def _server_command(self, target: str) -> list[str]:
+        omind_exe = shutil.which("omind") or "omind"
         return [
+            omind_exe,
             "node",
-            "--require", str(eof_guard_path()),
-            str(obsidian_mcp_entry()),
-            target,
+            "--vault", str(self.config.vault),
+            "--folder", self.config.folder,
         ]
 
-    def register_mcp(self) -> None:
-        target = str(self.config.omi_dir)
-        existing = self.registered_server()
-        up_to_date = (
-            existing is not None
-            and self._server_path(existing) == target
-            and self._is_direct_node(existing)
+    def desired_server_entry(self) -> dict[str, Any]:
+        """The stdio MCP server entry, in the shared command/args shape."""
+        command = self._server_command()
+        return {"command": command[0], "args": command[1:]}
+
+    def _matches_desired(self, server: dict[str, object]) -> bool:
+        desired = self.desired_server_entry()
+        return server.get("command") == desired["command"] and server.get("args") == list(
+            desired["args"]
         )
-        if up_to_date and not self.config.force:
-            self.log(f"  MCP server '{self.config.server_name}' already points at {target}")
+
+    def _legacy_server(self) -> dict[str, object] | None:
+        """The retired obsidian-mcp registration, when still present."""
+        if self.config.server_name == LEGACY_SERVER_NAME:
+            return None
+        path = claude_config_path()
+        if not path.is_file():
+            return None
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+        except json.JSONDecodeError:
+            return None
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            return None
+        entry = servers.get(LEGACY_SERVER_NAME)
+        if isinstance(entry, dict) and "obsidian-mcp" in json.dumps(entry):
+            return entry
+        return None
+
+    def retire_legacy_server(self) -> None:
+        """Remove the 1.x obsidian-mcp registration the node server replaces."""
+        if self._legacy_server() is None:
+            return
+        self._record(
+            f"remove retired MCP server '{LEGACY_SERVER_NAME}' (obsidian-mcp, "
+            "replaced by `omind node`)"
+        )
+        self._run(["claude", "mcp", "remove", LEGACY_SERVER_NAME, "-s", "user"])
+
+    def register_mcp(self) -> None:
+        existing = self.registered_server()
+        if existing is not None and self._matches_desired(existing) and not self.config.force:
+            self.log(
+                f"  MCP server '{self.config.server_name}' already runs "
+                f"`omind node` for {self.config.omi_dir}"
+            )
             return
         if existing is not None:
-            form = "node" if self._is_direct_node(existing) else "legacy npx"
             self._record(
                 f"remove existing MCP server '{self.config.server_name}' "
-                f"({form}, was {self._server_path(existing)!r})"
+                "(command differs from the omind node form)"
             )
             self._run(["claude", "mcp", "remove", self.config.server_name, "-s", "user"])
         self._record(
             f"register MCP server '{self.config.server_name}' -> "
-            f"node --require {eof_guard_path()} {obsidian_mcp_entry()} {target!r} (user scope)"
+            f"{' '.join(self._server_command())} (user scope)"
         )
         self._run(
             ["claude", "mcp", "add", "-s", "user", self.config.server_name, "--"]
-            + self._server_command(target)
+            + self._server_command()
         )
 
     def _hook_command(self, event: str) -> str:
@@ -486,6 +481,7 @@ class Provisioner:
 
     def integrate(self) -> None:
         """The agent-specific wiring; subclasses for other agents override this."""
+        self.retire_legacy_server()
         self.register_mcp()
         self.ensure_hooks_installed()
 
@@ -496,7 +492,7 @@ class Provisioner:
         self.ensure_obsidian_config()
         self.seed_memory_files()
         self.migrate_journal_notes()
-        self.ensure_server_install()
+        self.ensure_mesh()
         self.integrate()
         self.verify()
         if not self.config.dry_run:
@@ -547,8 +543,9 @@ def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
         results.append(
             CheckResult(
                 "obsidian_config",
-                "fail",
-                f"missing {app_json} — obsidian-mcp needs it to start",
+                "warn",
+                f"missing {app_json} — the folder won't open directly as an "
+                "Obsidian vault (run `omind setup`)",
             )
         )
 
@@ -566,30 +563,6 @@ def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
     return results
 
 
-def _diagnose_eof_guard() -> CheckResult:
-    guard = eof_guard_path()
-    if not guard.is_file():
-        return CheckResult(
-            "eof_guard",
-            "warn",
-            f"missing stdin-EOF guard {guard} — run `omind setup` "
-            "(the server may orphan when the agent exits)",
-        )
-    try:
-        current: str | None = guard.read_text(encoding="utf-8")
-    except OSError:
-        current = None
-    if current != seeds.EOF_GUARD_JS:
-        return CheckResult(
-            "eof_guard",
-            "warn",
-            f"outdated stdin-EOF guard {guard} — run `omind setup` to refresh it "
-            "(stale guards miss the transport-detach watchdog; tool calls can "
-            "hang forever, see issue #49)",
-        )
-    return CheckResult("eof_guard", "ok", f"stdin-EOF guard present and current: {guard}")
-
-
 def diagnose(config: SetupConfig) -> list[CheckResult]:
     """Inspect the wiring `omind setup` creates and report what's healthy.
 
@@ -603,7 +576,6 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
     prov = Provisioner(config=config, log=lambda _msg: None)
     server = prov.registered_server()
     name = config.server_name
-    target = str(omi)
     if server is None:
         results.append(
             CheckResult(
@@ -612,31 +584,29 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
                 f"MCP server '{name}' not registered at user scope (run `omind setup`)",
             )
         )
+    elif not prov._matches_desired(server):
+        results.append(
+            CheckResult(
+                "mcp_registration",
+                "warn",
+                f"MCP server '{name}' differs from the expected "
+                f"`omind node` command (run `omind setup`)",
+            )
+        )
     else:
-        path = prov._server_path(server)
-        if path != target:
-            results.append(
-                CheckResult(
-                    "mcp_registration",
-                    "warn",
-                    f"MCP server '{name}' points at {path!r}, expected {target!r}",
-                )
-            )
-        elif not Provisioner._is_direct_node(server):
-            results.append(
-                CheckResult(
-                    "mcp_registration",
-                    "warn",
-                    f"MCP server '{name}' uses the leak-prone npx command; "
-                    "run `omind setup` to migrate it to the direct-node form",
-                )
-            )
-        else:
-            results.append(
-                CheckResult("mcp_registration", "ok", f"MCP server '{name}' -> {target}")
-            )
+        results.append(
+            CheckResult("mcp_registration", "ok", f"MCP server '{name}' -> {omi}")
+        )
 
-    results.append(_diagnose_eof_guard())
+    if prov._legacy_server() is not None:
+        results.append(
+            CheckResult(
+                "legacy_server",
+                "warn",
+                f"retired '{LEGACY_SERVER_NAME}' (obsidian-mcp) registration still "
+                "present — run `omind setup` to remove it",
+            )
+        )
 
     results.append(_diagnose_hooks(claude_settings_path(), config))
 

@@ -1,16 +1,17 @@
 # Architecture: Git-Backed Memory Mesh
 
-> **Status:** Accepted design — **not yet implemented**.
-> **Target release:** 2.0.0 (architecture shift).
+> **Status:** **Implemented** as of 2.0.0 (see [mesh-ops.md](mesh-ops.md) for
+> day-to-day operation).
+> **Release:** 2.0.0 (architecture shift).
 > **Supersedes:** the per-machine, stdio-only model where each box runs its own
 > `obsidian-mcp` against a separately-synced copy of the OMI folder.
 > **Date:** 2026-06-10.
 
 This document records the design for turning omind from a single-machine memory
 tool into a **mesh**: every machine in the house runs a full local memory node,
-and the nodes replicate to one another peer-to-peer over git. It is a scope /
-decision record, not a description of shipped code. Where it says "will," the
-code does not exist yet.
+and the nodes replicate to one another peer-to-peer over git. Originally a
+scope/decision record; the design shipped in 2.0.0 essentially as written
+(deviations are noted inline).
 
 ## Motivation
 

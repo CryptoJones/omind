@@ -40,7 +40,6 @@ def isolate_config(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     monkeypatch.setattr(
         provision, "claude_settings_path", lambda: tmp_path / ".claude" / "settings.json"
     )
-    monkeypatch.setattr(provision, "mcp_servers_dir", lambda: tmp_path / "mcp-servers")
     return tmp_path
 
 

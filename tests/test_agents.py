@@ -28,13 +28,6 @@ def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
-def isolate_server_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    home = tmp_path / "mcp-servers"
-    monkeypatch.setattr(provision, "mcp_servers_dir", lambda: home)
-    return home
-
-
-@pytest.fixture(autouse=True)
 def no_subprocess(monkeypatch: pytest.MonkeyPatch) -> list[list[str]]:
     calls: list[list[str]] = []
 
@@ -120,10 +113,9 @@ def test_hermes_setup_registers_server_and_skill(
     run_setup_for(config, log=_quiet)
 
     data = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
-    server = data["mcp_servers"]["obsidian"]
-    assert server["command"] == "node"
-    assert "--require" in server["args"]
-    assert server["args"][-1] == str(config.omi_dir)
+    server = data["mcp_servers"]["omi"]
+    assert server["command"] == "/usr/bin/omind"
+    assert server["args"] == ["node", "--vault", str(config.vault), "--folder", "OMI"]
     # untouched pre-existing keys
     assert data["model"] == {"provider": "openrouter"}
     assert data["toolsets"] == ["hermes-cli"]
@@ -139,7 +131,7 @@ def test_hermes_setup_without_config_file_creates_minimal_one(
 ) -> None:
     run_setup_for(_config(tmp_path, "hermes"), log=_quiet)
     data = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
-    assert "obsidian" in data["mcp_servers"]
+    assert "omi" in data["mcp_servers"]
 
 
 def test_hermes_setup_is_idempotent(tmp_path: Path, hermes_home: Path) -> None:
@@ -151,7 +143,9 @@ def test_hermes_setup_is_idempotent(tmp_path: Path, hermes_home: Path) -> None:
     assert not any("register MCP server" in a for a in actions)
 
 
-def test_hermes_setup_repairs_drifted_entry(tmp_path: Path, hermes_home: Path) -> None:
+def test_hermes_setup_retires_legacy_and_registers_omi(
+    tmp_path: Path, hermes_home: Path
+) -> None:
     config = _config(tmp_path, "hermes")
     (hermes_home / "config.yaml").write_text(
         yaml.safe_dump(
@@ -161,8 +155,8 @@ def test_hermes_setup_repairs_drifted_entry(tmp_path: Path, hermes_home: Path) -
     )
     run_setup_for(config, log=_quiet)
     data = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
-    assert data["mcp_servers"]["obsidian"]["command"] == "node"
-    assert data["mcp_servers"]["obsidian"]["args"][-1] == str(config.omi_dir)
+    assert "obsidian" not in data["mcp_servers"]  # retired 1.x entry dropped
+    assert data["mcp_servers"]["omi"]["args"][0] == "node"
 
 
 def test_hermes_setup_preserves_other_mcp_servers(
@@ -175,7 +169,7 @@ def test_hermes_setup_preserves_other_mcp_servers(
     run_setup_for(_config(tmp_path, "hermes"), log=_quiet)
     data = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
     assert data["mcp_servers"]["github"] == {"command": "npx", "args": ["gh-mcp"]}
-    assert "obsidian" in data["mcp_servers"]
+    assert "omi" in data["mcp_servers"]
 
 
 def test_hermes_setup_refuses_corrupt_yaml(tmp_path: Path, hermes_home: Path) -> None:
@@ -226,9 +220,9 @@ def test_openclaw_setup_registers_server_and_skill(
     run_setup_for(config, log=_quiet)
 
     data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
-    server = data["mcp"]["servers"]["obsidian"]
-    assert server["command"] == "node"
-    assert server["args"][-1] == str(config.omi_dir)
+    server = data["mcp"]["servers"]["omi"]
+    assert server["command"] == "/usr/bin/omind"
+    assert server["args"] == ["node", "--vault", str(config.vault), "--folder", "OMI"]
     assert data["agents"] == {"defaults": {"workspace": "~/clawd"}}  # untouched
 
     skill = agents.openclaw_skill_dir() / paths.AGENT_SKILL_FILENAME
@@ -243,7 +237,7 @@ def test_openclaw_setup_merges_into_legacy_config_name(
     )
     run_setup_for(_config(tmp_path, "openclaw"), log=_quiet)
     data = json.loads((openclaw_home / "moltbot.json").read_text(encoding="utf-8"))
-    assert "obsidian" in data["mcp"]["servers"]
+    assert "omi" in data["mcp"]["servers"]
     assert data["mcp"]["servers"]["other"] == {"url": "https://x"}
     assert not (openclaw_home / "openclaw.json").exists()
 
@@ -296,7 +290,7 @@ def test_diagnose_hermes_warns_on_drifted_entry(tmp_path: Path, hermes_home: Pat
     run_setup_for(config, log=_quiet)
     cfg_path = hermes_home / "config.yaml"
     data = yaml.safe_load(cfg_path.read_text(encoding="utf-8"))
-    data["mcp_servers"]["obsidian"]["args"][-1] = "/somewhere/else"
+    data["mcp_servers"]["omi"]["args"][-1] = "/somewhere/else"
     cfg_path.write_text(yaml.safe_dump(data), encoding="utf-8")
     results = {r.key: r for r in diagnose_hermes(config)}
     assert results["hermes_mcp_registration"].level == "warn"

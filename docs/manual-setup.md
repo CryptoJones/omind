@@ -14,8 +14,8 @@ safe to redo.
 ## 1. The memory folder
 
 OMI is just a folder of Markdown notes inside (or standing in for) an Obsidian
-vault. `obsidian-mcp` validates the folder by reading `.obsidian/app.json` at
-startup, so the folder must carry a minimal Obsidian config:
+vault. A minimal `.obsidian/` config lets the folder open directly as a vault
+in the Obsidian app (omind itself doesn't need it):
 
 ```bash
 OMI="$HOME/Documents/Obsidian Vault/OMI"
@@ -36,47 +36,37 @@ Also seed `core-plugins.json`, `Memory Template.md`, and `index.md` — starter
 content for all of them lives in [`src/omind/seeds.py`](../src/omind/seeds.py),
 or let `omind setup` write just these (it never clobbers existing files).
 
-## 2. The MCP server install + stdin-EOF guard
+## 2. Initialize the mesh node
 
-Two non-obvious choices here, both learned the hard way (see
-[troubleshooting](troubleshooting.md)):
-
-- **Install to a stable npm prefix, not the npx cache.** `npx -y obsidian-mcp`
-  runs from `~/.npm/_npx/<hash>/`, which npm garbage-collects out from under a
-  registered server.
-- **Preload a stdin-EOF guard.** obsidian-mcp's file watcher keeps the Node
-  event loop alive, so without the guard the server orphans every time Claude
-  Code exits.
+Makes the folder a git working tree with omind's field-level merge driver,
+mints this machine's node identity (`~/.config/omind/node.json`), and locks
+the folder to owner-only:
 
 ```bash
-PREFIX="$HOME/.claude/mcp-servers/obsidian"
-mkdir -p "$PREFIX"
-npm install --prefix "$PREFIX" obsidian-mcp@1.0.6 --no-audit --no-fund
-
-cat > "$HOME/.claude/mcp-servers/obsidian-exit-on-eof.js" <<'JS'
-// Managed by omind. Exit obsidian-mcp when its stdin (the MCP client pipe)
-// closes; the chokidar file watcher otherwise keeps the Node event loop alive
-// and the process orphans when Claude Code exits.
-const die = () => process.exit(0);
-process.stdin.on("end", die);
-process.stdin.on("close", die);
-JS
+omind mesh init --vault "$HOME/Documents/Obsidian Vault" --folder OMI
 ```
+
+Single-machine use is fine too — just skip this step (and pass `--no-mesh` to
+`omind setup` if you use the automated path). To replicate with another
+machine later: `omind mesh add-peer <name> <ssh-url>` and
+`omind mesh install-service` (see [mesh-ops.md](mesh-ops.md)).
 
 ## 3. Register the MCP server (user scope)
 
-Register a **direct `node` command** — not `npx` — so Claude Code's
-terminating signal reaches Node instead of being swallowed by the npx/npm
-wrapper chain:
+The server is omind's own node server — no Node.js, npm, or third-party MCP
+package involved. Use the absolute path to `omind` (the spawned environment
+may lack `~/.local/bin` on `PATH`):
 
 ```bash
-claude mcp add -s user obsidian -- node \
-  --require "$HOME/.claude/mcp-servers/obsidian-exit-on-eof.js" \
-  "$HOME/.claude/mcp-servers/obsidian/node_modules/obsidian-mcp/build/main.js" \
-  "$HOME/Documents/Obsidian Vault/OMI"
+claude mcp add -s user omi -- "$(command -v omind)" node \
+  --vault "$HOME/Documents/Obsidian Vault" --folder OMI
 ```
 
-The last argument is the OMI folder the server exposes.
+If you are migrating from omind 1.x, also remove the retired server:
+
+```bash
+claude mcp remove obsidian -s user
+```
 
 ## 4. Auto-memory hooks
 
@@ -143,16 +133,16 @@ omind doctor --vault "$HOME/Documents/Obsidian Vault"
 ```
 
 `doctor` is pure inspection. It checks the tools on `PATH`, the folder layout,
-the user-scope MCP registration (and that it's the direct-`node` form), the
-EOF guard, and all three hooks. Restart Claude Code afterward so it loads the
-new tools and hooks.
+the user-scope MCP registration (and that it's the `omind node` form), the
+mesh health, and all three hooks. Restart Claude Code afterward so it loads
+the new tools and hooks.
 
 ## Undo
 
 ```bash
-claude mcp remove obsidian -s user
+claude mcp remove omi -s user
 ```
 
-Then delete the three `omind hook` entries from `~/.claude/settings.json` and
-remove `~/.claude/mcp-servers/` if nothing else uses it. Your notes are never
-touched by setup or teardown.
+Then delete the three `omind hook` entries from `~/.claude/settings.json`.
+Your notes are never touched by setup or teardown — and `mesh init` is
+reversible by deleting the folder's `.git/` (your notes stay).

@@ -3,8 +3,8 @@
 """Provision other AI agents (Hermes Agent, OpenClaw) to use OMI memory.
 
 `omind setup --agent hermes|openclaw` mirrors what the Claude Code path does:
-scaffold the OMI folder, install the obsidian-mcp server + stdin-EOF guard,
-then wire the agent to it. The agent-specific part is where the MCP server
+scaffold the OMI folder, initialize the mesh node, then wire the agent to
+omind's own node MCP server (`omind node`). The agent-specific part is where the MCP server
 gets declared — Hermes Agent reads a ``mcp_servers`` block in
 ``~/.hermes/config.yaml`` (YAML), OpenClaw a ``mcp.servers`` block in
 ``~/.openclaw/openclaw.json`` (JSON) — plus an ``omind-omi-memory`` skill
@@ -28,12 +28,12 @@ import yaml
 
 from omind import paths, seeds
 from omind.provision import (
+    LEGACY_SERVER_NAME,
     CheckResult,
     Logger,
     Provisioner,
     ProvisionError,
     SetupConfig,
-    _diagnose_eof_guard,
     _diagnose_omi_folder,
     _diagnose_tools,
     diagnose,
@@ -97,8 +97,7 @@ class AgentProvisioner(Provisioner):
     INSTALL_HINT: ClassVar[str] = ""
 
     REQUIRED_TOOLS: ClassVar[dict[str, str]] = {
-        "node": "obsidian-mcp runs on Node.js",
-        "npm": "npm installs the obsidian-mcp package",
+        "git": "the mesh replicates the memory folder over git",
     }
 
     def agent_root(self) -> Path:
@@ -122,11 +121,6 @@ class AgentProvisioner(Provisioner):
         else:
             self.log(f"  {self.AGENT_LABEL} found: {root}")
 
-    def desired_server_entry(self) -> dict[str, Any]:
-        """The stdio MCP server entry, in the shared command/args shape."""
-        command = self._server_command(str(self.config.omi_dir))
-        return {"command": command[0], "args": command[1:]}
-
     def install_memory_skill(self) -> None:
         skill = self.skill_dir() / paths.AGENT_SKILL_FILENAME
         content = seeds.AGENT_SKILL_TEMPLATE.format(
@@ -136,7 +130,23 @@ class AgentProvisioner(Provisioner):
         )
         self._write_if_absent(skill, content)
 
+    def _drop_legacy_entry(self, servers: dict[str, Any]) -> None:
+        """Remove the retired 1.x obsidian-mcp entry from an agent's servers map."""
+        legacy = servers.get(LEGACY_SERVER_NAME)
+        if (
+            self.config.server_name != LEGACY_SERVER_NAME
+            and isinstance(legacy, dict)
+            and "obsidian-mcp" in json.dumps(legacy)
+        ):
+            del servers[LEGACY_SERVER_NAME]
+            self._record(
+                f"remove retired MCP server '{LEGACY_SERVER_NAME}' (obsidian-mcp, "
+                "replaced by `omind node`)"
+            )
+
     def integrate(self) -> None:
+        # No `claude mcp` CLI here; the retired obsidian entry (if any) lives
+        # in these agents' own config files and is dropped by register_mcp.
         self.register_mcp()
         self.install_memory_skill()
 
@@ -215,6 +225,7 @@ class HermesProvisioner(AgentProvisioner):
         servers = data.get("mcp_servers")
         if not isinstance(servers, dict):
             servers = {}
+        self._drop_legacy_entry(servers)
         servers[self.config.server_name] = desired
         data["mcp_servers"] = servers
         self._record(
@@ -275,6 +286,7 @@ class OpenClawProvisioner(AgentProvisioner):
         servers = mcp.get("servers")
         if not isinstance(servers, dict):
             servers = {}
+        self._drop_legacy_entry(servers)
         servers[self.config.server_name] = desired
         mcp["servers"] = servers
         data["mcp"] = mcp
@@ -331,8 +343,6 @@ def _diagnose_agent(provisioner: AgentProvisioner) -> list[CheckResult]:
         results.append(
             CheckResult(f"{key}_mcp_registration", "ok", f"MCP server '{name}' -> {config.omi_dir}")
         )
-
-    results.append(_diagnose_eof_guard())
 
     skill = provisioner.skill_dir() / paths.AGENT_SKILL_FILENAME
     if skill.is_file():

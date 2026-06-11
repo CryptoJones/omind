@@ -24,20 +24,27 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 **OMI** ("Open Mind Interface") is a folder of Markdown notes that an AI agent
 reads and writes as long-term memory. `omind` does two things with it:
 
-- **`omind setup`** — idempotently provisions the
-  [`obsidian-mcp`](https://www.npmjs.com/package/obsidian-mcp) server for the
-  Claude Code CLI, pointed at an OMI folder inside an Obsidian vault. After this,
-  Claude Code can persist memory across sessions through the MCP tools.
+- **`omind setup`** — idempotently registers **omind's own node MCP server**
+  (`omind node`) with the Claude Code CLI, pointed at an OMI folder inside an
+  Obsidian vault, and initializes the folder as a **mesh node** (see below).
+  After this, Claude Code persists memory across sessions through the MCP
+  tools — and across machines through the mesh.
+- **`omind mesh`** — peer-to-peer replication: every machine runs a full local
+  node and nodes sync over git+ssh, with per-note Lamport versioning and a
+  field-level merge driver. No central server, full offline operation.
+  Deleting archives (restorable) instead of removing. See
+  [docs/mesh.md](docs/mesh.md) (design) and [docs/mesh-ops.md](docs/mesh-ops.md)
+  (operation).
 - **`omind serve`** — a small local web app (FastAPI + Tailwind) to **view, edit,
   and add** memory entries in that same folder, without opening Obsidian. Ships
   with five themes and a switchable UI in six languages (English, Spanish,
   French, Arabic, Russian, Chinese), including right-to-left layout for Arabic.
-- **`omind doctor`** — diagnose the wiring in one shot: Node/npm/Claude CLI on
-  `PATH`, the MCP server registered at user scope (in the leak-free direct-`node`
-  form) and pointed at the right folder, the stdin-EOF guard in place, the
-  OMI folder + Obsidian config readable, backup health (unconfigured /
-  last-success age / failing), and whether the auto-memory hooks have recorded
-  any recent failures.
+- **`omind doctor`** — diagnose the wiring in one shot: Claude CLI + git on
+  `PATH`, the `omi` MCP server registered at user scope with the right command,
+  the OMI folder readable, mesh health (node identity, merge driver, per-peer
+  ahead/behind, last-sync age, unresolved conflicts), backup health
+  (unconfigured / last-success age / failing), and whether the auto-memory
+  hooks have recorded any recent failures.
 - **`omind backup`** — encrypted, unattended off-machine backup of the OMI
   folder, wrapping [restic](https://restic.net/) (see
   [Encrypted backup](#encrypted-backup) below).
@@ -60,9 +67,9 @@ scripts/bootstrap.sh                       # or: --remote codeberg, --vault PATH
 ```
 
 It auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
-you), checks for `node`/`npm`/`claude` with install guidance if any are missing,
-then runs `omind setup` + `omind doctor`. Note: omind has **no Docker
-dependency** — only Node.js and the Claude Code CLI.
+you), checks for `git`/`claude` with install guidance if either is missing,
+then runs `omind setup` + `omind doctor`. Note: omind has **no Docker and no
+Node.js dependency** — only git and the Claude Code CLI.
 
 **Manual** — an isolated CLI install straight from the git remote:
 
@@ -100,8 +107,8 @@ commands and JSON, personalized to your paths — nothing is changed for you:
 omind quickstart --vault "$HOME/Documents/Obsidian Vault"
 ```
 
-It covers all four pieces (memory folder scaffold, MCP server install + stdin-EOF
-guard, user-scope registration, auto-memory hooks), each independently
+It covers all four pieces (memory folder scaffold, mesh initialization,
+user-scope MCP registration, auto-memory hooks), each independently
 applicable. The annotated walkthrough lives in
 [docs/manual-setup.md](docs/manual-setup.md).
 
@@ -189,9 +196,9 @@ omind setup --agent openclaw --vault "$HOME/Documents/Obsidian Vault"   # OpenCl
 Each does the same three things, adjusted for where that agent keeps its
 config:
 
-1. The shared steps — OMI folder scaffold, `obsidian-mcp` install, stdin-EOF
-   guard — identical to the Claude Code path, so all agents talk to **one**
-   memory folder through one server install.
+1. The shared steps — OMI folder scaffold, mesh initialization — identical to
+   the Claude Code path, so all agents talk to **one** memory folder through
+   the same `omind node` server.
 2. Registers the MCP server where the agent looks for it: the `mcp_servers`
    block in `~/.hermes/config.yaml` (Hermes Agent), or the `mcp.servers` block
    in `~/.openclaw/openclaw.json` (OpenClaw — legacy `~/.clawdbot` /
@@ -213,17 +220,18 @@ skill instead.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
-## Roadmap: the memory mesh
+## The memory mesh (2.0)
 
-The next major version (2.0.0) turns omind from a single-machine tool into a
-**git-backed mesh** — every machine runs a full local memory node, and the nodes
-replicate to one another **peer-to-peer over git**, so memory is shared across
-the house with **no central server** and full offline operation. Concurrent
-writes build on the existing per-node write safety (advisory `flock` + atomic
-`os.replace` + `note_version` compare-and-swap) and add cross-node **Lamport
-versioning** with a field-level merge; "deleting" a note **disables** it (hidden,
-restorable) rather than tombstoning it. See **[docs/mesh.md](docs/mesh.md)** for
-the full design.
+2.0.0 turned omind from a single-machine tool into a **git-backed mesh** —
+every machine runs a full local memory node, and the nodes replicate to one
+another **peer-to-peer over git**, so memory is shared across the house with
+**no central server** and full offline operation. Concurrent writes build on
+the per-node write safety (advisory `flock` + atomic `os.replace` +
+`note_version` compare-and-swap) and add cross-node **Lamport versioning**
+with a field-level merge; "deleting" a note **archives** it (hidden,
+restorable) rather than tombstoning it. Design:
+**[docs/mesh.md](docs/mesh.md)**; operation:
+**[docs/mesh-ops.md](docs/mesh-ops.md)**.
 
 ## License
 

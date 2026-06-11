@@ -26,6 +26,11 @@ misbehaves, look in this order:
 
 ## The MCP server "times out", and `obsidian-mcp` processes pile up
 
+> **Historical (1.x).** omind 2.0 retired `obsidian-mcp` entirely — the MCP
+> server is now omind's own `omind node`, which exits cleanly on stdin EOF by
+> construction (covered by a regression test). This section is kept for
+> archaeology and for anyone still on 1.x.
+
 ### Symptoms
 
 - Obsidian/OMI MCP tool calls from Claude Code appear to **time out** or hang

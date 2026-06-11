@@ -668,3 +668,148 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
 
     log("Windows: auto-install is not supported in 2.0; run the daemon at logon with:")
     log(f'  schtasks /Create /SC ONLOGON /TN omind-mesh /TR "{daemon_cmd}"')
+
+
+# -- doctor ---------------------------------------------------------------------
+
+
+def diagnose_mesh(config: Any) -> list[Any]:
+    """The mesh doctor checks (pure read except `git config --get` calls).
+
+    ``config`` is a :class:`omind.provision.SetupConfig`; imported lazily to
+    keep provision -> mesh a one-way dependency at module level.
+    """
+    from omind.provision import CheckResult
+
+    results: list[CheckResult] = []
+    omi = Path(config.omi_dir).expanduser()
+    if not (omi / ".git").is_dir():
+        return [
+            CheckResult(
+                "mesh",
+                "warn",
+                f"{omi} is not a mesh node — replication is off "
+                "(run `omind mesh init`, or ignore if single-machine is intended)",
+            )
+        ]
+
+    cfg = load_node_config(omi)
+    if cfg is None:
+        results.append(
+            CheckResult(
+                "mesh_identity",
+                "fail",
+                "git repo present but no node identity — run `omind mesh init`",
+            )
+        )
+    else:
+        results.append(CheckResult("mesh_identity", "ok", f"mesh node {cfg.node_id}"))
+
+    try:
+        driver = git(omi, "config", "--get", "merge.omi.driver", check=False)
+        ours = git(omi, "config", "--get", "merge.ours.driver", check=False)
+    except MeshError as exc:
+        return [*results, CheckResult("mesh_driver", "fail", f"git unavailable: {exc}")]
+    if driver.returncode != 0 or ours.returncode != 0:
+        results.append(
+            CheckResult(
+                "mesh_driver",
+                "fail",
+                "merge driver not configured — run `omind mesh init` "
+                "(merges would conflict instead of field-merging)",
+            )
+        )
+    else:
+        results.append(CheckResult("mesh_driver", "ok", "omi + ours merge drivers configured"))
+
+    attrs = omi / ".gitattributes"
+    if attrs.is_file() and "merge=omi" in attrs.read_text(encoding="utf-8"):
+        results.append(CheckResult("mesh_attributes", "ok", ".gitattributes routes notes to omi"))
+    else:
+        results.append(
+            CheckResult(
+                "mesh_attributes", "warn", ".gitattributes missing — run `omind mesh init`"
+            )
+        )
+
+    if os.name != "nt" and (omi.stat().st_mode & 0o077):
+        results.append(
+            CheckResult(
+                "mesh_permissions",
+                "warn",
+                f"{omi} is group/world accessible — another local user could read "
+                "the memory history; run `omind mesh init` to tighten to 0700",
+            )
+        )
+
+    peer_map = peers(omi)
+    if not peer_map:
+        results.append(
+            CheckResult(
+                "mesh_peers", "warn", "no peers configured — `omind mesh add-peer` to replicate"
+            )
+        )
+    for name in sorted(peer_map):
+        ref = f"refs/remotes/{name}/main"
+        if git(omi, "rev-parse", "--verify", ref, check=False).returncode != 0:
+            results.append(
+                CheckResult(f"mesh_peer:{name}", "warn", f"peer {name}: never fetched")
+            )
+            continue
+        counts = git(omi, "rev-list", "--left-right", "--count", f"HEAD...{ref}").stdout.split()
+        ahead, behind = (counts + ["0", "0"])[:2]
+        results.append(
+            CheckResult(
+                f"mesh_peer:{name}",
+                "ok",
+                f"peer {name}: {ahead} ahead / {behind} behind (as of last fetch)",
+            )
+        )
+
+    state = read_sync_state(omi)
+    interval = cfg.interval_seconds if cfg else 300
+    if state is None:
+        results.append(
+            CheckResult("mesh_sync", "warn", "never synced — `omind mesh sync` or install-service")
+        )
+    else:
+        age: float | None
+        try:
+            then = datetime.fromisoformat(str(state.get("last_sync", "")))
+            age = (datetime.now(timezone.utc) - then).total_seconds()
+        except ValueError:
+            age = None
+        if age is not None and age <= 2 * interval:
+            results.append(CheckResult("mesh_sync", "ok", f"last sync {int(age)}s ago"))
+        elif age is not None:
+            results.append(
+                CheckResult(
+                    "mesh_sync",
+                    "warn",
+                    f"last sync {int(age // 60)}m ago (> 2x the {interval}s interval) — "
+                    "is the daemon running?",
+                )
+            )
+        else:
+            results.append(CheckResult("mesh_sync", "warn", "sync state unreadable"))
+
+    conflicted = conflict_scan(omi)
+    if conflicted:
+        results.append(
+            CheckResult(
+                "mesh_conflicts",
+                "warn",
+                f"conflict markers in: {', '.join(conflicted)} — resolve and save",
+            )
+        )
+    else:
+        results.append(CheckResult("mesh_conflicts", "ok", "no unresolved conflict markers"))
+
+    disabled = len(
+        [s for s in OmiStore(omi).list_notes(include_disabled=True) if s.disabled]
+    )
+    if disabled:
+        results.append(
+            CheckResult("mesh_archived", "ok", f"{disabled} archived note(s) (restorable)")
+        )
+    return results

@@ -5,14 +5,19 @@
 from __future__ import annotations
 
 import json
-import shutil
 import subprocess
 from pathlib import Path, PurePosixPath
 
 import pytest
 
 from omind import paths, provision, seeds
-from omind.provision import Provisioner, ProvisionError, SetupConfig, default_vault_path
+from omind.provision import (
+    LEGACY_SERVER_NAME,
+    Provisioner,
+    ProvisionError,
+    SetupConfig,
+    default_vault_path,
+)
 
 # Captured before the autouse isolate_settings fixture patches the module attribute,
 # so the path-resolution tests can exercise the real function.
@@ -52,14 +57,6 @@ def isolate_claude(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
 
 
 @pytest.fixture(autouse=True)
-def isolate_server_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
-    """Keep the managed install dir + EOF guard inside tmp, never real ~/.claude."""
-    home = tmp_path / "mcp-servers"
-    monkeypatch.setattr(provision, "mcp_servers_dir", lambda: home)
-    return home
-
-
-@pytest.fixture(autouse=True)
 def isolate_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     """Never touch the real ~/.claude/settings.json when (un)installing hooks."""
     settings = tmp_path / "settings.json"
@@ -75,24 +72,19 @@ def _quiet(_: str) -> None:
     pass
 
 
-def _write_server_config(cfg: Path, omi_path: str) -> None:
-    """Write a registered server in the current leak-free node form."""
-    server = {
-        "command": "node",
-        "args": [
-            "--require",
-            str(provision.eof_guard_path()),
-            str(provision.obsidian_mcp_entry()),
-            omi_path,
-        ],
-    }
-    cfg.write_text(json.dumps({"mcpServers": {"obsidian": server}}))
+def _write_server_config(cfg: Path, config: SetupConfig) -> None:
+    """Write a registered server in the current `omind node` form."""
+    server = Provisioner(config, log=_quiet).desired_server_entry()
+    cfg.write_text(json.dumps({"mcpServers": {config.server_name: server}}))
 
 
 def _write_legacy_server_config(cfg: Path, omi_path: str) -> None:
-    """Write the old, leak-prone ``npx -y obsidian-mcp`` registration."""
-    server = {"command": "npx", "args": ["-y", "obsidian-mcp", omi_path]}
-    cfg.write_text(json.dumps({"mcpServers": {"obsidian": server}}))
+    """Write the retired 1.x obsidian-mcp registration (direct-node form)."""
+    server = {
+        "command": "node",
+        "args": ["--require", "/old/guard.js", "/old/obsidian-mcp/build/main.js", omi_path],
+    }
+    cfg.write_text(json.dumps({"mcpServers": {LEGACY_SERVER_NAME: server}}))
 
 
 def _provision_files(config: SetupConfig) -> None:
@@ -101,9 +93,6 @@ def _provision_files(config: SetupConfig) -> None:
     (obs / "app.json").write_text("{}")
     (config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).write_text("x")
     (config.omi_dir / paths.INDEX_FILENAME).write_text("x")
-    guard = provision.eof_guard_path()
-    guard.parent.mkdir(parents=True, exist_ok=True)
-    guard.write_text(seeds.EOF_GUARD_JS)
 
 
 def _install_hooks(config: SetupConfig) -> None:
@@ -137,12 +126,12 @@ def test_real_run_creates_files_and_registers(
     assert (obs / "core-plugins.json").is_file()
     assert (config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).is_file()
     assert (config.omi_dir / paths.INDEX_FILENAME).is_file()
-    assert provision.eof_guard_path().is_file()
-    assert any(c[:2] == ["npm", "install"] for c in fake_subprocess)
-    assert fake_subprocess[-2][:6] == ["claude", "mcp", "add", "-s", "user", "obsidian"]
+    assert not any(c[0] == "npm" for c in fake_subprocess)  # obsidian-mcp retired
+    assert any(c[:2] == ["git", "-C"] for c in fake_subprocess)  # mesh init ran
     add_cmd = fake_subprocess[-2]
-    assert "node" in add_cmd and "--require" in add_cmd
-    assert "npx" not in add_cmd
+    assert add_cmd[:6] == ["claude", "mcp", "add", "-s", "user", "omi"]
+    assert "node" in add_cmd and "--vault" in add_cmd and "--folder" in add_cmd
+    assert "npx" not in add_cmd and "--require" not in add_cmd
     assert fake_subprocess[-1][:3] == ["claude", "mcp", "get"]
 
 
@@ -161,33 +150,36 @@ def test_idempotent_registration_when_path_matches(
     tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
 ) -> None:
     config = _config(tmp_path)
-    _write_server_config(isolate_claude, str(config.omi_dir))
+    _write_server_config(isolate_claude, config)
     Provisioner(config, log=_quiet).run()
     assert not any(c[:3] == ["claude", "mcp", "add"] for c in fake_subprocess)
     assert not any(c[:3] == ["claude", "mcp", "remove"] for c in fake_subprocess)
 
 
-def test_changed_path_triggers_reregistration(
+def test_changed_command_triggers_reregistration(
     tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
 ) -> None:
     config = _config(tmp_path)
-    _write_server_config(isolate_claude, "/old/path")
+    drifted = {"command": "omind", "args": ["node", "--vault", "/old/vault", "--folder", "OMI"]}
+    isolate_claude.write_text(json.dumps({"mcpServers": {"omi": drifted}}))
     Provisioner(config, log=_quiet).run()
     assert any(c[:3] == ["claude", "mcp", "remove"] for c in fake_subprocess)
     assert any(c[:3] == ["claude", "mcp", "add"] for c in fake_subprocess)
 
 
-def test_migrates_legacy_npx_registration(
+def test_retires_legacy_obsidian_registration(
     tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
 ) -> None:
+    """A 1.x install carries an 'obsidian' (obsidian-mcp) entry; setup removes
+    it and registers the omind node server under the new name."""
     config = _config(tmp_path)
-    # Old leak-prone form, already pointing at the right folder: must still migrate.
     _write_legacy_server_config(isolate_claude, str(config.omi_dir))
     Provisioner(config, log=_quiet).run()
-    assert any(c[:3] == ["claude", "mcp", "remove"] for c in fake_subprocess)
+    removes = [c for c in fake_subprocess if c[:3] == ["claude", "mcp", "remove"]]
+    assert [c[3] for c in removes] == [LEGACY_SERVER_NAME]
     add_cmd = next(c for c in fake_subprocess if c[:3] == ["claude", "mcp", "add"])
-    assert "node" in add_cmd and "--require" in add_cmd
-    assert "npx" not in add_cmd
+    assert add_cmd[5] == "omi"
+    assert "node" in add_cmd and "--require" not in add_cmd
 
 
 def test_obsidian_dir_is_a_file_errors(
@@ -204,10 +196,10 @@ def test_missing_prereq_errors(
     tmp_path: Path, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(
-        provision.shutil, "which", lambda name: None if name == "npm" else f"/usr/bin/{name}"
+        provision.shutil, "which", lambda name: None if name == "git" else f"/usr/bin/{name}"
     )
     config = _config(tmp_path)
-    with pytest.raises(ProvisionError, match="npm"):
+    with pytest.raises(ProvisionError, match="git"):
         Provisioner(config, log=_quiet).run()
 
 
@@ -226,13 +218,14 @@ def test_doctor_healthy_when_provisioned(
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
-    _write_server_config(isolate_claude, str(config.omi_dir))
+    _write_server_config(isolate_claude, config)
     _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["omi_dir"].level == "ok"
     assert results["obsidian_config"].level == "ok"
     assert results["seeds"].level == "ok"
     assert results["mcp_registration"].level == "ok"
+    assert "legacy_server" not in results
     assert results["hooks"].level == "ok"
     assert provision.run_doctor(config, log=_quiet) == 0
 
@@ -244,7 +237,7 @@ def test_doctor_flags_missing_setup(
     config = _config(tmp_path)
     levels = {r.key: r.level for r in provision.diagnose(config)}
     assert levels["omi_dir"] == "fail"
-    assert levels["obsidian_config"] == "fail"
+    assert levels["obsidian_config"] == "warn"  # cosmetic now: omind node doesn't need it
     assert levels["mcp_registration"] == "fail"
     assert provision.run_doctor(config, log=_quiet) == 1
 
@@ -254,14 +247,15 @@ def test_doctor_warns_on_path_mismatch(
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
-    _write_server_config(isolate_claude, "/some/other/path")
+    drifted = {"command": "omind", "args": ["node", "--vault", "/elsewhere", "--folder", "OMI"]}
+    isolate_claude.write_text(json.dumps({"mcpServers": {"omi": drifted}}))
     _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["mcp_registration"].level == "warn"
     assert provision.run_doctor(config, log=_quiet) == 0  # warnings don't fail
 
 
-def test_doctor_warns_on_legacy_npx_form(
+def test_doctor_warns_on_lingering_legacy_server(
     tmp_path: Path, fake_tools: None, isolate_claude: Path
 ) -> None:
     config = _config(tmp_path)
@@ -269,54 +263,9 @@ def test_doctor_warns_on_legacy_npx_form(
     _write_legacy_server_config(isolate_claude, str(config.omi_dir))
     _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
-    # right path, wrong (leak-prone) command form -> warn, not ok
-    assert results["mcp_registration"].level == "warn"
-    assert "npx" in results["mcp_registration"].message
-    assert provision.run_doctor(config, log=_quiet) == 0
-
-
-def test_doctor_warns_on_missing_eof_guard(
-    tmp_path: Path, fake_tools: None, isolate_claude: Path
-) -> None:
-    config = _config(tmp_path)
-    _provision_files(config)
-    _write_server_config(isolate_claude, str(config.omi_dir))
-    provision.eof_guard_path().unlink()  # simulate a pre-migration setup
-    results = {r.key: r for r in provision.diagnose(config)}
-    assert results["eof_guard"].level == "warn"
-
-
-def test_doctor_warns_on_outdated_eof_guard(
-    tmp_path: Path, fake_tools: None, isolate_claude: Path
-) -> None:
-    """A stale guard (pre-watchdog, issue #49) must surface as a warning."""
-    config = _config(tmp_path)
-    _provision_files(config)
-    _write_server_config(isolate_claude, str(config.omi_dir))
-    provision.eof_guard_path().write_text(
-        'process.stdin.on("end", () => process.exit(0));\n', encoding="utf-8"
-    )
-    results = {r.key: r for r in provision.diagnose(config)}
-    assert results["eof_guard"].level == "warn"
-    assert "outdated" in results["eof_guard"].message
-
-
-def test_setup_refreshes_outdated_eof_guard(
-    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
-) -> None:
-    """The guard is a managed file: re-running setup updates stale content in
-    place (issue #49 shipped a guard fix that ``_write_if_absent`` would never
-    have delivered to existing installs)."""
-    config = _config(tmp_path)
-    guard = provision.eof_guard_path()
-    guard.parent.mkdir(parents=True, exist_ok=True)
-    guard.write_text("// ancient guard\n", encoding="utf-8")
-    actions = Provisioner(config, log=_quiet).run()
-    assert guard.read_text(encoding="utf-8") == seeds.EOF_GUARD_JS
-    assert any(a.startswith("update") and "exit-on-eof" in a for a in actions)
-    # A second run leaves the now-current guard untouched.
-    actions = Provisioner(config, log=_quiet).run()
-    assert not any(a.startswith("update") and "exit-on-eof" in a for a in actions)
+    assert results["mcp_registration"].level == "fail"  # omi itself not registered
+    assert results["legacy_server"].level == "warn"
+    assert "obsidian-mcp" in results["legacy_server"].message
 
 
 def test_claude_config_path_is_home_dotclaude_json(
@@ -384,7 +333,7 @@ def test_doctor_finds_server_via_canonical_config_path(
     monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: home))
     config = _config(tmp_path)
     _provision_files(config)
-    _write_server_config(home / ".claude.json", str(config.omi_dir))
+    _write_server_config(home / ".claude.json", config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["mcp_registration"].level == "ok"
 
@@ -463,7 +412,7 @@ def test_doctor_ok_when_hooks_installed(
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
-    _write_server_config(isolate_claude, str(config.omi_dir))
+    _write_server_config(isolate_claude, config)
     _install_hooks(config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["hooks"].level == "ok"
@@ -474,7 +423,7 @@ def test_doctor_fail_when_hooks_absent(
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
-    _write_server_config(isolate_claude, str(config.omi_dir))
+    _write_server_config(isolate_claude, config)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["hooks"].level == "fail"
     assert provision.run_doctor(config, log=_quiet) == 1
@@ -485,7 +434,7 @@ def test_doctor_warns_on_hook_path_mismatch(
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
-    _write_server_config(isolate_claude, str(config.omi_dir))
+    _write_server_config(isolate_claude, config)
     isolate_settings.write_text(
         json.dumps(
             {
@@ -576,61 +525,24 @@ def test_entry_marker_ignores_foreign_commands() -> None:
         assert not provision._entry_has_omind_marker(entry), command
 
 
-# -- eof-guard behavior (real node) -----------------------------------------
-# These run the actual preload under node and assert its two exit conditions.
-# The watchdog interval is dropped to 25 ms via OMIND_EOF_GUARD_INTERVAL_MS so
-# the tests stay fast.
-
-_node = shutil.which("node")
+# -- mesh initialization in setup -------------------------------------------------
 
 
-def _run_guarded_node(tmp_path: Path, script: str, *, close_stdin: bool) -> int:
-    import os
-
-    guard = tmp_path / "guard.js"
-    guard.write_text(seeds.EOF_GUARD_JS, encoding="utf-8")
-    proc = subprocess.Popen(
-        [_node, "--require", str(guard), "-e", script],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.DEVNULL,
-        stderr=subprocess.DEVNULL,
-        env={**os.environ, "OMIND_EOF_GUARD_INTERVAL_MS": "25"},
-    )
-    try:
-        if close_stdin and proc.stdin is not None:
-            proc.stdin.close()
-        return proc.wait(timeout=15)
-    finally:
-        if proc.poll() is None:
-            proc.kill()
+def test_setup_initializes_mesh_node(
+    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
+) -> None:
+    config = _config(tmp_path)
+    actions = Provisioner(config, log=_quiet).run()
+    assert any("initialize mesh node" in a for a in actions)
+    git_cmds = [c for c in fake_subprocess if c[0] == "git"]
+    assert any("init" in c for c in git_cmds)
+    assert any("merge.omi.driver" in " ".join(c) for c in git_cmds)
 
 
-@pytest.mark.skipif(_node is None, reason="node not installed")
-def test_eof_guard_exits_when_transport_detaches(tmp_path: Path) -> None:
-    """Issue #49: a transport that detaches from stdin without an EOF must be
-    fatal — otherwise the server lives on deaf and clients hang forever."""
-    script = (
-        "const h = () => {};"
-        "process.stdin.on('data', h);"  # the MCP SDK transport attaches
-        "setInterval(() => {}, 1000);"  # chokidar keeps the loop alive
-        "setTimeout(() => process.stdin.off('data', h), 100);"  # transport closes
-    )
-    assert _run_guarded_node(tmp_path, script, close_stdin=False) == 1
-
-
-@pytest.mark.skipif(_node is None, reason="node not installed")
-def test_eof_guard_exits_cleanly_on_stdin_eof(tmp_path: Path) -> None:
-    """The original orphaning guard still holds: stdin EOF is a clean exit."""
-    script = (
-        "process.stdin.on('data', () => {});"  # transport attached, flowing
-        "setInterval(() => {}, 1000);"
-    )
-    assert _run_guarded_node(tmp_path, script, close_stdin=True) == 0
-
-
-@pytest.mark.skipif(_node is None, reason="node not installed")
-def test_eof_guard_quiet_before_transport_attaches(tmp_path: Path) -> None:
-    """No false positive during startup: zero data listeners before the SDK
-    connects must not trip the watchdog."""
-    script = "setTimeout(() => process.exit(42), 300);"  # outlive several ticks
-    assert _run_guarded_node(tmp_path, script, close_stdin=False) == 42
+def test_setup_no_mesh_skips_initialization(
+    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
+) -> None:
+    config = _config(tmp_path, no_mesh=True)
+    actions = Provisioner(config, log=_quiet).run()
+    assert not any("initialize mesh node" in a for a in actions)
+    assert not any(c[0] == "git" for c in fake_subprocess)

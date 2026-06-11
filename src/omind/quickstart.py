@@ -26,12 +26,9 @@ from omind.agents import (
     openclaw_config_path,
 )
 from omind.provision import (
-    OBSIDIAN_MCP_VERSION,
     Provisioner,
     SetupConfig,
     claude_settings_path,
-    eof_guard_path,
-    server_install_dir,
 )
 
 
@@ -43,23 +40,24 @@ def _heredoc(path: str, tag: str, content: str) -> list[str]:
     return [f"cat > {path} <<'{tag}'", content.rstrip("\n"), tag]
 
 
-def _scaffold_and_server_blocks(config: SetupConfig) -> tuple[str, str]:
-    """The agent-independent steps: OMI scaffold + MCP server install."""
+def _scaffold_and_mesh_blocks(config: SetupConfig) -> tuple[str, str]:
+    """The agent-independent steps: OMI scaffold + mesh initialization."""
     omi = config.omi_dir
     obsidian_dir_q = f'"{omi / ".obsidian"}"'
-    install_dir = server_install_dir()
 
     scaffold_lines = [f"mkdir -p {obsidian_dir_q}"]
     for filename, content in seeds.OBSIDIAN_CONFIG_FILES.items():
         scaffold_lines += _heredoc(f'"{omi / ".obsidian" / filename}"', "JSON", content)
 
-    guard_lines = [
-        f'mkdir -p "{install_dir}"',
-        f'npm install --prefix "{install_dir}" obsidian-mcp@{OBSIDIAN_MCP_VERSION}'
-        " --no-audit --no-fund",
-    ] + _heredoc(f'"{eof_guard_path()}"', "JS", seeds.EOF_GUARD_JS)
+    mesh_lines = [
+        f'omind mesh init --vault "{config.vault}" --folder {config.folder}',
+        "# then, to replicate with another machine:",
+        f'#   omind mesh add-peer <name> <ssh-url> --vault "{config.vault}" '
+        f"--folder {config.folder}",
+        f'#   omind mesh install-service --vault "{config.vault}" --folder {config.folder}',
+    ]
 
-    return _sh(scaffold_lines), _sh(guard_lines)
+    return _sh(scaffold_lines), _sh(mesh_lines)
 
 
 def _build_agent_quickstart(config: SetupConfig) -> str:
@@ -85,7 +83,7 @@ def _build_agent_quickstart(config: SetupConfig) -> str:
         merge_hint = f"MERGE into the existing JSON in {agent_config} (don't replace other keys)"
 
     omi = config.omi_dir
-    scaffold_block, guard_block = _scaffold_and_server_blocks(config)
+    scaffold_block, mesh_block = _scaffold_and_mesh_blocks(config)
     skill_path = prov.skill_dir() / paths.AGENT_SKILL_FILENAME
     skill_content = seeds.AGENT_SKILL_TEMPLATE.format(
         vault=config.vault, folder=config.folder, omi_dir=omi
@@ -104,21 +102,20 @@ re-run. Prefer the automated path? Just run:
     omind setup --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
 
 [1/4] Scaffold the memory folder
-obsidian-mcp refuses to start without <folder>/.obsidian/app.json, so create
-the folder and its minimal Obsidian config (skip any file you already have):
+Create the folder and a minimal Obsidian config so it opens directly as a
+vault (skip any file you already have):
 
 {scaffold_block}
 
-[2/4] Install the MCP server and the stdin-EOF guard
-The server is installed to a stable npm prefix (NOT the npx cache, which npm
-garbage-collects out from under registered servers). The tiny `--require`
-preload makes the server exit when the agent closes its stdin pipe — without
-it the file watcher keeps Node alive and the process orphans:
+[2/4] Initialize the mesh node
+Makes the folder a git working tree with omind's field-level merge driver,
+mints this machine's node identity, and locks the folder to owner-only:
 
-{guard_block}
+{mesh_block}
 
 [3/4] Register the MCP server with {prov.AGENT_LABEL}
-{merge_hint}:
+The server is omind's own node server (`omind node`) — no Node.js, npm, or
+third-party MCP package involved. {merge_hint}:
 
 {snippet_block}
 
@@ -135,9 +132,8 @@ Verify the wiring (pure inspection, changes nothing):
 
 Then restart {prov.AGENT_LABEL} to load the tools and skill.
 
-Undo: delete the '{config.server_name}' entry from {agent_config}, remove
-"{skill_path.parent}", and remove "{server_install_dir().parent}" if nothing
-else uses it. Your notes in "{omi}" are never touched by any of this.
+Undo: delete the '{config.server_name}' entry from {agent_config} and remove
+"{skill_path.parent}". Your notes in "{omi}" are never touched by any of this.
 """
 
 
@@ -148,13 +144,12 @@ def build_quickstart(config: SetupConfig) -> str:
     prov = Provisioner(config=config, log=lambda _msg: None)
     omi = config.omi_dir
     omi_q = f'"{omi}"'
-    install_dir = server_install_dir()
     settings = claude_settings_path()
-    scaffold_block, guard_block = _scaffold_and_server_blocks(config)
+    scaffold_block, mesh_block = _scaffold_and_mesh_blocks(config)
 
     register_cmd = " ".join(
         ["claude", "mcp", "add", "-s", "user", config.server_name, "--"]
-        + [part if " " not in part else f'"{part}"' for part in prov._server_command(str(omi))]
+        + [part if " " not in part else f'"{part}"' for part in prov._server_command()]
     )
 
     hooks_json = json.dumps({"hooks": prov._omind_hook_entries()}, indent=2)
@@ -169,8 +164,8 @@ automated path? Just run:
     omind setup --vault "{config.vault}" --folder {config.folder}
 
 [1/4] Scaffold the memory folder
-obsidian-mcp refuses to start without <folder>/.obsidian/app.json, so create
-the folder and its minimal Obsidian config (skip any file you already have):
+Create the folder and a minimal Obsidian config so it opens directly as a
+vault (skip any file you already have):
 
 {scaffold_block}
 
@@ -178,15 +173,15 @@ Optionally seed `Memory Template.md` and `index.md` in {omi_q} —
 `omind setup` writes starter versions, or copy them from the repo's
 `src/omind/seeds.py`.
 
-[2/4] Install the MCP server and the stdin-EOF guard
-The server is installed to a stable npm prefix (NOT the npx cache, which npm
-garbage-collects out from under registered servers). The tiny `--require`
-preload makes the server exit when Claude Code closes its stdin pipe —
-without it the file watcher keeps Node alive and the process orphans:
+[2/4] Initialize the mesh node
+Makes the folder a git working tree with omind's field-level merge driver,
+mints this machine's node identity, and locks the folder to owner-only:
 
-{guard_block}
+{mesh_block}
 
 [3/4] Register the MCP server with Claude Code (user scope)
+The server is omind's own node server (`omind node`) — no Node.js, npm, or
+third-party MCP package involved:
 
 {_sh([register_cmd])}
 
@@ -207,8 +202,7 @@ Verify the wiring (pure inspection, changes nothing):
 
 Then restart Claude Code to load the tools and hooks.
 
-Undo: `claude mcp remove {config.server_name} -s user`, delete the three
-"omind hook" entries from {settings}, and remove
-"{install_dir.parent}" if nothing else uses it. Your notes in
+Undo: `claude mcp remove {config.server_name} -s user` and delete the three
+"omind hook" entries from {settings}. Your notes in
 {omi_q} are never touched by any of this.
 """

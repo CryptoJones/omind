@@ -48,7 +48,11 @@ supported Python version; if you only have one locally, CI covers the matrix.
 ```
 src/omind/
 ├── cli.py          argparse entry point: one `_run_*` handler per subcommand
-├── provision.py    `omind setup`/`doctor` — idempotent obsidian-mcp wiring
+├── provision.py    `omind setup`/`doctor` — idempotent MCP + mesh wiring
+├── server.py       `omind node` — the local mesh-node MCP server (mcp SDK)
+├── mesh.py         `omind mesh` — git replication: init/sync/daemon/peers
+├── merge.py        the field-level 3-way note merge driver (git merge=omi)
+├── clock.py        per-note Lamport revisions (cross-node ordering truth)
 ├── agents.py       Hermes/OpenClaw provisioners (subclass provision.py's)
 ├── quickstart.py   `omind quickstart` — the manual steps `setup` automates
 ├── backup.py       `omind backup` — encrypted restic backup + systemd timer

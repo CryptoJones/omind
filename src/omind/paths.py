@@ -19,9 +19,6 @@ INDEX_FILENAME = "index.md"
 #: Files that are scaffolding, not memories — excluded from listings.
 RESERVED_FILENAMES = frozenset({MEMORY_TEMPLATE_FILENAME, INDEX_FILENAME})
 
-#: The stdin-EOF preload installed next to obsidian-mcp (see omind.seeds).
-EOF_GUARD_FILENAME = "obsidian-exit-on-eof.js"
-
 #: Skill manifest name both Hermes and OpenClaw discover in a skill folder.
 AGENT_SKILL_FILENAME = "SKILL.md"
 

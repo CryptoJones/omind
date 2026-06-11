@@ -5,14 +5,13 @@
 # omind bootstrap: check (and where safe, install) the dependencies omind needs,
 # then install the `omind` CLI and verify the wiring.
 #
-# omind has NO Docker dependency. It is a pure-Python CLI that shells out to
-# node/npm (to run obsidian-mcp) and the `claude` CLI (to register the MCP
-# server). The dependencies this script handles are exactly those:
+# omind has NO Docker and NO Node.js dependency. It is a pure-Python CLI that
+# shells out to git (the mesh replicates over it) and the `claude` CLI (to
+# register the MCP server). The dependencies this script handles are exactly:
 #
 #   - uv      : installs omind in an isolated venv and bootstraps Python >=3.10
 #               (auto-installed here; it is user-local and needs no root)
-#   - node    : obsidian-mcp runs on Node.js          (checked; install guidance)
-#   - npm     : installs the obsidian-mcp package      (checked; install guidance)
+#   - git     : the mesh replicates the memory folder over git (checked)
 #   - claude  : the Claude Code CLI registers the server (checked; install guidance)
 #
 # Usage:
