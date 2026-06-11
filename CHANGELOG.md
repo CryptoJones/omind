@@ -307,3 +307,5 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
 [0.3.0]: https://github.com/CryptoJones/omind/releases/tag/v0.3.0
 [0.2.0]: https://github.com/CryptoJones/omind/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CryptoJones/omind/releases/tag/v0.1.0
+
+Proudly Made in Nebraska. Go Big Red! 🌽 https://xkcd.com/2347/
