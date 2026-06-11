@@ -7,20 +7,90 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.0.0] - 2026-06-11
+
+**The memory mesh.** omind goes from a single-machine memory tool to a
+peer-to-peer mesh: every machine runs a full local node and nodes replicate
+over git+ssh — no central server, full offline operation. Design:
+[docs/mesh.md](docs/mesh.md); operation: [docs/mesh-ops.md](docs/mesh-ops.md).
+
+### Added
+
+- **`omind node`** — omind's own MCP server over stdio (official `mcp` SDK),
+  exposing the store as nine tools (`read-note`, `create-note`, `edit-note`
+  with optimistic concurrency, `search-vault`, `list-notes`, `delete-note`,
+  `restore-note`, `backlinks`, `list-tags`). Exits cleanly on stdin EOF by
+  construction — the entire obsidian-mcp hang class (#49) is structurally
+  gone, held by a subprocess regression test.
+- **`omind mesh`** — `init` (git repo + field-level merge driver + node
+  identity), `add-peer`/`remove-peer` (peers are plain git remotes), `sync`
+  (commit, fetch/merge each reachable peer, push to a per-node
+  `refs/omind/<id>` outbox — never a peer's checked-out branch), `daemon`
+  (interval + on-write debounce), `install-service` (systemd user unit /
+  launchd agent), `clone` (seed a new machine), `purge` (the rare
+  hard-delete-everywhere, via replicated tombstone).
+- **Per-note Lamport revisions** (`- Rev: <n>@<node-id>` in `## Metadata`) —
+  the cross-node ordering truth; wall clocks are never trusted.
+- **Field-level 3-way merge driver** (`merge=omi`): set-union lists,
+  rev-LWW scalars, line-merged details where disjoint edits both apply and
+  same-point additions concatenate; a truly diverging region keeps both
+  sides under conflict markers plus a `#merge-conflict` tag. Every rule is
+  side-symmetric, so two nodes merging each other's work converge
+  byte-identically — even on conflict. Unknown `## Sections` are preserved.
+- **Archive instead of delete**: deleting a note on a mesh node sets
+  `Disabled: true` — hidden from listings/search/index but on disk and
+  restorable (web UI "archived" toggle + Restore button; `restore-note`
+  tool). Hard removal exists only as `omind mesh purge`.
+- **Doctor mesh checks**: node identity, merge-driver health, `.gitattributes`
+  routing, folder permissions, per-peer ahead/behind, last-sync age,
+  unresolved conflict markers, archived-note count.
+- **Privacy hardening**: `mesh init`/`clone` lock the OMI folder to owner-only
+  (0700) on POSIX — meshes never interact unless explicitly peered over
+  authenticated ssh (no discovery, no listener), and a traversable folder on
+  a shared host would leak the memory history to local users via `file://`.
+- Web UI: `GET /api/meta` (delete semantics), `include_disabled` listing,
+  `POST /api/notes/{name}/restore`, archived badges, six-language strings.
+
+### Changed (breaking)
+
+- **The MCP server is omind itself.** `omind setup` registers `omi` →
+  `omind node ...` and removes the retired `obsidian` (obsidian-mcp)
+  registration from Claude Code, Hermes, and OpenClaw configs. The default
+  `--server-name` is now `omi` — workflow notes referencing
+  `mcp__obsidian__*` tools need the new prefix.
+- **Deleting archives** (mesh nodes): `OmiStore.delete_note`, the web DELETE,
+  and the MCP `delete-note` soft-delete on a folder that replicates; plain
+  folders keep 1.x unlink behavior (`omind setup --no-mesh`).
+- **Dependencies**: Node.js and npm are no longer required at all; `git` is.
+  New Python dependency: the official `mcp` SDK.
+- `omind setup` initializes the mesh by default (`--no-mesh` opts out).
+
+### Removed
+
+- obsidian-mcp install machinery, the npx/direct-node registration forms, and
+  the entire stdin-EOF-guard apparatus (preload, managed-file refresh, doctor
+  checks, real-node tests). The 1.x troubleshooting saga is preserved in
+  [docs/troubleshooting.md](docs/troubleshooting.md) as history.
+
 ### Fixed
 
-- **obsidian-mcp no longer goes silently deaf after idle** (#49). The MCP SDK's
-  stdio transport can close *without* a stdin EOF, removing its `data` listener
-  while chokidar keeps the process alive; every subsequent request was read and
-  discarded, and agent tool calls hung forever (observed: 40 minutes until
-  manual cancel). The eof-guard preload now runs a transport watchdog: once a
-  transport has attached to stdin, its disappearance exits the process
-  non-zero, so the client sees a dead server immediately. With real-node tests
-  for the watchdog, the original EOF exit, and startup quiescence.
-- The eof-guard is now a **managed file**: `omind setup` refreshes it whenever
-  its content drifts from the shipped version (previously `_write_if_absent`
-  meant existing installs never received guard fixes), and `omind doctor`
-  warns on outdated guard content instead of only on a missing file.
+- **obsidian-mcp going silently deaf after idle** (#49) — fixed twice over:
+  the 1.x eof-guard gained a transport watchdog (shipped unreleased), and
+  2.0 then deleted the failure mode outright by replacing the server.
+
+### Migration (1.x → 2.0)
+
+```bash
+uv tool upgrade omind        # or: pipx upgrade omind
+omind setup                  # re-registers omi, removes obsidian, mesh init
+omind doctor                 # should be green
+# optional, per extra machine:
+omind mesh add-peer <name> <ssh-url>
+omind mesh install-service
+```
+
+Notes are untouched: legacy notes carry no Rev line and round-trip
+byte-identical until their first mesh-mode edit.
 
 ## [1.3.0] - 2026-06-10
 

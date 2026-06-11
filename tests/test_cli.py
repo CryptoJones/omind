@@ -12,7 +12,7 @@ from omind.cli import build_parser, main
 
 
 def test_version_is_set() -> None:
-    assert omind.__version__ == "1.3.0"
+    assert omind.__version__ == "2.0.0"
 
 
 def test_doctor_subcommand_parses() -> None:
