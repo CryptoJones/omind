@@ -544,3 +544,24 @@ def test_search_matches_fields_and_filters_disabled(mesh_store: OmiStore) -> Non
         "Alpha.md",
         "Beta.md",
     }
+
+
+def test_rev_naive_update_preserves_mesh_metadata(mesh_store: OmiStore) -> None:
+    """A legacy writer (fresh NoteFields, no rev) must not strip Rev/Disabled."""
+    name = mesh_store.create_note(NoteFields(title="Sticky", summary="v1"))
+    mesh_store.disable_note(name)  # now at rev 2, disabled
+    mesh_store.update_note(name, NoteFields(title="Sticky", summary="v2"))
+    after = mesh_store.read_fields(name)
+    assert after.summary == "v2"
+    assert after.disabled is True  # naive update does not resurrect
+    assert after.rev == "3@testnode-abc123"  # ticked past, not reset
+
+
+def test_mesh_aware_update_controls_disabled(mesh_store: OmiStore) -> None:
+    """A caller passing its own rev is mesh-aware: its disabled value is trusted."""
+    name = mesh_store.create_note(NoteFields(title="Aware", summary="s"))
+    mesh_store.disable_note(name)
+    fields = mesh_store.read_fields(name)
+    fields.disabled = False
+    mesh_store.update_note(name, fields)
+    assert mesh_store.read_fields(name).disabled is False
