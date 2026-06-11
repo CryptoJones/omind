@@ -3,6 +3,7 @@
 """Tests for the omind package skeleton."""
 
 import io
+import re
 from pathlib import Path
 
 import pytest
@@ -12,7 +13,13 @@ from omind.cli import build_parser, main
 
 
 def test_version_is_set() -> None:
-    assert omind.__version__ == "2.0.0"
+    # Compare against pyproject's version (the single source of truth) so a
+    # release bump can't leave __version__ behind — that happened in 2.0.1.
+    # (regex, not tomllib: CI's floor is 3.10)
+    pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
+    declared = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
+    assert declared is not None
+    assert omind.__version__ == declared.group(1)
 
 
 def test_doctor_subcommand_parses() -> None:
