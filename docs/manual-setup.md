@@ -88,7 +88,7 @@ these three and leaves the rest of the file alone:
         "hooks": [
           {
             "type": "command",
-            "command": "omind hook PostToolUse --vault \"$HOME/Documents/Obsidian Vault\" --folder OMI"
+            "command": "omind hook PostToolUse --vault \"$HOME/Documents/Obsidian Vault\" --folder \"OMI\""
           }
         ]
       }
@@ -98,7 +98,7 @@ these three and leaves the rest of the file alone:
         "hooks": [
           {
             "type": "command",
-            "command": "omind hook Stop --vault \"$HOME/Documents/Obsidian Vault\" --folder OMI"
+            "command": "omind hook Stop --vault \"$HOME/Documents/Obsidian Vault\" --folder \"OMI\""
           }
         ]
       }
@@ -108,7 +108,7 @@ these three and leaves the rest of the file alone:
         "hooks": [
           {
             "type": "command",
-            "command": "omind hook SessionStart --vault \"$HOME/Documents/Obsidian Vault\" --folder OMI"
+            "command": "omind hook SessionStart --vault \"$HOME/Documents/Obsidian Vault\" --folder \"OMI\""
           }
         ]
       }

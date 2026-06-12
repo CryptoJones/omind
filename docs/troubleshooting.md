@@ -138,15 +138,13 @@ After the change, a fresh spawn:
 
 ### Implications for `omind`
 
-This is what `omind setup` provisions, so the fix belongs in the tool itself:
+This is what `omind setup` provisioned in 1.x, and the fix shipped in 2.0:
 
-- `provision.py::Provisioner.register_mcp` currently emits
-  `npx -y obsidian-mcp <target>` (around lines 164–173). It should instead
-  provision a stable install + the direct `node --require <preload> <entry>`
-  command described above.
-- `provision.py::diagnose` / `omind doctor` could add a check that the
-  registered command is the direct-`node` form (not `npx`) and warn if it finds
-  the leak-prone wrapper.
+- `provision.py::Provisioner.register_mcp` now registers omind's own
+  `omind node --vault … --folder …` server directly — no npx, no Node.js, no
+  third-party MCP. `setup` also removes the retired `obsidian` registration.
+- `omind doctor` warns when the registered command is not the expected
+  `omind node` form, so a leak-prone leftover wrapper is surfaced.
 - Optional: document that read-only OMI tools (`list-available-vaults`,
   `read-note`, `search-vault`) can be added to Claude Code's permission
   allowlist to avoid per-call prompts; leave write/delete tools behind prompts.
