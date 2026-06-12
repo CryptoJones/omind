@@ -608,6 +608,7 @@ def sync(
             if error:
                 log(f"inbox {ref}: {error}")
 
+    merged_peers: list[PeerSync] = []
     for name in sorted(peers(omi_dir)):
         if only is not None and name not in only:
             continue
@@ -632,24 +633,25 @@ def sync(
                     log(f"peer {name}: {error}")
                     continue
             ps.merged = True
+        merged_peers.append(ps)
 
-            # Regenerate what merges may have touched, then publish.
-            _apply_tombstones(omi_dir, store)
-            store.update_index_locked()
-            _commit_locked(omi_dir, f"omind: post-merge regeneration on {node_id}")
-        push = git(omi_dir, "push", name, f"HEAD:refs/omind/{node_id}", check=False)
-        ps.pushed = push.returncode == 0
-        if not ps.pushed:
-            ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
-            log(f"peer {name}: {ps.error}")
-
+    # Regenerate + commit ONCE after all merges (also with no peers reachable,
+    # to leave generated files consistent) — per-peer regeneration was a full
+    # vault re-parse and a git status/add/commit round for every peer, under
+    # the lock. Every push below then carries the regenerated state.
     with store.write_lock():
-        # Even with no peers reachable, leave generated files consistent.
         _apply_tombstones(omi_dir, store)
         store.update_index_locked()
         _commit_locked(omi_dir, f"omind: post-merge regeneration on {node_id}")
 
         report.conflicts = conflict_scan(omi_dir)
+
+    for ps in merged_peers:
+        push = git(omi_dir, "push", ps.name, f"HEAD:refs/omind/{node_id}", check=False)
+        ps.pushed = push.returncode == 0
+        if not ps.pushed:
+            ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
+            log(f"peer {ps.name}: {ps.error}")
     _write_sync_state(omi_dir, report)
     for note_name in report.conflicts:
         log(f"conflict markers in {note_name} (tagged; resolve and save)")

@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.28.0] - 2026-06-12
+
+### Changed
+
+- **mesh: `sync()` regenerates and commits once after all peer merges**
+  instead of re-applying tombstones, re-parsing the whole vault for the
+  index, and running a `git status/add/commit` round per peer (all under the
+  write lock). Pushes now also always carry tombstone-applied state.
+
 ## [2.27.0] - 2026-06-12
 
 ### Fixed
