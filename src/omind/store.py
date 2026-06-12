@@ -603,7 +603,7 @@ class OmiStore:
     def _mutate_note(
         self,
         name: str,
-        transform: "Callable[[str], str]",
+        transform: Callable[[str], str],
         expected_version: str | None = None,
     ) -> str:
         """Read-modify-write one note atomically under the write lock.
