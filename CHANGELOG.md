@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.17.0] - 2026-06-12
+
+### Changed
+
+- **mesh: removed a duplicated `merge.ours.driver` config block in
+  `mesh_init`** — the same git-config line (and its 3-line comment) appeared
+  twice back-to-back; a future edit would likely have touched only one copy.
+
 ## [2.16.0] - 2026-06-12
 
 ### Changed

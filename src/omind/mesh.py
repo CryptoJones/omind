@@ -230,10 +230,6 @@ def mesh_init(omi_dir: Path, log: Logger = print) -> NodeConfig:
         # are); without this line `index.md merge=ours` falls back to a text
         # merge and the generated index conflicts on every cross edit.
         git(omi_dir, "config", "merge.ours.driver", "true")
-        # "ours" is NOT a built-in attributes driver (only text/binary/union
-        # are); without this line `index.md merge=ours` falls back to a text
-        # merge and the generated index conflicts on every cross edit.
-        git(omi_dir, "config", "merge.ours.driver", "true")
 
         _write_if_changed(omi_dir / ".gitattributes", GITATTRIBUTES, log)
         _write_if_changed(omi_dir / ".gitignore", GITIGNORE, log)
