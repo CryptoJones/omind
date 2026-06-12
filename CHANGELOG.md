@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.16.0] - 2026-06-12
+
+### Changed
+
+- **mesh: `peers()` reads all remotes in one `git config --get-regexp` call**
+  instead of `git remote` plus one `get-url` subprocess per remote — the
+  daemon runs this at the top of every sync tick, so with N peers that was
+  N+1 forked processes per cycle, forever.
+
 ## [2.15.0] - 2026-06-12
 
 ### Fixed

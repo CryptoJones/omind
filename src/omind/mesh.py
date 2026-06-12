@@ -257,16 +257,21 @@ TOMBSTONES_FILENAME = ".omi-tombstones"
 
 
 def peers(omi_dir: Path) -> dict[str, str]:
-    """The configured peer remotes: name -> fetch URL."""
-    names = git(omi_dir, "remote").stdout.splitlines()
-    # one get-url per remote rather than parsing `remote -v`, whose
-    # whitespace-delimited output is ambiguous for URLs containing spaces
-    # (the default vault path, "Obsidian Vault", contains one)
-    return {
-        name: git(omi_dir, "remote", "get-url", name).stdout.strip()
-        for name in (n.strip() for n in names)
-        if name
-    }
+    """The configured peer remotes: name -> fetch URL.
+
+    One ``git config --get-regexp`` call instead of ``git remote`` plus one
+    ``get-url`` per remote (the daemon calls this every sync tick). Keys are
+    unambiguous even for URLs containing spaces — `remote -v`'s
+    whitespace-delimited output is not (the default vault path,
+    "Obsidian Vault", contains one).
+    """
+    res = git(omi_dir, "config", "--get-regexp", r"^remote\..*\.url$", check=False)
+    result: dict[str, str] = {}
+    for line in res.stdout.splitlines():
+        key, _, url = line.partition(" ")
+        if key.startswith("remote.") and key.endswith(".url") and url:
+            result[key[len("remote.") : -len(".url")]] = url.strip()
+    return result
 
 
 def add_peer(omi_dir: Path, name: str, url: str) -> None:
