@@ -38,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from omind import filelock
+from omind import filelock, paths
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
@@ -69,10 +69,10 @@ _FAILURE_LOG_CAP_BYTES = 262_144
 def failure_log_path() -> Path:
     """Where swallowed hook errors leave a trace, outside the (possibly broken)
     vault: ``$XDG_STATE_HOME/omind/hook-failures.log`` (default
-    ``~/.local/state/omind/hook-failures.log``)."""
-    env = os.environ.get("XDG_STATE_HOME")
-    base = Path(env).expanduser() if env else Path.home() / ".local" / "state"
-    return base / "omind" / "hook-failures.log"
+    ``~/.local/state/omind/hook-failures.log``). Derived from
+    :func:`omind.paths.state_dir` — doctor reads this log; the writer and the
+    reader must never resolve the directory differently."""
+    return paths.state_dir() / "hook-failures.log"
 
 
 def _record_failure(context: str, exc: BaseException) -> None:

@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.20.0] - 2026-06-12
+
+### Fixed
+
+- **cli: `omind backup verify` uses the shared doctor symbol map** (with its
+  ASCII degrade) instead of a hardcoded `✓/!/✗` dict — on the cp1252 Windows
+  consoles the degrade exists for, `backup verify` crashed with
+  `UnicodeEncodeError` while printing its checklist.
+
+### Changed
+
+- **hooks: `failure_log_path` derives from `paths.state_dir()`** instead of
+  re-implementing the XDG_STATE_HOME resolution — doctor reads this log to
+  surface swallowed hook errors, and a drift between writer and reader would
+  make those failures invisible again.
+
 ## [2.19.0] - 2026-06-12
 
 ### Changed

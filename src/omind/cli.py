@@ -474,8 +474,10 @@ def _run_backup(args: argparse.Namespace) -> int:
             run_backup((args.vault / args.folder).expanduser())
             return 0
         if args.backup_command == "verify":
+            from omind.provision import _doctor_symbols
+
             results = verify_backup((args.vault / args.folder).expanduser())
-            symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
+            symbols = _doctor_symbols()  # ASCII degrade on cp1252 consoles
             for result in results:
                 print(f"  [{symbols[result.level]}] {result.message}")
             return 1 if any(r.level == "fail" for r in results) else 0
