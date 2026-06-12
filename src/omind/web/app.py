@@ -25,6 +25,7 @@ from omind.store import (
     NoteFields,
     NoteNotFoundError,
     OmiStore,
+    parse_note,
 )
 
 STATIC_DIR = Path(__file__).parent / "static"
@@ -80,9 +81,10 @@ def create_app(omi_dir: Path | str) -> FastAPI:
     @app.get("/api/notes/{name}")
     def get_note(name: str) -> dict[str, object]:
         raw = _guard(lambda: store.read_note(name))
-        fields = _guard(lambda: store.read_fields(name))
         version = _guard(lambda: store.note_version(name))
-        return {"filename": name, "raw": raw, "fields": fields.to_dict(), "version": version}
+        # One read + one parse: read_fields would re-read the file just read.
+        fields = parse_note(raw).to_dict()
+        return {"filename": name, "raw": raw, "fields": fields, "version": version}
 
     @app.get("/api/notes/{name}/backlinks")
     def get_backlinks(name: str) -> list[dict[str, object]]:

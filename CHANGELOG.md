@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.21.0] - 2026-06-12
+
+### Changed
+
+- **store/web/server: single read + single parse on the hot single-note
+  paths.** The web `GET /api/notes/{name}` and MCP `read-note` read the same
+  file twice (`read_note` then `read_fields`); `search()` parsed every
+  matching note twice (filter pass, then `_summarize` re-parse); and
+  `_summarize` hand-rolled the whitespace-collapse + truncation that
+  `_collapse` already implements. One read, one parse, one snippet rule.
+
 ## [2.20.0] - 2026-06-12
 
 ### Fixed

@@ -469,16 +469,16 @@ class OmiStore:
     def _summarize(self, path: Path, text: str | None = None) -> NoteSummary:
         if text is None:
             text = path.read_text(encoding="utf-8")
-        fields = parse_note(text)
-        snippet = re.sub(r"\s+", " ", fields.summary or fields.details).strip()
-        if len(snippet) > 200:
-            snippet = snippet[:197].rstrip() + "..."
+        return self._summarize_fields(path, parse_note(text))
+
+    def _summarize_fields(self, path: Path, fields: NoteFields) -> NoteSummary:
+        """Build a NoteSummary from already-parsed fields (no re-read/re-parse)."""
         return NoteSummary(
             filename=path.name,
             title=fields.title or path.stem,
             tags=fields.tags,
             created=fields.created,
-            summary=snippet,
+            summary=_collapse(fields.summary or fields.details, 200),
             disabled=fields.disabled,
         )
 
@@ -510,7 +510,7 @@ class OmiStore:
             ).lower()
             if needle and needle not in haystack:
                 continue
-            results.append(self._summarize(path, text))
+            results.append(self._summarize_fields(path, fields))
         results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return results
 

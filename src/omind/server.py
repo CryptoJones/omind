@@ -21,7 +21,7 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from omind.paths import sync_signal_path
-from omind.store import ActionItem, NoteFields, OmiStore
+from omind.store import ActionItem, NoteFields, OmiStore, parse_note
 
 SERVER_NAME = "omi"
 
@@ -76,11 +76,11 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     )
     def read_note(name: str) -> dict[str, object]:
         raw = store.read_note(name)
-        fields = store.read_fields(name)
+        # One read + one parse: read_fields would re-read the file just read.
         return {
             "filename": store.safe_name(name).name,
             "raw": raw,
-            "fields": fields.to_dict(),
+            "fields": parse_note(raw).to_dict(),
             "version": store.note_version(name),
         }
 
