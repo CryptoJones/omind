@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.15.0] - 2026-06-12
+
+### Fixed
+
+- **store: the optimistic-concurrency token is now content-based.** It was
+  `mtime_ns + size`, which collides when two same-size writes land within one
+  filesystem timestamp tick (1–2s granularity on FAT/exFAT and some network
+  mounts — places Obsidian vaults actually live), letting a stale save pass
+  the conflict check and destroy the concurrent edit. The token is now
+  `size + BLAKE2 content digest`: two tokens can only match when the bytes
+  are identical, in which case there is nothing to lose.
+
 ## [2.14.0] - 2026-06-12
 
 ### Fixed

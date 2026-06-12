@@ -13,6 +13,7 @@ rejects path traversal so a request can never escape the OMI directory.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import tempfile
@@ -553,17 +554,22 @@ class OmiStore:
         return parse_note(self.read_note(name))
 
     def note_version(self, name: str) -> str:
-        """An opaque token for a note's on-disk state (mtime + size).
+        """An opaque token for a note's on-disk state (size + content digest).
 
         Empty string when the note does not exist yet. Callers pass the token
         they last saw back to :meth:`write_note`; a mismatch means someone else
         (Claude Code's MCP, Hermes' cron, another tab) wrote in the meantime.
+
+        Content-based, not mtime-based: on filesystems with coarse timestamps
+        (FAT/exFAT, some network mounts) two same-size writes inside one tick
+        produced identical mtime+size tokens, silently passing the conflict
+        check. Equal digests mean byte-identical content — nothing to lose.
         """
         path = self.safe_name(name)
         if not path.is_file():
             return ""
-        st = path.stat()
-        return f"{st.st_mtime_ns}-{st.st_size}"
+        data = path.read_bytes()
+        return f"{len(data)}-{hashlib.blake2s(data, digest_size=8).hexdigest()}"
 
     def all_tags(self) -> list[str]:
         tags: set[str] = set()
