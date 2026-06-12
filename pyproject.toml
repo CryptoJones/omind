@@ -38,6 +38,9 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+e2e = [
+    "runpod>=1.7",
+]
 dev = [
     "pytest>=8.0",
     "ruff>=0.4",
