@@ -33,7 +33,7 @@ from pathlib import Path
 from typing import Any
 
 from omind import __version__, paths
-from omind.store import OmiStore, parse_note, today
+from omind.store import LOCK_FILENAME, OmiStore, parse_note, today
 
 Logger = Callable[[str], None]
 
@@ -80,6 +80,14 @@ def detect_format(path: Path) -> str:
 
 def default_export_name(fmt: str) -> str:
     return "omi-export.json" if fmt == "json" else "omi-export.tar.gz"
+
+
+def _runtime_artifact(name: str) -> bool:
+    """Lock and torn-temp files are runtime state, never data — exporting one
+    is clutter, and *importing* one is a real bug: the importer holds the
+    destination's `.omi.lock`, and on Windows reading/replacing a locked file
+    raises PermissionError mid-import."""
+    return name == LOCK_FILENAME or name.startswith(".tmp-")
 
 
 def _exportable_md(omi_dir: Path) -> list[Path]:
@@ -143,7 +151,7 @@ def _export_targz(omi: Path, out: Path) -> int:
     note_count = 0
     with tarfile.open(out, "w:gz") as tar:
         for path in sorted(omi.rglob("*")):
-            if not path.is_file():
+            if not path.is_file() or _runtime_artifact(path.name):
                 continue
             arcname = path.relative_to(omi).as_posix()
             tar.add(path, arcname=arcname)
@@ -304,6 +312,8 @@ def _import_targz(
                 raise TransferError(f"archive member escapes the OMI directory: {rel!r}")
             if Path(rel).name == paths.INDEX_FILENAME and Path(rel).parent == Path("."):
                 continue  # derived top-level index; regenerated after import
+            if _runtime_artifact(Path(rel).name):
+                continue  # lock/temp state from old bundles; never data
             extracted = tar.extractfile(member)
             if extracted is None:
                 continue

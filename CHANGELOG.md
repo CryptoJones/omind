@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-06-12
+
+### Fixed
+
+- **transfer: bundles never carry `.omi.lock` or `.tmp-*` runtime artifacts,
+  and imports skip them in old bundles.** The tar.gz export snapshotted the
+  lock file; importing such a bundle while (correctly, since 2.10.0) holding
+  the destination's lock made Windows raise `PermissionError` mid-import —
+  caught by the Windows CI matrix on the first run of this release train.
+
 ## [2.29.0] - 2026-06-12
 
 ### Changed
