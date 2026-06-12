@@ -13,10 +13,11 @@ rejects path traversal so a request can never escape the OMI directory.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import os
 import re
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -24,7 +25,12 @@ from typing import Any
 
 from omind import filelock
 from omind.clock import Rev, next_rev
-from omind.paths import INDEX_FILENAME, RESERVED_FILENAMES
+from omind.paths import (
+    INDEX_FILENAME,
+    JOURNAL_PREFIX,
+    RESERVED_FILENAMES,
+    sync_signal_path,
+)
 from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 
 # Inter-process write lock for an OMI folder. Concurrent Claude Code sessions
@@ -80,7 +86,7 @@ _REV_LINE_RE = re.compile(r"^\s*-\s*Rev:\s*(\S+)\s*$")
 _DISABLED_LINE_RE = re.compile(r"^\s*-\s*Disabled:\s*true\s*$", re.IGNORECASE)
 # Per-day journal notes written by omind.hooks; auto-recorded noise that would
 # otherwise crowd hand-curated memories out of the capped index list.
-_JOURNAL_NOTE_RE = re.compile(r"^Session Journal .*\.md$")
+_JOURNAL_NOTE_RE = re.compile(rf"^{re.escape(JOURNAL_PREFIX)} .*\.md$")
 
 
 class NoteError(Exception):
@@ -173,8 +179,14 @@ def today() -> str:
     return date.today().isoformat()
 
 
-def parse_note(md: str) -> NoteFields:
-    """Parse a note's Markdown into structured fields (best effort)."""
+def split_sections(md: str) -> tuple[str, dict[str, list[str]]]:
+    """Split a note into ``(title, {heading: body lines})``.
+
+    THE ``## heading`` splitter: :func:`parse_note` and the mesh merge
+    driver's extra-section pass (:mod:`omind.merge`) must agree on what
+    counts as a section heading, or template-owned content gets classified
+    as "extra" and duplicated into every merged note.
+    """
     title = ""
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -191,6 +203,12 @@ def parse_note(md: str) -> NoteFields:
             continue
         if current is not None:
             sections[current].append(line)
+    return title, sections
+
+
+def parse_note(md: str) -> NoteFields:
+    """Parse a note's Markdown into structured fields (best effort)."""
+    title, sections = split_sections(md)
 
     def body(name: str) -> str:
         return "\n".join(sections.get(name, [])).strip()
@@ -349,17 +367,44 @@ def _with_disabled(md: str, disabled: bool) -> str:
     return _metadata_line_edit(md, _DISABLED_LINE_RE, "- Disabled: true" if disabled else None)
 
 
+def _configured_node_id(omi_dir: Path) -> str | None:
+    """The node_id registered for this folder, or None. Never raises — a
+    corrupt node config must not take down plain note CRUD."""
+    from omind import mesh  # local import: mesh imports this module
+
+    try:
+        cfg = mesh.load_node_config(omi_dir)
+    except Exception:
+        return None
+    return cfg.node_id if cfg else None
+
+
 class OmiStore:
     """CRUD over `*.md` notes in a single OMI folder.
 
     ``node_id`` enables mesh mode (docs/mesh.md): every write stamps the next
     per-note Lamport revision into ``## Metadata``, and ``delete_note``
     soft-deletes (sets ``Disabled: true``) instead of unlinking.
+
+    When ``node_id`` is not passed it is derived from the mesh node config the
+    first time it's needed, so every write surface (web UI, ``omind note``,
+    import, …) stamps revisions on a mesh node — not just callers that
+    remembered to plumb it through.
     """
 
     def __init__(self, omi_dir: Path | str, node_id: str | None = None) -> None:
         self.omi_dir = Path(omi_dir).expanduser()
-        self.node_id = node_id
+        self._node_id = node_id
+        self._node_id_resolved = node_id is not None
+        # Listing cache: filename -> ((st_mtime_ns, st_size), NoteSummary).
+        self._summary_cache: dict[str, tuple[tuple[int, int], NoteSummary]] = {}
+
+    @property
+    def node_id(self) -> str | None:
+        if not self._node_id_resolved:
+            self._node_id_resolved = True
+            self._node_id = _configured_node_id(self.omi_dir)
+        return self._node_id
 
     def mesh_mode(self) -> bool:
         """True when this folder replicates: deletes must be merge-safe."""
@@ -389,7 +434,31 @@ class OmiStore:
     # Backward-compatible alias: external writers (Hermes) predate the rename.
     _write_lock = write_lock
 
+    def _signal_write(self) -> None:
+        """Advisory nudge for the mesh daemon's debounced sync; never raises.
+
+        Lives in the store so *every* write surface (MCP server, web UI,
+        ``omind note``, import) triggers replication — previously only the MCP
+        server's tools remembered to, and edits made elsewhere sat
+        uncommitted for up to the full sync interval.
+        """
+        if not self.mesh_mode():
+            return
+        try:
+            signal = sync_signal_path(self.omi_dir)
+            signal.parent.mkdir(parents=True, exist_ok=True)
+            signal.touch()
+        except OSError:
+            pass
+
     # -- naming / safety ----------------------------------------------------
+
+    def _reject_reserved(self, path: Path) -> None:
+        """Generated files are not notes: a note titled 'index' would overwrite
+        index.md, and the next regeneration would adopt the note body as the
+        hand-written index intro — permanently."""
+        if path.name in RESERVED_FILENAMES:
+            raise NoteError(f"{path.name!r} is a reserved file, not a note; pick another title")
 
     def safe_name(self, name: str) -> Path:
         """Resolve a user-supplied note name to a path inside the OMI dir.
@@ -436,25 +505,54 @@ class OmiStore:
     def _summarize(self, path: Path, text: str | None = None) -> NoteSummary:
         if text is None:
             text = path.read_text(encoding="utf-8")
-        fields = parse_note(text)
-        snippet = re.sub(r"\s+", " ", fields.summary or fields.details).strip()
-        if len(snippet) > 200:
-            snippet = snippet[:197].rstrip() + "..."
+        return self._summarize_fields(path, parse_note(text))
+
+    def _cached_summary(self, path: Path) -> NoteSummary | None:
+        """A NoteSummary for ``path``, re-read only when its stat changed.
+
+        Every write regenerates index.md via :meth:`list_notes`, and the web
+        UI / MCP listings call it per request — without this, each of those
+        was a full read+parse of every note in the vault. The (mtime_ns, size)
+        key makes entries self-invalidating; a same-tick same-size aliased
+        write can at worst serve a stale *listing* line, never stale content
+        (reads and the conflict token go through the file itself).
+        """
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        key = (st.st_mtime_ns, st.st_size)
+        hit = self._summary_cache.get(path.name)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        summary = self._summarize(path)
+        self._summary_cache[path.name] = (key, summary)
+        return summary
+
+    def _summarize_fields(self, path: Path, fields: NoteFields) -> NoteSummary:
+        """Build a NoteSummary from already-parsed fields (no re-read/re-parse)."""
         return NoteSummary(
             filename=path.name,
             title=fields.title or path.stem,
             tags=fields.tags,
             created=fields.created,
-            summary=snippet,
+            summary=_collapse(fields.summary or fields.details, 200),
             disabled=fields.disabled,
         )
 
     def list_notes(self, include_disabled: bool = False) -> list[NoteSummary]:
         summaries: list[NoteSummary] = []
+        seen: set[str] = set()
         for p in self._note_paths():
-            s = self._summarize(p)
+            s = self._cached_summary(p)
+            if s is None:
+                continue
+            seen.add(p.name)
             if include_disabled or not s.disabled:
                 summaries.append(s)
+        # Drop cache entries for notes that no longer exist on disk.
+        for stale in [name for name in self._summary_cache if name not in seen]:
+            del self._summary_cache[stale]
         summaries.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return summaries
 
@@ -477,7 +575,7 @@ class OmiStore:
             ).lower()
             if needle and needle not in haystack:
                 continue
-            results.append(self._summarize(path, text))
+            results.append(self._summarize_fields(path, fields))
         results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return results
 
@@ -498,7 +596,12 @@ class OmiStore:
             if path.resolve() == target.resolve():
                 continue
             text = path.read_text(encoding="utf-8")
-            link_targets = {t.strip().lower() for t in _WIKILINK_RE.findall(text)}
+            # Obsidian link forms: [[Note]], [[Note|alias]], [[Note#heading]] —
+            # only the part before | or # names the target note.
+            link_targets = {
+                t.split("|", 1)[0].split("#", 1)[0].strip().lower()
+                for t in _WIKILINK_RE.findall(text)
+            }
             if link_targets & identifiers:
                 summary = self._summarize(path, text)
                 if not summary.disabled:
@@ -516,17 +619,22 @@ class OmiStore:
         return parse_note(self.read_note(name))
 
     def note_version(self, name: str) -> str:
-        """An opaque token for a note's on-disk state (mtime + size).
+        """An opaque token for a note's on-disk state (size + content digest).
 
         Empty string when the note does not exist yet. Callers pass the token
         they last saw back to :meth:`write_note`; a mismatch means someone else
         (Claude Code's MCP, Hermes' cron, another tab) wrote in the meantime.
+
+        Content-based, not mtime-based: on filesystems with coarse timestamps
+        (FAT/exFAT, some network mounts) two same-size writes inside one tick
+        produced identical mtime+size tokens, silently passing the conflict
+        check. Equal digests mean byte-identical content — nothing to lose.
         """
         path = self.safe_name(name)
         if not path.is_file():
             return ""
-        st = path.stat()
-        return f"{st.st_mtime_ns}-{st.st_size}"
+        data = path.read_bytes()
+        return f"{len(data)}-{hashlib.blake2s(data, digest_size=8).hexdigest()}"
 
     def all_tags(self) -> list[str]:
         tags: set[str] = set()
@@ -538,10 +646,13 @@ class OmiStore:
 
     def write_note(self, name: str, content: str, expected_version: str | None = None) -> str:
         path = self.safe_name(name)
+        self._reject_reserved(path)
         with self.write_lock():
             # Re-check the optimistic-concurrency token *inside* the lock so the
-            # check-then-write is atomic against another process's save.
-            if expected_version is not None and path.is_file():
+            # check-then-write is atomic against another process's save. A
+            # missing file is a mismatch too (note_version returns ""): a stale
+            # save must not silently resurrect a note purged in the meantime.
+            if expected_version is not None:
                 current = self.note_version(name)
                 if current != expected_version:
                     raise NoteConflictError(
@@ -552,6 +663,41 @@ class OmiStore:
                 content = self._stamped(path, content)
             _atomic_write(path, content)
             self._write_index()
+        self._signal_write()
+        return path.name
+
+    def _mutate_note(
+        self,
+        name: str,
+        transform: Callable[[str], str],
+        expected_version: str | None = None,
+    ) -> str:
+        """Read-modify-write one note atomically under the write lock.
+
+        ``write_note`` only locks the write, so a caller that reads first and
+        writes the transformed text back races every other writer: anything
+        saved between the read and the locked write is silently reverted.
+        The lock is not reentrant (flock on a fresh fd), so the whole cycle
+        runs here instead of nesting through :meth:`write_note`.
+        """
+        path = self.safe_name(name)
+        self._reject_reserved(path)
+        with self.write_lock():
+            if not path.is_file():
+                raise NoteNotFoundError(f"note not found: {name!r}")
+            if expected_version is not None:
+                current = self.note_version(name)
+                if current != expected_version:
+                    raise NoteConflictError(
+                        f"note {name!r} changed on disk (expected {expected_version!r}, "
+                        f"found {current!r})"
+                    )
+            content = transform(path.read_text(encoding="utf-8"))
+            if self.node_id is not None and path.name not in RESERVED_FILENAMES:
+                content = self._stamped(path, content)
+            _atomic_write(path, content)
+            self._write_index()
+        self._signal_write()
         return path.name
 
     def _stamped(self, path: Path, content: str) -> str:
@@ -585,16 +731,22 @@ class OmiStore:
     def update_note(
         self, name: str, fields: NoteFields, expected_version: str | None = None
     ) -> str:
-        # Validate target exists, then overwrite with rendered fields.
-        current = parse_note(self.read_note(name))
-        # A caller that built fresh NoteFields without a rev predates the mesh
-        # fields (e.g. Hermes' upsert); it must not strip the note's revision
-        # or silently resurrect a soft-deleted note.
-        if not fields.rev:
-            fields.rev = current.rev
-            if not fields.disabled:
-                fields.disabled = current.disabled
-        return self.write_note(name, render_fields(fields), expected_version=expected_version)
+        def transform(text: str) -> str:
+            current = parse_note(text)
+            # A caller that built fresh NoteFields without a rev predates the
+            # mesh fields (e.g. Hermes' upsert); it must not strip the note's
+            # revision or silently resurrect a soft-deleted note.
+            if not fields.rev:
+                fields.rev = current.rev
+                if not fields.disabled:
+                    fields.disabled = current.disabled
+            # An empty created is never intentional — render_fields would
+            # silently substitute today(), rewriting the creation date.
+            if not fields.created:
+                fields.created = current.created
+            return render_fields(fields)
+
+        return self._mutate_note(name, transform, expected_version=expected_version)
 
     def delete_note(self, name: str) -> None:
         """Delete a note — mode-aware (docs/mesh.md "Disable instead of delete").
@@ -613,11 +765,11 @@ class OmiStore:
         path = self.safe_name(name)
         if path.name in RESERVED_FILENAMES:
             raise NoteError(f"refusing to disable reserved file: {path.name}")
-        return self.write_note(name, _with_disabled(self.read_note(name), True))
+        return self._mutate_note(name, lambda md: _with_disabled(md, True))
 
     def restore_note(self, name: str) -> str:
         """Clear a soft-deleted note's ``Disabled`` flag."""
-        return self.write_note(name, _with_disabled(self.read_note(name), False))
+        return self._mutate_note(name, lambda md: _with_disabled(md, False))
 
     def purge_note(self, name: str) -> None:
         """Hard-delete a note file. In a mesh, only `omind mesh purge` may use this."""
@@ -629,6 +781,7 @@ class OmiStore:
         with self.write_lock():
             path.unlink()
             self._write_index()
+        self._signal_write()
 
     # -- index --------------------------------------------------------------
 

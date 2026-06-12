@@ -174,3 +174,30 @@ def test_targz_rejects_path_traversal(tmp_path: Path) -> None:
     with pytest.raises(TransferError):
         import_dataset(tmp_path / "OMI", evil, log=_quiet)
     assert not (tmp_path / "escape.md").exists()
+
+
+def test_bundles_never_carry_lock_or_temp_files(tmp_path: Path) -> None:
+    """Importing a bundle with .omi.lock deadlocks/crashes under the held lock."""
+    import tarfile
+
+    from omind.store import LOCK_FILENAME
+
+    src = tmp_path / "src" / "OMI"
+    _seed_omi(src)
+    (src / LOCK_FILENAME).write_bytes(b"")
+    (src / ".tmp-abc.md").write_text("torn", encoding="utf-8")
+    bundle = tmp_path / "omi.tar.gz"
+    export_dataset(src, bundle, fmt="targz", log=_quiet)
+    with tarfile.open(bundle) as tar:
+        names = {Path(m.name).name for m in tar.getmembers()}
+    assert LOCK_FILENAME not in names
+    assert not any(n.startswith(".tmp-") for n in names)
+
+    # Old bundles may still carry them — import must skip, not write them.
+    evil = tmp_path / "evil.tar.gz"
+    with tarfile.open(evil, "w:gz") as tar:
+        tar.add(src / LOCK_FILENAME, arcname=LOCK_FILENAME)
+        tar.add(src / ".tmp-abc.md", arcname=".tmp-abc.md")
+    dest = tmp_path / "dest" / "OMI"
+    import_dataset(dest, evil, log=_quiet)
+    assert not (dest / ".tmp-abc.md").exists()

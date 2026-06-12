@@ -22,15 +22,18 @@ Imports never delete. Path traversal is rejected on both formats.
 
 from __future__ import annotations
 
+import contextlib
 import json
+import os
 import tarfile
+import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
 from omind import __version__, paths
-from omind.store import OmiStore, parse_note, today
+from omind.store import LOCK_FILENAME, OmiStore, parse_note, today
 
 Logger = Callable[[str], None]
 
@@ -77,6 +80,14 @@ def detect_format(path: Path) -> str:
 
 def default_export_name(fmt: str) -> str:
     return "omi-export.json" if fmt == "json" else "omi-export.tar.gz"
+
+
+def _runtime_artifact(name: str) -> bool:
+    """Lock and torn-temp files are runtime state, never data — exporting one
+    is clutter, and *importing* one is a real bug: the importer holds the
+    destination's `.omi.lock`, and on Windows reading/replacing a locked file
+    raises PermissionError mid-import."""
+    return name == LOCK_FILENAME or name.startswith(".tmp-")
 
 
 def _exportable_md(omi_dir: Path) -> list[Path]:
@@ -140,7 +151,7 @@ def _export_targz(omi: Path, out: Path) -> int:
     note_count = 0
     with tarfile.open(out, "w:gz") as tar:
         for path in sorted(omi.rglob("*")):
-            if not path.is_file():
+            if not path.is_file() or _runtime_artifact(path.name):
                 continue
             arcname = path.relative_to(omi).as_posix()
             tar.add(path, arcname=arcname)
@@ -172,13 +183,19 @@ def import_dataset(
     omi.mkdir(parents=True, exist_ok=True)
     result = ImportResult()
 
-    if fmt == "json":
-        _import_json(omi, src, force, result)
-    else:
-        _import_targz(omi, src, force, result)
+    # The whole write phase runs under the store's inter-process lock — the
+    # mesh daemon's `git add -A` must never stage a half-applied import, and
+    # raw writes would race every other writer (docs/mesh.md, single-writer
+    # rule). Individual files land via atomic same-dir tmp + os.replace.
+    store = OmiStore(omi)
+    with store.write_lock():
+        if fmt == "json":
+            _import_json(omi, src, force, result, store)
+        else:
+            _import_targz(omi, src, force, result, store)
 
-    # index.md is derived — rebuild it from whatever notes now exist on disk.
-    OmiStore(omi).update_index()
+        # index.md is derived — rebuild it from whatever notes now exist.
+        store.update_index_locked()
 
     log(
         f"import: +{len(result.added)} added, "
@@ -194,12 +211,16 @@ def import_dataset(
 
 
 def _classify_and_write(
-    target: Path, data: bytes, label: str, force: bool, result: ImportResult
+    target: Path, data: bytes, label: str, force: bool, result: ImportResult, store: OmiStore
 ) -> None:
-    """Write ``data`` to ``target`` per the content-aware import rules."""
+    """Write ``data`` to ``target`` per the content-aware import rules.
+
+    Caller holds the store write lock. Writes are atomic (tmp + os.replace),
+    and top-level notes get a Lamport rev stamp on a mesh node — an imported
+    note carrying a stale rev would otherwise lose the next merge.
+    """
     if not target.exists():
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_bytes(data)
+        _atomic_write_bytes(target, _stamp_if_note(target, data, store))
         result.added.append(label)
         return
     existing = target.read_bytes()
@@ -209,13 +230,48 @@ def _classify_and_write(
     if existing.replace(b"\r\n", b"\n") == data.replace(b"\r\n", b"\n"):
         result.unchanged.append(label)
     elif force:
-        target.write_bytes(data)
+        _atomic_write_bytes(target, _stamp_if_note(target, data, store))
         result.overwritten.append(label)
     else:
         result.conflicts.append(label)
 
 
-def _import_json(omi: Path, src: Path, force: bool, result: ImportResult) -> None:
+def _stamp_if_note(target: Path, data: bytes, store: OmiStore) -> bytes:
+    """Stamp the next Lamport rev into an imported top-level note (mesh only)."""
+    if (
+        store.node_id is None
+        or target.suffix != ".md"
+        or target.parent != store.omi_dir.resolve()
+        or target.name in paths.RESERVED_FILENAMES
+    ):
+        return data
+    try:
+        text = data.decode("utf-8")
+    except UnicodeDecodeError:
+        return data
+    return store._stamped(target, text).encode("utf-8")
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Bytes twin of ``store._atomic_write``: same-dir temp file + os.replace."""
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
+
+
+def _import_json(
+    omi: Path, src: Path, force: bool, result: ImportResult, store: OmiStore
+) -> None:
     try:
         data = json.loads(src.read_text(encoding="utf-8"))
     except json.JSONDecodeError as exc:
@@ -238,10 +294,12 @@ def _import_json(omi: Path, src: Path, force: bool, result: ImportResult) -> Non
             target = store.safe_name(filename)  # rejects traversal, ensures .md, in-dir
         except Exception as exc:  # noqa: BLE001 - store raises NoteError
             raise TransferError(f"unsafe filename in export: {filename!r} ({exc})") from exc
-        _classify_and_write(target, content.encode("utf-8"), target.name, force, result)
+        _classify_and_write(target, content.encode("utf-8"), target.name, force, result, store)
 
 
-def _import_targz(omi: Path, src: Path, force: bool, result: ImportResult) -> None:
+def _import_targz(
+    omi: Path, src: Path, force: bool, result: ImportResult, store: OmiStore
+) -> None:
     omi_resolved = omi.resolve()
     with tarfile.open(src, "r:gz") as tar:
         for member in tar.getmembers():
@@ -254,7 +312,9 @@ def _import_targz(omi: Path, src: Path, force: bool, result: ImportResult) -> No
                 raise TransferError(f"archive member escapes the OMI directory: {rel!r}")
             if Path(rel).name == paths.INDEX_FILENAME and Path(rel).parent == Path("."):
                 continue  # derived top-level index; regenerated after import
+            if _runtime_artifact(Path(rel).name):
+                continue  # lock/temp state from old bundles; never data
             extracted = tar.extractfile(member)
             if extracted is None:
                 continue
-            _classify_and_write(target, extracted.read(), rel, force, result)
+            _classify_and_write(target, extracted.read(), rel, force, result, store)

@@ -30,14 +30,13 @@ comes from the tag, the messages on stderr, and ``omind doctor``. Exit 1
 
 from __future__ import annotations
 
-import re
 import sys
 from dataclasses import dataclass, field
 from difflib import SequenceMatcher
 from pathlib import Path
 
 from omind.clock import Rev
-from omind.store import ActionItem, NoteFields, parse_note, render_fields
+from omind.store import ActionItem, NoteFields, parse_note, render_fields, split_sections
 
 #: Tag stamped onto a note whose Details carry conflict markers.
 CONFLICT_TAG = "merge-conflict"
@@ -47,9 +46,6 @@ CONFLICT_TAG = "merge-conflict"
 TEMPLATE_SECTIONS = frozenset(
     {"Metadata", "Summary", "Details", "Connections", "Action Items", "References"}
 )
-
-_HEADING_RE = re.compile(r"^##\s+(.*?)\s*$")
-
 
 @dataclass
 class MergeResult:
@@ -274,23 +270,16 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
 
 
 def _extra_sections(md: str) -> dict[str, list[str]]:
-    """Body lines of every ``## Heading`` the NoteFields template doesn't own."""
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    for line in md.splitlines():
-        m = _HEADING_RE.match(line)
-        if m:
-            heading = m.group(1)
-            current = heading if heading not in TEMPLATE_SECTIONS else None
-            if current is not None:
-                sections.setdefault(current, [])
-            continue
-        if line.startswith("#") and not line.startswith("##"):
-            current = None
-            continue
-        if current is not None:
-            sections[current].append(line)
-    return {h: _strip_blank(body) for h, body in sections.items()}
+    """Body lines of every ``## Heading`` the NoteFields template doesn't own.
+
+    Uses the same splitter as ``parse_note`` — two parsers deciding what a
+    section heading is would disagree eventually, and the loser's content
+    would be emitted twice in every merged note.
+    """
+    _, sections = split_sections(md)
+    return {
+        h: _strip_blank(body) for h, body in sections.items() if h not in TEMPLATE_SECTIONS
+    }
 
 
 def _strip_blank(lines: list[str]) -> list[str]:

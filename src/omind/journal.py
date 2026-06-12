@@ -26,8 +26,9 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from omind.hooks import JOURNAL_TAGS, journal_dir
-from omind.store import OmiStore, _atomic_write, today
+from omind import paths
+from omind.hooks import JOURNAL_TAGS, action_bullets, journal_dir
+from omind.store import NoteFields, OmiStore, _atomic_write, render_fields, today
 
 # Places older layouts left daily journals: the vault-folder root, plus the
 # short-lived ``logs/`` journal-location experiment some live vaults carry.
@@ -36,7 +37,9 @@ ARCHIVE_DIRNAME = "Archive"
 DEFAULT_RETAIN_DAYS = 30
 _NOTABLE_TARGET_LIMIT = 10
 
-_JOURNAL_FILE_RE = re.compile(r"^Session Journal (\d{4}-\d{2}-\d{2})\.md$")
+_JOURNAL_FILE_RE = re.compile(
+    rf"^{re.escape(paths.JOURNAL_PREFIX)} (\d{{4}}-\d{{2}}-\d{{2}})\.md$"
+)
 _ACTION_LINE_RE = re.compile(r"^- \d\d:\d\d \[session (?P<session>\w+)\] (?P<rest>.+)$")
 _TOOL_RE = re.compile(
     r"^PostToolUse (?P<tool>\S+)(?: -> (?P<target>.*?))? \((?P<outcome>ok|error)\)$"
@@ -63,20 +66,7 @@ def iso_week(day: date) -> str:
 
 def rollup_name(week: str) -> str:
     """Deterministic per-week rollup filename: ``Session Journal Rollup YYYY-Www.md``."""
-    return f"Session Journal Rollup {week}.md"
-
-
-def _action_bullets(text: str) -> list[str]:
-    """The ``- `` bullets under a journal's ``## Actions`` heading."""
-    bullets: list[str] = []
-    in_actions = False
-    for line in text.splitlines():
-        if line.startswith("## "):
-            in_actions = line.strip() == "## Actions"
-            continue
-        if in_actions and line.startswith("- "):
-            bullets.append(line)
-    return bullets
+    return f"{paths.JOURNAL_PREFIX} Rollup {week}.md"
 
 
 # -- migration ----------------------------------------------------------------
@@ -95,7 +85,7 @@ def find_stray_journals(omi_dir: Path | str) -> list[Path]:
             continue
         strays.extend(
             path
-            for path in sorted(directory.glob("Session Journal *.md"))
+            for path in sorted(directory.glob(paths.JOURNAL_GLOB))
             if journal_date(path.name) is not None
         )
     return strays
@@ -119,7 +109,7 @@ def migrate_journals(omi_dir: Path | str) -> list[str]:
         for stray in find_stray_journals(store.omi_dir):
             target = target_dir / stray.name
             if target.is_file():
-                bullets = _action_bullets(stray.read_text(encoding="utf-8"))
+                bullets = action_bullets(stray.read_text(encoding="utf-8"))
                 if bullets:
                     with target.open("a", encoding="utf-8") as fh:
                         fh.write("\n".join(bullets) + "\n")
@@ -183,23 +173,15 @@ def _tally(text: str, stats: JournalStats) -> None:
 
 
 def render_rollup(week: str, days: list[str], stats: JournalStats) -> str:
-    """Render the weekly summary as a template-shaped note (parses under parse_note)."""
-    title = rollup_name(week)[:-3]
-    tags = " ".join(f"#{t}" for t in (*JOURNAL_TAGS, "rollup"))
-    lines = [
-        f"# {title}",
-        "",
-        "## Metadata",
-        f"- Created: {today()}",
-        f"- Tags: {tags}",
-        "- Related to:",
-        "",
-        "## Summary",
-        f"Weekly rollup of {len(days)} daily session journal(s) for {week}: "
-        f"{stats.actions} action(s), {stats.errors} error(s), "
-        f"{len(stats.sessions)} session(s), {stats.stops} turn end(s).",
-        "",
-        "## Details",
+    """Render the weekly summary through the canonical note renderer.
+
+    ``render_fields`` is what parse_note and the mesh merge driver expect a
+    note to look like; a hand-built template here would drift the moment the
+    template grows a field. (Daily journals are different: their trailing
+    ``## Actions`` section is the O_APPEND hot path and deliberately bypasses
+    the store — see :mod:`omind.hooks`.)
+    """
+    details_lines = [
         "Days rolled up:",
         *(f"- {d}" for d in days),
         "",
@@ -215,7 +197,18 @@ def render_rollup(week: str, days: list[str], stats: JournalStats) -> str:
             for target, count in stats.targets.most_common(_NOTABLE_TARGET_LIMIT)
         ),
     ]
-    return "\n".join(lines).rstrip() + "\n"
+    fields = NoteFields(
+        title=rollup_name(week)[:-3],
+        summary=(
+            f"Weekly rollup of {len(days)} daily session journal(s) for {week}: "
+            f"{stats.actions} action(s), {stats.errors} error(s), "
+            f"{len(stats.sessions)} session(s), {stats.stops} turn end(s)."
+        ),
+        details="\n".join(details_lines),
+        created=today(),
+        tags=[*JOURNAL_TAGS, "rollup"],
+    )
+    return render_fields(fields)
 
 
 def rollup_journals(
@@ -243,7 +236,7 @@ def rollup_journals(
     with store._write_lock():
         groups: dict[str, list[tuple[date, Path]]] = {}
         if directory.is_dir():
-            for path in sorted(directory.glob("Session Journal *.md")):
+            for path in sorted(directory.glob(paths.JOURNAL_GLOB)):
                 day = journal_date(path.name)
                 if day is not None:
                     groups.setdefault(iso_week(day), []).append((day, path))
@@ -254,10 +247,21 @@ def rollup_journals(
                     continue
             elif max(day for day, _ in dated_paths) >= cutoff:
                 continue  # retention: keep raw dailies for retain_days
+            # A week may have rolled up before (its dailies now live in
+            # Archive/) and then receive a late daily — e.g. one synced from
+            # an offline peer. Recompute over the archived dailies too, so
+            # rewriting the rollup never shrinks the earlier aggregate.
+            archive_dir = directory / ARCHIVE_DIRNAME
+            archived_dated: list[tuple[date, Path]] = []
+            if archive_dir.is_dir():
+                for path in sorted(archive_dir.glob(paths.JOURNAL_GLOB)):
+                    day = journal_date(path.name)
+                    if day is not None and iso_week(day) == wk:
+                        archived_dated.append((day, path))
             stats = JournalStats()
-            for _, path in dated_paths:
+            for _, path in [*archived_dated, *dated_paths]:
                 _tally(path.read_text(encoding="utf-8"), stats)
-            days = [day.isoformat() for day, _ in dated_paths]
+            days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
             filename = rollup_name(wk)
             _atomic_write(directory / filename, render_rollup(wk, days, stats))
             archived: list[str] = []
@@ -267,7 +271,6 @@ def rollup_journals(
                     path.unlink()
                     deleted.append(path.name)
                 else:
-                    archive_dir = directory / ARCHIVE_DIRNAME
                     archive_dir.mkdir(parents=True, exist_ok=True)
                     path.replace(archive_dir / path.name)
                     archived.append(path.name)

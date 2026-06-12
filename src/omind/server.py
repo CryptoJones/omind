@@ -20,8 +20,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
-from omind.paths import sync_signal_path
-from omind.store import ActionItem, NoteFields, OmiStore
+from omind.store import ActionItem, NoteFields, OmiStore, parse_note
 
 SERVER_NAME = "omi"
 
@@ -54,16 +53,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     stamping in the store; without it the store still soft-deletes whenever
     the folder is a git working tree.
     """
+    # Write-signal touching lives in OmiStore now: every write surface nudges
+    # the mesh daemon, not just this server's tools.
     store = OmiStore(omi_dir, node_id=node_id)
-    signal = sync_signal_path(store.omi_dir)
-
-    def _wrote() -> None:
-        # Advisory only: the daemon syncs on interval regardless.
-        try:
-            signal.parent.mkdir(parents=True, exist_ok=True)
-            signal.touch()
-        except OSError as exc:
-            logger.warning("could not touch sync signal %s: %s", signal, exc)
 
     mcp = FastMCP(SERVER_NAME, instructions=_INSTRUCTIONS)
 
@@ -76,11 +68,11 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     )
     def read_note(name: str) -> dict[str, object]:
         raw = store.read_note(name)
-        fields = store.read_fields(name)
+        # One read + one parse: read_fields would re-read the file just read.
         return {
             "filename": store.safe_name(name).name,
             "raw": raw,
-            "fields": fields.to_dict(),
+            "fields": parse_note(raw).to_dict(),
             "version": store.note_version(name),
         }
 
@@ -112,7 +104,6 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
             references=references or [],
         )
         filename = store.create_note(fields)
-        _wrote()
         return {"filename": filename}
 
     @mcp.tool(
@@ -153,7 +144,6 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         if references is not None:
             fields.references = references
         filename = store.update_note(name, fields, expected_version=expected_version)
-        _wrote()
         return {"filename": filename, "version": store.note_version(name)}
 
     @mcp.tool(
@@ -185,13 +175,11 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     )
     def delete_note(name: str) -> dict[str, str]:
         filename = store.disable_note(name)
-        _wrote()
         return {"filename": filename, "status": "archived"}
 
     @mcp.tool(name="restore-note", description="Restore an archived (soft-deleted) note.")
     def restore_note(name: str) -> dict[str, str]:
         filename = store.restore_note(name)
-        _wrote()
         return {"filename": filename, "status": "restored"}
 
     @mcp.tool(

@@ -565,3 +565,79 @@ def test_mesh_aware_update_controls_disabled(mesh_store: OmiStore) -> None:
     fields.disabled = False
     mesh_store.update_note(name, fields)
     assert mesh_store.read_fields(name).disabled is False
+
+
+def test_update_note_preserves_created_date(store: OmiStore) -> None:
+    """A fresh-NoteFields update must not reset Created: to today."""
+    name = store.create_note(NoteFields(title="Old Note", created="2026-01-10"))
+    store.update_note(name, NoteFields(title="Old Note", summary="edited"))
+    assert store.read_fields(name).created == "2026-01-10"
+
+
+def test_upsert_keeps_fields_the_caller_left_unset(store: OmiStore) -> None:
+    """`omind note` can't express Action Items etc.; empty means keep, not clear."""
+    from omind.notes import upsert_note
+
+    store.create_note(
+        NoteFields(
+            title="Sticky Upsert",
+            summary="original summary",
+            created="2026-01-10",
+            tags=["keep"],
+            action_items=[ActionItem("still todo")],
+            references=["Source: somewhere"],
+        )
+    )
+    action, filename = upsert_note(store.omi_dir, NoteFields(title="Sticky Upsert", details="new"))
+    assert action == "updated"
+    after = store.read_fields(filename)
+    assert after.details == "new"
+    assert after.summary == "original summary"
+    assert after.created == "2026-01-10"
+    assert after.tags == ["keep"]
+    assert after.action_items == [ActionItem("still todo")]
+    assert after.references == ["Source: somewhere"]
+
+
+@pytest.mark.parametrize("title", ["index", "Memory Template"])
+def test_writes_refuse_reserved_filenames(store: OmiStore, title: str) -> None:
+    """A note titled 'index' must not clobber the generated index.md."""
+    with pytest.raises(NoteError):
+        store.create_note(NoteFields(title=title))
+    with pytest.raises(NoteError):
+        store.write_note(f"{title}.md", "# pwned\n")
+    with pytest.raises(NoteError):
+        store.update_note(f"{title}.md", NoteFields(title=title))
+
+
+def test_stale_write_after_purge_conflicts(store: OmiStore) -> None:
+    """A version token taken before a purge must not resurrect the note."""
+    name = store.create_note(NoteFields(title="Doomed", summary="s"))
+    token = store.note_version(name)
+    store.purge_note(name)
+    with pytest.raises(NoteConflictError):
+        store.write_note(name, "# Doomed\n", expected_version=token)
+    assert not (store.omi_dir / name).exists()
+
+
+def test_backlinks_match_aliased_and_heading_links(store: OmiStore) -> None:
+    """Obsidian counts [[Note|alias]] and [[Note#heading]] as backlinks; so do we."""
+    store.create_note(NoteFields(title="Note A", summary="target"))
+    store.create_note(NoteFields(title="Aliased", details="See [[Note A|the project]]."))
+    store.create_note(NoteFields(title="Headed", details="See [[Note A#Details]]."))
+    store.create_note(NoteFields(title="Unrelated", details="See [[Note B]]."))
+    names = {s.filename for s in store.backlinks("Note A")}
+    assert names == {"Aliased.md", "Headed.md"}
+
+
+def test_listing_cache_tracks_writes_and_deletes(store: OmiStore) -> None:
+    """The stat-keyed summary cache must never serve a deleted or stale note."""
+    a = store.create_note(NoteFields(title="Cached A", summary="v1"))
+    store.create_note(NoteFields(title="Cached B", summary="b"))
+    assert {s.title for s in store.list_notes()} == {"Cached A", "Cached B"}
+    store.update_note(a, NoteFields(title="Cached A", summary="v2 longer text"))
+    assert [s.summary for s in store.list_notes() if s.title == "Cached A"] == [
+        "v2 longer text"
+    ]
+    store.purge_note(a)
+    assert {s.title for s in store.list_notes()} == {"Cached B"}

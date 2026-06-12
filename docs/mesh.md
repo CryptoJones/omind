@@ -66,7 +66,7 @@ Every machine runs an identical **omind node**:
 
 | Module | Responsibility |
 | --- | --- |
-| `omind/server.py` | Local **node MCP server** exposing `OmiStore` as MCP tools over stdio. Replaces the provisioned `obsidian-mcp`. Triggers a debounced commit+sync on write. |
+| `omind/server.py` | Local **node MCP server** exposing `OmiStore` as MCP tools over stdio. Replaces the provisioned `obsidian-mcp`. (Since 2.27.0 the debounced-sync write signal lives in `OmiStore` itself, so every write surface — MCP, web UI, `omind note`, import — triggers it.) |
 | `omind/clock.py` | **Logical versioning** — a Lamport counter + stable node-id stamped into each note, the source of ordering truth for merges. |
 | `omind/merge.py` | The **git merge driver** for OMI notes (the core of the project). Field-level 3-way merge over `NoteFields`. |
 | `omind/mesh.py` | **Replication daemon** — `init`, `commit_local`, `sync(peers)`, `daemon`, `clone`, peer membership. |
@@ -154,9 +154,10 @@ offline writes, so they are rejected for the same reason as the hub.
 
 ### Logical clock, not wall-clock
 
-`OmiStore.note_version` is `mtime_ns-size` — a *local* token. mtime is not
-comparable across machines and carries no causality, so it is kept only for
-intra-node optimistic locking. Cross-node ordering uses a **Lamport counter +
+`OmiStore.note_version` is `size-blake2(content)` — a *local* token (content-
+based since 2.15.0: mtime+size collided for same-size writes within one
+timestamp tick on coarse filesystems). It carries no causality and is kept
+only for intra-node optimistic locking. Cross-node ordering uses a **Lamport counter +
 node-id** stamped into each note's `## Metadata` section (Obsidian-visible,
 keeps notes plain-Markdown). Clock skew across the laptop / Pluto / macmini is
 real and is never trusted.

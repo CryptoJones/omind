@@ -35,6 +35,23 @@ from omind.provision import (
 )
 
 
+def _add_vault_args(p: argparse.ArgumentParser) -> None:
+    """The --vault/--folder pair every vault-touching subcommand shares.
+
+    One definition: a subcommand with silently different defaults or help is
+    exactly the drift this prevents.
+    """
+    p.add_argument(
+        "--vault",
+        type=Path,
+        default=default_vault_path(),
+        help="path to the Obsidian vault (default: %(default)s)",
+    )
+    p.add_argument(
+        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="omind",
@@ -49,15 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     setup = sub.add_parser(
         "setup", help="provision the OMI/Obsidian MCP wiring for an AI agent"
     )
-    setup.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    setup.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(setup)
     setup.add_argument(
         "--agent",
         choices=AGENT_CHOICES,
@@ -90,15 +99,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="print copy-paste manual-wiring steps (what `setup` would do, as "
         "shell commands and JSON personalized to your paths)",
     )
-    quickstart.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    quickstart.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(quickstart)
     quickstart.add_argument(
         "--agent",
         choices=AGENT_CHOICES,
@@ -114,15 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     node = sub.add_parser(
         "node", help="run the local mesh-node MCP server over stdio (docs/mesh.md)"
     )
-    node.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    node.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(node)
 
     mesh = sub.add_parser(
         "mesh", help="peer-to-peer replication of the OMI folder over git (docs/mesh.md)"
@@ -188,15 +181,7 @@ def build_parser() -> argparse.ArgumentParser:
         mesh_clone,
         mesh_purge,
     ):
-        mp.add_argument(
-            "--vault",
-            type=Path,
-            default=default_vault_path(),
-            help="path to the Obsidian vault (default: %(default)s)",
-        )
-        mp.add_argument(
-            "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-        )
+        _add_vault_args(mp)
 
     # Hidden: invoked by git (merge.omi.driver), never by hand.
     merge_driver = sub.add_parser("merge-driver")
@@ -206,29 +191,13 @@ def build_parser() -> argparse.ArgumentParser:
     merge_driver.add_argument("path_label", nargs="?", default="")
 
     serve = sub.add_parser("serve", help="run the local web UI over an OMI memory folder")
-    serve.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    serve.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(serve)
     serve.add_argument("--host", default="127.0.0.1", help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8765, help="bind port (default: 8765)")
     serve.add_argument("--reload", action="store_true", help="auto-reload on code changes (dev)")
 
     doctor = sub.add_parser("doctor", help="diagnose the OMI/Obsidian MCP wiring")
-    doctor.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    doctor.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(doctor)
     doctor.add_argument(
         "--agent",
         choices=AGENT_CHOICES,
@@ -264,26 +233,10 @@ def build_parser() -> argparse.ArgumentParser:
         ("install-timer", "install a daily systemd user timer running `omind backup run`"),
     ):
         backup_sub = bsub.add_parser(name, help=helptext)
-        backup_sub.add_argument(
-            "--vault",
-            type=Path,
-            default=default_vault_path(),
-            help="path to the Obsidian vault (default: %(default)s)",
-        )
-        backup_sub.add_argument(
-            "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-        )
+        _add_vault_args(backup_sub)
 
     export = sub.add_parser("export", help="write the entire OMI dataset to a bundle")
-    export.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    export.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(export)
     export.add_argument(
         "--format",
         choices=("json", "targz"),
@@ -299,15 +252,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     imp = sub.add_parser("import", help="load an OMI dataset bundle into a folder")
     imp.add_argument("file", type=Path, help="bundle to import (.json or .tar.gz)")
-    imp.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    imp.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(imp)
     imp.add_argument(
         "--force",
         action="store_true",
@@ -319,15 +264,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="regenerate index.md's Recent Memories list under the write lock "
         "(safe to run from a session that wrote a note file directly)",
     )
-    reindex.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    reindex.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(reindex)
 
     note = sub.add_parser(
         "note",
@@ -344,15 +281,7 @@ def build_parser() -> argparse.ArgumentParser:
     note.add_argument("--related-to", default="", help="free-text 'related to' line")
     note.add_argument("--connections", default="", help="comma-separated note titles to [[link]]")
     note.add_argument("--references", default="", help="comma-separated references")
-    note.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    note.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(note)
 
     rollup = sub.add_parser(
         "rollup",
@@ -377,15 +306,7 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="delete rolled-up dailies instead of archiving them to Journal/Archive/",
     )
-    rollup.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    rollup.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(rollup)
 
     hook = sub.add_parser(
         "hook", help="(internal) record one Claude Code action into the OMI journal"
@@ -395,15 +316,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=list(HANDLED_EVENTS),
         help="the Claude Code hook event name",
     )
-    hook.add_argument(
-        "--vault",
-        type=Path,
-        default=default_vault_path(),
-        help="path to the Obsidian vault (default: %(default)s)",
-    )
-    hook.add_argument(
-        "--folder", default="OMI", help="memory folder inside the vault (default: OMI)"
-    )
+    _add_vault_args(hook)
 
     return parser
 
@@ -474,8 +387,10 @@ def _run_backup(args: argparse.Namespace) -> int:
             run_backup((args.vault / args.folder).expanduser())
             return 0
         if args.backup_command == "verify":
+            from omind.provision import _doctor_symbols
+
             results = verify_backup((args.vault / args.folder).expanduser())
-            symbols = {"ok": "✓", "warn": "!", "fail": "✗"}
+            symbols = _doctor_symbols()  # ASCII degrade on cp1252 consoles
             for result in results:
                 print(f"  [{symbols[result.level]}] {result.message}")
             return 1 if any(r.level == "fail" for r in results) else 0
@@ -489,12 +404,18 @@ def _run_backup(args: argparse.Namespace) -> int:
 
 def _run_node(args: argparse.Namespace) -> int:
     # Imported lazily: the mcp SDK is only needed when actually serving.
-    from omind.mesh import load_node_config
+    from omind.mesh import MeshError, load_node_config
     from omind.server import run_node
 
     omi_dir = (args.vault / args.folder).expanduser()
     # With a mesh identity, every MCP write stamps the next Lamport rev.
-    cfg = load_node_config(omi_dir)
+    # A corrupt node.json must not take the memory tools away from every
+    # Claude session — degrade to unstamped writes and say so on stderr.
+    try:
+        cfg = load_node_config(omi_dir)
+    except MeshError as exc:
+        print(f"warning: {exc}; serving without a mesh identity", file=sys.stderr)
+        cfg = None
     return run_node(omi_dir, node_id=cfg.node_id if cfg else None)
 
 

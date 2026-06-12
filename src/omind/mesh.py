@@ -30,11 +30,12 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 from omind.backup import config_dir
 from omind.paths import sync_state_path
 from omind.proc import run_command
-from omind.store import OmiStore
+from omind.store import OmiStore, _atomic_write
 
 Logger = Callable[[str], None]
 
@@ -139,7 +140,9 @@ def save_node_config(omi_dir: Path, cfg: NodeConfig) -> None:
         "interval_seconds": cfg.interval_seconds,
         "debounce_seconds": cfg.debounce_seconds,
     }
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Atomic: a torn node.json breaks every later mesh command — or worse,
+    # loses this folder's entry and mints a new node_id on the next setup.
+    _atomic_write(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def new_node_id() -> str:
@@ -227,10 +230,6 @@ def mesh_init(omi_dir: Path, log: Logger = print) -> NodeConfig:
         # are); without this line `index.md merge=ours` falls back to a text
         # merge and the generated index conflicts on every cross edit.
         git(omi_dir, "config", "merge.ours.driver", "true")
-        # "ours" is NOT a built-in attributes driver (only text/binary/union
-        # are); without this line `index.md merge=ours` falls back to a text
-        # merge and the generated index conflicts on every cross edit.
-        git(omi_dir, "config", "merge.ours.driver", "true")
 
         _write_if_changed(omi_dir / ".gitattributes", GITATTRIBUTES, log)
         _write_if_changed(omi_dir / ".gitignore", GITIGNORE, log)
@@ -254,16 +253,21 @@ TOMBSTONES_FILENAME = ".omi-tombstones"
 
 
 def peers(omi_dir: Path) -> dict[str, str]:
-    """The configured peer remotes: name -> fetch URL."""
-    names = git(omi_dir, "remote").stdout.splitlines()
-    # one get-url per remote rather than parsing `remote -v`, whose
-    # whitespace-delimited output is ambiguous for URLs containing spaces
-    # (the default vault path, "Obsidian Vault", contains one)
-    return {
-        name: git(omi_dir, "remote", "get-url", name).stdout.strip()
-        for name in (n.strip() for n in names)
-        if name
-    }
+    """The configured peer remotes: name -> fetch URL.
+
+    One ``git config --get-regexp`` call instead of ``git remote`` plus one
+    ``get-url`` per remote (the daemon calls this every sync tick). Keys are
+    unambiguous even for URLs containing spaces — `remote -v`'s
+    whitespace-delimited output is not (the default vault path,
+    "Obsidian Vault", contains one).
+    """
+    res = git(omi_dir, "config", "--get-regexp", r"^remote\..*\.url$", check=False)
+    result: dict[str, str] = {}
+    for line in res.stdout.splitlines():
+        key, _, url = line.partition(" ")
+        if key.startswith("remote.") and key.endswith(".url") and url:
+            result[key[len("remote.") : -len(".url")]] = url.strip()
+    return result
 
 
 def add_peer(omi_dir: Path, name: str, url: str) -> None:
@@ -457,8 +461,13 @@ class SyncReport:
         return all(not p.error for p in self.peers)
 
 
-def _commit_locked(omi_dir: Path, node_id: str, message: str) -> bool:
+def _commit_locked(omi_dir: Path, message: str) -> bool:
     """Stage + commit everything. Caller MUST hold the store write lock."""
+    # Never complete a merge an earlier crashed/timed-out sync abandoned:
+    # `git add -A && git commit` on a tree with MERGE_HEAD would commit the
+    # half-merged state (conflict markers included) and push it to peers.
+    if git(omi_dir, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0:
+        git(omi_dir, "merge", "--abort", check=False)
     if not git(omi_dir, "status", "--porcelain").stdout.strip():
         return False
     git(omi_dir, "add", "-A")
@@ -471,7 +480,7 @@ def commit_local(omi_dir: Path, node_id: str) -> bool:
     write can never be half-staged."""
     store = OmiStore(omi_dir)
     with store.write_lock():
-        return _commit_locked(omi_dir, node_id, f"omind: local changes on {node_id}")
+        return _commit_locked(omi_dir, f"omind: local changes on {node_id}")
 
 
 def _first_line(text: str) -> str:
@@ -485,16 +494,22 @@ def _first_line(text: str) -> str:
 
 def _merge_ref(omi_dir: Path, ref: str) -> str:
     """Merge one ref; '' on success, else a one-line error (merge aborted)."""
-    res = git(
-        omi_dir,
-        "merge",
-        "--no-edit",
-        "--allow-unrelated-histories",
-        "-m",
-        f"omind sync: merge {ref}",
-        ref,
-        check=False,
-    )
+    try:
+        res = git(
+            omi_dir,
+            "merge",
+            "--no-edit",
+            "--allow-unrelated-histories",
+            "-m",
+            f"omind sync: merge {ref}",
+            ref,
+            check=False,
+        )
+    except MeshError as exc:
+        # A timed-out merge (run_command raises before the returncode check)
+        # still leaves MERGE_HEAD and a half-merged tree behind — abort it.
+        git(omi_dir, "merge", "--abort", check=False)
+        return f"merge {ref}: {_first_line(str(exc))}"
     if res.returncode == 0:
         return ""
     git(omi_dir, "merge", "--abort", check=False)
@@ -574,12 +589,18 @@ def sync(
     an exception. Pushes go to ``refs/omind/<node_id>`` — never to the peer's
     checked-out branch (pushing into a non-bare repo's current branch is
     refused by git); the peer merges its inbox on its own next cycle.
+
+    The write lock covers only the steps that touch the working tree
+    (commit, merge, tombstones, index). ``git fetch``/``git push`` only move
+    refs and objects and run unlocked — holding the lock across network calls
+    blocked every note writer for up to GIT_TIMEOUT per unreachable peer
+    (POSIX flock has no timeout).
     """
     omi_dir = Path(omi_dir).expanduser()
     store = OmiStore(omi_dir)
     report = SyncReport()
     with store.write_lock():
-        report.committed = _commit_locked(omi_dir, node_id, f"omind: local changes on {node_id}")
+        report.committed = _commit_locked(omi_dir, f"omind: local changes on {node_id}")
 
         # Merge anything peers pushed into our inbox since last time.
         for ref in _inbox_refs(omi_dir, node_id):
@@ -587,19 +608,24 @@ def sync(
             if error:
                 log(f"inbox {ref}: {error}")
 
-        for name in sorted(peers(omi_dir)):
-            if only is not None and name not in only:
-                continue
-            ps = PeerSync(name=name)
-            report.peers.append(ps)
-            try:
-                git(omi_dir, "fetch", name)
-                ps.fetched = True
-            except MeshError as exc:
-                ps.error = _first_line(str(exc)) or "unreachable"
-                log(f"peer {name}: unreachable, skipped")
-                continue
-            ref = f"refs/remotes/{name}/main"
+    merged_peers: list[PeerSync] = []
+    for name in sorted(peers(omi_dir)):
+        if only is not None and name not in only:
+            continue
+        ps = PeerSync(name=name)
+        report.peers.append(ps)
+        try:
+            git(omi_dir, "fetch", name)
+            ps.fetched = True
+        except MeshError as exc:
+            ps.error = _first_line(str(exc)) or "unreachable"
+            log(f"peer {name}: unreachable, skipped")
+            continue
+        ref = f"refs/remotes/{name}/main"
+        with store.write_lock():
+            # A writer may have saved between locks; commit so the merge
+            # never sees (or clobbers) uncommitted local changes.
+            _commit_locked(omi_dir, f"omind: local changes on {node_id}")
             if git(omi_dir, "rev-parse", "--verify", ref, check=False).returncode == 0:
                 error = _merge_ref(omi_dir, ref)
                 if error:
@@ -607,23 +633,25 @@ def sync(
                     log(f"peer {name}: {error}")
                     continue
             ps.merged = True
+        merged_peers.append(ps)
 
-            # Regenerate what merges may have touched, then publish.
-            _apply_tombstones(omi_dir, store)
-            store.update_index_locked()
-            _commit_locked(omi_dir, node_id, f"omind: post-merge regeneration on {node_id}")
-            push = git(omi_dir, "push", name, f"HEAD:refs/omind/{node_id}", check=False)
-            ps.pushed = push.returncode == 0
-            if not ps.pushed:
-                ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
-                log(f"peer {name}: {ps.error}")
-
-        # Even with no peers reachable, leave generated files consistent.
+    # Regenerate + commit ONCE after all merges (also with no peers reachable,
+    # to leave generated files consistent) — per-peer regeneration was a full
+    # vault re-parse and a git status/add/commit round for every peer, under
+    # the lock. Every push below then carries the regenerated state.
+    with store.write_lock():
         _apply_tombstones(omi_dir, store)
         store.update_index_locked()
-        _commit_locked(omi_dir, node_id, f"omind: post-merge regeneration on {node_id}")
+        _commit_locked(omi_dir, f"omind: post-merge regeneration on {node_id}")
 
         report.conflicts = conflict_scan(omi_dir)
+
+    for ps in merged_peers:
+        push = git(omi_dir, "push", ps.name, f"HEAD:refs/omind/{node_id}", check=False)
+        ps.pushed = push.returncode == 0
+        if not ps.pushed:
+            ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
+            log(f"peer {ps.name}: {ps.error}")
     _write_sync_state(omi_dir, report)
     for note_name in report.conflicts:
         log(f"conflict markers in {note_name} (tagged; resolve and save)")
@@ -663,11 +691,13 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
         tomb = omi_dir / TOMBSTONES_FILENAME
         existing = tomb.read_text(encoding="utf-8").splitlines() if tomb.is_file() else []
         if target.name not in existing:
-            tomb.write_text("\n".join([*existing, target.name]) + "\n", encoding="utf-8")
+            # Atomic: a torn tombstone file would un-purge every prior purge
+            # mesh-wide once the truncation merged out to the peers.
+            _atomic_write(tomb, "\n".join([*existing, target.name]) + "\n")
         if target.is_file():
             target.unlink()
         store.update_index_locked()
-        _commit_locked(omi_dir, node_id, f"omind: purge {target.name} from {node_id}")
+        _commit_locked(omi_dir, f"omind: purge {target.name} from {node_id}")
     log(f"purged {target.name} (tombstoned for every node)")
 
 
@@ -765,7 +795,9 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
     if load_node_config(omi_dir) is None:
         raise MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
     omind_exe = shutil.which("omind") or "omind"
-    daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder {folder}'
+    # Quoted like the hook command: systemd ExecStart and schtasks both
+    # word-split an unquoted folder name containing a space.
+    daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder "{folder}"'
 
     if sys.platform == "linux":
         from omind.backup import systemd_user_dir
@@ -797,7 +829,8 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
         agents.mkdir(parents=True, exist_ok=True)
         plist_path = agents / f"{MESH_LAUNCHD_LABEL}.plist"
         args = [omind_exe, "mesh", "daemon", "--vault", str(vault), "--folder", folder]
-        args_xml = "\n".join(f"      <string>{a}</string>" for a in args)
+        # XML-escape: a vault path containing & or < would yield an invalid plist.
+        args_xml = "\n".join(f"      <string>{xml_escape(a)}</string>" for a in args)
         plist = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '

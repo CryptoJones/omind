@@ -7,6 +7,353 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.30.0] - 2026-06-12
+
+### Fixed
+
+- **transfer: bundles never carry `.omi.lock` or `.tmp-*` runtime artifacts,
+  and imports skip them in old bundles.** The tar.gz export snapshotted the
+  lock file; importing such a bundle while (correctly, since 2.10.0) holding
+  the destination's lock made Windows raise `PermissionError` mid-import —
+  caught by the Windows CI matrix on the first run of this release train.
+
+## [2.29.0] - 2026-06-12
+
+### Changed
+
+- **store: listings re-parse only changed notes.** `list_notes` (and through
+  it `all_tags` and every post-write index regeneration) read and parsed
+  every `.md` file in the vault on every call — a 2,000-note vault paid
+  2,000 reads per save and per sidebar refresh. A per-store summary cache
+  keyed by `(mtime_ns, size)` makes those calls O(changed files) parses +
+  O(N) stats, self-invalidating, with deleted notes pruned on each listing.
+  Content search still reads file contents (it has to).
+
+## [2.28.0] - 2026-06-12
+
+### Changed
+
+- **mesh: `sync()` regenerates and commits once after all peer merges**
+  instead of re-applying tombstones, re-parsing the whole vault for the
+  index, and running a `git status/add/commit` round per peer (all under the
+  write lock). Pushes now also always carry tombstone-applied state.
+
+## [2.27.0] - 2026-06-12
+
+### Fixed
+
+- **store: every write surface now nudges the mesh daemon's debounced sync.**
+  The write-signal touch lived only in the MCP server's tool wrappers, so
+  edits made through `omind serve`, `omind note`, or `omind import` sat
+  uncommitted and unreplicated for up to the full sync interval (default
+  300s) instead of debounce-syncing in ~10s — invisible until a machine dies
+  holding five minutes of unsynced memories. The touch now happens in
+  `OmiStore`'s write paths (mesh folders only), so new write surfaces get it
+  for free.
+
+## [2.26.0] - 2026-06-12
+
+### Changed
+
+- **cli: the `--vault`/`--folder` pair is defined once** (`_add_vault_args`)
+  and applied to all 14 vault-touching subcommands, instead of being
+  hand-copied onto each — changing the default vault path or help text was a
+  13-place edit where missing one gave a subcommand silently different
+  defaults.
+
+## [2.25.0] - 2026-06-12
+
+### Changed
+
+- **journal: weekly rollups render through `store.render_fields`** instead of
+  a third hand-built copy of the note template — when the template grows a
+  field, rollups now grow it automatically instead of drifting out of the
+  shape `parse_note` and the merge driver expect. (Daily journals keep their
+  bespoke header on purpose: the trailing `## Actions` section is the
+  O_APPEND hot path and deliberately bypasses the store.)
+
+## [2.24.0] - 2026-06-12
+
+### Changed
+
+- **store/merge: one section splitter.** The merge driver's extra-section
+  pass re-implemented `parse_note`'s `## heading` splitter with its own regex
+  and its own top-level-`#` handling; if the two ever disagreed on what
+  counts as a heading, template-owned content would be classified as "extra"
+  and emitted twice in every merged note mesh-wide. Both now use a shared
+  `store.split_sections` — which also stops the merge driver from silently
+  dropping extra-section content that followed a stray top-level `#` line.
+
+## [2.23.0] - 2026-06-12
+
+### Fixed
+
+- **hooks: one `action_bullets()` extractor for both SessionStart priming and
+  rollups — and the two copies had already drifted.** `hooks._journal_tail`
+  never reset at the next `## ` heading, so bullets in any section *after*
+  `## Actions` were wrongly primed into SessionStart context; `journal.py`'s
+  copy reset correctly. The shared helper (owned by hooks, next to the writer
+  that defines the format) uses the correct reset semantics.
+
+## [2.22.0] - 2026-06-12
+
+### Changed
+
+- **paths: the session-journal filename convention is defined once.**
+  `JOURNAL_PREFIX`/`JOURNAL_GLOB` in `paths.py` now feed the writer
+  (`hooks.journal_name`), the rollup/migration globs and regex in
+  `journal.py`, and the index-exclusion regex in `store.py` — previously the
+  pattern was hand-encoded in five places, so renaming it would have left
+  rollups never matching new dailies and journals flooding the index.
+
+## [2.21.0] - 2026-06-12
+
+### Changed
+
+- **store/web/server: single read + single parse on the hot single-note
+  paths.** The web `GET /api/notes/{name}` and MCP `read-note` read the same
+  file twice (`read_note` then `read_fields`); `search()` parsed every
+  matching note twice (filter pass, then `_summarize` re-parse); and
+  `_summarize` hand-rolled the whitespace-collapse + truncation that
+  `_collapse` already implements. One read, one parse, one snippet rule.
+
+## [2.20.0] - 2026-06-12
+
+### Fixed
+
+- **cli: `omind backup verify` uses the shared doctor symbol map** (with its
+  ASCII degrade) instead of a hardcoded `✓/!/✗` dict — on the cp1252 Windows
+  consoles the degrade exists for, `backup verify` crashed with
+  `UnicodeEncodeError` while printing its checklist.
+
+### Changed
+
+- **hooks: `failure_log_path` derives from `paths.state_dir()`** instead of
+  re-implementing the XDG_STATE_HOME resolution — doctor reads this log to
+  surface swallowed hook errors, and a drift between writer and reader would
+  make those failures invisible again.
+
+## [2.19.0] - 2026-06-12
+
+### Changed
+
+- **provision: one shared `_read_mcp_servers()` reader** replaces the
+  copy-pasted read-config/parse-JSON/get-`mcpServers` blocks in
+  `registered_server` and `_legacy_server` — error-handling fixes were bound
+  to land in one copy and not the other, making doctor and the legacy
+  retirement path disagree about what is registered.
+- **provision: removed the dead `run_setup()` wrapper** — nothing referenced
+  it (the CLI goes through `agents.run_setup_for`, which constructs the
+  `Provisioner` itself, including agent dispatch the wrapper bypassed).
+
+## [2.18.0] - 2026-06-12
+
+### Changed
+
+- **mesh: `_commit_locked` no longer takes an unused `node_id` parameter** —
+  it implied the commit identity depended on it (it actually comes from the
+  `user.name` git config set in `mesh_init`) and forced every call site to
+  thread a value that did nothing.
+
+## [2.17.0] - 2026-06-12
+
+### Changed
+
+- **mesh: removed a duplicated `merge.ours.driver` config block in
+  `mesh_init`** — the same git-config line (and its 3-line comment) appeared
+  twice back-to-back; a future edit would likely have touched only one copy.
+
+## [2.16.0] - 2026-06-12
+
+### Changed
+
+- **mesh: `peers()` reads all remotes in one `git config --get-regexp` call**
+  instead of `git remote` plus one `get-url` subprocess per remote — the
+  daemon runs this at the top of every sync tick, so with N peers that was
+  N+1 forked processes per cycle, forever.
+
+## [2.15.0] - 2026-06-12
+
+### Fixed
+
+- **store: the optimistic-concurrency token is now content-based.** It was
+  `mtime_ns + size`, which collides when two same-size writes land within one
+  filesystem timestamp tick (1–2s granularity on FAT/exFAT and some network
+  mounts — places Obsidian vaults actually live), letting a stale save pass
+  the conflict check and destroy the concurrent edit. The token is now
+  `size + BLAKE2 content digest`: two tokens can only match when the bytes
+  are identical, in which case there is nothing to lose.
+
+## [2.14.0] - 2026-06-12
+
+### Fixed
+
+- **store: `backlinks` now matches aliased and heading wikilinks.** The raw
+  `[[...]]` capture was compared whole against the target's title/stem, so
+  `[[Note A|the project]]` and `[[Note A#Details]]` — both backlinks in
+  Obsidian — were silently missed. Only the part before `|` or `#` names the
+  target note, and that's what gets compared now.
+
+## [2.13.0] - 2026-06-12
+
+### Fixed
+
+- **provision/mesh/backup: `--folder` is quoted everywhere a command string is
+  serialized, and launchd plist arguments are XML-escaped.** The hook command
+  in `settings.json`, the systemd `ExecStart` lines (mesh daemon + backup
+  timer), and the printed `schtasks` one-liner all quoted `--vault` but left
+  `--folder` bare — `omind setup --folder "My Memory"` produced hooks and
+  services that word-split into a stray positional and silently never worked.
+  The macOS plist interpolated arguments into XML unescaped, so a vault path
+  containing `&` or `<` yielded an invalid plist.
+
+## [2.12.0] - 2026-06-12
+
+### Fixed
+
+- **bootstrap: check the dependencies omind actually has.** The script
+  hard-required node/npm — which omind doesn't use (its own header says so) —
+  so a machine with `claude` installed via the native installer aborted the
+  documented one-line install for no reason. And it never checked `git`, the
+  one tool `omind setup` and the mesh genuinely require (and that `uv tool
+  install` of a git URL needs). It now checks git + claude, treats npm purely
+  as install guidance for claude, and fails fast with a clear message when
+  git is absent.
+
+## [2.11.0] - 2026-06-12
+
+### Fixed
+
+- **cli: a corrupt `node.json` no longer crashes `omind node` at startup.**
+  `_run_node` called `load_node_config` unguarded, so invalid JSON (partial
+  write, manual edit) made every Claude session's MCP server die with a
+  traceback — all OMI memory tools gone behind an opaque "server failed to
+  start". It now warns on stderr and serves without a mesh identity
+  (unstamped writes), matching how `_run_mesh` already degrades.
+
+## [2.10.0] - 2026-06-12
+
+### Fixed
+
+- **transfer: `omind import` honors the single-writer contract.** The import
+  write phase now runs under the store's `.omi.lock` (so the mesh daemon's
+  `git add -A` can never stage a half-applied import), every file lands via
+  atomic same-dir temp + `os.replace` instead of in-place `write_bytes`, and
+  on a mesh node imported top-level notes get a Lamport rev stamp — an
+  imported note carrying a stale rev would otherwise lose the next merge.
+
+## [2.9.0] - 2026-06-12
+
+### Fixed
+
+- **journal: re-rolling a week no longer destroys the earlier aggregate.**
+  `rollup_journals` recomputed a week's stats only from dailies still in
+  `Journal/`, then overwrote the existing rollup note — so a late daily for an
+  already-archived week (e.g. union-merged in from an offline peer) replaced a
+  five-day aggregate with a one-day one. The recompute now includes that
+  week's dailies in `Journal/Archive/`, so rewriting the rollup is always a
+  superset of what it replaces.
+
+## [2.8.0] - 2026-06-12
+
+### Fixed
+
+- **store: a stale save can no longer resurrect a purged note.** The
+  optimistic-concurrency check was skipped when the target file was missing
+  (`expected_version is not None and path.is_file()`), so a client holding a
+  pre-purge version token silently recreated the note — which then replicated
+  back out across the mesh until each peer's next tombstone pass. A missing
+  file now counts as a token mismatch (`note_version` returns `""`) and
+  raises `NoteConflictError`.
+
+## [2.7.0] - 2026-06-12
+
+### Fixed
+
+- **mesh: `sync()` no longer holds the vault's exclusive write lock across
+  network I/O.** `git fetch`/`git push` (up to 120s each per peer) ran inside
+  the lock, and POSIX flock has no timeout — with unreachable peers, every
+  note writer (MCP `edit-note`, the web UI) blocked for minutes per sync
+  tick. Fetch/push only move refs and objects, so they now run unlocked; the
+  lock covers exactly the working-tree steps (commit, merge, tombstones,
+  index regeneration), re-committing any local write that lands between the
+  locked sections so merges never see a dirty tree.
+
+## [2.6.0] - 2026-06-12
+
+### Fixed
+
+- **store: the write paths now reject reserved filenames.** Only
+  `disable_note`/`purge_note` guarded against them, so a note titled `index`
+  (via `omind note`, the MCP `create-note`/`edit-note` tools, or the web UI)
+  mapped to `index.md`, overwrote the vault index, and the next index
+  regeneration adopted the rendered note body as the hand-written intro —
+  permanently. `write_note`/`create_note`/`update_note` raise `NoteError`
+  for `index.md` and `Memory Template.md` instead.
+
+## [2.5.0] - 2026-06-12
+
+### Fixed
+
+- **mesh: `.omi-tombstones` and `node.json` are written atomically** (same-dir
+  temp file + `os.replace`, the store's own `_atomic_write`) instead of
+  in-place `write_text`. A crash mid-write previously truncated the tombstone
+  list — and the truncation merged out to every peer as clean line deletions,
+  resurrecting previously hard-purged notes mesh-wide. A torn `node.json`
+  either broke every subsequent mesh command or silently minted a fresh
+  `node_id`, breaking the never-regenerated Lamport identity invariant.
+
+## [2.4.0] - 2026-06-12
+
+### Fixed
+
+- **store: `disable_note`, `restore_note`, and `update_note` are now atomic
+  read-modify-writes.** They previously read the note *before* `write_note`
+  took the inter-process lock and wrote the transformed snapshot back with no
+  version check — any edit landing in that window (another Claude session, the
+  web UI) was silently reverted. The whole cycle now runs under one
+  `write_lock()` via a shared `_mutate_note` helper (the flock is not
+  reentrant, so nesting through `write_note` was never an option).
+
+## [2.3.0] - 2026-06-12
+
+### Fixed
+
+- **store/notes: updating a note no longer resets its `Created:` date or wipes
+  fields the caller didn't pass.** `update_note` back-fills an empty `created`
+  from the existing note (an empty value was silently rewritten to today by the
+  renderer), and `upsert_note` — the path behind `omind note`, Hermes, and the
+  backup failure note — now keeps the existing summary/details/tags/
+  connections/action-items/references when the incoming fields leave them
+  empty, instead of erasing whatever the CLI flags couldn't express.
+
+## [2.2.0] - 2026-06-12
+
+### Fixed
+
+- **store: Lamport rev-stamping no longer depends on each caller passing
+  `node_id`.** `OmiStore` now derives the node identity from the mesh node
+  config on first use when the caller doesn't supply one. Previously only the
+  MCP server (`omind node`) passed it, so on a mesh node, edits made through
+  the web UI (`omind serve`), `omind note`, or `omind import` were written
+  unstamped — and the field-level merge driver's last-writer-wins rule handed
+  those fields to an *older* stamped peer edit on the next sync, silently
+  discarding the newer local change. A corrupt node config degrades to
+  unstamped writes instead of breaking note CRUD.
+
+## [2.1.0] - 2026-06-12
+
+### Fixed
+
+- **mesh: a timed-out `git merge` is now aborted** instead of leaving
+  `MERGE_HEAD` and a half-merged tree behind. Previously `_merge_ref` only ran
+  `git merge --abort` on a non-zero exit; a merge that hit the 120s git
+  timeout raised before that check, and the next sync's `git add -A && git
+  commit` completed the abandoned merge — conflict markers included — and
+  pushed it to every peer. `_commit_locked` now also aborts any leftover
+  in-progress merge before staging, so no crashed sync can ever be committed
+  as a merge commit.
+
 ## [2.0.1] - 2026-06-11
 
 ### Added

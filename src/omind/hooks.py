@@ -38,7 +38,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, TextIO
 
-from omind import filelock
+from omind import filelock, paths
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
@@ -55,7 +55,7 @@ _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood 
 # are injected after the static files, under a whole-payload budget. Static
 # files always win the budget; dynamic sections truncate (or drop) first.
 _SESSION_STATE_GLOB = "Session State *.md"
-_JOURNAL_GLOB = "Session Journal *.md"
+_JOURNAL_GLOB = paths.JOURNAL_GLOB
 _JOURNAL_TAIL_BULLETS = 20
 _TOTAL_CONTEXT_CHAR_CAP = 48_000
 _TRUNCATION_MARKER = "\n…[truncated]"
@@ -69,10 +69,10 @@ _FAILURE_LOG_CAP_BYTES = 262_144
 def failure_log_path() -> Path:
     """Where swallowed hook errors leave a trace, outside the (possibly broken)
     vault: ``$XDG_STATE_HOME/omind/hook-failures.log`` (default
-    ``~/.local/state/omind/hook-failures.log``)."""
-    env = os.environ.get("XDG_STATE_HOME")
-    base = Path(env).expanduser() if env else Path.home() / ".local" / "state"
-    return base / "omind" / "hook-failures.log"
+    ``~/.local/state/omind/hook-failures.log``). Derived from
+    :func:`omind.paths.state_dir` — doctor reads this log; the writer and the
+    reader must never resolve the directory differently."""
+    return paths.state_dir() / "hook-failures.log"
 
 
 def _record_failure(context: str, exc: BaseException) -> None:
@@ -107,7 +107,7 @@ def _date_str(now: datetime | None = None) -> str:
 
 def journal_name(now: datetime | None = None) -> str:
     """Deterministic per-day journal filename: ``Session Journal YYYY-MM-DD.md``."""
-    return f"Session Journal {_date_str(now)}.md"
+    return f"{paths.JOURNAL_PREFIX} {_date_str(now)}.md"
 
 
 def journal_dir(omi_dir: Path | str) -> Path:
@@ -288,24 +288,31 @@ def _latest_by_name(directory: Path, pattern: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
-    """Last ``limit`` action bullets of a journal note, or ``None``. Never raises.
+def action_bullets(text: str) -> list[str]:
+    """The ``- `` bullets under a journal's ``## Actions`` heading.
 
-    Only bullets under ``## Actions`` count — the ``## Metadata`` list lines are
-    not actions and are skipped.
+    Only that section counts: ``## Metadata`` list lines are not actions, and
+    the scan resets at the next heading. Owned here, next to the writer that
+    defines the journal format; :mod:`omind.journal` reuses it.
     """
+    bullets: list[str] = []
+    in_actions = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_actions = line.strip() == "## Actions"
+            continue
+        if in_actions and line.startswith("- "):
+            bullets.append(line)
+    return bullets
+
+
+def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
+    """Last ``limit`` action bullets of a journal note, or ``None``. Never raises."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    in_actions = False
-    bullets: list[str] = []
-    for line in text.splitlines():
-        if line.strip() == "## Actions":
-            in_actions = True
-            continue
-        if in_actions and line.startswith("- "):
-            bullets.append(line)
+    bullets = action_bullets(text)
     if not bullets:
         return None
     return "\n".join(bullets[-limit:])
