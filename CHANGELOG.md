@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.7.0] - 2026-06-12
+
+### Fixed
+
+- **mesh: `sync()` no longer holds the vault's exclusive write lock across
+  network I/O.** `git fetch`/`git push` (up to 120s each per peer) ran inside
+  the lock, and POSIX flock has no timeout — with unreachable peers, every
+  note writer (MCP `edit-note`, the web UI) blocked for minutes per sync
+  tick. Fetch/push only move refs and objects, so they now run unlocked; the
+  lock covers exactly the working-tree steps (commit, merge, tombstones,
+  index regeneration), re-committing any local write that lands between the
+  locked sections so merges never see a dirty tree.
+
 ## [2.6.0] - 2026-06-12
 
 ### Fixed

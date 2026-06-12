@@ -587,6 +587,12 @@ def sync(
     an exception. Pushes go to ``refs/omind/<node_id>`` — never to the peer's
     checked-out branch (pushing into a non-bare repo's current branch is
     refused by git); the peer merges its inbox on its own next cycle.
+
+    The write lock covers only the steps that touch the working tree
+    (commit, merge, tombstones, index). ``git fetch``/``git push`` only move
+    refs and objects and run unlocked — holding the lock across network calls
+    blocked every note writer for up to GIT_TIMEOUT per unreachable peer
+    (POSIX flock has no timeout).
     """
     omi_dir = Path(omi_dir).expanduser()
     store = OmiStore(omi_dir)
@@ -600,19 +606,23 @@ def sync(
             if error:
                 log(f"inbox {ref}: {error}")
 
-        for name in sorted(peers(omi_dir)):
-            if only is not None and name not in only:
-                continue
-            ps = PeerSync(name=name)
-            report.peers.append(ps)
-            try:
-                git(omi_dir, "fetch", name)
-                ps.fetched = True
-            except MeshError as exc:
-                ps.error = _first_line(str(exc)) or "unreachable"
-                log(f"peer {name}: unreachable, skipped")
-                continue
-            ref = f"refs/remotes/{name}/main"
+    for name in sorted(peers(omi_dir)):
+        if only is not None and name not in only:
+            continue
+        ps = PeerSync(name=name)
+        report.peers.append(ps)
+        try:
+            git(omi_dir, "fetch", name)
+            ps.fetched = True
+        except MeshError as exc:
+            ps.error = _first_line(str(exc)) or "unreachable"
+            log(f"peer {name}: unreachable, skipped")
+            continue
+        ref = f"refs/remotes/{name}/main"
+        with store.write_lock():
+            # A writer may have saved between locks; commit so the merge
+            # never sees (or clobbers) uncommitted local changes.
+            _commit_locked(omi_dir, node_id, f"omind: local changes on {node_id}")
             if git(omi_dir, "rev-parse", "--verify", ref, check=False).returncode == 0:
                 error = _merge_ref(omi_dir, ref)
                 if error:
@@ -625,12 +635,13 @@ def sync(
             _apply_tombstones(omi_dir, store)
             store.update_index_locked()
             _commit_locked(omi_dir, node_id, f"omind: post-merge regeneration on {node_id}")
-            push = git(omi_dir, "push", name, f"HEAD:refs/omind/{node_id}", check=False)
-            ps.pushed = push.returncode == 0
-            if not ps.pushed:
-                ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
-                log(f"peer {name}: {ps.error}")
+        push = git(omi_dir, "push", name, f"HEAD:refs/omind/{node_id}", check=False)
+        ps.pushed = push.returncode == 0
+        if not ps.pushed:
+            ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
+            log(f"peer {name}: {ps.error}")
 
+    with store.write_lock():
         # Even with no peers reachable, leave generated files consistent.
         _apply_tombstones(omi_dir, store)
         store.update_index_locked()
