@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.2.0] - 2026-06-12
+
+### Fixed
+
+- **store: Lamport rev-stamping no longer depends on each caller passing
+  `node_id`.** `OmiStore` now derives the node identity from the mesh node
+  config on first use when the caller doesn't supply one. Previously only the
+  MCP server (`omind node`) passed it, so on a mesh node, edits made through
+  the web UI (`omind serve`), `omind note`, or `omind import` were written
+  unstamped — and the field-level merge driver's last-writer-wins rule handed
+  those fields to an *older* stamped peer edit on the next sync, silently
+  discarding the newer local change. A corrupt node config degrades to
+  unstamped writes instead of breaking note CRUD.
+
 ## [2.1.0] - 2026-06-12
 
 ### Fixed

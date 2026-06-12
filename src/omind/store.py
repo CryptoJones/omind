@@ -349,17 +349,42 @@ def _with_disabled(md: str, disabled: bool) -> str:
     return _metadata_line_edit(md, _DISABLED_LINE_RE, "- Disabled: true" if disabled else None)
 
 
+def _configured_node_id(omi_dir: Path) -> str | None:
+    """The node_id registered for this folder, or None. Never raises — a
+    corrupt node config must not take down plain note CRUD."""
+    from omind import mesh  # local import: mesh imports this module
+
+    try:
+        cfg = mesh.load_node_config(omi_dir)
+    except Exception:
+        return None
+    return cfg.node_id if cfg else None
+
+
 class OmiStore:
     """CRUD over `*.md` notes in a single OMI folder.
 
     ``node_id`` enables mesh mode (docs/mesh.md): every write stamps the next
     per-note Lamport revision into ``## Metadata``, and ``delete_note``
     soft-deletes (sets ``Disabled: true``) instead of unlinking.
+
+    When ``node_id`` is not passed it is derived from the mesh node config the
+    first time it's needed, so every write surface (web UI, ``omind note``,
+    import, …) stamps revisions on a mesh node — not just callers that
+    remembered to plumb it through.
     """
 
     def __init__(self, omi_dir: Path | str, node_id: str | None = None) -> None:
         self.omi_dir = Path(omi_dir).expanduser()
-        self.node_id = node_id
+        self._node_id = node_id
+        self._node_id_resolved = node_id is not None
+
+    @property
+    def node_id(self) -> str | None:
+        if not self._node_id_resolved:
+            self._node_id_resolved = True
+            self._node_id = _configured_node_id(self.omi_dir)
+        return self._node_id
 
     def mesh_mode(self) -> bool:
         """True when this folder replicates: deletes must be merge-safe."""
