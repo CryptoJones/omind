@@ -416,6 +416,13 @@ class OmiStore:
 
     # -- naming / safety ----------------------------------------------------
 
+    def _reject_reserved(self, path: Path) -> None:
+        """Generated files are not notes: a note titled 'index' would overwrite
+        index.md, and the next regeneration would adopt the note body as the
+        hand-written index intro — permanently."""
+        if path.name in RESERVED_FILENAMES:
+            raise NoteError(f"{path.name!r} is a reserved file, not a note; pick another title")
+
     def safe_name(self, name: str) -> Path:
         """Resolve a user-supplied note name to a path inside the OMI dir.
 
@@ -563,6 +570,7 @@ class OmiStore:
 
     def write_note(self, name: str, content: str, expected_version: str | None = None) -> str:
         path = self.safe_name(name)
+        self._reject_reserved(path)
         with self.write_lock():
             # Re-check the optimistic-concurrency token *inside* the lock so the
             # check-then-write is atomic against another process's save.
@@ -594,6 +602,7 @@ class OmiStore:
         runs here instead of nesting through :meth:`write_note`.
         """
         path = self.safe_name(name)
+        self._reject_reserved(path)
         with self.write_lock():
             if not path.is_file():
                 raise NoteNotFoundError(f"note not found: {name!r}")

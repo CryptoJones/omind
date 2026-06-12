@@ -597,3 +597,14 @@ def test_upsert_keeps_fields_the_caller_left_unset(store: OmiStore) -> None:
     assert after.tags == ["keep"]
     assert after.action_items == [ActionItem("still todo")]
     assert after.references == ["Source: somewhere"]
+
+
+@pytest.mark.parametrize("title", ["index", "Memory Template"])
+def test_writes_refuse_reserved_filenames(store: OmiStore, title: str) -> None:
+    """A note titled 'index' must not clobber the generated index.md."""
+    with pytest.raises(NoteError):
+        store.create_note(NoteFields(title=title))
+    with pytest.raises(NoteError):
+        store.write_note(f"{title}.md", "# pwned\n")
+    with pytest.raises(NoteError):
+        store.update_note(f"{title}.md", NoteFields(title=title))

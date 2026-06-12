@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.6.0] - 2026-06-12
+
+### Fixed
+
+- **store: the write paths now reject reserved filenames.** Only
+  `disable_note`/`purge_note` guarded against them, so a note titled `index`
+  (via `omind note`, the MCP `create-note`/`edit-note` tools, or the web UI)
+  mapped to `index.md`, overwrote the vault index, and the next index
+  regeneration adopted the rendered note body as the hand-written intro —
+  permanently. `write_note`/`create_note`/`update_note` raise `NoteError`
+  for `index.md` and `Memory Template.md` instead.
+
 ## [2.5.0] - 2026-06-12
 
 ### Fixed
