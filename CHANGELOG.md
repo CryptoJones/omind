@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.23.0] - 2026-06-12
+
+### Fixed
+
+- **hooks: one `action_bullets()` extractor for both SessionStart priming and
+  rollups — and the two copies had already drifted.** `hooks._journal_tail`
+  never reset at the next `## ` heading, so bullets in any section *after*
+  `## Actions` were wrongly primed into SessionStart context; `journal.py`'s
+  copy reset correctly. The shared helper (owned by hooks, next to the writer
+  that defines the format) uses the correct reset semantics.
+
 ## [2.22.0] - 2026-06-12
 
 ### Changed

@@ -288,24 +288,31 @@ def _latest_by_name(directory: Path, pattern: str) -> Path | None:
     return matches[0] if matches else None
 
 
-def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
-    """Last ``limit`` action bullets of a journal note, or ``None``. Never raises.
+def action_bullets(text: str) -> list[str]:
+    """The ``- `` bullets under a journal's ``## Actions`` heading.
 
-    Only bullets under ``## Actions`` count — the ``## Metadata`` list lines are
-    not actions and are skipped.
+    Only that section counts: ``## Metadata`` list lines are not actions, and
+    the scan resets at the next heading. Owned here, next to the writer that
+    defines the journal format; :mod:`omind.journal` reuses it.
     """
+    bullets: list[str] = []
+    in_actions = False
+    for line in text.splitlines():
+        if line.startswith("## "):
+            in_actions = line.strip() == "## Actions"
+            continue
+        if in_actions and line.startswith("- "):
+            bullets.append(line)
+    return bullets
+
+
+def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
+    """Last ``limit`` action bullets of a journal note, or ``None``. Never raises."""
     try:
         text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return None
-    in_actions = False
-    bullets: list[str] = []
-    for line in text.splitlines():
-        if line.strip() == "## Actions":
-            in_actions = True
-            continue
-        if in_actions and line.startswith("- "):
-            bullets.append(line)
+    bullets = action_bullets(text)
     if not bullets:
         return None
     return "\n".join(bullets[-limit:])

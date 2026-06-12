@@ -27,7 +27,7 @@ from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from omind import paths
-from omind.hooks import JOURNAL_TAGS, journal_dir
+from omind.hooks import JOURNAL_TAGS, action_bullets, journal_dir
 from omind.store import OmiStore, _atomic_write, today
 
 # Places older layouts left daily journals: the vault-folder root, plus the
@@ -67,19 +67,6 @@ def iso_week(day: date) -> str:
 def rollup_name(week: str) -> str:
     """Deterministic per-week rollup filename: ``Session Journal Rollup YYYY-Www.md``."""
     return f"{paths.JOURNAL_PREFIX} Rollup {week}.md"
-
-
-def _action_bullets(text: str) -> list[str]:
-    """The ``- `` bullets under a journal's ``## Actions`` heading."""
-    bullets: list[str] = []
-    in_actions = False
-    for line in text.splitlines():
-        if line.startswith("## "):
-            in_actions = line.strip() == "## Actions"
-            continue
-        if in_actions and line.startswith("- "):
-            bullets.append(line)
-    return bullets
 
 
 # -- migration ----------------------------------------------------------------
@@ -122,7 +109,7 @@ def migrate_journals(omi_dir: Path | str) -> list[str]:
         for stray in find_stray_journals(store.omi_dir):
             target = target_dir / stray.name
             if target.is_file():
-                bullets = _action_bullets(stray.read_text(encoding="utf-8"))
+                bullets = action_bullets(stray.read_text(encoding="utf-8"))
                 if bullets:
                     with target.open("a", encoding="utf-8") as fh:
                         fh.write("\n".join(bullets) + "\n")
