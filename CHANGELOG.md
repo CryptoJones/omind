@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.22.0] - 2026-06-12
+
+### Changed
+
+- **paths: the session-journal filename convention is defined once.**
+  `JOURNAL_PREFIX`/`JOURNAL_GLOB` in `paths.py` now feed the writer
+  (`hooks.journal_name`), the rollup/migration globs and regex in
+  `journal.py`, and the index-exclusion regex in `store.py` — previously the
+  pattern was hand-encoded in five places, so renaming it would have left
+  rollups never matching new dailies and journals flooding the index.
+
 ## [2.21.0] - 2026-06-12
 
 ### Changed

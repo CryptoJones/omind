@@ -25,7 +25,7 @@ from typing import Any
 
 from omind import filelock
 from omind.clock import Rev, next_rev
-from omind.paths import INDEX_FILENAME, RESERVED_FILENAMES
+from omind.paths import INDEX_FILENAME, JOURNAL_PREFIX, RESERVED_FILENAMES
 from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 
 # Inter-process write lock for an OMI folder. Concurrent Claude Code sessions
@@ -81,7 +81,7 @@ _REV_LINE_RE = re.compile(r"^\s*-\s*Rev:\s*(\S+)\s*$")
 _DISABLED_LINE_RE = re.compile(r"^\s*-\s*Disabled:\s*true\s*$", re.IGNORECASE)
 # Per-day journal notes written by omind.hooks; auto-recorded noise that would
 # otherwise crowd hand-curated memories out of the capped index list.
-_JOURNAL_NOTE_RE = re.compile(r"^Session Journal .*\.md$")
+_JOURNAL_NOTE_RE = re.compile(rf"^{re.escape(JOURNAL_PREFIX)} .*\.md$")
 
 
 class NoteError(Exception):

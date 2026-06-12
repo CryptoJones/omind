@@ -26,6 +26,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+from omind import paths
 from omind.hooks import JOURNAL_TAGS, journal_dir
 from omind.store import OmiStore, _atomic_write, today
 
@@ -36,7 +37,9 @@ ARCHIVE_DIRNAME = "Archive"
 DEFAULT_RETAIN_DAYS = 30
 _NOTABLE_TARGET_LIMIT = 10
 
-_JOURNAL_FILE_RE = re.compile(r"^Session Journal (\d{4}-\d{2}-\d{2})\.md$")
+_JOURNAL_FILE_RE = re.compile(
+    rf"^{re.escape(paths.JOURNAL_PREFIX)} (\d{{4}}-\d{{2}}-\d{{2}})\.md$"
+)
 _ACTION_LINE_RE = re.compile(r"^- \d\d:\d\d \[session (?P<session>\w+)\] (?P<rest>.+)$")
 _TOOL_RE = re.compile(
     r"^PostToolUse (?P<tool>\S+)(?: -> (?P<target>.*?))? \((?P<outcome>ok|error)\)$"
@@ -63,7 +66,7 @@ def iso_week(day: date) -> str:
 
 def rollup_name(week: str) -> str:
     """Deterministic per-week rollup filename: ``Session Journal Rollup YYYY-Www.md``."""
-    return f"Session Journal Rollup {week}.md"
+    return f"{paths.JOURNAL_PREFIX} Rollup {week}.md"
 
 
 def _action_bullets(text: str) -> list[str]:
@@ -95,7 +98,7 @@ def find_stray_journals(omi_dir: Path | str) -> list[Path]:
             continue
         strays.extend(
             path
-            for path in sorted(directory.glob("Session Journal *.md"))
+            for path in sorted(directory.glob(paths.JOURNAL_GLOB))
             if journal_date(path.name) is not None
         )
     return strays
@@ -243,7 +246,7 @@ def rollup_journals(
     with store._write_lock():
         groups: dict[str, list[tuple[date, Path]]] = {}
         if directory.is_dir():
-            for path in sorted(directory.glob("Session Journal *.md")):
+            for path in sorted(directory.glob(paths.JOURNAL_GLOB)):
                 day = journal_date(path.name)
                 if day is not None:
                     groups.setdefault(iso_week(day), []).append((day, path))
@@ -261,7 +264,7 @@ def rollup_journals(
             archive_dir = directory / ARCHIVE_DIRNAME
             archived_dated: list[tuple[date, Path]] = []
             if archive_dir.is_dir():
-                for path in sorted(archive_dir.glob("Session Journal *.md")):
+                for path in sorted(archive_dir.glob(paths.JOURNAL_GLOB)):
                     day = journal_date(path.name)
                     if day is not None and iso_week(day) == wk:
                         archived_dated.append((day, path))

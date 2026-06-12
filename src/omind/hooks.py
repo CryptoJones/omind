@@ -55,7 +55,7 @@ _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood 
 # are injected after the static files, under a whole-payload budget. Static
 # files always win the budget; dynamic sections truncate (or drop) first.
 _SESSION_STATE_GLOB = "Session State *.md"
-_JOURNAL_GLOB = "Session Journal *.md"
+_JOURNAL_GLOB = paths.JOURNAL_GLOB
 _JOURNAL_TAIL_BULLETS = 20
 _TOTAL_CONTEXT_CHAR_CAP = 48_000
 _TRUNCATION_MARKER = "\n…[truncated]"
@@ -107,7 +107,7 @@ def _date_str(now: datetime | None = None) -> str:
 
 def journal_name(now: datetime | None = None) -> str:
     """Deterministic per-day journal filename: ``Session Journal YYYY-MM-DD.md``."""
-    return f"Session Journal {_date_str(now)}.md"
+    return f"{paths.JOURNAL_PREFIX} {_date_str(now)}.md"
 
 
 def journal_dir(omi_dir: Path | str) -> Path:

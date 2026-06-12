@@ -22,6 +22,12 @@ RESERVED_FILENAMES = frozenset({MEMORY_TEMPLATE_FILENAME, INDEX_FILENAME})
 #: Skill manifest name both Hermes and OpenClaw discover in a skill folder.
 AGENT_SKILL_FILENAME = "SKILL.md"
 
+#: The session-journal filename convention. Single source of truth: hooks
+#: (the writer), journal (rollup/migration globs), and store (index
+#: exclusion) all derive their names, globs, and regexes from this prefix.
+JOURNAL_PREFIX = "Session Journal"
+JOURNAL_GLOB = f"{JOURNAL_PREFIX} *.md"
+
 
 def state_dir() -> Path:
     """omind's state directory: ``$XDG_STATE_HOME/omind`` or ``~/.local/state/omind``."""
