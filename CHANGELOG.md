@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.11.0] - 2026-06-12
+
+### Fixed
+
+- **cli: a corrupt `node.json` no longer crashes `omind node` at startup.**
+  `_run_node` called `load_node_config` unguarded, so invalid JSON (partial
+  write, manual edit) made every Claude session's MCP server die with a
+  traceback — all OMI memory tools gone behind an opaque "server failed to
+  start". It now warns on stderr and serves without a mesh identity
+  (unstamped writes), matching how `_run_mesh` already degrades.
+
 ## [2.10.0] - 2026-06-12
 
 ### Fixed

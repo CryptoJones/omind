@@ -489,12 +489,18 @@ def _run_backup(args: argparse.Namespace) -> int:
 
 def _run_node(args: argparse.Namespace) -> int:
     # Imported lazily: the mcp SDK is only needed when actually serving.
-    from omind.mesh import load_node_config
+    from omind.mesh import MeshError, load_node_config
     from omind.server import run_node
 
     omi_dir = (args.vault / args.folder).expanduser()
     # With a mesh identity, every MCP write stamps the next Lamport rev.
-    cfg = load_node_config(omi_dir)
+    # A corrupt node.json must not take the memory tools away from every
+    # Claude session — degrade to unstamped writes and say so on stderr.
+    try:
+        cfg = load_node_config(omi_dir)
+    except MeshError as exc:
+        print(f"warning: {exc}; serving without a mesh identity", file=sys.stderr)
+        cfg = None
     return run_node(omi_dir, node_id=cfg.node_id if cfg else None)
 
 
