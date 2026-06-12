@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.3.0] - 2026-06-12
+
+### Fixed
+
+- **store/notes: updating a note no longer resets its `Created:` date or wipes
+  fields the caller didn't pass.** `update_note` back-fills an empty `created`
+  from the existing note (an empty value was silently rewritten to today by the
+  renderer), and `upsert_note` — the path behind `omind note`, Hermes, and the
+  backup failure note — now keeps the existing summary/details/tags/
+  connections/action-items/references when the incoming fields leave them
+  empty, instead of erasing whatever the CLI flags couldn't express.
+
 ## [2.2.0] - 2026-06-12
 
 ### Fixed

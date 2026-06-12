@@ -619,6 +619,10 @@ class OmiStore:
             fields.rev = current.rev
             if not fields.disabled:
                 fields.disabled = current.disabled
+        # An empty created is never intentional — render_fields would silently
+        # substitute today(), rewriting the note's creation date on every update.
+        if not fields.created:
+            fields.created = current.created
         return self.write_note(name, render_fields(fields), expected_version=expected_version)
 
     def delete_note(self, name: str) -> None:

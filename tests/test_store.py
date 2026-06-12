@@ -565,3 +565,35 @@ def test_mesh_aware_update_controls_disabled(mesh_store: OmiStore) -> None:
     fields.disabled = False
     mesh_store.update_note(name, fields)
     assert mesh_store.read_fields(name).disabled is False
+
+
+def test_update_note_preserves_created_date(store: OmiStore) -> None:
+    """A fresh-NoteFields update must not reset Created: to today."""
+    name = store.create_note(NoteFields(title="Old Note", created="2026-01-10"))
+    store.update_note(name, NoteFields(title="Old Note", summary="edited"))
+    assert store.read_fields(name).created == "2026-01-10"
+
+
+def test_upsert_keeps_fields_the_caller_left_unset(store: OmiStore) -> None:
+    """`omind note` can't express Action Items etc.; empty means keep, not clear."""
+    from omind.notes import upsert_note
+
+    store.create_note(
+        NoteFields(
+            title="Sticky Upsert",
+            summary="original summary",
+            created="2026-01-10",
+            tags=["keep"],
+            action_items=[ActionItem("still todo")],
+            references=["Source: somewhere"],
+        )
+    )
+    action, filename = upsert_note(store.omi_dir, NoteFields(title="Sticky Upsert", details="new"))
+    assert action == "updated"
+    after = store.read_fields(filename)
+    assert after.details == "new"
+    assert after.summary == "original summary"
+    assert after.created == "2026-01-10"
+    assert after.tags == ["keep"]
+    assert after.action_items == [ActionItem("still todo")]
+    assert after.references == ["Source: somewhere"]
