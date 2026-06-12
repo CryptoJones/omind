@@ -278,17 +278,7 @@ class Provisioner:
             mesh_init(self.config.omi_dir, log=lambda m: self.log(f"  {m}"))
 
     def registered_server(self) -> dict[str, object] | None:
-        path = claude_config_path()
-        if not path.is_file():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return None
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            return None
-        server = servers.get(self.config.server_name)
+        server = _read_mcp_servers().get(self.config.server_name)
         return server if isinstance(server, dict) else None
 
     def _server_command(self) -> list[str]:
@@ -320,17 +310,7 @@ class Provisioner:
         """The retired obsidian-mcp registration, when still present."""
         if self.config.server_name == LEGACY_SERVER_NAME:
             return None
-        path = claude_config_path()
-        if not path.is_file():
-            return None
-        try:
-            data = json.loads(path.read_text(encoding="utf-8"))
-        except json.JSONDecodeError:
-            return None
-        servers = data.get("mcpServers")
-        if not isinstance(servers, dict):
-            return None
-        entry = servers.get(LEGACY_SERVER_NAME)
+        entry = _read_mcp_servers().get(LEGACY_SERVER_NAME)
         if isinstance(entry, dict) and "obsidian-mcp" in json.dumps(entry):
             return entry
         return None
@@ -502,9 +482,21 @@ class Provisioner:
         return self.actions
 
 
-def run_setup(config: SetupConfig, log: Logger = print) -> list[str]:
-    """Convenience wrapper: build a :class:`Provisioner` and run it."""
-    return Provisioner(config=config, log=log).run()
+def _read_mcp_servers() -> dict[str, Any]:
+    """The `mcpServers` mapping from ~/.claude.json, or {} on any miss.
+
+    The one shared reader: doctor (via registered_server) and the legacy
+    retirement path must always agree on what is registered.
+    """
+    path = claude_config_path()
+    if not path.is_file():
+        return {}
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return {}
+    servers = data.get("mcpServers")
+    return servers if isinstance(servers, dict) else {}
 
 
 @dataclass

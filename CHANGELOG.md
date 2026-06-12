@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.19.0] - 2026-06-12
+
+### Changed
+
+- **provision: one shared `_read_mcp_servers()` reader** replaces the
+  copy-pasted read-config/parse-JSON/get-`mcpServers` blocks in
+  `registered_server` and `_legacy_server` — error-handling fixes were bound
+  to land in one copy and not the other, making doctor and the legacy
+  retirement path disagree about what is registered.
+- **provision: removed the dead `run_setup()` wrapper** — nothing referenced
+  it (the CLI goes through `agents.run_setup_for`, which constructs the
+  `Provisioner` itself, including agent dispatch the wrapper bypassed).
+
 ## [2.18.0] - 2026-06-12
 
 ### Changed
