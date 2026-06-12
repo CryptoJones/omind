@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.13.0] - 2026-06-12
+
+### Fixed
+
+- **provision/mesh/backup: `--folder` is quoted everywhere a command string is
+  serialized, and launchd plist arguments are XML-escaped.** The hook command
+  in `settings.json`, the systemd `ExecStart` lines (mesh daemon + backup
+  timer), and the printed `schtasks` one-liner all quoted `--vault` but left
+  `--folder` bare — `omind setup --folder "My Memory"` produced hooks and
+  services that word-split into a stray positional and silently never worked.
+  The macOS plist interpolated arguments into XML unescaped, so a vault path
+  containing `&` or `<` yielded an invalid plist.
+
 ## [2.12.0] - 2026-06-12
 
 ### Fixed

@@ -378,9 +378,11 @@ class Provisioner:
         omind_exe = shutil.which("omind") or "omind"
         # The "<exe> hook" prefix always contains HOOK_MARKER ("omind hook"),
         # which provision uses to find/replace omind's own entries.
+        # Both values are quoted: the hook string goes through a shell, and an
+        # unquoted folder like "My Memory" word-splits into a stray positional.
         return (
             f'{omind_exe} hook {event} --vault "{self.config.vault}" '
-            f"--folder {self.config.folder}"
+            f'--folder "{self.config.folder}"'
         )
 
     def _omind_hook_entries(self) -> dict[str, list[dict[str, Any]]]:

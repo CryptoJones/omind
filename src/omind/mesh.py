@@ -30,6 +30,7 @@ from dataclasses import asdict, dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+from xml.sax.saxutils import escape as xml_escape
 
 from omind.backup import config_dir
 from omind.paths import sync_state_path
@@ -791,7 +792,9 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
     if load_node_config(omi_dir) is None:
         raise MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
     omind_exe = shutil.which("omind") or "omind"
-    daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder {folder}'
+    # Quoted like the hook command: systemd ExecStart and schtasks both
+    # word-split an unquoted folder name containing a space.
+    daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder "{folder}"'
 
     if sys.platform == "linux":
         from omind.backup import systemd_user_dir
@@ -823,7 +826,8 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
         agents.mkdir(parents=True, exist_ok=True)
         plist_path = agents / f"{MESH_LAUNCHD_LABEL}.plist"
         args = [omind_exe, "mesh", "daemon", "--vault", str(vault), "--folder", folder]
-        args_xml = "\n".join(f"      <string>{a}</string>" for a in args)
+        # XML-escape: a vault path containing & or < would yield an invalid plist.
+        args_xml = "\n".join(f"      <string>{xml_escape(a)}</string>" for a in args)
         plist = (
             '<?xml version="1.0" encoding="UTF-8"?>\n'
             '<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" '

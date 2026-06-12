@@ -409,7 +409,7 @@ def install_timer(config: SetupConfig, log: Logger = print) -> None:
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f'ExecStart={omind_exe} backup run --vault "{config.vault}" --folder {config.folder}\n'
+        f'ExecStart={omind_exe} backup run --vault "{config.vault}" --folder "{config.folder}"\n'
     )
     timer = (
         "[Unit]\n"
