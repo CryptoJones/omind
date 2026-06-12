@@ -200,3 +200,16 @@ def test_rollup_note_stays_out_of_listings(tmp_path: Path) -> None:
     journal.rollup_journals(tmp_path, week="2026-W24", now=_NOW)
     store = OmiStore(tmp_path)
     assert store.list_notes() == []  # rollup lives in Journal/, never indexed
+
+
+def test_rollup_late_daily_keeps_archived_days(tmp_path: Path) -> None:
+    """Re-rolling a week after its dailies were archived must not shrink the aggregate."""
+    journal_dir = tmp_path / "Journal"
+    _write_daily(journal_dir, "2026-06-01", _BULLETS)
+    _write_daily(journal_dir, "2026-06-02", _BULLETS)
+    journal.rollup_journals(tmp_path, week="2026-W23")
+    # A late daily for the already-rolled-up week arrives (e.g. from a peer).
+    _write_daily(journal_dir, "2026-06-03", _BULLETS)
+    journal.rollup_journals(tmp_path, week="2026-W23")
+    text = (journal_dir / journal.rollup_name("2026-W23")).read_text(encoding="utf-8")
+    assert "2026-06-01" in text and "2026-06-02" in text and "2026-06-03" in text

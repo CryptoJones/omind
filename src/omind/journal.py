@@ -254,10 +254,21 @@ def rollup_journals(
                     continue
             elif max(day for day, _ in dated_paths) >= cutoff:
                 continue  # retention: keep raw dailies for retain_days
+            # A week may have rolled up before (its dailies now live in
+            # Archive/) and then receive a late daily — e.g. one synced from
+            # an offline peer. Recompute over the archived dailies too, so
+            # rewriting the rollup never shrinks the earlier aggregate.
+            archive_dir = directory / ARCHIVE_DIRNAME
+            archived_dated: list[tuple[date, Path]] = []
+            if archive_dir.is_dir():
+                for path in sorted(archive_dir.glob("Session Journal *.md")):
+                    day = journal_date(path.name)
+                    if day is not None and iso_week(day) == wk:
+                        archived_dated.append((day, path))
             stats = JournalStats()
-            for _, path in dated_paths:
+            for _, path in [*archived_dated, *dated_paths]:
                 _tally(path.read_text(encoding="utf-8"), stats)
-            days = [day.isoformat() for day, _ in dated_paths]
+            days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
             filename = rollup_name(wk)
             _atomic_write(directory / filename, render_rollup(wk, days, stats))
             archived: list[str] = []
@@ -267,7 +278,6 @@ def rollup_journals(
                     path.unlink()
                     deleted.append(path.name)
                 else:
-                    archive_dir = directory / ARCHIVE_DIRNAME
                     archive_dir.mkdir(parents=True, exist_ok=True)
                     path.replace(archive_dir / path.name)
                     archived.append(path.name)

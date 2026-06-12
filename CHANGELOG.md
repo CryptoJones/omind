@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.9.0] - 2026-06-12
+
+### Fixed
+
+- **journal: re-rolling a week no longer destroys the earlier aggregate.**
+  `rollup_journals` recomputed a week's stats only from dailies still in
+  `Journal/`, then overwrote the existing rollup note — so a late daily for an
+  already-archived week (e.g. union-merged in from an offline peer) replaced a
+  five-day aggregate with a one-day one. The recompute now includes that
+  week's dailies in `Journal/Archive/`, so rewriting the rollup is always a
+  superset of what it replaces.
+
 ## [2.8.0] - 2026-06-12
 
 ### Fixed
