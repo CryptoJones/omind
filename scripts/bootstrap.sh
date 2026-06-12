@@ -75,14 +75,13 @@ else
   warn "Ensure ~/.local/bin is on your PATH in new shells (add to ~/.bashrc if needed)."
 fi
 
-# ---- 2. node / npm / claude (checked; not force-installed) -----------------
+# ---- 2. git / claude (checked; not force-installed) ------------------------
+# Exactly what `omind setup` requires (provision.REQUIRED_TOOLS): git + claude.
+# node/npm are NOT omind dependencies — they're only one way to install claude.
 MISSING=0
-info "Checking runtime dependencies (node, npm, claude)"
-if command -v node >/dev/null 2>&1; then ok "node: $(node --version)"
-else warn "node missing — $(pkg_hint nodejs)"; MISSING=1; fi
-
-if command -v npm >/dev/null 2>&1; then ok "npm: $(npm --version)"
-else warn "npm missing — $(pkg_hint npm)"; MISSING=1; fi
+info "Checking runtime dependencies (git, claude)"
+if command -v git >/dev/null 2>&1; then ok "git: $(git --version)"
+else warn "git missing — $(pkg_hint git)"; MISSING=1; fi
 
 if command -v claude >/dev/null 2>&1; then ok "claude CLI present"
 else
@@ -92,6 +91,8 @@ else
 fi
 
 # ---- 3. install omind ------------------------------------------------------
+# uv clones the repo, so without git the install itself cannot proceed.
+command -v git >/dev/null 2>&1 || die "git is required to install omind; install it and re-run"
 info "Installing omind from ${REMOTE} (${GIT_URL})"
 uv tool install --force "$GIT_URL"
 ok "omind installed: $(omind --version 2>/dev/null || echo 'run: omind --version')"

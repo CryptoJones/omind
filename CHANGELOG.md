@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.12.0] - 2026-06-12
+
+### Fixed
+
+- **bootstrap: check the dependencies omind actually has.** The script
+  hard-required node/npm — which omind doesn't use (its own header says so) —
+  so a machine with `claude` installed via the native installer aborted the
+  documented one-line install for no reason. And it never checked `git`, the
+  one tool `omind setup` and the mesh genuinely require (and that `uv tool
+  install` of a git URL needs). It now checks git + claude, treats npm purely
+  as install guidance for claude, and fails fast with a clear message when
+  git is absent.
+
 ## [2.11.0] - 2026-06-12
 
 ### Fixed
