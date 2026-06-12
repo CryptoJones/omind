@@ -25,7 +25,12 @@ from typing import Any
 
 from omind import filelock
 from omind.clock import Rev, next_rev
-from omind.paths import INDEX_FILENAME, JOURNAL_PREFIX, RESERVED_FILENAMES
+from omind.paths import (
+    INDEX_FILENAME,
+    JOURNAL_PREFIX,
+    RESERVED_FILENAMES,
+    sync_signal_path,
+)
 from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 
 # Inter-process write lock for an OMI folder. Concurrent Claude Code sessions
@@ -427,6 +432,23 @@ class OmiStore:
     # Backward-compatible alias: external writers (Hermes) predate the rename.
     _write_lock = write_lock
 
+    def _signal_write(self) -> None:
+        """Advisory nudge for the mesh daemon's debounced sync; never raises.
+
+        Lives in the store so *every* write surface (MCP server, web UI,
+        ``omind note``, import) triggers replication — previously only the MCP
+        server's tools remembered to, and edits made elsewhere sat
+        uncommitted for up to the full sync interval.
+        """
+        if not self.mesh_mode():
+            return
+        try:
+            signal = sync_signal_path(self.omi_dir)
+            signal.parent.mkdir(parents=True, exist_ok=True)
+            signal.touch()
+        except OSError:
+            pass
+
     # -- naming / safety ----------------------------------------------------
 
     def _reject_reserved(self, path: Path) -> None:
@@ -610,6 +632,7 @@ class OmiStore:
                 content = self._stamped(path, content)
             _atomic_write(path, content)
             self._write_index()
+        self._signal_write()
         return path.name
 
     def _mutate_note(
@@ -643,6 +666,7 @@ class OmiStore:
                 content = self._stamped(path, content)
             _atomic_write(path, content)
             self._write_index()
+        self._signal_write()
         return path.name
 
     def _stamped(self, path: Path, content: str) -> str:
@@ -726,6 +750,7 @@ class OmiStore:
         with self.write_lock():
             path.unlink()
             self._write_index()
+        self._signal_write()
 
     # -- index --------------------------------------------------------------
 

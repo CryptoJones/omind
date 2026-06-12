@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.27.0] - 2026-06-12
+
+### Fixed
+
+- **store: every write surface now nudges the mesh daemon's debounced sync.**
+  The write-signal touch lived only in the MCP server's tool wrappers, so
+  edits made through `omind serve`, `omind note`, or `omind import` sat
+  uncommitted and unreplicated for up to the full sync interval (default
+  300s) instead of debounce-syncing in ~10s — invisible until a machine dies
+  holding five minutes of unsynced memories. The touch now happens in
+  `OmiStore`'s write paths (mesh folders only), so new write surfaces get it
+  for free.
+
 ## [2.26.0] - 2026-06-12
 
 ### Changed
