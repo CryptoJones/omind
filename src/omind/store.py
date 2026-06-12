@@ -16,7 +16,7 @@ import contextlib
 import os
 import re
 import tempfile
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date
 from pathlib import Path
@@ -579,6 +579,38 @@ class OmiStore:
             self._write_index()
         return path.name
 
+    def _mutate_note(
+        self,
+        name: str,
+        transform: "Callable[[str], str]",
+        expected_version: str | None = None,
+    ) -> str:
+        """Read-modify-write one note atomically under the write lock.
+
+        ``write_note`` only locks the write, so a caller that reads first and
+        writes the transformed text back races every other writer: anything
+        saved between the read and the locked write is silently reverted.
+        The lock is not reentrant (flock on a fresh fd), so the whole cycle
+        runs here instead of nesting through :meth:`write_note`.
+        """
+        path = self.safe_name(name)
+        with self.write_lock():
+            if not path.is_file():
+                raise NoteNotFoundError(f"note not found: {name!r}")
+            if expected_version is not None:
+                current = self.note_version(name)
+                if current != expected_version:
+                    raise NoteConflictError(
+                        f"note {name!r} changed on disk (expected {expected_version!r}, "
+                        f"found {current!r})"
+                    )
+            content = transform(path.read_text(encoding="utf-8"))
+            if self.node_id is not None and path.name not in RESERVED_FILENAMES:
+                content = self._stamped(path, content)
+            _atomic_write(path, content)
+            self._write_index()
+        return path.name
+
     def _stamped(self, path: Path, content: str) -> str:
         """Stamp the next Lamport revision for this node into ``content``.
 
@@ -610,20 +642,22 @@ class OmiStore:
     def update_note(
         self, name: str, fields: NoteFields, expected_version: str | None = None
     ) -> str:
-        # Validate target exists, then overwrite with rendered fields.
-        current = parse_note(self.read_note(name))
-        # A caller that built fresh NoteFields without a rev predates the mesh
-        # fields (e.g. Hermes' upsert); it must not strip the note's revision
-        # or silently resurrect a soft-deleted note.
-        if not fields.rev:
-            fields.rev = current.rev
-            if not fields.disabled:
-                fields.disabled = current.disabled
-        # An empty created is never intentional — render_fields would silently
-        # substitute today(), rewriting the note's creation date on every update.
-        if not fields.created:
-            fields.created = current.created
-        return self.write_note(name, render_fields(fields), expected_version=expected_version)
+        def transform(text: str) -> str:
+            current = parse_note(text)
+            # A caller that built fresh NoteFields without a rev predates the
+            # mesh fields (e.g. Hermes' upsert); it must not strip the note's
+            # revision or silently resurrect a soft-deleted note.
+            if not fields.rev:
+                fields.rev = current.rev
+                if not fields.disabled:
+                    fields.disabled = current.disabled
+            # An empty created is never intentional — render_fields would
+            # silently substitute today(), rewriting the creation date.
+            if not fields.created:
+                fields.created = current.created
+            return render_fields(fields)
+
+        return self._mutate_note(name, transform, expected_version=expected_version)
 
     def delete_note(self, name: str) -> None:
         """Delete a note — mode-aware (docs/mesh.md "Disable instead of delete").
@@ -642,11 +676,11 @@ class OmiStore:
         path = self.safe_name(name)
         if path.name in RESERVED_FILENAMES:
             raise NoteError(f"refusing to disable reserved file: {path.name}")
-        return self.write_note(name, _with_disabled(self.read_note(name), True))
+        return self._mutate_note(name, lambda md: _with_disabled(md, True))
 
     def restore_note(self, name: str) -> str:
         """Clear a soft-deleted note's ``Disabled`` flag."""
-        return self.write_note(name, _with_disabled(self.read_note(name), False))
+        return self._mutate_note(name, lambda md: _with_disabled(md, False))
 
     def purge_note(self, name: str) -> None:
         """Hard-delete a note file. In a mesh, only `omind mesh purge` may use this."""

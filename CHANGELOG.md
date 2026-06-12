@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.4.0] - 2026-06-12
+
+### Fixed
+
+- **store: `disable_note`, `restore_note`, and `update_note` are now atomic
+  read-modify-writes.** They previously read the note *before* `write_note`
+  took the inter-process lock and wrote the transformed snapshot back with no
+  version check — any edit landing in that window (another Claude session, the
+  web UI) was silently reverted. The whole cycle now runs under one
+  `write_lock()` via a shared `_mutate_note` helper (the flock is not
+  reentrant, so nesting through `write_note` was never an option).
+
 ## [2.3.0] - 2026-06-12
 
 ### Fixed
