@@ -27,15 +27,16 @@ pip install -e ".[dev]"
 ```
 
 The editable install puts the `omind` command on your `PATH` and pulls in the dev
-tools (`pytest`, `ruff`, `mypy`, `httpx`).
+tools (`pytest`, `ruff`, `mypy`, `httpx`, `pip-audit`, `types-PyYAML`).
 
 ## Quality gates
 
-Every change must keep all three green:
+Every change must keep all four green (the same gates CI runs on every PR):
 
 ```bash
 ruff check .        # lint (line length 100; rules E F I N W UP B SIM)
 mypy src            # static types, --strict
+pip-audit           # dependency vulnerability scan
 pytest -v           # tests in tests/
 ```
 
@@ -70,6 +71,10 @@ src/omind/
     └── static/     the single-page UI (index.html, app.js, app.css)
 tests/              pytest suites mirroring the modules above (+ conftest.py
                     isolating XDG_STATE_HOME for every test)
+e2e/                opt-in end-to-end suite against real disposable nodes;
+                    every test skips unless OMIND_E2E_PROVIDER=podman|runpod
+                    is set (excluded from the default `pytest` run — see
+                    e2e/README.md)
 ```
 
 `store.py` has no web dependency — it is the file-I/O core that both the CLI and

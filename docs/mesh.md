@@ -168,7 +168,9 @@ Because notes round-trip through a structured model, the merge driver parses
 base/ours/theirs into `NoteFields` and merges **field by field** rather than
 diffing raw text:
 
-- `tags`, `connections`, `references` → **set union** (conflict-free).
+- `tags`, `connections`, `references` → **3-way set merge** (conflict-free;
+  an element removed by one side and untouched by the other stays removed —
+  a plain union would resurrect every removal).
 - `action_items` → union by text; `done` is logical-OR.
 - `title`, `summary`, `related_to` → scalar **last-writer-wins** by Lamport rev,
   tie-broken by node-id.
@@ -229,7 +231,7 @@ This is strictly simpler than tombstoning every delete, and it is reversible.
 | Command | Does |
 | --- | --- |
 | `omind node` | Run the local node MCP server (stdio). |
-| `omind mesh init` | Make OMI a git repo; install the merge driver + `.gitattributes`; write node config (node-id, peers). |
+| `omind mesh init` | Make OMI a git repo; install the merge driver + `.gitattributes`; write node config (node-id, sync cadence). Peers live as ordinary git remotes, not in the config. |
 | `omind mesh add-peer <name> <git-url>` / `remove-peer` | Manage peer remotes. |
 | `omind mesh add-seed <name> <url> [--mirror <git-url>]` | Provision a passive bare seed repo (local path or over ssh) — init, post-receive hook (main pointer + optional mirror push), register as a peer here. Converges on re-run. |
 | `omind mesh sync` | One-shot fetch + merge + push against reachable peers. |

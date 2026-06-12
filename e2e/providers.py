@@ -205,10 +205,10 @@ def runpod_api_key() -> str:
 class RunPodProvider:
     """Tiny CPU pods on RunPod.
 
-    Written against the official ``runpod`` SDK's pod API. Two fields are the
-    likely suspects if the first live run misbehaves (the SDK has churned
-    here): the CPU ``instance_id`` flavor name, and how the started pod
-    reports its public ip/port mapping. Run ``test_provider_smoke.py`` first.
+    Written against the official ``runpod`` SDK's pod API and live-validated
+    with the default image/instance. If a future SDK release changes the CPU
+    ``instance_id`` flavor names or how a started pod reports its public
+    ip/port mapping, run ``test_provider_smoke.py`` first to isolate it.
     """
 
     #: Conservative caps — tests must never be able to fan out expensively.

@@ -47,7 +47,7 @@ environment variable holding it from `OMIND_E2E_RUNPOD_KEY_VAR`
 ```bash
 export OMIND_E2E_RUNPOD_KEY_VAR=MY_RUNPOD_KEY   # tell the harness where to look
 export MY_RUNPOD_KEY=...                        # the actual secret
-OMIND_E2E_PROVIDER=runpod uv run --extra e2e pytest e2e/ -v
+OMIND_E2E_PROVIDER=runpod uv run --extra e2e --extra dev pytest e2e/ -v
 ```
 
 ### Cost guards (runpod)
@@ -61,24 +61,24 @@ OMIND_E2E_PROVIDER=runpod uv run --extra e2e pytest e2e/ -v
   `uv run --extra e2e python -m e2e.sweep` terminates anything matching the
   prefix.
 
-> **First-live-run note:** the RunPod provider is written against the
-> official `runpod` SDK's pod API (CPU instance types, `PUBLIC_KEY` ssh
-> injection, exposed TCP 22). Field names there have churned between SDK
-> releases — the first run with a real key should be
-> `pytest e2e/test_provider_smoke.py` alone, which provisions one pod,
-> runs `echo ok` over ssh, and tears it down.
+> **Live-validated:** the RunPod provider's defaults (CPU instance type,
+> `PUBLIC_KEY` ssh injection, exposed TCP 22) are verified working against
+> the official `runpod` SDK on a real account (2026-06-12, full suite green
+> in ~8 min). If a future SDK release changes these fields, run
+> `pytest e2e/test_provider_smoke.py` alone to isolate it — it provisions
+> one pod, runs `echo ok` over ssh, and tears it down.
 
 ## Running
 
 ```bash
 # local, free, fast — validates the harness and the mesh over loopback ssh
-OMIND_E2E_PROVIDER=podman uv run --extra e2e pytest e2e/ -v
+OMIND_E2E_PROVIDER=podman uv run --extra e2e --extra dev pytest e2e/ -v
 
 # real VMs
-OMIND_E2E_PROVIDER=runpod uv run --extra e2e pytest e2e/ -v
+OMIND_E2E_PROVIDER=runpod uv run --extra e2e --extra dev pytest e2e/ -v
 
 # keep nodes alive after a failure for inspection
-OMIND_E2E_KEEP=1 OMIND_E2E_PROVIDER=runpod uv run --extra e2e pytest e2e/ -v -x
+OMIND_E2E_KEEP=1 OMIND_E2E_PROVIDER=runpod uv run --extra e2e --extra dev pytest e2e/ -v -x
 ```
 
 ## Scenarios
