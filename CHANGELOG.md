@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.24.0] - 2026-06-12
+
+### Changed
+
+- **store/merge: one section splitter.** The merge driver's extra-section
+  pass re-implemented `parse_note`'s `## heading` splitter with its own regex
+  and its own top-level-`#` handling; if the two ever disagreed on what
+  counts as a heading, template-owned content would be classified as "extra"
+  and emitted twice in every merged note mesh-wide. Both now use a shared
+  `store.split_sections` — which also stops the merge driver from silently
+  dropping extra-section content that followed a stray top-level `#` line.
+
 ## [2.23.0] - 2026-06-12
 
 ### Fixed

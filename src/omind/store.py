@@ -174,8 +174,14 @@ def today() -> str:
     return date.today().isoformat()
 
 
-def parse_note(md: str) -> NoteFields:
-    """Parse a note's Markdown into structured fields (best effort)."""
+def split_sections(md: str) -> tuple[str, dict[str, list[str]]]:
+    """Split a note into ``(title, {heading: body lines})``.
+
+    THE ``## heading`` splitter: :func:`parse_note` and the mesh merge
+    driver's extra-section pass (:mod:`omind.merge`) must agree on what
+    counts as a section heading, or template-owned content gets classified
+    as "extra" and duplicated into every merged note.
+    """
     title = ""
     sections: dict[str, list[str]] = {}
     current: str | None = None
@@ -192,6 +198,12 @@ def parse_note(md: str) -> NoteFields:
             continue
         if current is not None:
             sections[current].append(line)
+    return title, sections
+
+
+def parse_note(md: str) -> NoteFields:
+    """Parse a note's Markdown into structured fields (best effort)."""
+    title, sections = split_sections(md)
 
     def body(name: str) -> str:
         return "\n".join(sections.get(name, [])).strip()
