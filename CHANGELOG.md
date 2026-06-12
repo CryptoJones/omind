@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.18.0] - 2026-06-12
+
+### Changed
+
+- **mesh: `_commit_locked` no longer takes an unused `node_id` parameter** —
+  it implied the commit identity depended on it (it actually comes from the
+  `user.name` git config set in `mesh_init`) and forced every call site to
+  thread a value that did nothing.
+
 ## [2.17.0] - 2026-06-12
 
 ### Changed

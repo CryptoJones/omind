@@ -461,7 +461,7 @@ class SyncReport:
         return all(not p.error for p in self.peers)
 
 
-def _commit_locked(omi_dir: Path, node_id: str, message: str) -> bool:
+def _commit_locked(omi_dir: Path, message: str) -> bool:
     """Stage + commit everything. Caller MUST hold the store write lock."""
     # Never complete a merge an earlier crashed/timed-out sync abandoned:
     # `git add -A && git commit` on a tree with MERGE_HEAD would commit the
@@ -480,7 +480,7 @@ def commit_local(omi_dir: Path, node_id: str) -> bool:
     write can never be half-staged."""
     store = OmiStore(omi_dir)
     with store.write_lock():
-        return _commit_locked(omi_dir, node_id, f"omind: local changes on {node_id}")
+        return _commit_locked(omi_dir, f"omind: local changes on {node_id}")
 
 
 def _first_line(text: str) -> str:
@@ -600,7 +600,7 @@ def sync(
     store = OmiStore(omi_dir)
     report = SyncReport()
     with store.write_lock():
-        report.committed = _commit_locked(omi_dir, node_id, f"omind: local changes on {node_id}")
+        report.committed = _commit_locked(omi_dir, f"omind: local changes on {node_id}")
 
         # Merge anything peers pushed into our inbox since last time.
         for ref in _inbox_refs(omi_dir, node_id):
@@ -624,7 +624,7 @@ def sync(
         with store.write_lock():
             # A writer may have saved between locks; commit so the merge
             # never sees (or clobbers) uncommitted local changes.
-            _commit_locked(omi_dir, node_id, f"omind: local changes on {node_id}")
+            _commit_locked(omi_dir, f"omind: local changes on {node_id}")
             if git(omi_dir, "rev-parse", "--verify", ref, check=False).returncode == 0:
                 error = _merge_ref(omi_dir, ref)
                 if error:
@@ -636,7 +636,7 @@ def sync(
             # Regenerate what merges may have touched, then publish.
             _apply_tombstones(omi_dir, store)
             store.update_index_locked()
-            _commit_locked(omi_dir, node_id, f"omind: post-merge regeneration on {node_id}")
+            _commit_locked(omi_dir, f"omind: post-merge regeneration on {node_id}")
         push = git(omi_dir, "push", name, f"HEAD:refs/omind/{node_id}", check=False)
         ps.pushed = push.returncode == 0
         if not ps.pushed:
@@ -647,7 +647,7 @@ def sync(
         # Even with no peers reachable, leave generated files consistent.
         _apply_tombstones(omi_dir, store)
         store.update_index_locked()
-        _commit_locked(omi_dir, node_id, f"omind: post-merge regeneration on {node_id}")
+        _commit_locked(omi_dir, f"omind: post-merge regeneration on {node_id}")
 
         report.conflicts = conflict_scan(omi_dir)
     _write_sync_state(omi_dir, report)
@@ -695,7 +695,7 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
         if target.is_file():
             target.unlink()
         store.update_index_locked()
-        _commit_locked(omi_dir, node_id, f"omind: purge {target.name} from {node_id}")
+        _commit_locked(omi_dir, f"omind: purge {target.name} from {node_id}")
     log(f"purged {target.name} (tombstoned for every node)")
 
 
