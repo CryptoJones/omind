@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.31.0] - 2026-06-12
+
+### Added
+
+- **`e2e/` — a real-world testing harness on disposable VMs.** Provisions
+  tiny hosts (local podman containers, or RunPod CPU pods via
+  `OMIND_E2E_PROVIDER=runpod`), installs a wheel built from the working tree,
+  and drives the mesh over *real node-to-node ssh*: fresh-box bootstrap,
+  two-node convergence, and concurrent field-level merge. Live-validated on
+  RunPod (full suite green in ~8 min, zero leaked pods). The API key is read
+  via a configurable variable name (`OMIND_E2E_RUNPOD_KEY_VAR`, default
+  `RUNPOD_API_KEY`); every test skips unless a provider is selected, so CI
+  and plain `pytest` are untouched. See [e2e/README.md](e2e/README.md).
+
+### Changed
+
+- **Documentation realigned with the code** after the 2.1.0–2.30.0 train:
+  mesh.md's lock-scope, list-merge, and peers-as-remotes wording;
+  manual-setup.md hook examples (quoted `--folder`); troubleshooting.md's
+  obsidian-mcp section rewritten as shipped history; CONTRIBUTING.md's four
+  quality gates and the e2e suite in the project layout.
+
 ## [2.30.0] - 2026-06-12
 
 ### Fixed
