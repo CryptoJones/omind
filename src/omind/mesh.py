@@ -459,6 +459,11 @@ class SyncReport:
 
 def _commit_locked(omi_dir: Path, node_id: str, message: str) -> bool:
     """Stage + commit everything. Caller MUST hold the store write lock."""
+    # Never complete a merge an earlier crashed/timed-out sync abandoned:
+    # `git add -A && git commit` on a tree with MERGE_HEAD would commit the
+    # half-merged state (conflict markers included) and push it to peers.
+    if git(omi_dir, "rev-parse", "-q", "--verify", "MERGE_HEAD", check=False).returncode == 0:
+        git(omi_dir, "merge", "--abort", check=False)
     if not git(omi_dir, "status", "--porcelain").stdout.strip():
         return False
     git(omi_dir, "add", "-A")
@@ -485,16 +490,22 @@ def _first_line(text: str) -> str:
 
 def _merge_ref(omi_dir: Path, ref: str) -> str:
     """Merge one ref; '' on success, else a one-line error (merge aborted)."""
-    res = git(
-        omi_dir,
-        "merge",
-        "--no-edit",
-        "--allow-unrelated-histories",
-        "-m",
-        f"omind sync: merge {ref}",
-        ref,
-        check=False,
-    )
+    try:
+        res = git(
+            omi_dir,
+            "merge",
+            "--no-edit",
+            "--allow-unrelated-histories",
+            "-m",
+            f"omind sync: merge {ref}",
+            ref,
+            check=False,
+        )
+    except MeshError as exc:
+        # A timed-out merge (run_command raises before the returncode check)
+        # still leaves MERGE_HEAD and a half-merged tree behind — abort it.
+        git(omi_dir, "merge", "--abort", check=False)
+        return f"merge {ref}: {_first_line(str(exc))}"
     if res.returncode == 0:
         return ""
     git(omi_dir, "merge", "--abort", check=False)

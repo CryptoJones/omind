@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.1.0] - 2026-06-12
+
+### Fixed
+
+- **mesh: a timed-out `git merge` is now aborted** instead of leaving
+  `MERGE_HEAD` and a half-merged tree behind. Previously `_merge_ref` only ran
+  `git merge --abort` on a non-zero exit; a merge that hit the 120s git
+  timeout raised before that check, and the next sync's `git add -A && git
+  commit` completed the abandoned merge — conflict markers included — and
+  pushed it to every peer. `_commit_locked` now also aborts any leftover
+  in-progress merge before staging, so no crashed sync can ever be committed
+  as a merge commit.
+
 ## [2.0.1] - 2026-06-11
 
 ### Added
