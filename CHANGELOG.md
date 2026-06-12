@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.5.0] - 2026-06-12
+
+### Fixed
+
+- **mesh: `.omi-tombstones` and `node.json` are written atomically** (same-dir
+  temp file + `os.replace`, the store's own `_atomic_write`) instead of
+  in-place `write_text`. A crash mid-write previously truncated the tombstone
+  list — and the truncation merged out to every peer as clean line deletions,
+  resurrecting previously hard-purged notes mesh-wide. A torn `node.json`
+  either broke every subsequent mesh command or silently minted a fresh
+  `node_id`, breaking the never-regenerated Lamport identity invariant.
+
 ## [2.4.0] - 2026-06-12
 
 ### Fixed

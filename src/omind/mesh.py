@@ -34,7 +34,7 @@ from typing import Any
 from omind.backup import config_dir
 from omind.paths import sync_state_path
 from omind.proc import run_command
-from omind.store import OmiStore
+from omind.store import OmiStore, _atomic_write
 
 Logger = Callable[[str], None]
 
@@ -139,7 +139,9 @@ def save_node_config(omi_dir: Path, cfg: NodeConfig) -> None:
         "interval_seconds": cfg.interval_seconds,
         "debounce_seconds": cfg.debounce_seconds,
     }
-    path.write_text(json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8")
+    # Atomic: a torn node.json breaks every later mesh command — or worse,
+    # loses this folder's entry and mints a new node_id on the next setup.
+    _atomic_write(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def new_node_id() -> str:
@@ -674,7 +676,9 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
         tomb = omi_dir / TOMBSTONES_FILENAME
         existing = tomb.read_text(encoding="utf-8").splitlines() if tomb.is_file() else []
         if target.name not in existing:
-            tomb.write_text("\n".join([*existing, target.name]) + "\n", encoding="utf-8")
+            # Atomic: a torn tombstone file would un-purge every prior purge
+            # mesh-wide once the truncation merged out to the peers.
+            _atomic_write(tomb, "\n".join([*existing, target.name]) + "\n")
         if target.is_file():
             target.unlink()
         store.update_index_locked()
