@@ -28,7 +28,7 @@ from pathlib import Path
 
 from omind import paths
 from omind.hooks import JOURNAL_TAGS, action_bullets, journal_dir
-from omind.store import OmiStore, _atomic_write, today
+from omind.store import NoteFields, OmiStore, _atomic_write, render_fields, today
 
 # Places older layouts left daily journals: the vault-folder root, plus the
 # short-lived ``logs/`` journal-location experiment some live vaults carry.
@@ -173,23 +173,15 @@ def _tally(text: str, stats: JournalStats) -> None:
 
 
 def render_rollup(week: str, days: list[str], stats: JournalStats) -> str:
-    """Render the weekly summary as a template-shaped note (parses under parse_note)."""
-    title = rollup_name(week)[:-3]
-    tags = " ".join(f"#{t}" for t in (*JOURNAL_TAGS, "rollup"))
-    lines = [
-        f"# {title}",
-        "",
-        "## Metadata",
-        f"- Created: {today()}",
-        f"- Tags: {tags}",
-        "- Related to:",
-        "",
-        "## Summary",
-        f"Weekly rollup of {len(days)} daily session journal(s) for {week}: "
-        f"{stats.actions} action(s), {stats.errors} error(s), "
-        f"{len(stats.sessions)} session(s), {stats.stops} turn end(s).",
-        "",
-        "## Details",
+    """Render the weekly summary through the canonical note renderer.
+
+    ``render_fields`` is what parse_note and the mesh merge driver expect a
+    note to look like; a hand-built template here would drift the moment the
+    template grows a field. (Daily journals are different: their trailing
+    ``## Actions`` section is the O_APPEND hot path and deliberately bypasses
+    the store — see :mod:`omind.hooks`.)
+    """
+    details_lines = [
         "Days rolled up:",
         *(f"- {d}" for d in days),
         "",
@@ -205,7 +197,18 @@ def render_rollup(week: str, days: list[str], stats: JournalStats) -> str:
             for target, count in stats.targets.most_common(_NOTABLE_TARGET_LIMIT)
         ),
     ]
-    return "\n".join(lines).rstrip() + "\n"
+    fields = NoteFields(
+        title=rollup_name(week)[:-3],
+        summary=(
+            f"Weekly rollup of {len(days)} daily session journal(s) for {week}: "
+            f"{stats.actions} action(s), {stats.errors} error(s), "
+            f"{len(stats.sessions)} session(s), {stats.stops} turn end(s)."
+        ),
+        details="\n".join(details_lines),
+        created=today(),
+        tags=[*JOURNAL_TAGS, "rollup"],
+    )
+    return render_fields(fields)
 
 
 def rollup_journals(

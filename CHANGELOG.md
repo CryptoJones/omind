@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.25.0] - 2026-06-12
+
+### Changed
+
+- **journal: weekly rollups render through `store.render_fields`** instead of
+  a third hand-built copy of the note template — when the template grows a
+  field, rollups now grow it automatically instead of drifting out of the
+  shape `parse_note` and the merge driver expect. (Daily journals keep their
+  bespoke header on purpose: the trailing `## Actions` section is the
+  O_APPEND hot path and deliberately bypasses the store.)
+
 ## [2.24.0] - 2026-06-12
 
 ### Changed
