@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.10.0] - 2026-06-12
+
+### Fixed
+
+- **transfer: `omind import` honors the single-writer contract.** The import
+  write phase now runs under the store's `.omi.lock` (so the mesh daemon's
+  `git add -A` can never stage a half-applied import), every file lands via
+  atomic same-dir temp + `os.replace` instead of in-place `write_bytes`, and
+  on a mesh node imported top-level notes get a Lamport rev stamp — an
+  imported note carrying a stale rev would otherwise lose the next merge.
+
 ## [2.9.0] - 2026-06-12
 
 ### Fixed
