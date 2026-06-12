@@ -628,3 +628,16 @@ def test_backlinks_match_aliased_and_heading_links(store: OmiStore) -> None:
     store.create_note(NoteFields(title="Unrelated", details="See [[Note B]]."))
     names = {s.filename for s in store.backlinks("Note A")}
     assert names == {"Aliased.md", "Headed.md"}
+
+
+def test_listing_cache_tracks_writes_and_deletes(store: OmiStore) -> None:
+    """The stat-keyed summary cache must never serve a deleted or stale note."""
+    a = store.create_note(NoteFields(title="Cached A", summary="v1"))
+    store.create_note(NoteFields(title="Cached B", summary="b"))
+    assert {s.title for s in store.list_notes()} == {"Cached A", "Cached B"}
+    store.update_note(a, NoteFields(title="Cached A", summary="v2 longer text"))
+    assert [s.summary for s in store.list_notes() if s.title == "Cached A"] == [
+        "v2 longer text"
+    ]
+    store.purge_note(a)
+    assert {s.title for s in store.list_notes()} == {"Cached B"}

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.29.0] - 2026-06-12
+
+### Changed
+
+- **store: listings re-parse only changed notes.** `list_notes` (and through
+  it `all_tags` and every post-write index regeneration) read and parsed
+  every `.md` file in the vault on every call — a 2,000-note vault paid
+  2,000 reads per save and per sidebar refresh. A per-store summary cache
+  keyed by `(mtime_ns, size)` makes those calls O(changed files) parses +
+  O(N) stats, self-invalidating, with deleted notes pruned on each listing.
+  Content search still reads file contents (it has to).
+
 ## [2.28.0] - 2026-06-12
 
 ### Changed

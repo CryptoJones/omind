@@ -396,6 +396,8 @@ class OmiStore:
         self.omi_dir = Path(omi_dir).expanduser()
         self._node_id = node_id
         self._node_id_resolved = node_id is not None
+        # Listing cache: filename -> ((st_mtime_ns, st_size), NoteSummary).
+        self._summary_cache: dict[str, tuple[tuple[int, int], NoteSummary]] = {}
 
     @property
     def node_id(self) -> str | None:
@@ -505,6 +507,28 @@ class OmiStore:
             text = path.read_text(encoding="utf-8")
         return self._summarize_fields(path, parse_note(text))
 
+    def _cached_summary(self, path: Path) -> NoteSummary | None:
+        """A NoteSummary for ``path``, re-read only when its stat changed.
+
+        Every write regenerates index.md via :meth:`list_notes`, and the web
+        UI / MCP listings call it per request — without this, each of those
+        was a full read+parse of every note in the vault. The (mtime_ns, size)
+        key makes entries self-invalidating; a same-tick same-size aliased
+        write can at worst serve a stale *listing* line, never stale content
+        (reads and the conflict token go through the file itself).
+        """
+        try:
+            st = path.stat()
+        except OSError:
+            return None
+        key = (st.st_mtime_ns, st.st_size)
+        hit = self._summary_cache.get(path.name)
+        if hit is not None and hit[0] == key:
+            return hit[1]
+        summary = self._summarize(path)
+        self._summary_cache[path.name] = (key, summary)
+        return summary
+
     def _summarize_fields(self, path: Path, fields: NoteFields) -> NoteSummary:
         """Build a NoteSummary from already-parsed fields (no re-read/re-parse)."""
         return NoteSummary(
@@ -518,10 +542,17 @@ class OmiStore:
 
     def list_notes(self, include_disabled: bool = False) -> list[NoteSummary]:
         summaries: list[NoteSummary] = []
+        seen: set[str] = set()
         for p in self._note_paths():
-            s = self._summarize(p)
+            s = self._cached_summary(p)
+            if s is None:
+                continue
+            seen.add(p.name)
             if include_disabled or not s.disabled:
                 summaries.append(s)
+        # Drop cache entries for notes that no longer exist on disk.
+        for stale in [name for name in self._summary_cache if name not in seen]:
+            del self._summary_cache[stale]
         summaries.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return summaries
 
