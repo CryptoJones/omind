@@ -573,8 +573,10 @@ class OmiStore:
         self._reject_reserved(path)
         with self.write_lock():
             # Re-check the optimistic-concurrency token *inside* the lock so the
-            # check-then-write is atomic against another process's save.
-            if expected_version is not None and path.is_file():
+            # check-then-write is atomic against another process's save. A
+            # missing file is a mismatch too (note_version returns ""): a stale
+            # save must not silently resurrect a note purged in the meantime.
+            if expected_version is not None:
                 current = self.note_version(name)
                 if current != expected_version:
                     raise NoteConflictError(

@@ -608,3 +608,13 @@ def test_writes_refuse_reserved_filenames(store: OmiStore, title: str) -> None:
         store.write_note(f"{title}.md", "# pwned\n")
     with pytest.raises(NoteError):
         store.update_note(f"{title}.md", NoteFields(title=title))
+
+
+def test_stale_write_after_purge_conflicts(store: OmiStore) -> None:
+    """A version token taken before a purge must not resurrect the note."""
+    name = store.create_note(NoteFields(title="Doomed", summary="s"))
+    token = store.note_version(name)
+    store.purge_note(name)
+    with pytest.raises(NoteConflictError):
+        store.write_note(name, "# Doomed\n", expected_version=token)
+    assert not (store.omi_dir / name).exists()

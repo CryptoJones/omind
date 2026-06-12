@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.8.0] - 2026-06-12
+
+### Fixed
+
+- **store: a stale save can no longer resurrect a purged note.** The
+  optimistic-concurrency check was skipped when the target file was missing
+  (`expected_version is not None and path.is_file()`), so a client holding a
+  pre-purge version token silently recreated the note — which then replicated
+  back out across the mesh until each peer's next tombstone pass. A missing
+  file now counts as a token mismatch (`note_version` returns `""`) and
+  raises `NoteConflictError`.
+
 ## [2.7.0] - 2026-06-12
 
 ### Fixed
