@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.26.0] - 2026-06-12
+
+### Changed
+
+- **cli: the `--vault`/`--folder` pair is defined once** (`_add_vault_args`)
+  and applied to all 14 vault-touching subcommands, instead of being
+  hand-copied onto each — changing the default vault path or help text was a
+  13-place edit where missing one gave a subcommand silently different
+  defaults.
+
 ## [2.25.0] - 2026-06-12
 
 ### Changed
