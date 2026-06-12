@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.14.0] - 2026-06-12
+
+### Fixed
+
+- **store: `backlinks` now matches aliased and heading wikilinks.** The raw
+  `[[...]]` capture was compared whole against the target's title/stem, so
+  `[[Note A|the project]]` and `[[Note A#Details]]` — both backlinks in
+  Obsidian — were silently missed. Only the part before `|` or `#` names the
+  target note, and that's what gets compared now.
+
 ## [2.13.0] - 2026-06-12
 
 ### Fixed

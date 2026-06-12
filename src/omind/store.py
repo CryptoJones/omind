@@ -530,7 +530,12 @@ class OmiStore:
             if path.resolve() == target.resolve():
                 continue
             text = path.read_text(encoding="utf-8")
-            link_targets = {t.strip().lower() for t in _WIKILINK_RE.findall(text)}
+            # Obsidian link forms: [[Note]], [[Note|alias]], [[Note#heading]] —
+            # only the part before | or # names the target note.
+            link_targets = {
+                t.split("|", 1)[0].split("#", 1)[0].strip().lower()
+                for t in _WIKILINK_RE.findall(text)
+            }
             if link_targets & identifiers:
                 summary = self._summarize(path, text)
                 if not summary.disabled:

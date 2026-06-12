@@ -618,3 +618,13 @@ def test_stale_write_after_purge_conflicts(store: OmiStore) -> None:
     with pytest.raises(NoteConflictError):
         store.write_note(name, "# Doomed\n", expected_version=token)
     assert not (store.omi_dir / name).exists()
+
+
+def test_backlinks_match_aliased_and_heading_links(store: OmiStore) -> None:
+    """Obsidian counts [[Note|alias]] and [[Note#heading]] as backlinks; so do we."""
+    store.create_note(NoteFields(title="Note A", summary="target"))
+    store.create_note(NoteFields(title="Aliased", details="See [[Note A|the project]]."))
+    store.create_note(NoteFields(title="Headed", details="See [[Note A#Details]]."))
+    store.create_note(NoteFields(title="Unrelated", details="See [[Note B]]."))
+    names = {s.filename for s in store.backlinks("Note A")}
+    assert names == {"Aliased.md", "Headed.md"}
