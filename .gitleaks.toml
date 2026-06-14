@@ -8,8 +8,12 @@ title = "omind gitleaks"
 useDefault = true
 
 [allowlist]
-description = "Test fixtures and docs use obvious fake tokens/paths."
+description = "Test/e2e fixtures and docs use obvious fake tokens/paths."
 paths = [
   '''tests/.*''',
   '''docs/.*''',
+  # The e2e harness reads provider keys from the environment at runtime; it
+  # commits no secrets. gitleaks' generic-api-key rule false-positives on the
+  # high-entropy env-var NAME in runpod_api_key()'s docstring (e2e/providers.py).
+  '''e2e/.*''',
 ]
