@@ -9,11 +9,9 @@ For each .md file found in ~/.claude/projects/*/memory/:
   4. Delete the Claude memory file either way
 """
 import glob
-import os
 import pathlib
 import re
 import subprocess
-import sys
 
 HOME = pathlib.Path.home()
 OMIND = HOME / ".local/bin/omind"

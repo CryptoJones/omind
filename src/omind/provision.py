@@ -24,18 +24,20 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
 
-#: Identifies enforce-hook commands inside hook entries.
-ENFORCE_HOOK_MARKER = "omi-enforce.py"
-
-def _enforce_hook_dest() -> Path:
-    """Where omind writes the enforcement hook script on this machine."""
-    return Path.home() / ".claude" / "hooks" / "omi-enforce.py"
-
 from omind import paths, seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
 from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
 from omind.proc import run_command
+
+#: Identifies enforce-hook commands inside hook entries.
+ENFORCE_HOOK_MARKER = "omi-enforce.py"
+
+
+def _enforce_hook_dest() -> Path:
+    """Where omind writes the enforcement hook script on this machine."""
+    return Path.home() / ".claude" / "hooks" / "omi-enforce.py"
+
 
 Logger = Callable[[str], None]
 
@@ -700,7 +702,7 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         return CheckResult(
             "hooks",
             "warn",
-            f"enforcement hook not in PostToolUse (run `omind setup`)",
+            "enforcement hook not in PostToolUse (run `omind setup`)",
         )
     if not enforce_dest.is_file():
         return CheckResult(
