@@ -1,0 +1,18 @@
+version: 2
+updates:
+  # Python dependencies (pyproject.toml). omind's CI installs with pip.
+  - package-ecosystem: "pip"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5
+    groups:
+      python-deps:
+        patterns: ["*"]
+
+  # Keep the SHA-pinned GitHub Actions current.
+  - package-ecosystem: "github-actions"
+    directory: "/"
+    schedule:
+      interval: "weekly"
+    open-pull-requests-limit: 5

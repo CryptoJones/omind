@@ -1,0 +1,15 @@
+# gitleaks config. Uses the default rule set; allowlists obvious test fixtures
+# and the generated mesh node-id/backup-password placeholders so CI stays signal,
+# not noise. omind has no committed credentials: backup passwords and node IDs
+# are generated at runtime with `secrets.token_*` and written outside the repo.
+title = "omind gitleaks"
+
+[extend]
+useDefault = true
+
+[allowlist]
+description = "Test fixtures and docs use obvious fake tokens/paths."
+paths = [
+  '''tests/.*''',
+  '''docs/.*''',
+]
