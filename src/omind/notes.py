@@ -53,3 +53,5 @@ def _keep_existing_when_unset(fields: NoteFields, existing: NoteFields) -> None:
         fields.action_items = existing.action_items
     if not fields.references:
         fields.references = existing.references
+    if not fields.extras:
+        fields.extras = existing.extras

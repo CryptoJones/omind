@@ -36,16 +36,21 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from omind.clock import Rev
-from omind.store import ActionItem, NoteFields, parse_note, render_fields, split_sections
+from omind.store import (
+    TEMPLATE_SECTIONS,
+    ActionItem,
+    NoteFields,
+    parse_note,
+    render_fields,
+    split_sections,
+)
 
 #: Tag stamped onto a note whose Details carry conflict markers.
 CONFLICT_TAG = "merge-conflict"
 
-#: Sections owned by the NoteFields template; anything else is an "extra"
-#: section preserved verbatim-ish through the merge.
-TEMPLATE_SECTIONS = frozenset(
-    {"Metadata", "Summary", "Details", "Connections", "Action Items", "References"}
-)
+#: ``TEMPLATE_SECTIONS`` (the headings the NoteFields template owns; anything
+#: else is an "extra" section preserved verbatim-ish through the merge) lives in
+#: :mod:`omind.store` so parse_note's extra-capture and this driver agree.
 
 @dataclass
 class MergeResult:
