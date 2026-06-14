@@ -43,6 +43,7 @@ e2e = [
 ]
 dev = [
     "pytest>=8.0",
+    "pytest-cov>=5.0",
     "ruff>=0.4",
     "mypy>=1.9",
     "httpx>=0.27",
@@ -81,3 +82,16 @@ strict = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+
+[tool.coverage.run]
+branch = true
+source = ["omind"]
+# __main__ is thin CLI entry wiring exercised at startup, not in unit tests.
+omit = ["src/omind/__main__.py"]
+
+[tool.coverage.report]
+show_missing = true
+# Set at/below the current measured total (84.6% with branch coverage) so the
+# gate guards against regression without failing today; raise it as it improves.
+fail_under = 80
+exclude_lines = ["pragma: no cover", "if __name__ == .__main__.:", "raise NotImplementedError"]

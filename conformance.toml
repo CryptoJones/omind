@@ -1,0 +1,18 @@
+# mcp-conformance target config for omind (the local "omi" memory MCP server).
+# Run from the repo root with the project venv present, after creating a
+# throwaway vault so the suite never touches your real OMI memory:
+#   mkdir -p ./.conformance-vault/OMI
+#   /path/to/mcp-conformance/.venv/bin/mcp-conformance run
+#
+# Probes are read-only listing tools against the disposable vault. omind reads a
+# trusted local folder, so expect.injection is intentionally omitted.
+command = [".venv/bin/omind", "node", "--vault", "./.conformance-vault", "--folder", "OMI"]
+
+[[probe]]
+tool = "list-notes"
+
+[[probe]]
+tool = "list-tags"
+
+[expect]
+max_output_chars = 200000

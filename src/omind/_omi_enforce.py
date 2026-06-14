@@ -9,11 +9,9 @@ For each .md file found in ~/.claude/projects/*/memory/:
   4. Delete the Claude memory file either way
 """
 import glob
-import os
 import pathlib
 import re
 import subprocess
-import sys
 
 HOME = pathlib.Path.home()
 OMIND = HOME / ".local/bin/omind"
@@ -22,7 +20,7 @@ OMI_DIR = VAULT / "OMI"
 CLAUDE_PROJECTS = HOME / ".claude/projects"
 
 
-def parse_frontmatter(text: str) -> tuple[dict, str]:
+def parse_frontmatter(text: str) -> tuple[dict[str, str], str]:
     """Return (fields_dict, body_text). Handles simple key: value and nested metadata.type."""
     if not text.startswith("---"):
         return {}, text
@@ -30,7 +28,7 @@ def parse_frontmatter(text: str) -> tuple[dict, str]:
     if len(parts) < 3:
         return {}, text
     fm_raw, body = parts[1], parts[2].strip()
-    fields: dict = {}
+    fields: dict[str, str] = {}
     in_metadata = False
     for line in fm_raw.splitlines():
         if line.strip() == "metadata:":
