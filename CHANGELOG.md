@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.32.0] - 2026-06-14
+
+### Added
+
+- **Enforcement hook — OMI is now the exclusive memory system.** `omind setup`
+  now writes `~/.claude/hooks/omi-enforce.py` from package data (`omind._omi_enforce`)
+  and adds it to the `PostToolUse` hook entry in `settings.json`, immediately
+  after the journal hook. On every tool call, any `.md` file Claude's built-in
+  memory system writes to `~/.claude/projects/*/memory/` is intercepted: if a
+  matching OMI note already exists (checked by title/filename in the vault), the
+  built-in file is deleted; if not, the note is migrated via `omind note` first,
+  then deleted. No data loss — `omind doctor` now also verifies the enforcement
+  hook is wired and the script file is present. The reference copy lives in
+  `extras/omi_enforce.py`.
+
 ## [2.31.0] - 2026-06-12
 
 ### Added

@@ -11,6 +11,7 @@ the MCP server is only (re)registered when its command differs.
 
 from __future__ import annotations
 
+import importlib.resources
 import json
 import os
 import re
@@ -22,6 +23,13 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar
+
+#: Identifies enforce-hook commands inside hook entries.
+ENFORCE_HOOK_MARKER = "omi-enforce.py"
+
+def _enforce_hook_dest() -> Path:
+    """Where omind writes the enforcement hook script on this machine."""
+    return Path.home() / ".claude" / "hooks" / "omi-enforce.py"
 
 from omind import paths, seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
@@ -369,13 +377,36 @@ class Provisioner:
         """The hooks-array entry omind owns, per handled event."""
         entries: dict[str, list[dict[str, Any]]] = {}
         for event in HANDLED_EVENTS:
-            entry: dict[str, Any] = {
-                "hooks": [{"type": "command", "command": self._hook_command(event)}]
-            }
+            hooks_list: list[dict[str, Any]] = [
+                {"type": "command", "command": self._hook_command(event)}
+            ]
             if event == "PostToolUse":
-                entry = {"matcher": "*", **entry}
+                # Enforcement hook runs immediately after the omind journal hook so
+                # any built-in memory file written this turn is migrated to OMI
+                # before the file is deleted — guaranteeing no data loss.
+                hooks_list.append({
+                    "type": "command",
+                    "command": f"python3 {_enforce_hook_dest()}",
+                })
+                entry: dict[str, Any] = {"matcher": "*", "hooks": hooks_list}
+            else:
+                entry = {"hooks": hooks_list}
             entries[event] = [entry]
         return entries
+
+    def _write_enforce_hook_script(self) -> None:
+        """Write the enforcement hook script from package data to ~/.claude/hooks/."""
+        dest = _enforce_hook_dest()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("_omi_enforce.py")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(f"  WARNING: could not read enforcement hook from package data: {exc}")
+            return
+        self._write_managed(dest, content)
 
     def _read_settings(self, path: Path) -> dict[str, Any]:
         """Load settings.json as a dict; raise rather than clobber bad/foreign JSON."""
@@ -465,6 +496,7 @@ class Provisioner:
         """The agent-specific wiring; subclasses for other agents override this."""
         self.retire_legacy_server()
         self.register_mcp()
+        self._write_enforce_hook_script()
         self.ensure_hooks_installed()
 
     def run(self) -> list[str]:
@@ -653,8 +685,32 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             f"auto-memory hooks point at a different vault than {expected_vault!r}; "
             "run `omind setup`",
         )
+    # Check the enforcement hook is present and the script exists on disk.
+    enforce_dest = _enforce_hook_dest()
+    post_entries = hooks_cfg.get("PostToolUse")
+    enforce_wired = False
+    if isinstance(post_entries, list):
+        for e in post_entries:
+            if _entry_has_omind_marker(e):
+                cmd_text = _entry_command_text(e)
+                if ENFORCE_HOOK_MARKER in cmd_text:
+                    enforce_wired = True
+                    break
+    if not enforce_wired:
+        return CheckResult(
+            "hooks",
+            "warn",
+            f"enforcement hook not in PostToolUse (run `omind setup`)",
+        )
+    if not enforce_dest.is_file():
+        return CheckResult(
+            "hooks",
+            "warn",
+            f"enforcement hook script missing at {enforce_dest} (run `omind setup`)",
+        )
     return CheckResult(
-        "hooks", "ok", "auto-memory hooks installed (PostToolUse, Stop, SessionStart)"
+        "hooks", "ok",
+        "auto-memory hooks installed (PostToolUse, Stop, SessionStart) + enforcement hook"
     )
 
 

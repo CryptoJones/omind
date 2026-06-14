@@ -19,3 +19,17 @@ skill so it never writes OMI raw. See
 ```bash
 echo "the body of the note" | python extras/omi_write.py --title "An Insight" --tags thesis,attention
 ```
+
+## `omi_enforce.py`
+
+A `PostToolUse` Claude Code hook that intercepts any `.md` file Claude's
+built-in memory system writes to `~/.claude/projects/*/memory/`, verifies a
+matching note already exists in the OMI vault (by title/filename), migrates
+it via `omind note` if not, and then deletes the built-in file. This makes
+OMI the **exclusive** memory system — the built-in system can write all it
+likes, but nothing persists there past the end of a tool call.
+
+`omind setup` installs this hook automatically (writes it to
+`~/.claude/hooks/omi-enforce.py` and wires it into `settings.json`). This
+copy in `extras/` is the reference version for direct inspection or manual
+deployment.
