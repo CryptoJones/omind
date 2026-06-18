@@ -11,6 +11,7 @@ the MCP server is only (re)registered when its command differs.
 
 from __future__ import annotations
 
+import contextlib
 import importlib.resources
 import json
 import os
@@ -37,6 +38,11 @@ ENFORCE_HOOK_MARKER = "omi-enforce.py"
 def _enforce_hook_dest() -> Path:
     """Where omind writes the enforcement hook script on this machine."""
     return Path.home() / ".claude" / "hooks" / "omi-enforce.py"
+
+
+def _guard_hook_dest() -> Path:
+    """Where omind writes the fresh-base git guard hook script on this machine."""
+    return Path.home() / ".claude" / "hooks" / "git-fresh-base.sh"
 
 
 Logger = Callable[[str], None]
@@ -131,6 +137,12 @@ def _entry_command_text(entry: object) -> str:
 
 #: The retired 1.x server registration (obsidian-mcp); setup removes it.
 LEGACY_SERVER_NAME = "obsidian"
+
+#: Marker identifying omind's PreToolUse(Bash) fresh-base guard entry in
+#: settings.json — the guard script's filename always appears in its command.
+GUARD_HOOK_MARKER = "git-fresh-base.sh"
+#: Seconds Claude Code waits for the guard (it runs `git fetch` before deciding).
+GUARD_HOOK_TIMEOUT = 20
 
 
 @dataclass
@@ -410,6 +422,23 @@ class Provisioner:
             return
         self._write_managed(dest, content)
 
+    def _write_guard_hook_script(self) -> None:
+        """Write the fresh-base git guard hook from package data to ~/.claude/hooks/."""
+        dest = _guard_hook_dest()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("git-fresh-base.sh")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(f"  WARNING: could not read git guard hook from package data: {exc}")
+            return
+        self._write_managed(dest, content)
+        if not self.config.dry_run:
+            with contextlib.suppress(OSError):
+                dest.chmod(0o755)
+
     def _read_settings(self, path: Path) -> dict[str, Any]:
         """Load settings.json as a dict; raise rather than clobber bad/foreign JSON."""
         if not path.is_file():
@@ -465,6 +494,46 @@ class Provisioner:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
+    def ensure_guard_hook_installed(self) -> None:
+        """Idempotently register the PreToolUse(Bash) fresh-base git guard.
+
+        Identifies omind's guard entry by ``GUARD_HOOK_MARKER`` (the script's
+        filename in the command), so a user's own PreToolUse Bash hooks are kept
+        and re-runs never accumulate duplicates. Writes only when something
+        changed (or ``--force``).
+        """
+        path = claude_settings_path()
+        data = self._read_settings(path)
+        hooks_cfg = data.get("hooks")
+        if not isinstance(hooks_cfg, dict):
+            hooks_cfg = {}
+
+        desired: dict[str, Any] = {
+            "matcher": "Bash",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": str(_guard_hook_dest()),
+                    "timeout": GUARD_HOOK_TIMEOUT,
+                }
+            ],
+        }
+        existing = hooks_cfg.get("PreToolUse")
+        existing_list = existing if isinstance(existing, list) else []
+        kept = [e for e in existing_list if GUARD_HOOK_MARKER not in _entry_command_text(e)]
+        merged = kept + [desired]
+
+        if merged == existing_list and not self.config.force:
+            self.log(f"  fresh-base git guard hook already installed in {path}")
+            return
+
+        hooks_cfg["PreToolUse"] = merged
+        data["hooks"] = hooks_cfg
+        self._record(f"install PreToolUse(Bash) fresh-base git guard in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
     def verify(self) -> None:
         if self.config.dry_run:
             return
@@ -499,7 +568,9 @@ class Provisioner:
         self.retire_legacy_server()
         self.register_mcp()
         self._write_enforce_hook_script()
+        self._write_guard_hook_script()
         self.ensure_hooks_installed()
+        self.ensure_guard_hook_installed()
 
     def run(self) -> list[str]:
         self.log(f"omind setup -> {self.config.omi_dir}")

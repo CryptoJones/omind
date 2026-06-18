@@ -28,7 +28,10 @@ reads and writes as long-term memory. `omind` does two things with it:
   (`omind node`) with the Claude Code CLI, pointed at an OMI folder inside an
   Obsidian vault, and initializes the folder as a **mesh node** (see below).
   After this, Claude Code persists memory across sessions through the MCP
-  tools — and across machines through the mesh.
+  tools — and across machines through the mesh. Setup also installs a
+  PreToolUse(Bash) **fresh-base git guard** (`git-fresh-base.sh`) that blocks
+  branching off a local `main`/`master`/`develop` that is behind its
+  `origin/*` counterpart (it fetches first, fails open otherwise).
 - **`omind mesh`** — peer-to-peer replication: every machine runs a full local
   node and nodes sync over git+ssh, with per-note Lamport versioning and a
   field-level merge driver. No central server, full offline operation.
@@ -107,8 +110,9 @@ commands and JSON, personalized to your paths — nothing is changed for you:
 omind quickstart --vault "$HOME/Documents/Obsidian Vault"
 ```
 
-It covers all four pieces (memory folder scaffold, mesh initialization,
-user-scope MCP registration, auto-memory hooks), each independently
+It covers all five pieces (memory folder scaffold, mesh initialization,
+user-scope MCP registration, auto-memory hooks, fresh-base git guard hook),
+each independently
 applicable. The annotated walkthrough lives in
 [docs/manual-setup.md](docs/manual-setup.md).
 
