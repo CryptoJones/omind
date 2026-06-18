@@ -42,6 +42,13 @@ from omind import filelock, paths
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
+#: Hermes Agent has no SessionStart hook; it fires ``pre_llm_call`` before every
+#: LLM turn and consumes a ``{"context": ...}`` payload on stdout. omind installs
+#: this event to inject the same priming the Claude SessionStart hook does — but
+#: only once per session (see :func:`emit_pre_llm_call_context`).
+HERMES_PRIME_EVENT = "pre_llm_call"
+#: Every event the ``omind hook`` CLI accepts (Claude's three + Hermes' one).
+ALL_HOOK_EVENTS = HANDLED_EVENTS + (HERMES_PRIME_EVENT,)
 JOURNAL_DIRNAME = "Journal"  # subfolder keeping dailies out of listings/index
 JOURNAL_TAGS = ("session-journal", "omi")
 _TARGET_LIMIT = 80
@@ -397,6 +404,58 @@ def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -
         _record_failure(f"emit_session_start_context({omi_dir})", exc)
 
 
+def _prime_marker_dir() -> Path:
+    """Where per-session "already primed" markers live (outside the vault):
+    ``$XDG_STATE_HOME/omind/session-primed/``. Sibling to the hook-failure log."""
+    return paths.state_dir() / "session-primed"
+
+
+def _already_primed(session_id: object) -> bool:
+    """True when this session has already been primed; otherwise mark it and
+    return False. Never raises.
+
+    Hermes' ``pre_llm_call`` fires before *every* LLM turn, so without a guard
+    omind would re-inject the (large) priming payload on each turn. A marker
+    file per session id makes priming fire exactly once. When no session id is
+    supplied we cannot tell turns apart, so we prime this call rather than risk
+    never priming (an empty id would otherwise collide every session onto one
+    marker).
+    """
+    cleaned = "".join(c for c in str(session_id) if c.isalnum())
+    if not cleaned:
+        return False
+    try:
+        directory = _prime_marker_dir()
+        directory.mkdir(parents=True, exist_ok=True)
+        marker = directory / cleaned
+        if marker.exists():
+            return True
+        marker.touch()
+    except OSError as exc:
+        _record_failure("_already_primed", exc)
+    return False
+
+
+def emit_pre_llm_call_context(
+    omi_dir: Path | str,
+    *,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+) -> None:
+    """Emit OMI priming as Hermes' ``pre_llm_call`` ``{"context": ...}`` payload,
+    once per session. Silent no-op on later turns of the same session. Never
+    raises — a broken priming hook must never wedge the agent."""
+    sink = stdout if stdout is not None else sys.stdout
+    try:
+        event = read_event(stdin)
+        if _already_primed(event.get("session_id") or ""):
+            return
+        payload = {"context": build_session_start_context(omi_dir)}
+        sink.write(json.dumps(payload) + "\n")
+    except Exception as exc:
+        _record_failure(f"emit_pre_llm_call_context({omi_dir})", exc)
+
+
 def run_hook(
     event_name: str,
     omi_dir: Path | str,
@@ -408,6 +467,9 @@ def run_hook(
     try:
         if event_name == "SessionStart":
             emit_session_start_context(omi_dir, out=stdout)
+            return 0
+        if event_name == HERMES_PRIME_EVENT:
+            emit_pre_llm_call_context(omi_dir, stdin=stdin, stdout=stdout)
             return 0
         event = read_event(stdin)
         line = format_entry(event, event_name=event_name)

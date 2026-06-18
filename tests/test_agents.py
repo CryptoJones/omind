@@ -25,6 +25,9 @@ from omind.provision import ProvisionError, SetupConfig
 @pytest.fixture(autouse=True)
 def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
+    # agents._omind_hook_command resolves omind via agents.shutil — patch it too
+    # so the hook/bootstrap wiring is deterministic regardless of the test host.
+    monkeypatch.setattr(agents.shutil, "which", lambda name: f"/usr/bin/{name}")
 
 
 @pytest.fixture(autouse=True)
@@ -263,6 +266,113 @@ def test_openclaw_setup_fails_without_openclaw_install(
     monkeypatch.setattr(agents, "openclaw_root", lambda: tmp_path / "nope")
     with pytest.raises(ProvisionError, match="OpenClaw not found"):
         run_setup_for(_config(tmp_path, "openclaw"), log=_quiet)
+
+
+# -- session priming --------------------------------------------------------------
+
+
+def test_hermes_setup_installs_priming_hook_and_allowlist(
+    tmp_path: Path, hermes_home: Path
+) -> None:
+    config = _config(tmp_path, "hermes")
+    run_setup_for(config, log=_quiet)
+
+    data = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
+    entries = data["hooks"]["pre_llm_call"]
+    assert len(entries) == 1
+    cmd = entries[0]["command"]
+    assert cmd.startswith("/usr/bin/omind hook pre_llm_call")
+    assert f'--vault "{config.vault}"' in cmd
+    assert entries[0]["timeout"] == 15
+
+    allow = json.loads(
+        (hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8")
+    )
+    assert {"event": "pre_llm_call", "command": cmd} in allow["approvals"]
+
+
+def test_hermes_priming_preserves_user_hooks(tmp_path: Path, hermes_home: Path) -> None:
+    user_hook = {"command": "/usr/bin/my-own-hook", "timeout": 5}
+    (hermes_home / "config.yaml").write_text(
+        yaml.safe_dump({"hooks": {"pre_llm_call": [user_hook]}}), encoding="utf-8"
+    )
+    run_setup_for(_config(tmp_path, "hermes"), log=_quiet)
+    entries = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))[
+        "hooks"
+    ]["pre_llm_call"]
+    assert user_hook in entries  # untouched
+    assert any("omind hook pre_llm_call" in e["command"] for e in entries)
+
+
+def test_hermes_priming_is_idempotent(tmp_path: Path, hermes_home: Path) -> None:
+    config = _config(tmp_path, "hermes")
+    run_setup_for(config, log=_quiet)
+    run_setup_for(config, log=_quiet)
+    entries = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))[
+        "hooks"
+    ]["pre_llm_call"]
+    assert sum("omind hook" in e["command"] for e in entries) == 1
+    allow = json.loads(
+        (hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8")
+    )
+    assert len(allow["approvals"]) == 1
+
+
+def test_hermes_priming_tolerates_corrupt_allowlist(
+    tmp_path: Path, hermes_home: Path
+) -> None:
+    (hermes_home / "shell-hooks-allowlist.json").write_text("{bad", encoding="utf-8")
+    run_setup_for(_config(tmp_path, "hermes"), log=_quiet)  # must not raise
+    # an unparseable allowlist is left exactly as-is, never clobbered
+    assert (hermes_home / "shell-hooks-allowlist.json").read_text(
+        encoding="utf-8"
+    ) == "{bad"
+
+
+def test_openclaw_setup_installs_bootstrap_priming(
+    tmp_path: Path, openclaw_home: Path
+) -> None:
+    config = _config(tmp_path, "openclaw")
+    run_setup_for(config, log=_quiet)
+
+    bootstrap = agents.openclaw_bootstrap_path()
+    assert bootstrap.name == "MEMORY.md"  # a basename OpenClaw auto-loads
+    text = bootstrap.read_text(encoding="utf-8")
+    assert str(config.omi_dir) in text
+    assert "omind note" in text
+
+    data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
+    extra = data["hooks"]["internal"]["entries"]["bootstrap-extra-files"]
+    assert extra["enabled"] is True
+    assert str(bootstrap) in extra["paths"]
+
+
+def test_openclaw_bootstrap_preserves_existing_paths(
+    tmp_path: Path, openclaw_home: Path
+) -> None:
+    (openclaw_home / "openclaw.json").write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "internal": {
+                        "entries": {
+                            "bootstrap-extra-files": {
+                                "enabled": True,
+                                "paths": ["packages/*/AGENTS.md"],
+                            }
+                        }
+                    }
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_setup_for(_config(tmp_path, "openclaw"), log=_quiet)
+    extra = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))[
+        "hooks"
+    ]["internal"]["entries"]["bootstrap-extra-files"]
+    assert "packages/*/AGENTS.md" in extra["paths"]  # user path kept
+    assert str(agents.openclaw_bootstrap_path()) in extra["paths"]
 
 
 # -- doctor -----------------------------------------------------------------------
