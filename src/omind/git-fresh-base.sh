@@ -49,8 +49,13 @@ cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
 # Must be inside a git work tree, else nothing to guard.
 git rev-parse --is-inside-work-tree >/dev/null 2>&1 || exit 0
 
-# Refresh remote refs (best effort; never hang, never prompt).
-GIT_TERMINAL_PROMPT=0 timeout 15 git fetch origin --quiet 2>/dev/null
+# Refresh remote refs (best effort; never hang, never prompt). `timeout` is not
+# on macOS by default, so prefer it, then `gtimeout`, else fetch without a
+# wrapper (GIT_TERMINAL_PROMPT=0 still prevents a credential-prompt hang).
+if command -v timeout >/dev/null 2>&1; then _fetch_to="timeout 15"
+elif command -v gtimeout >/dev/null 2>&1; then _fetch_to="gtimeout 15"
+else _fetch_to=""; fi
+GIT_TERMINAL_PROMPT=0 $_fetch_to git fetch origin --quiet 2>/dev/null
 
 # Resolve which branch is the base we must validate.
 if [ -n "$base" ]; then

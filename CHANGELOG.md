@@ -7,15 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.33.0] - 2026-06-18
+
 ### Added
 
-- **Fresh-base git guard hook.** `omind setup` now installs a Claude Code
+- **Cross-agent OMI session-priming.** `omind setup` now wires session-start OMI
+  priming for **Hermes Agent** (a `pre_llm_call` hook + consent-allowlist
+  pre-approval) and **OpenClaw** (an omind-owned bootstrap file), not just Claude
+  Code. Priming runs once per session (markers in `$XDG_STATE_HOME/omind/session-primed/`)
+  and never raises — a broken priming hook must not wedge the agent.
+- **Fresh-base git guard hook.** `omind setup` installs a Claude Code
   PreToolUse(Bash) guard (`~/.claude/hooks/git-fresh-base.sh`, shipped as
   package data) and registers it in `settings.json`. Before creating a branch
-  off a local `main`/`master`/`develop`, it runs `git fetch` and blocks the
-  command when that local base is behind its `origin/*` counterpart — pushing
-  you to `git checkout -b <name> origin/<branch>` instead. Idempotent, fails
-  open on any error, and preserves existing user PreToolUse Bash hooks.
+  off a local `main`/`master`/`develop`, it fetches and blocks the command when
+  that local base is behind its `origin/*` counterpart — pushing you to
+  `git checkout -b <name> origin/<branch>` instead. Idempotent, fails open on any
+  error, and preserves existing user PreToolUse Bash hooks. The fetch is
+  `timeout`-portable (uses `timeout`/`gtimeout` when present, else fetches
+  directly), so it works on macOS where `timeout` isn't installed.
+
+### Fixed
+
+- **`edit-note` no longer drops non-template `##` sections.** `NoteFields` gains
+  an `extras` dict so `parse_note` captures non-template sections and
+  `render_fields` re-emits them after the template body, matching the mesh merge
+  driver. `update_note`/upsert inherit existing extras; `TEMPLATE_SECTIONS` is
+  now the single source of truth in `store`, imported by both `parse_note` and
+  `merge`.
 
 ## [2.32.0] - 2026-06-14
 
