@@ -125,6 +125,11 @@ class NoteFields:
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
+    # Non-template ``## Heading`` sections (anything outside TEMPLATE_SECTIONS).
+    # Captured on parse and re-emitted on render so a note carrying its own
+    # H2 headings inside a field body round-trips instead of being silently
+    # dropped by the edit path. The mesh merge driver preserves these too.
+    extras: dict[str, list[str]] = field(default_factory=dict)
     # Mesh fields (docs/mesh.md). Empty/False on legacy notes, and rendered
     # only when set, so a non-mesh note round-trips byte-identical.
     rev: str = ""
@@ -154,6 +159,10 @@ class NoteFields:
             connections=[str(c).strip() for c in (data.get("connections") or []) if str(c).strip()],
             action_items=items,
             references=[str(r).strip() for r in (data.get("references") or []) if str(r).strip()],
+            extras={
+                str(h): [str(line) for line in (lines or [])]
+                for h, lines in (data.get("extras") or {}).items()
+            },
             rev=str(data.get("rev", "")).strip(),
             disabled=bool(data.get("disabled")),
         )
@@ -177,6 +186,25 @@ def _clean_tag(tag: object) -> str:
 
 def today() -> str:
     return date.today().isoformat()
+
+
+#: Sections owned by the NoteFields template. Any other ``## Heading`` is an
+#: "extra" section, captured into NoteFields.extras and preserved through both
+#: the local edit path (parse_note/render_fields) and the mesh merge driver
+#: (:mod:`omind.merge`, which imports this set). The two must agree, or
+#: template-owned content gets misclassified as extra and duplicated.
+TEMPLATE_SECTIONS = frozenset(
+    {"Metadata", "Summary", "Details", "Connections", "Action Items", "References"}
+)
+
+
+def _strip_blank_edges(lines: list[str]) -> list[str]:
+    start, end = 0, len(lines)
+    while start < end and not lines[start].strip():
+        start += 1
+    while end > start and not lines[end - 1].strip():
+        end -= 1
+    return lines[start:end]
 
 
 def split_sections(md: str) -> tuple[str, dict[str, list[str]]]:
@@ -248,6 +276,12 @@ def parse_note(md: str) -> NoteFields:
             if text:
                 references.append(text)
 
+    extras = {
+        heading: _strip_blank_edges(lines)
+        for heading, lines in sections.items()
+        if heading not in TEMPLATE_SECTIONS
+    }
+
     return NoteFields(
         title=title,
         summary=body("Summary"),
@@ -258,6 +292,7 @@ def parse_note(md: str) -> NoteFields:
         connections=[c.strip() for c in connections if c.strip()],
         action_items=action_items,
         references=references,
+        extras=extras,
         rev=rev,
         disabled=disabled,
     )
@@ -299,6 +334,14 @@ def render_fields(f: NoteFields) -> str:
     out.append("## References")
     out.extend(f"- {r}".rstrip() for r in f.references if r.strip())
     out.append("")
+
+    # Non-template sections, preserved verbatim after the template body so a
+    # note's own ``## Heading`` content survives an edit instead of being
+    # dropped. Mirrors the mesh merge driver's extra-section placement.
+    for heading, lines in f.extras.items():
+        out.append(f"## {heading}")
+        out.extend(_strip_blank_edges(lines))
+        out.append("")
 
     return "\n".join(out).rstrip() + "\n"
 
@@ -744,6 +787,11 @@ class OmiStore:
             # silently substitute today(), rewriting the creation date.
             if not fields.created:
                 fields.created = current.created
+            # Callers that don't carry extras (a partial edit-note, an MCP/CLI
+            # upsert built from flat fields) must not drop the note's existing
+            # non-template sections. Inherit them like rev/created above.
+            if not fields.extras:
+                fields.extras = current.extras
             return render_fields(fields)
 
         return self._mutate_note(name, transform, expected_version=expected_version)

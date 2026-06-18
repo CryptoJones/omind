@@ -50,6 +50,52 @@ def test_render_parse_round_trip() -> None:
     assert parsed == fields
 
 
+def test_extras_round_trip() -> None:
+    fields = NoteFields(
+        title="X",
+        details="Intro.",
+        extras={"Custom Section": ["body line one", "body line two"]},
+    )
+    parsed = parse_note(render_fields(fields))
+    assert parsed.extras == {"Custom Section": ["body line one", "body line two"]}
+    assert parsed.details == "Intro."
+
+
+def test_h2_heading_inside_details_captured_as_extra() -> None:
+    # The footgun: an author puts a ``## H2`` inside the details body. The H2
+    # opens a new section, so it is captured as an extra instead of silently
+    # dropped on the next render (the 2026-06-14 data-loss bug).
+    md = (
+        "# X\n\n## Summary\ns\n\n## Details\nintro line\n\n"
+        "## A Subheading\nunder the subheading\n"
+    )
+    fields = parse_note(md)
+    assert fields.details == "intro line"
+    assert fields.extras == {"A Subheading": ["under the subheading"]}
+
+
+def test_update_note_preserves_extras_on_partial_edit(store: OmiStore) -> None:
+    # Regression for the 2026-06-14 bug: a partial edit whose fields carry no
+    # extras must not drop the note's existing non-template sections.
+    name = store.create_note(
+        NoteFields(
+            title="Has Extras",
+            summary="before",
+            details="intro",
+            extras={"Extra": ["keep me"]},
+        )
+    )
+    store.update_note(name, NoteFields(title="Has Extras", summary="after"))
+    reread = store.read_fields(name)
+    assert reread.summary == "after"
+    assert reread.extras == {"Extra": ["keep me"]}
+
+
+def test_from_dict_preserves_extras() -> None:
+    restored = NoteFields.from_dict({"title": "X", "extras": {"H": ["a", "b"]}})
+    assert restored.extras == {"H": ["a", "b"]}
+
+
 @pytest.mark.parametrize("tag", ["память", "记忆", "ذاكرة", "café", "tag_1/sub"])
 def test_non_latin_tags_round_trip(tag: str) -> None:
     parsed = parse_note(render_fields(NoteFields(title="X", tags=[tag])))
