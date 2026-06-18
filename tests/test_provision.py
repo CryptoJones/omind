@@ -380,6 +380,68 @@ def test_setup_preserves_user_hooks(tmp_path: Path, isolate_settings: Path) -> N
     assert len(entries) == 2
 
 
+# -- fresh-base git guard hook (PreToolUse/Bash) ----------------------------
+
+
+def _guard_entries(settings: Path) -> list[dict[str, object]]:
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    return [
+        e
+        for e in data["hooks"]["PreToolUse"]
+        if provision.GUARD_HOOK_MARKER in provision._entry_command_text(e)
+    ]
+
+
+def test_setup_writes_guard_hook_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    Provisioner(_config(tmp_path), log=_quiet)._write_guard_hook_script()
+    dest = tmp_path / ".claude" / "hooks" / "git-fresh-base.sh"
+    assert dest.is_file()
+    assert dest.stat().st_mode & 0o111  # executable bit set
+    assert "git-fresh-base" in dest.read_text(encoding="utf-8")
+
+
+def test_setup_installs_guard_hook_idempotently(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).ensure_guard_hook_installed()
+    before = isolate_settings.read_text(encoding="utf-8")
+    Provisioner(config, log=_quiet).ensure_guard_hook_installed()  # second run: no change
+    assert isolate_settings.read_text(encoding="utf-8") == before
+    entries = _guard_entries(isolate_settings)
+    assert len(entries) == 1
+    assert entries[0]["matcher"] == "Bash"
+
+
+def test_guard_hook_preserves_user_pretooluse_hook(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    user_entry = {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "/x/confirm-process-kill.sh"}],
+    }
+    isolate_settings.write_text(json.dumps({"hooks": {"PreToolUse": [user_entry]}}))
+    Provisioner(_config(tmp_path), log=_quiet).ensure_guard_hook_installed()
+    entries = json.loads(isolate_settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert user_entry in entries  # untouched
+    assert len(_guard_entries(isolate_settings)) == 1
+    assert len(entries) == 2
+
+
+def test_guard_hook_dry_run_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    prov = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)
+    prov._write_guard_hook_script()
+    prov.ensure_guard_hook_installed()
+    assert not isolate_settings.exists()
+    assert not (tmp_path / ".claude" / "hooks" / "git-fresh-base.sh").exists()
+
+
 def test_hook_path_drift_triggers_update(tmp_path: Path, isolate_settings: Path) -> None:
     stale_cmd = 'omind hook PostToolUse --vault "/old/vault" --folder OMI'
     stale = {

@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **Fresh-base git guard hook.** `omind setup` now installs a Claude Code
+  PreToolUse(Bash) guard (`~/.claude/hooks/git-fresh-base.sh`, shipped as
+  package data) and registers it in `settings.json`. Before creating a branch
+  off a local `main`/`master`/`develop`, it runs `git fetch` and blocks the
+  command when that local base is behind its `origin/*` counterpart — pushing
+  you to `git checkout -b <name> origin/<branch>` instead. Idempotent, fails
+  open on any error, and preserves existing user PreToolUse Bash hooks.
+
 ## [2.32.0] - 2026-06-14
 
 ### Added
