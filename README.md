@@ -189,16 +189,18 @@ every snapshot; losing it with the disk makes the backups unreadable.
 
 ## Other agents: Hermes Agent and OpenClaw
 
-Claude Code is the default, but the same OMI folder can back any agent. `omind
-setup --agent ...` provisions two more out of the box:
+[Claude Code](https://github.com/anthropics/claude-code) is the default, but the
+same OMI folder can back any agent. `omind setup --agent ...` provisions two
+more out of the box —
+[Hermes Agent](https://github.com/NousResearch/hermes-agent) and
+[OpenClaw](https://github.com/openclaw/openclaw):
 
 ```bash
 omind setup --agent hermes   --vault "$HOME/Documents/Obsidian Vault"   # Hermes Agent
 omind setup --agent openclaw --vault "$HOME/Documents/Obsidian Vault"   # OpenClaw
 ```
 
-Each does the same three things, adjusted for where that agent keeps its
-config:
+Each does the same four things, adjusted for where that agent keeps its config:
 
 1. The shared steps — OMI folder scaffold, mesh initialization — identical to
    the Claude Code path, so all agents talk to **one** memory folder through
@@ -213,14 +215,24 @@ config:
    `omind note` — the single-writer path that keeps concurrently running
    agents from corrupting the folder (see
    [docs/mesh.md](docs/mesh.md) → "Node types & the single-writer rule").
+4. **Wires session-start priming** so the agent reads OMI *first*, without
+   depending on it remembering to. Each agent receives the same priming payload
+   (recent-memory index + latest session state) through its own mechanism:
+   Claude Code via a `SessionStart` hook, Hermes Agent via a `pre_llm_call`
+   hook (injected once per session, and pre-approved in Hermes'
+   `shell-hooks-allowlist.json` so it loads without a prompt), and OpenClaw via
+   a managed `MEMORY.md` bootstrap file registered under `bootstrap-extra-files`.
+   All three run the same `omind hook` command, so there is one source of truth
+   for what gets injected.
 
 `omind doctor --agent hermes|openclaw` diagnoses that agent's wiring, and
 `omind quickstart --agent hermes|openclaw` prints the manual steps (YAML/JSON
 snippets personalized to your paths) if you'd rather merge them in yourself.
 
-The auto-memory journal hooks remain Claude Code-only for now — Hermes Agent
-and OpenClaw emit different hook payloads; their actions reach OMI through the
-skill instead.
+The auto-memory **journal** hooks (the per-action trail) remain Claude
+Code-only for now — Hermes Agent and OpenClaw emit different per-tool payloads;
+their actions reach OMI through the skill instead. Session **priming** (step 4)
+is wired for all three.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 

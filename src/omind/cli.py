@@ -25,7 +25,7 @@ from pathlib import Path
 
 from omind import __version__
 from omind.agents import AGENT_CHOICES, diagnose_for, run_setup_for
-from omind.hooks import HANDLED_EVENTS, run_hook
+from omind.hooks import ALL_HOOK_EVENTS, run_hook
 from omind.provision import (
     CheckResult,
     ProvisionError,
@@ -309,12 +309,15 @@ def build_parser() -> argparse.ArgumentParser:
     _add_vault_args(rollup)
 
     hook = sub.add_parser(
-        "hook", help="(internal) record one Claude Code action into the OMI journal"
+        "hook",
+        help="(internal) record an agent action into the OMI journal, or emit "
+        "session priming",
     )
     hook.add_argument(
         "event",
-        choices=list(HANDLED_EVENTS),
-        help="the Claude Code hook event name",
+        choices=list(ALL_HOOK_EVENTS),
+        help="the hook event name (Claude Code: PostToolUse/Stop/SessionStart; "
+        "Hermes Agent: pre_llm_call)",
     )
     _add_vault_args(hook)
 

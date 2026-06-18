@@ -21,12 +21,14 @@ from __future__ import annotations
 
 import json
 import os
+import shutil
 from pathlib import Path
 from typing import Any, ClassVar
 
 import yaml
 
 from omind import paths, seeds
+from omind.hooks import HOOK_MARKER
 from omind.provision import (
     LEGACY_SERVER_NAME,
     CheckResult,
@@ -54,6 +56,13 @@ def hermes_config_path() -> Path:
 
 def hermes_skill_dir() -> Path:
     return hermes_root() / "skills" / "memory" / "omind-omi-memory"
+
+
+def hermes_allowlist_path() -> Path:
+    """Hermes' shell-hook consent allowlist. omind pre-approves its own priming
+    hook here so it loads without an interactive prompt (the user opted in by
+    running setup); mirrors ``agent/shell_hooks.py`` in hermes-agent."""
+    return hermes_root() / "shell-hooks-allowlist.json"
 
 
 #: Current and legacy OpenClaw state-directory / config-file names (the
@@ -85,6 +94,13 @@ def openclaw_config_path() -> Path:
 
 def openclaw_skill_dir() -> Path:
     return openclaw_root() / "skills" / "omind-omi-memory"
+
+
+def openclaw_bootstrap_path() -> Path:
+    """The OMI priming bootstrap file omind owns for OpenClaw. Kept in a folder
+    omind controls (basename ``MEMORY.md`` so OpenClaw recognizes it) so a
+    user-authored ``~/.openclaw/MEMORY.md`` is never touched."""
+    return openclaw_root() / "omind" / "MEMORY.md"
 
 
 # -- shared agent machinery ---------------------------------------------------
@@ -144,11 +160,32 @@ class AgentProvisioner(Provisioner):
                 "replaced by `omind node`)"
             )
 
+    def _omind_hook_command(self, event: str) -> str:
+        """The ``omind hook <event>`` invocation an agent runs for OMI priming.
+
+        Absolute ``omind`` path when resolvable (the agent's spawn environment
+        may lack ``~/.local/bin`` on PATH); the ``omind hook`` prefix always
+        contains :data:`HOOK_MARKER` so re-runs find and replace our own entry.
+        Both folder values are quoted so a path like ``My Vault`` cannot
+        word-split into a stray positional.
+        """
+        omind_exe = shutil.which("omind") or "omind"
+        return (
+            f'{omind_exe} hook {event} --vault "{self.config.vault}" '
+            f'--folder "{self.config.folder}"'
+        )
+
     def integrate(self) -> None:
         # No `claude mcp` CLI here; the retired obsidian entry (if any) lives
         # in these agents' own config files and is dropped by register_mcp.
         self.register_mcp()
         self.install_memory_skill()
+        self.install_priming()
+
+    def install_priming(self) -> None:
+        """Wire the agent's session-start OMI priming. Overridden per agent —
+        Hermes installs a ``pre_llm_call`` hook, OpenClaw a bootstrap file."""
+        return None
 
     def verify(self) -> None:
         """Read-back check; these agents have no `mcp get`-style CLI probe."""
@@ -239,6 +276,97 @@ class HermesProvisioner(AgentProvisioner):
                 encoding="utf-8",
             )
 
+    def install_priming(self) -> None:
+        """Install the OMI priming hook into Hermes' ``hooks.pre_llm_call`` and
+        pre-approve it in the shell-hook allowlist.
+
+        Hermes fires ``pre_llm_call`` before every LLM turn and injects any
+        ``{"context": ...}`` the hook prints; ``omind hook pre_llm_call`` emits
+        OMI priming once per session. We touch only our own entry (identified by
+        :data:`HOOK_MARKER`), leaving any user-authored hooks in place.
+        """
+        path = hermes_config_path()
+        data = self._read_config()
+        command = self._omind_hook_command("pre_llm_call")
+        desired = {"command": command, "timeout": 15}
+
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        entries = hooks.get("pre_llm_call")
+        existing = entries if isinstance(entries, list) else []
+        kept = [
+            e
+            for e in existing
+            if not (
+                isinstance(e, dict)
+                and isinstance(e.get("command"), str)
+                and HOOK_MARKER in e["command"]
+            )
+        ]
+        merged = kept + [desired]
+
+        if merged != existing or self.config.force:
+            hooks["pre_llm_call"] = merged
+            data["hooks"] = hooks
+            self._record(f"install OMI priming hook (pre_llm_call) in {path}")
+            if not self.config.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+        else:
+            self.log(f"  OMI priming hook already installed in {path}")
+
+        self._allowlist_priming_hook(command)
+
+    def _allowlist_priming_hook(self, command: str) -> None:
+        """Pre-approve the priming hook in Hermes' consent allowlist so it loads
+        without a TTY prompt. Matching is by (event, command); we replace any
+        prior omind-owned ``pre_llm_call`` approval so a drifted command can't
+        leave a stale grant behind. Never overwrites a file it can't parse."""
+        path = hermes_allowlist_path()
+        try:
+            raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
+        except (OSError, json.JSONDecodeError):
+            self.log(
+                f"  NOTE: {path} is unreadable/invalid; skipping allowlist "
+                "pre-approval (approve the hook at Hermes' TTY prompt, or run "
+                "Hermes with --accept-hooks once)."
+            )
+            return
+        data = raw if isinstance(raw, dict) else {}
+        approvals = data.get("approvals")
+        approvals = approvals if isinstance(approvals, list) else []
+
+        already = any(
+            isinstance(e, dict)
+            and e.get("event") == "pre_llm_call"
+            and e.get("command") == command
+            for e in approvals
+        )
+        if already and not self.config.force:
+            return
+
+        kept = [
+            e
+            for e in approvals
+            if not (
+                isinstance(e, dict)
+                and e.get("event") == "pre_llm_call"
+                and HOOK_MARKER in str(e.get("command", ""))
+            )
+        ]
+        kept.append({"event": "pre_llm_call", "command": command})
+        data["approvals"] = kept
+        self._record(f"pre-approve OMI priming hook in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(
+                json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            )
+
 
 # -- OpenClaw -------------------------------------------------------------------
 
@@ -294,6 +422,60 @@ class OpenClawProvisioner(AgentProvisioner):
             f"register MCP server '{self.config.server_name}' in {path} -> "
             f"{self.config.omi_dir}"
         )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def install_priming(self) -> None:
+        """Wire OpenClaw to read OMI first each session.
+
+        OpenClaw has no stdout-context hook (Claude's SessionStart, Hermes'
+        pre_llm_call); it injects recognized "bootstrap" files (``MEMORY.md`` &
+        co.) into the system prompt's Project Context on a session's first turn.
+        So omind writes a managed ``MEMORY.md`` priming file in a folder it owns
+        and registers it under ``hooks.internal.entries.bootstrap-extra-files``,
+        touching only that entry's enable flag and our own path.
+        """
+        bootstrap = openclaw_bootstrap_path()
+        content = seeds.AGENT_PRIMING_BOOTSTRAP_TEMPLATE.format(
+            vault=self.config.vault,
+            folder=self.config.folder,
+            omi_dir=self.config.omi_dir,
+        )
+        # Managed (not write-if-absent): this carries omind's own priming text,
+        # so existing installs must pick up edits rather than keep a stale copy.
+        self._write_managed(bootstrap, content)
+
+        path = openclaw_config_path()
+        data = self._read_settings(path)
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        internal = hooks.get("internal")
+        if not isinstance(internal, dict):
+            internal = {}
+        entries = internal.get("entries")
+        if not isinstance(entries, dict):
+            entries = {}
+        extra = entries.get("bootstrap-extra-files")
+        if not isinstance(extra, dict):
+            extra = {}
+        path_list = extra.get("paths")
+        path_list = path_list if isinstance(path_list, list) else []
+
+        wanted = str(bootstrap)
+        if wanted in path_list and extra.get("enabled") is True and not self.config.force:
+            self.log(f"  OMI bootstrap priming already registered in {path}")
+            return
+        if wanted not in path_list:
+            path_list.append(wanted)
+        extra["enabled"] = True
+        extra["paths"] = path_list
+        entries["bootstrap-extra-files"] = extra
+        internal["entries"] = entries
+        hooks["internal"] = internal
+        data["hooks"] = hooks
+        self._record(f"register OMI bootstrap priming (bootstrap-extra-files) in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")

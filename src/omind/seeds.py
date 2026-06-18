@@ -133,3 +133,35 @@ Rules:
 - Real `[[wikilinks]]` to related notes; tags are plain comma-separated words.
 - `index.md` is maintained by omind — never edit it by hand.
 """
+
+# Bootstrap priming file for OpenClaw. OpenClaw has no stdout-context hook like
+# Claude (SessionStart) or Hermes (pre_llm_call); instead it injects "bootstrap"
+# files (recognized basenames such as MEMORY.md) into the system prompt's
+# Project Context on the first turn of a session. omind writes this file under a
+# folder it owns and registers it via `bootstrap-extra-files` so OpenClaw reads
+# OMI first every session. Placeholders: {vault}, {folder}, {omi_dir}.
+AGENT_PRIMING_BOOTSTRAP_TEMPLATE = """\
+# OMI long-term memory (read this first)
+
+Your persistent, cross-session memory is the OMI vault at `{omi_dir}`, shared by
+every agent on this machine. It is the source of truth — prefer it over any
+built-in memory.
+
+- **Read OMI first.** Before acting on a task, consult OMI. The `omi` MCP server
+  is wired up; use its tools (`search-vault`, `read-note`, `list-notes`) to pull
+  what you already know about this machine, its hosts, and the user. The vault's
+  `index.md` lists recent memories.
+- **Save memories through omind only.** When something is worth keeping across
+  sessions, persist it with the single-writer CLI (never write files into the
+  OMI folder directly — a raw write can corrupt the index):
+
+  ```bash
+  omind note --title "Short Descriptive Title" \\
+    --summary "one-line summary" --tags "topic,subtopic" \\
+    --vault "{vault}" --folder "{folder}" <<'BODY'
+  The insight in plain Markdown, with [[wikilinks]] to related notes.
+  BODY
+  ```
+
+This file is managed by `omind setup --agent openclaw`; edits are overwritten.
+"""

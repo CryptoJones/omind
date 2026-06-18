@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import io
+import json
 import re
 import threading
 from datetime import datetime
@@ -256,6 +257,52 @@ def test_session_start_falls_back_when_no_notes(tmp_path: Path) -> None:
     ctx = hooks.build_session_start_context(tmp_path)  # empty vault
     assert "source of truth" in ctx
     assert "could not be read" in ctx
+
+
+# -- Hermes pre_llm_call priming ----------------------------------------------
+
+
+@pytest.fixture
+def isolated_state(monkeypatch, tmp_path: Path):  # type: ignore[no-untyped-def]
+    """Point the per-session prime markers at a throwaway dir."""
+    state = tmp_path / "state"
+    monkeypatch.setattr(hooks.paths, "state_dir", lambda: state)
+    return state
+
+
+def test_pre_llm_call_emits_context_once_per_session(
+    tmp_path: Path, isolated_state: Path
+) -> None:
+    (tmp_path / "index.md").write_text("RECENT: [[A Memory]]", encoding="utf-8")
+    event = '{"session_id": "sess-abc-123"}'
+
+    first = io.StringIO()
+    hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO(event), stdout=first)
+    payload = json.loads(first.getvalue())
+    assert "RECENT: [[A Memory]]" in payload["context"]  # primed on first turn
+
+    second = io.StringIO()
+    hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO(event), stdout=second)
+    assert second.getvalue() == ""  # same session -> silent no-op
+
+
+def test_pre_llm_call_primes_each_call_without_session_id(
+    tmp_path: Path, isolated_state: Path
+) -> None:
+    (tmp_path / "index.md").write_text("RECENT: [[A Memory]]", encoding="utf-8")
+    # No session id to dedup on -> prime every call rather than risk never.
+    for _ in range(2):
+        out = io.StringIO()
+        hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO("{}"), stdout=out)
+        assert "context" in out.getvalue()
+
+
+def test_pre_llm_call_never_raises_on_garbage(
+    tmp_path: Path, isolated_state: Path
+) -> None:
+    out = io.StringIO()
+    rc = hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO("not json{"), stdout=out)
+    assert rc == 0  # tolerated; never blocks the agent
 
 
 # -- session-start dynamic priming (session state + journal tail) -------------
