@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from pathlib import Path, PurePosixPath
 
@@ -399,7 +400,8 @@ def test_setup_writes_guard_hook_script(
     Provisioner(_config(tmp_path), log=_quiet)._write_guard_hook_script()
     dest = tmp_path / ".claude" / "hooks" / "git-fresh-base.sh"
     assert dest.is_file()
-    assert dest.stat().st_mode & 0o111  # executable bit set
+    if os.name != "nt":  # Windows has no POSIX executable bit to assert on
+        assert dest.stat().st_mode & 0o111
     assert "git-fresh-base" in dest.read_text(encoding="utf-8")
 
 
