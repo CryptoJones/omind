@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.34.0] - 2026-06-18
+
+### Added
+
+- **`omind` Claude Code skill.** `omind setup` now installs a skill at
+  `~/.claude/skills/omind/SKILL.md` (honoring `CLAUDE_CONFIG_DIR`) alongside the
+  MCP server registration. The MCP server provides the memory *tools*; the skill
+  teaches Claude the *procedure* — search-before-save, the single-writer `omind
+  note` write path, and managing the omind CLI (`setup`/`doctor`/`node`/`mesh`).
+  It's a managed file (refreshed when omind's guidance drifts, like the hook
+  scripts), and `omind doctor` reports whether it's installed. The Hermes/OpenClaw
+  `omind-omi-memory` skill is unchanged.
+
 ## [2.33.0] - 2026-06-18
 
 ### Added

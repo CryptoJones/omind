@@ -4,9 +4,12 @@
 
 `omind setup` reproduces, on any machine, the manual steps that register
 omind's own node MCP server (`omind node`, see docs/mesh.md) with the Claude
-Code CLI at user scope, scaffold the OMI folder, and initialize it as a mesh
-node. Every step is safe to re-run: existing files are never clobbered, and
-the MCP server is only (re)registered when its command differs.
+Code CLI at user scope, scaffold the OMI folder, initialize it as a mesh
+node, and install the `omind` skill (which teaches Claude the memory workflow
+and how to drive the CLI — complementing the MCP server's tools). Every step
+is safe to re-run: user files are never clobbered, the MCP server is only
+(re)registered when its command differs, and omind-managed files (hook
+scripts, the skill) are refreshed only when their content drifts.
 """
 
 from __future__ import annotations
@@ -43,6 +46,18 @@ def _enforce_hook_dest() -> Path:
 def _guard_hook_dest() -> Path:
     """Where omind writes the fresh-base git guard hook script on this machine."""
     return Path.home() / ".claude" / "hooks" / "git-fresh-base.sh"
+
+
+def claude_skill_dir() -> Path:
+    """Directory holding omind's Claude Code skill (honors ``CLAUDE_CONFIG_DIR``).
+
+    Claude Code discovers user-scope skills under ``~/.claude/skills/`` — or
+    ``$CLAUDE_CONFIG_DIR/skills/`` when the env var relocates the config dir,
+    matching :func:`claude_settings_path`.
+    """
+    config_dir = os.environ.get("CLAUDE_CONFIG_DIR")
+    base = Path(config_dir) if config_dir else Path.home() / ".claude"
+    return base / "skills" / "omind"
 
 
 Logger = Callable[[str], None]
@@ -439,6 +454,22 @@ class Provisioner:
             with contextlib.suppress(OSError):
                 dest.chmod(0o755)
 
+    def install_claude_skill(self) -> None:
+        """Install omind's Claude Code skill (OMI memory workflow + CLI ops).
+
+        The MCP server gives Claude the memory *tools*; this skill teaches it the
+        *procedure* — search-before-save, the single-writer ``omind note`` path,
+        and managing the omind CLI. Managed like the hook scripts (not
+        write-if-absent) so existing installs pick up edits to omind's guidance.
+        """
+        skill = claude_skill_dir() / paths.AGENT_SKILL_FILENAME
+        content = seeds.CLAUDE_SKILL_TEMPLATE.format(
+            vault=self.config.vault,
+            folder=self.config.folder,
+            omi_dir=self.config.omi_dir,
+        )
+        self._write_managed(skill, content)
+
     def _read_settings(self, path: Path) -> dict[str, Any]:
         """Load settings.json as a dict; raise rather than clobber bad/foreign JSON."""
         if not path.is_file():
@@ -571,6 +602,7 @@ class Provisioner:
         self._write_guard_hook_script()
         self.ensure_hooks_installed()
         self.ensure_guard_hook_installed()
+        self.install_claude_skill()
 
     def run(self) -> list[str]:
         self.log(f"omind setup -> {self.config.omi_dir}")
@@ -709,9 +741,21 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     results.append(_diagnose_hooks(claude_settings_path(), config))
 
+    results.append(_diagnose_claude_skill())
+
     results.append(_diagnose_hook_failures())
 
     return results
+
+
+def _diagnose_claude_skill() -> CheckResult:
+    """Inspect whether omind's Claude Code skill is installed (pure read)."""
+    skill = claude_skill_dir() / paths.AGENT_SKILL_FILENAME
+    if skill.is_file():
+        return CheckResult("claude_skill", "ok", f"omind skill installed: {skill}")
+    return CheckResult(
+        "claude_skill", "warn", f"omind skill missing: {skill} (run `omind setup`)"
+    )
 
 
 def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:

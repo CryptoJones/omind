@@ -65,6 +65,14 @@ def isolate_settings(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return settings
 
 
+@pytest.fixture(autouse=True)
+def isolate_claude_skill(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    """Never touch the real ~/.claude/skills/omind when installing the skill."""
+    skill_dir = tmp_path / "skills" / "omind"
+    monkeypatch.setattr(provision, "claude_skill_dir", lambda: skill_dir)
+    return skill_dir
+
+
 def _config(tmp_path: Path, **kw: object) -> SetupConfig:
     return SetupConfig(vault=tmp_path / "vault", **kw)  # type: ignore[arg-type]
 
@@ -229,6 +237,47 @@ def test_doctor_healthy_when_provisioned(
     assert "legacy_server" not in results
     assert results["hooks"].level == "ok"
     assert provision.run_doctor(config, log=_quiet) == 0
+
+
+def test_real_run_installs_claude_skill(
+    tmp_path: Path,
+    fake_tools: None,
+    fake_subprocess: list[list[str]],
+    isolate_claude: Path,
+    isolate_claude_skill: Path,
+) -> None:
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).run()
+    skill = isolate_claude_skill / paths.AGENT_SKILL_FILENAME
+    assert skill.is_file()
+    body = skill.read_text(encoding="utf-8")
+    assert body.startswith("---\nname: omind\n")
+    assert str(config.vault) in body  # placeholders were filled
+    assert "omind note" in body  # teaches the single-writer write path
+
+
+def test_claude_skill_refreshes_on_drift(
+    tmp_path: Path, fake_tools: None, isolate_claude_skill: Path
+) -> None:
+    """The skill is managed: a stale copy is rewritten, not left as-is."""
+    config = _config(tmp_path)
+    skill = isolate_claude_skill / paths.AGENT_SKILL_FILENAME
+    skill.parent.mkdir(parents=True)
+    skill.write_text("stale", encoding="utf-8")
+    Provisioner(config, log=_quiet).install_claude_skill()
+    assert skill.read_text(encoding="utf-8") != "stale"
+    assert "name: omind" in skill.read_text(encoding="utf-8")
+
+
+def test_doctor_reports_claude_skill(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, isolate_claude_skill: Path
+) -> None:
+    config = _config(tmp_path)
+    missing = {r.key: r for r in provision.diagnose(config)}
+    assert missing["claude_skill"].level == "warn"
+    Provisioner(config, log=_quiet).install_claude_skill()
+    present = {r.key: r for r in provision.diagnose(config)}
+    assert present["claude_skill"].level == "ok"
 
 
 def test_doctor_flags_missing_setup(
