@@ -134,6 +134,82 @@ Rules:
 - `index.md` is maintained by omind — never edit it by hand.
 """
 
+# Skill installed into Claude Code's own skills directory by `omind setup`
+# (the default --agent claude path). Unlike AGENT_SKILL_TEMPLATE — which only
+# teaches the memory write path to agents that lack omind's hooks — this skill
+# also documents managing the omind CLI itself (setup/doctor/node/mesh), since
+# the user asked for both in one skill. Claude discovers skills as a folder
+# holding a SKILL.md with name/description frontmatter. Placeholders: {vault},
+# {folder}, {omi_dir}.
+CLAUDE_SKILL_TEMPLATE = """\
+---
+name: omind
+description: >-
+  Use OMI long-term memory (read via the `omi` MCP tools, write via `omind
+  note`) and manage the omind CLI itself — setup, doctor, the `omind node` MCP
+  server, and mesh replication. Use whenever asked to remember something across
+  sessions, recall earlier memory, or install/repair/replicate omind's memory
+  wiring on a machine.
+---
+
+# omind — OMI memory + CLI
+
+omind gives every agent on this machine one shared long-term memory: a single
+Markdown note per insight in the OMI Obsidian folder at `{omi_dir}`, replicated
+between machines over git (the "mesh"). The `omi` MCP server (omind's own
+`omind node`) is already wired to that folder.
+
+## Using memory
+
+**Read / search — use the `omi` MCP tools** (already connected):
+
+- `search-vault` — find notes by content; do this before answering from
+  scratch, and before saving so you update an existing note rather than
+  duplicating it.
+- `read-note`, `list-notes`, `list-tags`, `backlinks` — pull what's known.
+- `index.md` lists recent memories.
+
+**Write — always through `omind note`** (the single-writer path). Never write
+files into the OMI folder directly: a raw write can interleave with another
+agent's write and corrupt the index. `omind note` is an upsert — re-running with
+the same title updates the note in place:
+
+```bash
+omind note --title "Short Descriptive Title" \\
+  --summary "one-line summary of the insight" \\
+  --tags "topic,subtopic" \\
+  --vault "{vault}" --folder "{folder}" <<'BODY'
+The full insight, in plain Markdown. Link related notes with real
+[[wikilinks]] so the memory graph stays connected.
+BODY
+```
+
+Rules:
+
+- One note per insight, with a descriptive title — never a combined dump.
+- Real `[[wikilinks]]` to related notes; tags are plain comma-separated words.
+- `index.md` is maintained by omind — never edit it by hand.
+
+## Managing omind (the CLI)
+
+- `omind setup` — idempotently wire this machine (MCP server + hooks + this
+  skill). `--agent hermes|openclaw` wires those agents instead of Claude Code;
+  `--dry-run` previews, `--force` rewrites.
+- `omind doctor` — diagnose the wiring; reports what's healthy and what to fix.
+- `omind node --vault "{vault}" --folder "{folder}"` — the stdio MCP server
+  itself (what the `omi` tools run); normally launched by the agent, not by hand.
+- `omind serve` — local web UI to browse, edit, and add memory.
+- `omind mesh add-peer <name> <url>` then `omind mesh install-service` —
+  replicate this folder to another machine. `omind mesh sync` syncs once;
+  `omind mesh clone <url>` seeds a fresh node from a peer.
+- `omind rollup` / `omind reindex` / `omind export` / `omind import` — routine
+  maintenance of the memory folder.
+
+Run any command with `--help` for its full options.
+
+This skill is managed by `omind setup`; edits are overwritten.
+"""
+
 # Bootstrap priming file for OpenClaw. OpenClaw has no stdout-context hook like
 # Claude (SessionStart) or Hermes (pre_llm_call); instead it injects "bootstrap"
 # files (recognized basenames such as MEMORY.md) into the system prompt's
