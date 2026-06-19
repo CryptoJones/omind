@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import importlib.resources
 import io
 import json
+from pathlib import Path
 
-from omind import guard
+import pytest
+
+from omind import guard, paths
 
 
 def test_omi_consult_is_allowed_and_sets_the_per_turn_sentinel() -> None:
@@ -81,3 +85,33 @@ def test_run_guard_check_and_reset_exit_codes() -> None:
     assert ok == 0
     assert guard.run_guard("reset", io.StringIO(json.dumps({"session": "s6"}))) == 0
     assert not guard.consulted_this_turn("s6")
+
+
+def test_clear_gate_reaps_legacy_tmp_sentinels(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(guard, "_LEGACY_SENTINEL_DIRS", (tmp_path,))
+    legacy = tmp_path / "omi-gate-deadbeef"
+    legacy.write_text("")
+    unrelated = tmp_path / "keep.txt"
+    unrelated.write_text("x")
+    guard.clear_gate("sReap")
+    assert not legacy.exists()  # stale prototype sentinel reaped
+    assert unrelated.exists()  # unrelated files untouched
+
+
+def test_sentinel_path_lives_in_state_dir() -> None:
+    assert guard._sentinel_path("abc.def") == paths.state_dir() / "gate-abc.def"
+
+
+def test_guard_and_reset_adapters_share_one_sentinel_path() -> None:
+    """Regression for the /tmp-vs-state-dir drift: the guard and reset adapters
+    must compute the same per-turn sentinel path, and the guard must never use
+    the legacy /tmp path (only the reset reaps it)."""
+    files = importlib.resources.files("omind")
+    guard_sh = files.joinpath("omi-guard.sh").read_text(encoding="utf-8")
+    reset_sh = files.joinpath("omi-gate-reset.sh").read_text(encoding="utf-8")
+    state_expr = "${XDG_STATE_HOME:-$HOME/.local/state}/omind"
+    assert state_expr in guard_sh and "gate-$sid" in guard_sh
+    assert state_expr in reset_sh and "gate-$sid" in reset_sh
+    assert "/tmp/omi-gate" not in guard_sh

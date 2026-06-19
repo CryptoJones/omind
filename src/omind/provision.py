@@ -15,6 +15,7 @@ scripts, the skill) are refreshed only when their content drifts.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.resources
 import json
 import os
@@ -26,9 +27,9 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, ClassVar
+from typing import Any, ClassVar, TextIO
 
-from omind import paths, seeds
+from omind import __version__, guard, paths, seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
 from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
@@ -56,6 +57,86 @@ def _omi_guard_dest() -> Path:
 def _omi_gate_reset_dest() -> Path:
     """Where omind writes the OMI gate-reset adapter on this machine."""
     return Path.home() / ".claude" / "hooks" / "omi-gate-reset.sh"
+
+
+def _legacy_omi_guard_dest() -> Path:
+    """The retired hand-rolled guard adapter (pre-omind-core prototype). Provision
+    strips it from settings.json and deletes this file so a machine that ran the
+    prototype converges onto the shipped ``omi-guard.sh``."""
+    return Path.home() / ".claude" / "hooks" / "omi-git-guard.sh"
+
+
+def _managed_guard_hooks() -> dict[str, Path]:
+    """package-data resource name -> install destination for the OMI-compliance
+    guard hook-set that issues #86/#87 track."""
+    return {
+        "omi-guard.sh": _omi_guard_dest(),
+        "omi-gate-reset.sh": _omi_gate_reset_dest(),
+    }
+
+
+def _shipped_hook_sha(resource: str) -> str | None:
+    """sha256 of a managed hook's *package-data* (pre-substitution) content, so
+    two machines on the same omind version share the same sha."""
+    try:
+        content = (
+            importlib.resources.files("omind").joinpath(resource).read_text(encoding="utf-8")
+        )
+    except (OSError, ModuleNotFoundError):
+        return None
+    return hashlib.sha256(content.encode("utf-8")).hexdigest()
+
+
+def _shipped_hook_shas() -> dict[str, str]:
+    shas: dict[str, str] = {}
+    for resource in _managed_guard_hooks():
+        sha = _shipped_hook_sha(resource)
+        if sha is not None:
+            shas[resource] = sha
+    return shas
+
+
+def _provision_manifest_path() -> Path:
+    """Stamp of the installed guard hook-set (omind version + shipped hook shas),
+    beside the hooks. Lets an upgrade (#87) and ``omind doctor`` (#86) tell a
+    current install from a stale one."""
+    return Path.home() / ".claude" / "hooks" / ".omind-provision.json"
+
+
+def write_provision_manifest() -> None:
+    """Record that the guard hook-set shipped by *this* omind is now installed."""
+    payload = {"omind_version": __version__, "hooks": _shipped_hook_shas()}
+    path = _provision_manifest_path()
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+
+
+def read_provision_manifest() -> dict[str, Any]:
+    try:
+        data = json.loads(_provision_manifest_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def hookset_drift() -> str | None:
+    """Reason the installed guard hook-set is stale vs what this omind ships, or
+    ``None`` when current. Cheap and offline: compares the provision manifest to
+    the running binary's version + shipped hook shas. Drives #87 self-heal and the
+    #86 doctor check."""
+    manifest = read_provision_manifest()
+    if not manifest:
+        return "guard hook-set never stamped by this omind (no provision manifest)"
+    recorded_version = str(manifest.get("omind_version") or "")
+    if recorded_version != __version__:
+        return f"omind {recorded_version or '?'} -> {__version__}: hook-set may be stale"
+    recorded = manifest.get("hooks")
+    recorded = recorded if isinstance(recorded, dict) else {}
+    for name, sha in _shipped_hook_shas().items():
+        if recorded.get(name) != sha:
+            return f"hook {name} differs from the shipped version"
+    return None
 
 
 def claude_skill_dir() -> Path:
@@ -173,6 +254,11 @@ GUARD_HOOK_TIMEOUT = 20
 #: (each adapter's filename always appears in its command).
 OMI_GUARD_MARKER = "omi-guard.sh"
 OMI_GATE_RESET_MARKER = "omi-gate-reset.sh"
+#: The retired hand-rolled PreToolUse('*') guard, replaced by ``omi-guard.sh``.
+#: Provision strips it from settings.json so a prototype machine doesn't run two
+#: guards. (Its name is NOT a substring of OMI_GUARD_MARKER, so the two markers
+#: match independently.)
+LEGACY_OMI_GUARD_MARKER = "omi-git-guard.sh"
 #: Seconds Claude Code waits for the OMI guard adapter (may shell out to
 #: `omind guard check` for a Bash command).
 OMI_GUARD_TIMEOUT = 15
@@ -583,9 +669,23 @@ class Provisioner:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
+    def _remove_legacy_omi_guard(self) -> None:
+        """Delete the retired hand-rolled ``omi-git-guard.sh`` prototype if present,
+        so a machine that ran it converges onto the shipped ``omi-guard.sh``."""
+        dest = _legacy_omi_guard_dest()
+        if not dest.exists():
+            return
+        self._record(f"remove legacy guard adapter {dest}")
+        if not self.config.dry_run:
+            with contextlib.suppress(OSError):
+                dest.unlink()
+
     def _write_omi_guard_scripts(self) -> None:
-        """Write the OMI-compliance guard + gate-reset adapters from package
-        data, substituting the omind binary path and this machine's OMI folder."""
+        """Write the OMI-compliance guard + gate-reset adapters from package data,
+        substituting the omind binary path and this machine's OMI folder. Also
+        retires the legacy prototype adapter and stamps the provision manifest so
+        upgrades can detect hook-set drift (#86/#87)."""
+        self._remove_legacy_omi_guard()
         omind_exe = shutil.which("omind") or "omind"
         omi_dir = str(self.config.omi_dir)
         for resource, dest in (
@@ -608,6 +708,11 @@ class Provisioner:
             if not self.config.dry_run:
                 with contextlib.suppress(OSError):
                     dest.chmod(0o755)
+        # Stamp what we just installed so #87 self-heal / #86 doctor can detect a
+        # later binary shipping a newer hook-set. Silent (not a recorded action),
+        # so re-stamping after a no-op version bump doesn't look like a change.
+        if not self.config.dry_run:
+            write_provision_manifest()
 
     def ensure_omi_guard_installed(self) -> None:
         """Idempotently register the OMI-compliance guard: a PreToolUse('*')
@@ -637,16 +742,20 @@ class Provisioner:
                 "hooks": [{"type": "command", "command": str(_omi_gate_reset_dest())}]
             },
         }
-        markers = {
-            "PreToolUse": OMI_GUARD_MARKER,
-            "UserPromptSubmit": OMI_GATE_RESET_MARKER,
+        strip_markers = {
+            "PreToolUse": (OMI_GUARD_MARKER, LEGACY_OMI_GUARD_MARKER),
+            "UserPromptSubmit": (OMI_GATE_RESET_MARKER,),
         }
 
         changed = False
         for event, entry in desired.items():
             existing = hooks_cfg.get(event)
             existing_list = existing if isinstance(existing, list) else []
-            kept = [e for e in existing_list if markers[event] not in _entry_command_text(e)]
+            kept = [
+                e
+                for e in existing_list
+                if not any(m in _entry_command_text(e) for m in strip_markers[event])
+            ]
             merged = kept + [entry]
             if merged != existing_list:
                 changed = True
@@ -735,6 +844,46 @@ class Provisioner:
         if not self.config.dry_run:
             self.log(self.DONE_MESSAGE)
         return self.actions
+
+
+def heal_omi_guard(
+    vault: Path | None = None,
+    folder: str = "OMI",
+    *,
+    log: Logger = lambda _msg: None,
+) -> bool:
+    """Idempotently (re)install the OMI-compliance guard hook-set and restamp the
+    provision manifest. Returns ``True`` if anything actually changed. Shared by
+    #87 startup self-heal and ``omind setup``; preserves the user's own hooks."""
+    config = SetupConfig(vault=vault or default_vault_path(), folder=folder)
+    prov = Provisioner(config=config, log=log)
+    prov._write_omi_guard_scripts()
+    prov.ensure_omi_guard_installed()
+    return bool(prov.actions)
+
+
+#: Set to disable the on-startup self-heal (for users who manage hooks by hand).
+_AUTOHEAL_DISABLE_ENV = "OMIND_NO_AUTOHEAL"
+
+
+def autoheal_on_startup(vault: Path, folder: str = "OMI", *, out: TextIO | None = None) -> None:
+    """#87: when ``omind node`` starts on a newer binary than the installed guard
+    hook-set, idempotently re-provision it so a machine is never silently left
+    unprotected between ``omind setup`` runs. Opt out with ``OMIND_NO_AUTOHEAL=1``.
+
+    Fully fail-open: the MCP server start must never break, and it only ever writes
+    to stderr — stdout is the MCP protocol channel."""
+    stream = out if out is not None else sys.stderr
+    try:
+        if os.environ.get(_AUTOHEAL_DISABLE_ENV):
+            return
+        reason = hookset_drift()
+        if reason is None:
+            return
+        if heal_omi_guard(vault=vault, folder=folder):
+            print(f"omind: healed OMI-guard hook drift ({reason}).", file=stream)
+    except Exception:
+        return
 
 
 def _read_mcp_servers() -> dict[str, Any]:
@@ -859,6 +1008,8 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     results.append(_diagnose_hooks(claude_settings_path(), config))
 
+    results.append(_diagnose_omi_guard(claude_settings_path(), config))
+
     results.append(_diagnose_claude_skill())
 
     results.append(_diagnose_hook_failures())
@@ -946,6 +1097,83 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     return CheckResult(
         "hooks", "ok",
         "auto-memory hooks installed (PostToolUse, Stop, SessionStart) + enforcement hook"
+    )
+
+
+def _diagnose_omi_guard(settings_path: Path, config: SetupConfig) -> CheckResult:
+    """#86: verify the OMI-compliance guard block-path is actually wired — not just
+    the auto-memory hooks. A green here must mean the per-turn consult gate and the
+    hard blocks really run, so a missing/unwired guard is a ``fail``, not a silent
+    pass."""
+    missing = [str(p) for p in _managed_guard_hooks().values() if not p.is_file()]
+    if missing:
+        return CheckResult(
+            "omi_guard",
+            "fail",
+            f"OMI-compliance guard adapter(s) missing: {', '.join(missing)} — the "
+            "consult gate + hard blocks are NOT enforced (run `omind setup`)",
+        )
+    try:
+        data = json.loads(settings_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError):
+        return CheckResult(
+            "omi_guard",
+            "fail",
+            f"OMI-compliance guard not verifiable: cannot read {settings_path} "
+            "(run `omind setup`)",
+        )
+    hooks_cfg = data.get("hooks") if isinstance(data, dict) else None
+    hooks_cfg = hooks_cfg if isinstance(hooks_cfg, dict) else {}
+    pre_list = hooks_cfg.get("PreToolUse")
+    pre_list = pre_list if isinstance(pre_list, list) else []
+    pre_ok = any(
+        isinstance(e, dict)
+        and e.get("matcher") == "*"
+        and OMI_GUARD_MARKER in _entry_command_text(e)
+        for e in pre_list
+    )
+    ups_list = hooks_cfg.get("UserPromptSubmit")
+    ups_list = ups_list if isinstance(ups_list, list) else []
+    ups_ok = any(OMI_GATE_RESET_MARKER in _entry_command_text(e) for e in ups_list)
+    if not (pre_ok and ups_ok):
+        unwired: list[str] = []
+        if not pre_ok:
+            unwired.append("PreToolUse '*' guard")
+        if not ups_ok:
+            unwired.append("UserPromptSubmit gate-reset")
+        return CheckResult(
+            "omi_guard",
+            "fail",
+            f"OMI-compliance guard not wired in settings.json ({', '.join(unwired)}) "
+            "— the per-turn consult gate is OFF (run `omind setup`)",
+        )
+    # Live block-path smoke test: an unconsulted, non-OMI action must be denied.
+    if guard.decide({"command": "ls", "session": "__omind_doctor__"}).allow:
+        return CheckResult(
+            "omi_guard",
+            "fail",
+            "OMI-compliance guard policy engine allowed an unconsulted action — "
+            "the block-path is broken",
+        )
+    if any(LEGACY_OMI_GUARD_MARKER in _entry_command_text(e) for e in pre_list):
+        return CheckResult(
+            "omi_guard",
+            "warn",
+            "legacy hand-rolled omi-git-guard.sh is still registered alongside the "
+            "shipped guard — run `omind setup` to migrate",
+        )
+    drift = hookset_drift()
+    if drift:
+        return CheckResult(
+            "omi_guard",
+            "warn",
+            f"OMI-compliance guard installed but stale ({drift}) — run `omind setup`",
+        )
+    return CheckResult(
+        "omi_guard",
+        "ok",
+        "OMI-compliance guard wired (PreToolUse '*' + UserPromptSubmit gate-reset); "
+        "block-path live",
     )
 
 

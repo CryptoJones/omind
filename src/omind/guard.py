@@ -37,6 +37,7 @@ import contextlib
 import json
 import re
 import sys
+import tempfile
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -136,10 +137,40 @@ def consulted_this_turn(session: str) -> bool:
     return _sentinel_path(session).exists()
 
 
+#: Pre-state-dir prototype guards wrote the per-turn sentinel to ``/tmp`` rather
+#: than the state dir. The canonical guard never writes there, so any such file
+#: is legacy litter the turn-start reset reaps — otherwise a machine upgrading
+#: from the buggy version leaves stale ``/tmp/omi-gate-*`` files behind. A tuple
+#: (not a hardcoded path) so tests can point it at a temp dir.
+_LEGACY_SENTINEL_DIRS: tuple[Path, ...] = (Path("/tmp"), Path(tempfile.gettempdir()))
+_LEGACY_SENTINEL_GLOB = "omi-gate-*"
+
+
+def _reap_legacy_sentinels() -> None:
+    """Delete leftover ``/tmp/omi-gate-*`` sentinels from the prototype guard."""
+    seen: set[Path] = set()
+    for directory in _LEGACY_SENTINEL_DIRS:
+        if directory in seen:
+            continue
+        seen.add(directory)
+        try:
+            stale = list(directory.glob(_LEGACY_SENTINEL_GLOB))
+        except OSError:
+            continue
+        for path in stale:
+            with contextlib.suppress(OSError):
+                path.unlink()
+
+
 def clear_gate(session: str) -> None:
-    """Clear the per-turn consult sentinel (the harness's turn-start reset)."""
+    """Clear the per-turn consult sentinel (the harness's turn-start reset).
+
+    Also reaps legacy ``/tmp/omi-gate-*`` sentinels left by the pre-state-dir
+    prototype guard, so a machine upgrading from that version does not keep stale
+    sentinels around (the canonical guard never writes ``/tmp``)."""
     with contextlib.suppress(OSError):
         _sentinel_path(session).unlink()
+    _reap_legacy_sentinels()
 
 
 def decide(action: dict[str, Any]) -> Verdict:

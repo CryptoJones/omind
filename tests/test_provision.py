@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import subprocess
@@ -107,6 +108,17 @@ def _provision_files(config: SetupConfig) -> None:
 def _install_hooks(config: SetupConfig) -> None:
     """Write the auto-memory hooks into the isolated settings.json."""
     Provisioner(config, log=_quiet).ensure_hooks_installed()
+
+
+def _install_guard(config: SetupConfig, monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
+    """Install the enforcement + OMI-compliance guard hook *files* and their
+    settings wiring into an isolated home, so the #86 doctor block-path check
+    sees a fully wired guard (files on disk + PreToolUse/UserPromptSubmit + stamp)."""
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: home))
+    prov = Provisioner(config, log=_quiet)
+    prov._write_enforce_hook_script()
+    prov._write_omi_guard_scripts()
+    prov.ensure_omi_guard_installed()
 
 
 def test_default_vault_path_shape() -> None:
@@ -223,12 +235,13 @@ def test_idempotent_files_on_rerun(
 
 
 def test_doctor_healthy_when_provisioned(
-    tmp_path: Path, fake_tools: None, isolate_claude: Path
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
     _write_server_config(isolate_claude, config)
     _install_hooks(config)
+    _install_guard(config, monkeypatch, tmp_path)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["omi_dir"].level == "ok"
     assert results["obsidian_config"].level == "ok"
@@ -236,6 +249,7 @@ def test_doctor_healthy_when_provisioned(
     assert results["mcp_registration"].level == "ok"
     assert "legacy_server" not in results
     assert results["hooks"].level == "ok"
+    assert results["omi_guard"].level == "ok"
     assert provision.run_doctor(config, log=_quiet) == 0
 
 
@@ -293,13 +307,14 @@ def test_doctor_flags_missing_setup(
 
 
 def test_doctor_warns_on_path_mismatch(
-    tmp_path: Path, fake_tools: None, isolate_claude: Path
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
     drifted = {"command": "omind", "args": ["node", "--vault", "/elsewhere", "--folder", "OMI"]}
     isolate_claude.write_text(json.dumps({"mcpServers": {"omi": drifted}}))
     _install_hooks(config)
+    _install_guard(config, monkeypatch, tmp_path)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["mcp_registration"].level == "warn"
     assert provision.run_doctor(config, log=_quiet) == 0  # warnings don't fail
@@ -593,7 +608,11 @@ def test_doctor_fail_when_hooks_absent(
 
 
 def test_doctor_warns_on_hook_path_mismatch(
-    tmp_path: Path, fake_tools: None, isolate_claude: Path, isolate_settings: Path
+    tmp_path: Path,
+    fake_tools: None,
+    isolate_claude: Path,
+    isolate_settings: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
@@ -619,8 +638,10 @@ def test_doctor_warns_on_hook_path_mismatch(
             }
         )
     )
+    _install_guard(config, monkeypatch, tmp_path)
     results = {r.key: r for r in provision.diagnose(config)}
     assert results["hooks"].level == "warn"
+    assert results["omi_guard"].level == "ok"
     assert provision.run_doctor(config, log=_quiet) == 0
 
 
@@ -686,6 +707,103 @@ def test_entry_marker_ignores_foreign_commands() -> None:
     for command in ("echo mine", "myomindish hooks", "omind doctor --vault x"):
         entry = {"hooks": [{"type": "command", "command": command}]}
         assert not provision._entry_has_omind_marker(entry), command
+
+
+# -- guard hook-set: manifest, drift, self-heal, migration (#86/#87) ------------
+
+
+def test_provision_manifest_roundtrip_and_drift(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    assert provision.hookset_drift() is not None  # never stamped yet
+    provision.write_provision_manifest()
+    manifest = provision.read_provision_manifest()
+    assert manifest["omind_version"] == provision.__version__
+    assert "omi-guard.sh" in manifest["hooks"]
+    assert provision.hookset_drift() is None  # freshly stamped by this binary
+    stamp = tmp_path / ".claude" / "hooks" / ".omind-provision.json"
+    stamp.write_text(json.dumps({"omind_version": "0.0.1", "hooks": manifest["hooks"]}))
+    assert provision.hookset_drift() is not None  # older recorded version -> stale
+
+
+def test_autoheal_installs_guard_when_drifted(
+    tmp_path: Path, fake_tools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.delenv("OMIND_NO_AUTOHEAL", raising=False)
+    config = _config(tmp_path)
+    err = io.StringIO()
+    provision.autoheal_on_startup(config.vault, config.folder, out=err)
+    assert (tmp_path / ".claude" / "hooks" / "omi-guard.sh").is_file()
+    assert (tmp_path / ".claude" / "hooks" / "omi-gate-reset.sh").is_file()
+    assert provision.hookset_drift() is None  # stamped -> no longer drifted
+    assert "healed" in err.getvalue()
+    err2 = io.StringIO()
+    provision.autoheal_on_startup(config.vault, config.folder, out=err2)
+    assert err2.getvalue() == ""  # second start: current -> silent no-op
+
+
+def test_autoheal_respects_opt_out(
+    tmp_path: Path, fake_tools: None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    monkeypatch.setenv("OMIND_NO_AUTOHEAL", "1")
+    config = _config(tmp_path)
+    provision.autoheal_on_startup(config.vault, config.folder)
+    assert not (tmp_path / ".claude" / "hooks" / "omi-guard.sh").exists()
+
+
+def test_provision_migrates_legacy_guard(
+    tmp_path: Path, fake_tools: None, isolate_settings: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    hooks_dir = tmp_path / ".claude" / "hooks"
+    hooks_dir.mkdir(parents=True)
+    legacy_file = hooks_dir / "omi-git-guard.sh"
+    legacy_file.write_text("#!/usr/bin/env bash\n# hand-rolled prototype\n")
+    isolate_settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        {
+                            "matcher": "*",
+                            "hooks": [{"type": "command", "command": str(legacy_file)}],
+                        }
+                    ]
+                }
+            }
+        )
+    )
+    config = _config(tmp_path)
+    prov = Provisioner(config, log=_quiet)
+    prov._write_omi_guard_scripts()
+    prov.ensure_omi_guard_installed()
+    assert not legacy_file.exists()  # stale prototype script deleted
+    pre = json.loads(isolate_settings.read_text())["hooks"]["PreToolUse"]
+    assert not any("omi-git-guard.sh" in json.dumps(e) for e in pre)  # deregistered
+    assert any(
+        e.get("matcher") == "*" and "omi-guard.sh" in json.dumps(e) for e in pre
+    )  # canonical installed
+
+
+def test_doctor_fails_when_guard_absent(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#86 regression: auto-memory hooks present but the OMI-compliance guard not
+    installed must be a doctor failure, not a false green."""
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    config = _config(tmp_path)
+    _provision_files(config)
+    _write_server_config(isolate_claude, config)
+    prov = Provisioner(config, log=_quiet)
+    prov._write_enforce_hook_script()
+    prov.ensure_hooks_installed()
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["hooks"].level == "ok"
+    assert results["omi_guard"].level == "fail"
+    assert provision.run_doctor(config, log=_quiet) == 1
 
 
 # -- mesh initialization in setup -------------------------------------------------

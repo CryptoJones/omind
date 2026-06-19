@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.39.0] - 2026-06-19
+
+### Added
+
+- **OMI-guard self-heal + doctor block-path check (closes #86, #87).** A machine
+  running a newer omind binary than its installed guard hook-set is no longer
+  silently left unprotected:
+  - `omind node` self-heals on startup — when the installed OMI-compliance guard
+    hook-set has drifted from what the running binary ships, it idempotently
+    re-provisions the adapters (preserving the user's own hooks). Fail-open and
+    stderr-only (never touches the MCP stdout channel); opt out with
+    `OMIND_NO_AUTOHEAL=1`. (#87)
+  - A provision manifest (`~/.claude/hooks/.omind-provision.json`) stamps the
+    installed hook-set's omind version + shipped hook shas so drift is detectable
+    cheaply and offline.
+  - `omind doctor` gains an OMI-compliance guard block-path check: it now **fails**
+    (instead of a false green) when the `omi-guard.sh` PreToolUse `*` adapter or
+    the `omi-gate-reset.sh` UserPromptSubmit gate-reset is missing/unwired, and
+    runs a live deny smoke test of the policy engine. (#86)
+
+### Fixed
+
+- **Guard gate sentinel hygiene.** `omind setup` now retires the legacy
+  hand-rolled `omi-git-guard.sh` prototype (deregistered from settings.json and
+  deleted from disk) so a prototype machine converges onto the shipped
+  `omi-guard.sh`. The turn-start gate reset also reaps stale `/tmp/omi-gate-*`
+  sentinels left by that prototype — the canonical guard uses the state dir, never
+  `/tmp`.
+
 ## [2.38.0] - 2026-06-19
 
 ### Added

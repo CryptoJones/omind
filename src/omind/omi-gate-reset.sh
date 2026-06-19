@@ -12,4 +12,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
 [ -z "$sid" ] && sid="nosid"
 rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/omind/gate-$sid" 2>/dev/null
+# Reap legacy /tmp/omi-gate-* sentinels left by the pre-state-dir prototype guard
+# (the canonical guard never writes /tmp, so any such file is stale litter).
+rm -f /tmp/omi-gate-* 2>/dev/null
 exit 0

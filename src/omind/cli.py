@@ -448,6 +448,11 @@ def _run_node(args: argparse.Namespace) -> int:
     except MeshError as exc:
         print(f"warning: {exc}; serving without a mesh identity", file=sys.stderr)
         cfg = None
+    # #87: self-heal a stale/missing guard hook-set on a newer binary (fail-open,
+    # stderr only — stdout is the MCP channel). Opt out with OMIND_NO_AUTOHEAL=1.
+    from omind.provision import autoheal_on_startup
+
+    autoheal_on_startup(args.vault, args.folder)
     from omind.update import update_nudge
 
     nudge = update_nudge()  # cached, fail-open; stderr only — stdout is the MCP channel
