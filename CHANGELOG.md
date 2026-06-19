@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.38.0] - 2026-06-19
+
+### Added
+
+- **Version check + `omind self-update`.** omind now checks the running version
+  against the latest on GitHub (newest Release, falling back to the highest git
+  *tag* — taking the max, since tag-only releases otherwise look stale), cached
+  once a day in `state_dir` and fail-open (`OMIND_NO_UPDATE_CHECK=1` disables it).
+  `omind doctor` reports when you're behind, and `omind node` prints a one-line
+  **stderr** nudge on start (never blocks, never touches the stdio MCP channel).
+  `omind self-update` is the explicit updater: it detects the install method
+  (`uv tool` / pip / editable) and reinstalls the latest tag from the public
+  GitHub repo (`--check` to only report, `--force` to reinstall regardless).
+  Notify-first by design — never silent auto-apply, since omind backs every
+  agent's memory. Closes the gap where a pinned `uv tool` install kept serving an
+  old version after a release. See `docs/self-update.md`.
+
 ## [2.37.0] - 2026-06-19
 
 ### Fixed

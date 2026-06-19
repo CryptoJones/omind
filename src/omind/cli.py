@@ -61,7 +61,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{setup,quickstart,serve,doctor,backup,export,import,reindex,note,rollup,hook}",
+        metavar="{setup,quickstart,serve,doctor,self-update,backup,export,import,reindex,note,rollup,hook}",
     )
 
     setup = sub.add_parser(
@@ -334,6 +334,16 @@ def build_parser() -> argparse.ArgumentParser:
         "per-turn consult gate for a session",
     )
 
+    selfupdate = sub.add_parser(
+        "self-update", help="check GitHub for a newer omind and reinstall it"
+    )
+    selfupdate.add_argument(
+        "--check", action="store_true", help="only report whether an update is available"
+    )
+    selfupdate.add_argument(
+        "--force", action="store_true", help="reinstall the latest even if not newer"
+    )
+
     return parser
 
 
@@ -383,7 +393,13 @@ def _run_doctor(args: argparse.Namespace) -> int:
         server_name=args.server_name,
         agent=args.agent,
     )
-    return run_doctor(config, diagnose_fn=_diagnose_with_backup)
+    rc = run_doctor(config, diagnose_fn=_diagnose_with_backup)
+    from omind.update import update_nudge
+
+    nudge = update_nudge()
+    if nudge:
+        print(f"\n{nudge}")
+    return rc
 
 
 def _run_backup(args: argparse.Namespace) -> int:
@@ -432,6 +448,11 @@ def _run_node(args: argparse.Namespace) -> int:
     except MeshError as exc:
         print(f"warning: {exc}; serving without a mesh identity", file=sys.stderr)
         cfg = None
+    from omind.update import update_nudge
+
+    nudge = update_nudge()  # cached, fail-open; stderr only — stdout is the MCP channel
+    if nudge:
+        print(nudge, file=sys.stderr)
     return run_node(omi_dir, node_id=cfg.node_id if cfg else None)
 
 
@@ -614,6 +635,12 @@ def _run_hook(args: argparse.Namespace) -> int:
     return run_hook(args.event, omi_dir)  # always 0; must never block the agent
 
 
+def _run_self_update(args: argparse.Namespace) -> int:
+    from omind.update import self_update
+
+    return self_update(check_only=args.check, force=args.force)
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
@@ -649,6 +676,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_hook(args)
     if args.command == "guard":
         return run_guard(args.action)
+    if args.command == "self-update":
+        return _run_self_update(args)
     parser.print_help()
     return 0
 
