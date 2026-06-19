@@ -55,6 +55,22 @@ def test_codeberg_push_is_allowed_after_consult() -> None:
     guard.clear_gate("s5")
 
 
+def test_github_push_is_opt_in_not_hard() -> None:
+    guard.mark_consulted("s7")
+    bare = "git push https://x@github.com/CryptoJones/omind.git main"
+    assert not guard.decide({"command": bare, "session": "s7"}).allow  # blocked by default
+    optin = "OMI_PUSH_GITHUB=1 " + bare
+    assert guard.decide({"command": optin, "session": "s7"}).allow  # deliberate push allowed
+    # the opt-in does NOT bypass the absolute hard rules
+    assert not guard.decide(
+        {"command": "OMI_PUSH_GITHUB=1 gh pr create --title x", "session": "s7"}
+    ).allow
+    assert not guard.decide(
+        {"command": "OMI_PUSH_GITHUB=1 gh repo delete x/y", "session": "s7"}
+    ).allow
+    guard.clear_gate("s7")
+
+
 def test_run_guard_check_and_reset_exit_codes() -> None:
     guard.clear_gate("s6")
     blocked = guard.run_guard("check", io.StringIO(json.dumps({"command": "ls", "session": "s6"})))

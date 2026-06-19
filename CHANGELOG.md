@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.36.0] - 2026-06-19
+
+### Changed
+
+- **GitHub push relaxed from a hard block to a deliberate opt-in.** `omind.guard`
+  no longer hard-denies a GitHub push; a `git push` / HTTPS-remote-set to
+  github.com is allowed when the command opts in with `OMI_PUSH_GITHUB=1` — a
+  deliberate mirror of Codeberg's exact commit. Impulsive/accidental github-first
+  pushes are still blocked, and `gh pr create`/`merge`, `gh auth setup-git`, and
+  repo-deletes stay hard. The `omi-guard.sh` adapter delegates Bash commands to
+  the core, so it inherits this unchanged. Codeberg remains the source of truth.
+
 ## [2.35.0] - 2026-06-19
 
 ### Added

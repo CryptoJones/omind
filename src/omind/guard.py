@@ -22,6 +22,8 @@ Decision order:
   1. An OMI consult sets the per-turn sentinel and is always allowed (so the
      gate can never deadlock — the clear-path is always available).
   2. HARD BLOCKS — the destructive/forge deny set, deterministic, no bypass.
+  2b. GITHUB PUSH — blocked unless the command opts in with ``OMI_PUSH_GITHUB=1``
+     (a deliberate mirror of Codeberg's exact commit); otherwise denied.
   3. THE GATE — block until OMI was consulted this turn; ``omind guard reset``
      (the harness's turn-start hook) clears the sentinel.
 
@@ -41,28 +43,18 @@ from typing import Any, TextIO
 
 from omind import paths
 
-#: The destructive / forge deny set. Phase 2 promotes this to a data table the
-#: learning loop appends to; for now it is the seed policy, in code.
+#: The destructive / forge deny set — absolute, no bypass. Phase 2 promotes this
+#: to a data table the learning loop appends to; for now it is the seed policy.
 HARD_RULES: tuple[tuple[str, str], ...] = (
     (
         r"\bgh\s+auth\s+setup-git\b",
-        "never 'gh auth setup-git'. GitHub auth = SSH, else the gh-YOLO PAT "
-        "from pass via a one-shot credential helper. Read OMI: github-auth-ssh.",
-    ),
-    (
-        r"(push|remote\s+(set-url|add))[^|;&]*https://[^\s]*github\.com",
-        "no HTTPS-GitHub push/remote-set. Use SSH, or the gh-YOLO pass "
-        "credential helper. Read OMI: github-auth-ssh.",
+        "never 'gh auth setup-git'. GitHub auth = the gh-YOLO PAT from pass via "
+        "a one-shot (per-command) credential helper. Read OMI: github-auth-ssh.",
     ),
     (
         r"\bgh\s+pr\s+(create|merge)\b",
         "GitHub never gets a PR. PR + merge happen on Codeberg; GitHub mirrors "
         "Codeberg's exact commit. Read OMI: codeberg-authoritative.",
-    ),
-    (
-        r"\bgit\s+push\b[^|;&]*github",
-        "no discretionary GitHub push. Codeberg is the source of truth (push "
-        "it first, over SSH). Read OMI: codeberg-authoritative.",
     ),
     (
         r"\bgh\s+repo\s+delete\b",
@@ -76,8 +68,34 @@ HARD_RULES: tuple[tuple[str, str], ...] = (
     ),
 )
 
+#: GitHub PUSH — relaxed from the hard set to a DELIBERATE opt-in (2026-06-19).
+#: A github push is the mirror of Codeberg's exact commit; it is blocked unless
+#: the command explicitly opts in with ``OMI_PUSH_GITHUB=1``, so an impulsive
+#: github-first push is still caught while a deliberate mirror sync goes through.
+#: Codeberg stays the source of truth — push it first.
+GITHUB_PUSH_RULES: tuple[tuple[str, str], ...] = (
+    (
+        r"(push|remote\s+(set-url|add))[^|;&]*https://[^\s]*github\.com",
+        "no HTTPS-GitHub push/remote-set. For a deliberate mirror of Codeberg's "
+        "exact commit, prefix OMI_PUSH_GITHUB=1 and use the gh-YOLO pass "
+        "credential helper. Read OMI: github-auth-ssh, codeberg-authoritative.",
+    ),
+    (
+        r"\bgit\s+push\b[^|;&]*github",
+        "no discretionary GitHub push. Codeberg is the source of truth (push it "
+        "first). A deliberate mirror push opts in with OMI_PUSH_GITHUB=1. "
+        "Read OMI: codeberg-authoritative.",
+    ),
+)
+
+#: Set in a command to deliberately allow a single GitHub mirror push.
+GITHUB_PUSH_OPT_IN = re.compile(r"OMI_PUSH_GITHUB=1")
+
 _HARD_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
     (re.compile(rx), msg) for rx, msg in HARD_RULES
+)
+_GITHUB_PUSH_PATTERNS: tuple[tuple[re.Pattern[str], str], ...] = tuple(
+    (re.compile(rx), msg) for rx, msg in GITHUB_PUSH_RULES
 )
 
 GATE_MESSAGE = (
@@ -138,6 +156,12 @@ def decide(action: dict[str, Any]) -> Verdict:
     for pattern, message in _HARD_PATTERNS:
         if pattern.search(command):
             return Verdict(allow=False, reason=f"omi-guard (hard): {message}")
+
+    # 2b) GitHub push — blocked unless the command deliberately opts in.
+    if not GITHUB_PUSH_OPT_IN.search(command):
+        for pattern, message in _GITHUB_PUSH_PATTERNS:
+            if pattern.search(command):
+                return Verdict(allow=False, reason=f"omi-guard (github-push): {message}")
 
     # 3) The gate — block until OMI was consulted this turn.
     if consulted_this_turn(session):
