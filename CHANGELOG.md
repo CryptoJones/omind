@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.35.0] - 2026-06-19
+
+### Added
+
+- **OMI-compliance enforcement guard (cross-agent core).** A new harness-agnostic
+  decision engine, `omind guard check`/`reset` (`omind.guard`), is the single
+  place every agent asks "may I run this action?": it hard-blocks the known
+  git/forge mistakes (`gh auth setup-git`, HTTPS-GitHub pushes, `gh pr
+  create`/`merge`, discretionary `git push …github`, repo deletes) and enforces
+  a per-turn "consult OMI before acting" gate — with the policy in one place so a
+  rule enforces identically across Claude Code, Hermes, OpenClaw, and OpenCode.
+  `omind setup` installs two thin Claude Code adapters — a PreToolUse(`*`)
+  `omi-guard.sh` (the per-turn gate runs in bash for speed; Bash commands
+  delegate the hard-block policy to the core) and a UserPromptSubmit
+  `omi-gate-reset.sh` — preserving existing user hooks, and allow-lists OMI reads
+  so the gate's clear-path can never be permission-denied. Fail-open on adapter
+  errors; the destructive blocks fail-closed. (First phase of a phased
+  enforcement + self-learning subsystem.)
+
 ## [2.34.0] - 2026-06-18
 
 ### Added

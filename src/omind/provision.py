@@ -48,6 +48,16 @@ def _guard_hook_dest() -> Path:
     return Path.home() / ".claude" / "hooks" / "git-fresh-base.sh"
 
 
+def _omi_guard_dest() -> Path:
+    """Where omind writes the OMI-compliance guard adapter on this machine."""
+    return Path.home() / ".claude" / "hooks" / "omi-guard.sh"
+
+
+def _omi_gate_reset_dest() -> Path:
+    """Where omind writes the OMI gate-reset adapter on this machine."""
+    return Path.home() / ".claude" / "hooks" / "omi-gate-reset.sh"
+
+
 def claude_skill_dir() -> Path:
     """Directory holding omind's Claude Code skill (honors ``CLAUDE_CONFIG_DIR``).
 
@@ -158,6 +168,14 @@ LEGACY_SERVER_NAME = "obsidian"
 GUARD_HOOK_MARKER = "git-fresh-base.sh"
 #: Seconds Claude Code waits for the guard (it runs `git fetch` before deciding).
 GUARD_HOOK_TIMEOUT = 20
+
+#: Markers identifying omind's OMI-compliance guard entries in settings.json
+#: (each adapter's filename always appears in its command).
+OMI_GUARD_MARKER = "omi-guard.sh"
+OMI_GATE_RESET_MARKER = "omi-gate-reset.sh"
+#: Seconds Claude Code waits for the OMI guard adapter (may shell out to
+#: `omind guard check` for a Bash command).
+OMI_GUARD_TIMEOUT = 15
 
 
 @dataclass
@@ -565,6 +583,104 @@ class Provisioner:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
+    def _write_omi_guard_scripts(self) -> None:
+        """Write the OMI-compliance guard + gate-reset adapters from package
+        data, substituting the omind binary path and this machine's OMI folder."""
+        omind_exe = shutil.which("omind") or "omind"
+        omi_dir = str(self.config.omi_dir)
+        for resource, dest in (
+            ("omi-guard.sh", _omi_guard_dest()),
+            ("omi-gate-reset.sh", _omi_gate_reset_dest()),
+        ):
+            try:
+                content = (
+                    importlib.resources.files("omind")
+                    .joinpath(resource)
+                    .read_text(encoding="utf-8")
+                )
+            except Exception as exc:
+                self.log(f"  WARNING: could not read {resource} from package data: {exc}")
+                continue
+            content = content.replace("__OMIND_BIN__", omind_exe).replace(
+                "__OMI_DIR__", omi_dir
+            )
+            self._write_managed(dest, content)
+            if not self.config.dry_run:
+                with contextlib.suppress(OSError):
+                    dest.chmod(0o755)
+
+    def ensure_omi_guard_installed(self) -> None:
+        """Idempotently register the OMI-compliance guard: a PreToolUse('*')
+        adapter and a UserPromptSubmit gate-reset, plus an allow-list for OMI
+        reads so the gate's clear-path can never be permission-denied. omind's
+        entries are found by the adapter filename in the command, so a user's
+        own hooks are preserved and re-runs never duplicate.
+        """
+        path = claude_settings_path()
+        data = self._read_settings(path)
+        hooks_cfg = data.get("hooks")
+        if not isinstance(hooks_cfg, dict):
+            hooks_cfg = {}
+
+        desired: dict[str, dict[str, Any]] = {
+            "PreToolUse": {
+                "matcher": "*",
+                "hooks": [
+                    {
+                        "type": "command",
+                        "command": str(_omi_guard_dest()),
+                        "timeout": OMI_GUARD_TIMEOUT,
+                    }
+                ],
+            },
+            "UserPromptSubmit": {
+                "hooks": [{"type": "command", "command": str(_omi_gate_reset_dest())}]
+            },
+        }
+        markers = {
+            "PreToolUse": OMI_GUARD_MARKER,
+            "UserPromptSubmit": OMI_GATE_RESET_MARKER,
+        }
+
+        changed = False
+        for event, entry in desired.items():
+            existing = hooks_cfg.get(event)
+            existing_list = existing if isinstance(existing, list) else []
+            kept = [e for e in existing_list if markers[event] not in _entry_command_text(e)]
+            merged = kept + [entry]
+            if merged != existing_list:
+                changed = True
+            hooks_cfg[event] = merged
+
+        perms = data.get("permissions")
+        if not isinstance(perms, dict):
+            perms = {}
+        allow = perms.get("allow")
+        allow_list = list(allow) if isinstance(allow, list) else []
+        for rule in (
+            f"Read({self.config.omi_dir}/**)",
+            "mcp__omi__read-note",
+            "mcp__omi__search-vault",
+            "mcp__omi__list-notes",
+        ):
+            if rule not in allow_list:
+                allow_list.append(rule)
+                changed = True
+        perms["allow"] = allow_list
+
+        if not changed and not self.config.force:
+            self.log(f"  OMI-compliance guard already installed in {path}")
+            return
+
+        data["hooks"] = hooks_cfg
+        data["permissions"] = perms
+        self._record(
+            f"install OMI-compliance guard (PreToolUse '*' + UserPromptSubmit) in {path}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
     def verify(self) -> None:
         if self.config.dry_run:
             return
@@ -602,6 +718,8 @@ class Provisioner:
         self._write_guard_hook_script()
         self.ensure_hooks_installed()
         self.ensure_guard_hook_installed()
+        self._write_omi_guard_scripts()
+        self.ensure_omi_guard_installed()
         self.install_claude_skill()
 
     def run(self) -> list[str]:

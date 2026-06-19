@@ -25,6 +25,7 @@ from pathlib import Path
 
 from omind import __version__
 from omind.agents import AGENT_CHOICES, diagnose_for, run_setup_for
+from omind.guard import run_guard
 from omind.hooks import ALL_HOOK_EVENTS, run_hook
 from omind.provision import (
     CheckResult,
@@ -320,6 +321,18 @@ def build_parser() -> argparse.ArgumentParser:
         "Hermes Agent: pre_llm_call)",
     )
     _add_vault_args(hook)
+
+    guard = sub.add_parser(
+        "guard",
+        help="(internal) OMI-compliance enforcement decision for an agent "
+        "action; called by the per-harness guard adapters",
+    )
+    guard.add_argument(
+        "action",
+        choices=("check", "reset"),
+        help="check an action (allow/deny on stdin JSON) or reset the "
+        "per-turn consult gate for a session",
+    )
 
     return parser
 
@@ -634,6 +647,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_rollup(args)
     if args.command == "hook":
         return _run_hook(args)
+    if args.command == "guard":
+        return run_guard(args.action)
     parser.print_help()
     return 0
 

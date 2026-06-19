@@ -493,6 +493,56 @@ def test_guard_hook_dry_run_writes_nothing(
     assert not (tmp_path / ".claude" / "hooks" / "git-fresh-base.sh").exists()
 
 
+def test_setup_writes_omi_guard_scripts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    Provisioner(_config(tmp_path), log=_quiet)._write_omi_guard_scripts()
+    hooks = tmp_path / ".claude" / "hooks"
+    for name in ("omi-guard.sh", "omi-gate-reset.sh"):
+        dest = hooks / name
+        assert dest.is_file()
+        if os.name != "nt":
+            assert dest.stat().st_mode & 0o111
+        body = dest.read_text(encoding="utf-8")
+        assert "__OMI_DIR__" not in body  # install-time placeholders substituted
+        assert "__OMIND_BIN__" not in body
+
+
+def test_omi_guard_installed_idempotently(tmp_path: Path, isolate_settings: Path) -> None:
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).ensure_omi_guard_installed()
+    before = isolate_settings.read_text(encoding="utf-8")
+    Provisioner(config, log=_quiet).ensure_omi_guard_installed()  # second run: no change
+    assert isolate_settings.read_text(encoding="utf-8") == before
+    data = json.loads(before)
+    pre = [e for e in data["hooks"]["PreToolUse"] if "omi-guard.sh" in json.dumps(e)]
+    ups = [e for e in data["hooks"]["UserPromptSubmit"] if "omi-gate-reset.sh" in json.dumps(e)]
+    assert len(pre) == 1
+    assert pre[0]["matcher"] == "*"
+    assert len(ups) == 1
+    assert "mcp__omi__read-note" in data["permissions"]["allow"]
+
+
+def test_omi_guard_preserves_user_hooks(tmp_path: Path, isolate_settings: Path) -> None:
+    user_pre = {"matcher": "Bash", "hooks": [{"type": "command", "command": "/x/mine.sh"}]}
+    isolate_settings.write_text(json.dumps({"hooks": {"PreToolUse": [user_pre]}}))
+    Provisioner(_config(tmp_path), log=_quiet).ensure_omi_guard_installed()
+    pre = json.loads(isolate_settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert user_pre in pre  # untouched
+    assert any("omi-guard.sh" in json.dumps(e) for e in pre)
+    assert len(pre) == 2
+
+
+def test_omi_guard_dry_run_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    prov = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)
+    prov._write_omi_guard_scripts()
+    prov.ensure_omi_guard_installed()
+    assert not isolate_settings.exists()
+    assert not (tmp_path / ".claude" / "hooks" / "omi-guard.sh").exists()
+
+
 def test_hook_path_drift_triggers_update(tmp_path: Path, isolate_settings: Path) -> None:
     stale_cmd = 'omind hook PostToolUse --vault "/old/vault" --folder OMI'
     stale = {

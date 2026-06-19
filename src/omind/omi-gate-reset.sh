@@ -1,0 +1,15 @@
+#!/usr/bin/env bash
+# omi-gate-reset.sh — Claude Code UserPromptSubmit adapter, installed by omind.
+#
+# Clears the per-turn OMI-consult sentinel so omi-guard.sh re-arms each turn:
+# the first non-OMI action of every turn is blocked until OMI is consulted.
+# Pure bash (no subprocess); the sentinel path matches omind's state dir, the
+# same location guard.py uses. Never raises.
+
+set -u
+input="$(cat 2>/dev/null)"
+command -v jq >/dev/null 2>&1 || exit 0
+sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
+[ -z "$sid" ] && sid="nosid"
+rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/omind/gate-$sid" 2>/dev/null
+exit 0
