@@ -346,6 +346,50 @@ def render_fields(f: NoteFields) -> str:
     return "\n".join(out).rstrip() + "\n"
 
 
+def _split_field_headings(body: str) -> tuple[str, dict[str, list[str]]]:
+    """Split a free-text field body into ``(text before the first ## H2,
+    {heading: body lines})``.
+
+    Mirrors how :func:`split_sections` re-reads an ``## H2`` embedded in a
+    Summary/Details body — the H2 opens a new section. Hoisting these out before
+    render (see :func:`_hoist_field_headings`) is what keeps render/parse stable.
+    """
+    pre: list[str] = []
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    for line in body.splitlines():
+        m = re.match(r"^##\s+(.*)$", line)
+        if m:
+            current = m.group(1).strip()
+            sections.setdefault(current, [])
+            continue
+        (sections[current] if current is not None else pre).append(line)
+    return "\n".join(pre).strip(), {h: _strip_blank_edges(v) for h, v in sections.items()}
+
+
+def _hoist_field_headings(fields: NoteFields) -> None:
+    """Move any ``## H2`` out of ``summary``/``details`` into ``extras`` in place.
+
+    The note format delimits fields with ``## H2``, so an H2 inside a free-text
+    field body is reparsed as its own section on the next read. Normalizing the
+    fields into that shape *before* render (a) makes ``render_fields``
+    round-trip-stable, and (b) stops a caller that re-supplies the whole body
+    through ``details`` (the only multi-section field the MCP/CLI API exposes)
+    from stacking a duplicate of each section onto the inherited extras on every
+    edit. The freshly-supplied body wins a name clash.
+    """
+    for attr in ("summary", "details"):
+        body: str = getattr(fields, attr)
+        if "##" not in body:  # fast path: no possible heading
+            continue
+        pre, hoisted = _split_field_headings(body)
+        if not hoisted:
+            continue
+        setattr(fields, attr, pre)
+        for heading, lines in hoisted.items():
+            fields.extras[heading] = lines
+
+
 def _collapse(text: str, limit: int) -> str:
     """Collapse whitespace to one line and truncate to ``limit`` characters."""
     collapsed = re.sub(r"\s+", " ", text).strip()
@@ -769,6 +813,7 @@ class OmiStore:
         path = self.safe_name(filename)
         if path.exists():
             raise NoteError(f"a note named {filename!r} already exists")
+        _hoist_field_headings(fields)  # canonicalize ## H2-in-body -> extras
         return self.write_note(filename, render_fields(fields))
 
     def update_note(
@@ -792,6 +837,11 @@ class OmiStore:
             # non-template sections. Inherit them like rev/created above.
             if not fields.extras:
                 fields.extras = current.extras
+            # A multi-section body supplied through `details` (the only such
+            # field the MCP/CLI API exposes) carries ## H2s that read back as
+            # extras. Hoist them now so they REPLACE the same-named inherited
+            # extra instead of rendering twice and accumulating on every edit.
+            _hoist_field_headings(fields)
             return render_fields(fields)
 
         return self._mutate_note(name, transform, expected_version=expected_version)

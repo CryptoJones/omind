@@ -91,6 +91,35 @@ def test_update_note_preserves_extras_on_partial_edit(store: OmiStore) -> None:
     assert reread.extras == {"Extra": ["keep me"]}
 
 
+def test_h2_in_details_survives_repeated_edits_without_duplicating(store: OmiStore) -> None:
+    # The corruption that bit the omind roadmap note: the MCP/CLI API can only
+    # express a multi-section body through `details`, but a `## H2` inside details
+    # reads back as an extra — so without normalization, every re-edit rendered the
+    # body's H2s AND the inherited extras, doubling each section on every save.
+    body = "intro\n\n## Origin\nA\n\n## Phase\nB"
+    name = store.create_note(NoteFields(title="Roadmap", summary="s", details=body))
+    for _ in range(3):
+        store.update_note(name, NoteFields(title="Roadmap", summary="s", details=body))
+    text = store.read_note(name)
+    assert text.count("## Origin") == 1
+    assert text.count("## Phase") == 1
+    reread = store.read_fields(name)
+    assert reread.details == "intro"
+    assert reread.extras == {"Origin": ["A"], "Phase": ["B"]}
+
+
+def test_h2_edit_replaces_section_and_keeps_other_extras(store: OmiStore) -> None:
+    # A re-supplied body updates its own section in place; a genuine extra the
+    # body never mentions is preserved (not dropped, not duplicated).
+    name = store.create_note(
+        NoteFields(title="Doc", summary="s", details="## Section\nv1", extras={"Aside": ["keep"]})
+    )
+    store.update_note(name, NoteFields(title="Doc", summary="s", details="## Section\nv2"))
+    reread = store.read_fields(name)
+    assert reread.extras == {"Aside": ["keep"], "Section": ["v2"]}
+    assert store.read_note(name).count("## Section") == 1
+
+
 def test_from_dict_preserves_extras() -> None:
     restored = NoteFields.from_dict({"title": "X", "extras": {"H": ["a", "b"]}})
     assert restored.extras == {"H": ["a", "b"]}

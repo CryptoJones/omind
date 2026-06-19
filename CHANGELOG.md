@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.37.0] - 2026-06-19
+
+### Fixed
+
+- **Repeated `edit-note` no longer duplicates a note's body sections.** The note
+  format delimits fields with `## H2`, but the only multi-section field the
+  MCP/CLI API exposes is `details` — so a structured body goes in there, its
+  `## H2`s read back as `extras`, and every subsequent edit rendered *both* the
+  re-supplied body and the inherited extras, stacking a duplicate of each section
+  on every save (this is what corrupted a long roadmap note into three
+  contradictory copies of its sections). The write path (`store.create_note` /
+  `update_note`, hence every surface: MCP, web, `omind note`, Hermes upsert) now
+  hoists any `## H2` out of `summary`/`details` into `extras` before render, so a
+  re-supplied section *replaces* its same-named extra instead of accumulating.
+  Round-trip is now stable; genuine unrelated extras are still preserved.
+
 ## [2.36.0] - 2026-06-19
 
 ### Changed
