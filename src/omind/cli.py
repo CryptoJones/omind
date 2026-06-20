@@ -388,6 +388,12 @@ def build_parser() -> argparse.ArgumentParser:
     guard.add_argument(
         "--limit", type=int, default=20, help="max compliance-log rows (for `guard log`)"
     )
+    guard.add_argument(
+        "--explain",
+        action="store_true",
+        help="for `guard verify`: print the relevance score/threshold/band "
+        "diagnostic (debug a REQUIRE-mode false negative) instead of judging",
+    )
 
     selfupdate = sub.add_parser(
         "self-update", help="check GitHub for a newer omind and reinstall it"
@@ -761,6 +767,7 @@ def main(argv: list[str] | None = None) -> int:
             harness=args.harness,
             limit=args.limit,
             command=args.guard_command,
+            explain=args.explain,
         )
     if args.command == "self-update":
         return _run_self_update(args)

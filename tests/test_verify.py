@@ -166,3 +166,71 @@ def test_run_guard_verify_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         )
     )
     assert guard.run_guard("verify", event, omi_dir=omi) == 0
+
+
+# -- 2.41.1: tunable thresholds, always-relevant allowlist, explain, past mistakes --
+
+
+def test_tunable_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
+    def boom(*a: object, **k: object) -> bool:
+        raise AssertionError("model should not be called")
+
+    monkeypatch.setattr(verify, "_ask_model", boom)
+    # zero overlap -> deterministic irrelevant by default
+    assert verify.judge("codeberg release", "banana mango smoothie") is False
+    # lower HIGH to 0 -> any score is "high" -> relevant, still no model call
+    monkeypatch.setenv("OMI_VERIFY_HIGH", "0.0")
+    assert verify.judge("codeberg release", "banana mango smoothie") is True
+
+
+def test_always_relevant_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    omi = _omi(tmp_path)
+    note = omi / "codeberg-authoritative.md"
+    note.write_text("# Codeberg\n\nhosting order mirror push remote\n", encoding="utf-8")
+    guard.begin_turn("ar", "cut the release please")  # terse -> would score low/irrelevant
+    guard.mark_consulted("ar")
+    monkeypatch.setenv("OMI_VERIFY_ALWAYS_RELEVANT", "codeberg-authoritative")
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "ar", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert verdict == "relevant"  # allowlisted -> never re-closes the gate
+    assert guard.consulted_this_turn("ar")
+
+
+def test_past_mistakes_context() -> None:
+    assert verify._past_mistakes_context() == ""  # none yet
+    compliance.log_event(
+        compliance.KIND_VIOLATION, rule_id=verify.OFF_TOPIC_RULE, command="Smoothie.md",
+        outcome="irrelevant",
+    )
+    ctx = verify._past_mistakes_context()
+    assert "Smoothie.md" in ctx and "off-topic" in ctx.lower()
+
+
+def test_explain_consult(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    note = omi / "Codeberg.md"
+    note.write_text("# Codeberg\n\ncodeberg release push mirror workflow\n", encoding="utf-8")
+    guard.begin_turn("ex", "how to codeberg release push mirror")
+    info = verify.explain_consult(
+        {"tool_name": "Read", "session_id": "ex", "tool_input": {"file_path": str(note)}}, omi
+    )
+    assert info is not None
+    assert info["kind"] == "read" and info["score"] >= 0.5
+    assert "high" in info["band"] and info["verdict"] is True
+    bash = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
+    assert verify.explain_consult(bash, omi) is None
+
+
+def test_run_guard_verify_explain(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    note = omi / "Codeberg.md"
+    note.write_text("# Codeberg\n\ncodeberg release push\n", encoding="utf-8")
+    guard.begin_turn("ge", "codeberg release push")
+    payload = {"tool_name": "Read", "session_id": "ge", "tool_input": {"file_path": str(note)}}
+    event = io.StringIO(json.dumps(payload))
+    assert guard.run_guard("verify", event, omi_dir=omi, explain=True) == 0

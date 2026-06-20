@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.41.1] - 2026-06-20
+
+### Added
+
+- **Verifier friction fixes + past-mistakes priming (closes #62).** The Layer-C
+  relevance verifier got too strict on terse prompts under `OMI_VERIFY_REQUIRE`
+  (a short task string shares few keywords with a relevant note's body, scoring
+  low → re-closing the gate). Mitigations:
+  - **`omind guard verify --explain`** prints the relevance score, the thresholds,
+    which band it lands in, the verdict, and the notes it would suggest — so a
+    false negative is debuggable instead of opaque.
+  - **Tunable thresholds** — `OMI_VERIFY_HIGH` / `OMI_VERIFY_LOW` override the
+    deterministic-relevant / -irrelevant cutoffs (widen the model band or the
+    relevant band for short-prompt workflows).
+  - **Always-relevant allowlist** — `OMI_VERIFY_ALWAYS_RELEVANT` (comma-separated
+    substrings): a consult whose target matches is always relevant (never
+    re-closes the gate), e.g. release/project notes you always consult.
+  - **Past-mistakes priming** — the `claude -p` relevance prompt now includes this
+    agent's recent off-topic consults (from the compliance log) as context.
+
+### Fixed
+
+- **Tests isolate the `OMI_VERIFY_*` env**, so a machine running with
+  `OMI_VERIFY_REQUIRE=1` in settings.json can't leak it into the test process.
+
 ## [2.41.0] - 2026-06-20
 
 ### Added

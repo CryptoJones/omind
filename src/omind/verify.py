@@ -39,15 +39,57 @@ from omind import compliance, guard, retrieve
 
 #: Overlap at/above this is relevant with no model call; at/below the low mark is
 #: irrelevant with no model call; the band between is referred to the model.
+#: Both are tunable via env (widen the model band, or the deterministic-relevant
+#: band, for terse-prompt workflows where keyword overlap under-scores).
 _HIGH = 0.5
 _LOW = 0.1
 _NOTE_EXCERPT_CAP = 4000
 _DEFAULT_TIMEOUT = 15
 _REQUIRE_ENV = "OMI_VERIFY_REQUIRE"
 _TIMEOUT_ENV = "OMI_VERIFY_TIMEOUT"
+_HIGH_ENV = "OMI_VERIFY_HIGH"
+_LOW_ENV = "OMI_VERIFY_LOW"
+#: Comma-separated substrings; a consult whose target matches one is ALWAYS
+#: relevant (never re-closes the gate) — e.g. release/project notes you always
+#: consult. The escape hatch for the REQUIRE-mode false negatives on terse tasks.
+_ALWAYS_RELEVANT_ENV = "OMI_VERIFY_ALWAYS_RELEVANT"
 
 #: Synthetic rule id for an off-topic consult in the compliance log.
 OFF_TOPIC_RULE = "off-topic-consult"
+
+
+def _threshold(env: str, default: float) -> float:
+    try:
+        return float(os.environ.get(env) or default)
+    except (ValueError, TypeError):
+        return default
+
+
+def _always_relevant(target: str) -> bool:
+    """True when ``target`` matches an operator-configured always-relevant
+    substring (``OMI_VERIFY_ALWAYS_RELEVANT``)."""
+    low = target.lower()
+    for pat in os.environ.get(_ALWAYS_RELEVANT_ENV, "").split(","):
+        pat = pat.strip().lower()
+        if pat and pat in low:
+            return True
+    return False
+
+
+def _past_mistakes_context(limit: int = 5) -> str:
+    """Recent off-topic consults this agent made, to prime the relevance check
+    with this agent's past mistakes (roadmap Phase 3). ``""`` when none."""
+    recent = [
+        str(e.get("command") or "")
+        for e in compliance.read_events()
+        if e.get("rule_id") == OFF_TOPIC_RULE and e.get("command")
+    ][-limit:]
+    if not recent:
+        return ""
+    return (
+        "This agent has RECENTLY consulted these off-topic (avoid rewarding the "
+        "same mistake):\n" + "\n".join(f"- {c}" for c in recent) + "\n\n"
+    )
 
 
 def _under(path: str, omi_dir: Path | str) -> bool:
@@ -118,6 +160,7 @@ def _ask_model(task: str, text: str) -> bool | None:
         "its memory (OMI) before acting on a task, and it consulted the material "
         "below. Answer with exactly one word — RELEVANT or IRRELEVANT — for whether "
         "that material is relevant to the task.\n\n"
+        f"{_past_mistakes_context()}"
         f"TASK:\n{task[:1000]}\n\n"
         f"CONSULTED MATERIAL:\n{text[:2000]}\n"
     )
@@ -137,14 +180,17 @@ def _ask_model(task: str, text: str) -> bool | None:
 
 
 def judge(task: str, text: str) -> bool:
-    """Relevance verdict for a single consult. Deterministic prefilter first, the
-    model only for the ambiguous middle, fail-open everywhere else."""
+    """Relevance verdict for a single consult. Deterministic prefilter first (with
+    operator-tunable thresholds), the model only for the ambiguous middle, fail-open
+    everywhere else."""
     if not task or not text:
         return True  # can't judge without both sides -> fail open (relevant)
+    high = _threshold(_HIGH_ENV, _HIGH)
+    low = _threshold(_LOW_ENV, _LOW)
     score = retrieve.overlap_score(task, text)
-    if score >= _HIGH:
+    if score >= high:
         return True
-    if score <= _LOW:
+    if score <= low:
         return False
     verdict = _ask_model(task, text)
     return True if verdict is None else verdict
@@ -184,7 +230,7 @@ def verify_consult(
     kind, target = target_info
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
-    relevant = judge(task, _consult_text(kind, target, omi_dir))
+    relevant = _always_relevant(target) or judge(task, _consult_text(kind, target, omi_dir))
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:
         return "relevant"
@@ -205,3 +251,41 @@ def verify_consult(
         # relevant consult happens. Enforcement stays off the PreToolUse hot path.
         guard.clear_gate(session)
     return "irrelevant"
+
+
+def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any] | None:
+    """Diagnose how a consult would be judged WITHOUT side effects — the score,
+    the (tunable) thresholds, which band it lands in, the verdict, and the notes
+    that would be suggested. Powers ``omind guard verify --explain`` so a REQUIRE-
+    mode false negative is debuggable. ``None`` when not an OMI consult."""
+    target_info = consult_target(event, omi_dir)
+    if target_info is None:
+        return None
+    kind, target = target_info
+    session = str(event.get("session_id") or "")
+    task = guard.turn_task(session)
+    text = _consult_text(kind, target, omi_dir)
+    high = _threshold(_HIGH_ENV, _HIGH)
+    low = _threshold(_LOW_ENV, _LOW)
+    score = retrieve.overlap_score(task, text)
+    if _always_relevant(target):
+        band, verdict = "always-relevant (allowlist)", True
+    elif not task or not text:
+        band, verdict = "fail-open (no task/text)", True
+    elif score >= high:
+        band, verdict = "high → deterministic relevant", True
+    elif score <= low:
+        band, verdict = "low → deterministic irrelevant", False
+    else:
+        band, verdict = "middle → claude -p tiebreaker", None
+    return {
+        "kind": kind,
+        "target": target,
+        "task": task[:160],
+        "score": round(score, 3),
+        "high": high,
+        "low": low,
+        "band": band,
+        "verdict": verdict,  # None = the model would decide
+        "suggested_notes": retrieve.relevant_titles(task, omi_dir) if task else [],
+    }

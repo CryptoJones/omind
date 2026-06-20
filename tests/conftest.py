@@ -77,6 +77,20 @@ def _isolate_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 @pytest.fixture(autouse=True)
+def _isolate_verify_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Clear the verifier's env knobs so a developer/CI machine that runs with
+    ``OMI_VERIFY_REQUIRE=1`` (or custom thresholds/allowlist) in settings.json
+    can't leak that into the test process. Tests that exercise them set their own."""
+    for var in (
+        "OMI_VERIFY_REQUIRE",
+        "OMI_VERIFY_ALWAYS_RELEVANT",
+        "OMI_VERIFY_HIGH",
+        "OMI_VERIFY_LOW",
+    ):
+        monkeypatch.delenv(var, raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _no_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     """Disable the GitHub version check in every test — no network, no flake.
 

@@ -274,6 +274,7 @@ def run_guard(
     harness: str = "claude",
     limit: int = 20,
     command: str = "",
+    explain: bool = False,
 ) -> int:
     """CLI entry for ``omind guard <action>``. Returns the process exit code.
 
@@ -307,7 +308,7 @@ def run_guard(
     if action_name == "suggest":
         return _run_suggest(_load(src), omi_dir)
     if action_name == "verify":
-        return _run_verify(_load(src), omi_dir)
+        return _run_verify(_load(src), omi_dir, explain)
     if action_name == "adapter":
         from omind import adapters
 
@@ -395,14 +396,19 @@ def _run_suggest(data: dict[str, Any], omi_dir: Path | None) -> int:
     return 0
 
 
-def _run_verify(data: dict[str, Any], omi_dir: Path | None) -> int:
+def _run_verify(data: dict[str, Any], omi_dir: Path | None, explain: bool = False) -> int:
     """``omind guard verify``: judge an OMI-consult event's relevance (manual /
-    test entry; the live path runs inside the PostToolUse hook)."""
+    test entry; the live path runs inside the PostToolUse hook). ``--explain``
+    prints the score/thresholds/band/verdict diagnostic without side effects."""
     if omi_dir is None:
         sys.stdout.write("not-a-consult\n")
         return 0
     from omind import verify
 
+    if explain:
+        info = verify.explain_consult(data, omi_dir)
+        sys.stdout.write((json.dumps(info, indent=2) if info else "not-a-consult") + "\n")
+        return 0
     verdict = verify.verify_consult(data, omi_dir)
     sys.stdout.write((verdict or "not-a-consult") + "\n")
     return 0
