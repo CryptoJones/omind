@@ -30,10 +30,17 @@ def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     still override it after this fixture runs.
 
     Uses a dedicated dir name (not ``home``) so a test that makes its own
-    ``tmp_path / "home"`` doesn't collide with this pre-created one."""
+    ``tmp_path / "home"`` doesn't collide with this pre-created one.
+
+    Sets BOTH ``HOME`` (POSIX ``Path.home()``) and ``USERPROFILE`` (Windows
+    ``Path.home()`` reads ``%USERPROFILE%``, NOT ``$HOME``). Without the latter,
+    the isolation silently no-op'd on Windows CI: provisioning tried to write the
+    real ``C:\\Users\\runneradmin\\.claude`` and the 2.40.1 ``_guard_test_isolation``
+    guard (rightly) refused — turning the runner red on windows-latest only."""
     home = tmp_path / "isolated-home"
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
 
 
 @pytest.fixture(autouse=True)
