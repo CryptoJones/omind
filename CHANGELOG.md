@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.41.2] - 2026-06-20
+
+### Added
+
+- **`omind lint` — a vault health check (closes #64).** The store enforces
+  structure on the *write* path, but notes also arrive by hand (Obsidian, an
+  editor, a botched `--connections` split) and drift in ways no single read
+  surfaces. `omind lint` walks the vault once and reports four classes of problem:
+  - **broken-link** (`error`) — a `[[wikilink]]` whose target resolves to no note
+    by stem or title (the exact breakage the 2.41.0 comma-split fix prevented
+    going forward; this finds the ones already on disk). Resolution is
+    case-insensitive and understands `[[Note|alias]]` / `[[Note#heading]]` forms.
+  - **missing-title** (`warn`) — a note with no `# Title` heading.
+  - **isolated** (`info`) — a note with neither inbound nor outbound links
+    (orphaned from the graph; a leaf with *any* link is fine).
+  - **near-duplicate** (`info`) — two notes whose titles overlap heavily.
+
+  Reserved (`index.md`, `Memory Template.md`) and soft-deleted notes are skipped;
+  links *to* reserved notes are not flagged. `--json` emits machine-readable
+  issues; `--strict` exits non-zero on any issue (default: only on an `error`).
+  It is read-only — it never edits a note.
+
 ## [2.41.1] - 2026-06-20
 
 ### Added

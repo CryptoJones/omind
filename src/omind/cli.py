@@ -299,6 +299,21 @@ def build_parser() -> argparse.ArgumentParser:
     search.add_argument("--tag", default=None, help="also require this tag")
     _add_vault_args(search)
 
+    lint = sub.add_parser(
+        "lint",
+        help="check the vault for broken wikilinks, isolated/orphaned notes, "
+        "missing titles, and near-duplicate notes",
+    )
+    lint.add_argument(
+        "--json", action="store_true", help="emit issues as JSON instead of a report"
+    )
+    lint.add_argument(
+        "--strict",
+        action="store_true",
+        help="exit non-zero on any issue (default: only on an error-severity issue)",
+    )
+    _add_vault_args(lint)
+
     rollup = sub.add_parser(
         "rollup",
         help="compact weeks of daily session journals into one summary note each, "
@@ -649,6 +664,22 @@ def _run_search(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_lint(args: argparse.Namespace) -> int:
+    import json
+
+    from omind import lint
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    issues = lint.lint_vault(omi_dir)
+    if args.json:
+        print(json.dumps([i.__dict__ for i in issues], indent=2))
+    else:
+        print(lint.format_report(issues, omi_dir=omi_dir))
+    if args.strict and issues:
+        return 1
+    return 1 if any(i.severity == "error" for i in issues) else 0
+
+
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated CLI flag into a clean list."""
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -751,6 +782,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_import(args)
     if args.command == "search":
         return _run_search(args)
+    if args.command == "lint":
+        return _run_lint(args)
     if args.command == "reindex":
         return _run_reindex(args)
     if args.command == "note":
