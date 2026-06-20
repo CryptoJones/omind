@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.40.0] - 2026-06-20
+
+### Added
+
+- **OMI-compliance enforcement: roadmap Phases 2–4.** The guard graduates from a
+  blunt per-turn consult gate to a learning, relevance-aware enforcement system.
+  - **Policy-as-data (Phase 2).** The deny set is now a data-driven policy
+    (`omind.policy`): a `Rule` table with the destructive/forge seed rules kept
+    in code (cold-start safe) and *learned* rules persisted to
+    `state_dir()/policy.json`. `omind setup` scaffolds `seed-policy.json` for
+    inspection. `guard.decide()` enforces the merged policy with identical
+    behavior (hard blocks, github-push `OMI_PUSH_GITHUB=1` opt-in).
+  - **Compliance log + violation detector (Phase 2 / Layer E).** Every policy
+    deny and every post-hoc rule match is recorded to
+    `state_dir()/compliance.jsonl`; the PostToolUse hook re-scans the command
+    that actually ran and logs hard-rule escapes / soft-rule observations.
+  - **Learning loop (Phase 2).** `omind guard learn` compiles a violation into a
+    soft learned rule **and** a structured OMI note; `omind guard escalate`
+    walks the soft→hard→verifier ladder by recidivism. Seed rules are immutable.
+  - **Verifier — Layer C (Phase 3).** `omind.verify` judges whether the note an
+    agent consulted was relevant to the turn's task, in the PostToolUse hook
+    (off the PreToolUse hot path): a deterministic overlap prefilter decides the
+    clear cases and only the ambiguous middle calls headless `claude -p`, failing
+    open on any error/timeout/missing binary. WARN by default (logs + a stderr
+    nudge naming better notes); `OMI_VERIFY_REQUIRE=1` re-closes the gate when no
+    relevant consult exists. The gate sentinel now carries the turn's consults as
+    JSON and `omi-gate-reset.sh` captures the prompt as the turn's task.
+  - **Just-in-time relevance retrieval (Phase 3).** A gate deny now names the
+    notes relevant to the turn's task (`omind guard suggest`,
+    `omind.retrieve`) instead of "read any note", de-prioritizing credential/auth
+    notes.
+  - **Cross-harness groundwork (Phase 4).** `omind.adapters` normalizes any
+    harness's pre-action event into the one `omind guard check` schema
+    (`omind guard adapter`), and `omind guard export-corpus` emits the compliance
+    log as fine-tuning JSONL. Wiring the adapter into the live Hermes/OpenClaw/
+    OpenCode hooks, and the fine-tune run itself, remain follow-ups.
+  - **Doctor.** `omind doctor` now reports policy rule counts, a compliance-log
+    rollup, and whether the verifier's `claude` backend is on PATH (a `warn`, not
+    a fail — the verifier fails open to deterministic-only).
+
 ## [2.39.0] - 2026-06-19
 
 ### Added

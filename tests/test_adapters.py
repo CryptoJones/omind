@@ -1,0 +1,52 @@
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Aaron K. Clark
+"""Tests for the harness-agnostic guard adapter (Phase 4)."""
+
+from __future__ import annotations
+
+import io
+import json
+
+from omind import adapters, guard
+
+
+def test_normalize_claude_shape() -> None:
+    action = adapters.normalize_action(
+        {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s"}
+    )
+    assert action == {"tool": "Bash", "command": "ls", "session": "s", "is_omi_consult": False}
+
+
+def test_normalize_other_harness_shapes() -> None:
+    # Hermes/OpenCode-ish: top-level tool/command/session.
+    action = adapters.normalize_action({"tool": "shell", "command": "gh pr create", "session": "h"})
+    assert action["command"] == "gh pr create" and action["session"] == "h"
+    # An mcp__omi__ tool is recognized as a consult regardless of harness.
+    consult = adapters.normalize_action({"name": "mcp__omi__search-vault", "session": "h"})
+    assert consult["is_omi_consult"] is True
+    # `args` is accepted as the command when no command/tool_input is present.
+    assert adapters.normalize_action({"args": "rm -rf /"})["command"] == "rm -rf /"
+
+
+def test_run_adapter_hard_block_denies_any_harness() -> None:
+    event = io.StringIO(json.dumps({"tool": "shell", "command": "gh pr create", "session": "a1"}))
+    assert adapters.run_adapter(event) == 2  # hard rule fires without a consult too
+
+
+def test_run_adapter_consult_clears_then_gate_allows() -> None:
+    guard.clear_gate("a2")
+    blocked = io.StringIO(json.dumps({"tool": "shell", "command": "ls", "session": "a2"}))
+    assert adapters.run_adapter(blocked) == 2  # gate closed
+    consult = io.StringIO(json.dumps({"name": "mcp__omi__read-note", "session": "a2"}))
+    assert adapters.run_adapter(consult) == 0  # consult clears the gate
+    assert guard.consulted_this_turn("a2")
+    allowed = io.StringIO(json.dumps({"tool": "shell", "command": "ls", "session": "a2"}))
+    assert adapters.run_adapter(allowed) == 0  # now allowed for the turn
+    guard.clear_gate("a2")
+
+
+def test_run_guard_adapter_action_dispatches() -> None:
+    guard.clear_gate("a3")
+    event = io.StringIO(json.dumps({"tool": "shell", "command": "ls", "session": "a3"}))
+    assert guard.run_guard("adapter", event) == 2
+    guard.clear_gate("a3")

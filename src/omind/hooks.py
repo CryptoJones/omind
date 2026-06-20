@@ -475,6 +475,15 @@ def run_hook(
         line = format_entry(event, event_name=event_name)
         if line:
             append_entry(omi_dir, line)
+        if event_name == "PostToolUse":
+            # Layer E: scan the command that actually ran against the policy and
+            # record any rule match into the compliance log (the learning corpus).
+            from omind import compliance, verify
+
+            compliance.record_post_tool(event)
+            # Layer C: if this action was an OMI consult, judge its relevance to
+            # the turn's task (off the synchronous PreToolUse hot path).
+            verify.verify_consult(event, omi_dir)
     except Exception as exc:
         _record_failure(f"run_hook({event_name}, {omi_dir})", exc)
         return 0

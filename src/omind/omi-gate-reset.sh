@@ -2,16 +2,24 @@
 # omi-gate-reset.sh — Claude Code UserPromptSubmit adapter, installed by omind.
 #
 # Clears the per-turn OMI-consult sentinel so omi-guard.sh re-arms each turn:
-# the first non-OMI action of every turn is blocked until OMI is consulted.
-# Pure bash (no subprocess); the sentinel path matches omind's state dir, the
-# same location guard.py uses. Never raises.
+# the first non-OMI action of every turn is blocked until OMI is consulted. It
+# also CAPTURES the turn's task (the user prompt) into a sibling turn-<sid>.txt
+# so the verifier (Layer C) and just-in-time retrieval know what the agent is
+# working on. Pure bash (no subprocess); the sentinel path matches omind's state
+# dir, the same location guard.py uses. Never raises.
 
 set -u
 input="$(cat 2>/dev/null)"
 command -v jq >/dev/null 2>&1 || exit 0
 sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
 [ -z "$sid" ] && sid="nosid"
-rm -f "${XDG_STATE_HOME:-$HOME/.local/state}/omind/gate-$sid" 2>/dev/null
+STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omind"
+rm -f "$STATE/gate-$sid" 2>/dev/null
+# Capture this turn's task so the verifier/retrieval can judge consult relevance
+# (guard.py reads turn-<sid>.txt). Best-effort; empty prompt is fine.
+mkdir -p "$STATE" 2>/dev/null
+printf '%s' "$(printf '%s' "$input" | jq -r '.prompt // empty' 2>/dev/null)" \
+  > "$STATE/turn-$sid.txt" 2>/dev/null
 # Reap legacy /tmp/omi-gate-* sentinels left by the pre-state-dir prototype guard
 # (the canonical guard never writes /tmp, so any such file is stale litter).
 rm -f /tmp/omi-gate-* 2>/dev/null

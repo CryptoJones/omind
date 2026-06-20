@@ -29,7 +29,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, TextIO
 
-from omind import __version__, guard, paths, seeds
+from omind import __version__, guard, paths, policy, seeds
 from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
 from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
@@ -713,6 +713,9 @@ class Provisioner:
         # so re-stamping after a no-op version bump doesn't look like a change.
         if not self.config.dry_run:
             write_provision_manifest()
+            # Scaffold the SEED ruleset for inspection (the guard reads the seed
+            # from code, so this file is informational, not load-bearing).
+            policy.write_seed_policy()
 
     def ensure_omi_guard_installed(self) -> None:
         """Idempotently register the OMI-compliance guard: a PreToolUse('*')
@@ -1010,6 +1013,8 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     results.append(_diagnose_omi_guard(claude_settings_path(), config))
 
+    results.extend(_diagnose_enforcement())
+
     results.append(_diagnose_claude_skill())
 
     results.append(_diagnose_hook_failures())
@@ -1175,6 +1180,58 @@ def _diagnose_omi_guard(settings_path: Path, config: SetupConfig) -> CheckResult
         "OMI-compliance guard wired (PreToolUse '*' + UserPromptSubmit gate-reset); "
         "block-path live",
     )
+
+
+def _diagnose_enforcement() -> list[CheckResult]:
+    """Report the data-driven enforcement state: policy size, the compliance log
+    rollup, and whether the verifier's model backend is available.
+
+    The verifier check is a ``warn`` (not ``fail``) when ``claude`` is absent: the
+    verifier fails open to its deterministic prefilter, so it still works — just
+    without the model tiebreaker for the ambiguous middle band."""
+    from omind import compliance, policy
+
+    results: list[CheckResult] = []
+
+    learned = policy.load_learned()
+    results.append(
+        CheckResult(
+            "policy",
+            "ok",
+            f"policy: {len(policy.SEED_RULES)} seed + {len(learned)} learned rule(s)",
+        )
+    )
+
+    summary = compliance.summary()
+    if summary["total"]:
+        top = ", ".join(f"{rid}×{n}" for rid, n in summary["top_rules"][:3]) or "none"
+        results.append(
+            CheckResult(
+                "compliance_log",
+                "ok",
+                f"compliance log: {summary['total']} event(s), {summary['denies']} deny, "
+                f"{summary['violations']} violation(s); top: {top}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult("compliance_log", "ok", "compliance log: no violations recorded yet")
+        )
+
+    if shutil.which("claude"):
+        results.append(
+            CheckResult("verifier_backend", "ok", "verifier model backend: `claude` on PATH")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "verifier_backend",
+                "warn",
+                "verifier model backend: `claude` not on PATH — the relevance "
+                "verifier runs deterministic-only (fails open, no model tiebreaker)",
+            )
+        )
+    return results
 
 
 #: A failure-log entry younger than this many days makes doctor warn.

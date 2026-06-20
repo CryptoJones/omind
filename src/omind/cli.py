@@ -329,9 +329,28 @@ def build_parser() -> argparse.ArgumentParser:
     )
     guard.add_argument(
         "action",
-        choices=("check", "reset"),
-        help="check an action (allow/deny on stdin JSON) or reset the "
-        "per-turn consult gate for a session",
+        choices=(
+            "check",
+            "reset",
+            "learn",
+            "escalate",
+            "verify",
+            "suggest",
+            "adapter",
+            "export-corpus",
+        ),
+        help="check/reset the per-turn gate (stdin JSON); learn a violation into "
+        "a rule + note; escalate recidivist rules; verify a consult's relevance; "
+        "suggest notes relevant to this turn's task; adapter normalizes another "
+        "harness's event into a check; export-corpus emits the compliance log as "
+        "fine-tuning JSONL",
+    )
+    guard.add_argument(
+        "--omi-dir",
+        type=Path,
+        default=None,
+        help="OMI folder for actions that read/write notes (learn/verify/suggest); "
+        "defaults to the standard vault's OMI folder",
     )
 
     selfupdate = sub.add_parser(
@@ -680,7 +699,8 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "hook":
         return _run_hook(args)
     if args.command == "guard":
-        return run_guard(args.action)
+        omi_dir = args.omi_dir if args.omi_dir is not None else (default_vault_path() / "OMI")
+        return run_guard(args.action, omi_dir=omi_dir)
     if args.command == "self-update":
         return _run_self_update(args)
     parser.print_help()

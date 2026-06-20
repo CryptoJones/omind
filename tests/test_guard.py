@@ -115,3 +115,47 @@ def test_guard_and_reset_adapters_share_one_sentinel_path() -> None:
     assert state_expr in guard_sh and "gate-$sid" in guard_sh
     assert state_expr in reset_sh and "gate-$sid" in reset_sh
     assert "/tmp/omi-gate" not in guard_sh
+
+
+def test_turn_task_capture_roundtrip() -> None:
+    guard.begin_turn("t1", "fix the codeberg release workflow")
+    assert guard.turn_task("t1") == "fix the codeberg release workflow"
+    assert guard.turn_task("never-set") == ""  # never raises on a missing turn file
+
+
+def test_reset_clears_gate_and_captures_task() -> None:
+    guard.mark_consulted("t2")
+    assert guard.consulted_this_turn("t2")
+    guard.run_guard(
+        "reset", io.StringIO(json.dumps({"session_id": "t2", "prompt": "do the thing"}))
+    )
+    assert not guard.consulted_this_turn("t2")  # gate re-armed
+    assert guard.turn_task("t2") == "do the thing"  # task captured for the verifier
+
+
+def test_record_consult_accumulates_and_survives_a_bash_touch(tmp_path: Path) -> None:
+    guard.record_consult("t3", kind="read", target="A.md", relevant=True)
+    guard.record_consult("t3", kind="search", target="codeberg", relevant=None)
+    recorded = guard.consults("t3")
+    assert [c["target"] for c in recorded] == ["A.md", "codeberg"]
+    assert recorded[0]["relevant"] is True
+    # An empty file (as the bash adapter's `touch` leaves it) reads as no consults,
+    # never a crash.
+    guard._sentinel_path("t4").parent.mkdir(parents=True, exist_ok=True)
+    guard._sentinel_path("t4").write_text("", encoding="utf-8")
+    assert guard.consults("t4") == []
+    assert guard.consulted_this_turn("t4")
+
+
+def test_is_omi_consult_with_target_is_recorded() -> None:
+    guard.clear_gate("t5")
+    guard.decide(
+        {
+            "is_omi_consult": True,
+            "session": "t5",
+            "consult_target": "Note.md",
+            "consult_kind": "read",
+        }
+    )
+    assert guard.consults("t5")[0]["target"] == "Note.md"
+    guard.clear_gate("t5")

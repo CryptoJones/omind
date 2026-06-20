@@ -106,8 +106,12 @@ def _provision_files(config: SetupConfig) -> None:
 
 
 def _install_hooks(config: SetupConfig) -> None:
-    """Write the auto-memory hooks into the isolated settings.json."""
-    Provisioner(config, log=_quiet).ensure_hooks_installed()
+    """Write the auto-memory hooks into the isolated settings.json, plus the
+    enforcement hook *script* on disk (the doctor `hooks` check verifies it
+    exists, and HOME is isolated, so the real machine's copy is not in scope)."""
+    prov = Provisioner(config, log=_quiet)
+    prov.ensure_hooks_installed()
+    prov._write_enforce_hook_script()
 
 
 def _install_guard(config: SetupConfig, monkeypatch: pytest.MonkeyPatch, home: Path) -> None:
@@ -827,3 +831,25 @@ def test_setup_no_mesh_skips_initialization(
     actions = Provisioner(config, log=_quiet).run()
     assert not any("initialize mesh node" in a for a in actions)
     assert not any(c[0] == "git" for c in fake_subprocess)
+
+
+def test_diagnose_enforcement_reports_policy_compliance_and_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omind import compliance, policy
+
+    policy.append_learned_rule(policy.Rule(id="lr", pattern="x", message="m"))
+    compliance.log_event(compliance.KIND_DECISION, rule_id="gh-repo-delete", outcome="deny")
+
+    monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
+    by_name = {c.key: c for c in provision._diagnose_enforcement()}
+    assert "seed" in by_name["policy"].message and "1 learned" in by_name["policy"].message
+    assert by_name["compliance_log"].message.startswith("compliance log: 1 event")
+    assert by_name["verifier_backend"].level == "ok"
+
+
+def test_diagnose_enforcement_warns_without_claude(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    by_name = {c.key: c for c in provision._diagnose_enforcement()}
+    assert by_name["verifier_backend"].level == "warn"
+    assert by_name["compliance_log"].message == "compliance log: no violations recorded yet"
