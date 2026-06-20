@@ -25,10 +25,12 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 reads and writes as long-term memory. `omind` does two things with it:
 
 - **`omind setup`** — idempotently registers **omind's own node MCP server**
-  (`omind node`) with the Claude Code CLI, pointed at an OMI folder inside an
-  Obsidian vault, and initializes the folder as a **mesh node** (see below).
-  After this, Claude Code persists memory across sessions through the MCP
-  tools — and across machines through the mesh. Setup also installs a
+  (`omind node`) with your agent — **Claude Code** by default, or **Hermes,
+  OpenClaw, OpenCode, and Codex CLI** via `--agent` (see *Other agents* below) —
+  pointed at an OMI folder inside an Obsidian vault, and initializes the folder
+  as a **mesh node** (see below). After this, the agent persists memory across
+  sessions through the MCP tools — and across machines through the mesh. Setup
+  also installs a
   PreToolUse(Bash) **fresh-base git guard** (`git-fresh-base.sh`) that blocks
   branching off a local `main`/`master`/`develop` that is behind its
   `origin/*` counterpart (it fetches first, fails open otherwise).
@@ -71,8 +73,11 @@ scripts/bootstrap.sh                       # or: --remote codeberg, --vault PATH
 
 It auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
 you), checks for `git`/`claude` with install guidance if either is missing,
-then runs `omind setup` + `omind doctor`. Note: omind has **no Docker and no
-Node.js dependency** — only git and the Claude Code CLI.
+then runs `omind setup` + `omind doctor`. Note: omind itself has **no Docker and
+no Node.js dependency** — it needs only `git` and an agent CLI (Claude Code on
+the default path; Hermes, OpenClaw, OpenCode, and Codex are each wired with
+`omind setup --agent <name>` once their own CLI is installed — see *Other
+agents* below).
 
 **Manual** — an isolated CLI install straight from the git remote:
 
@@ -97,7 +102,9 @@ pip install -e ".[dev]"
 
 ## Quick start
 
-Provision the Claude Code MCP wiring (idempotent; safe to re-run):
+Provision the MCP wiring for your agent — Claude Code by default; add
+`--agent hermes|openclaw|opencode|codex` for the others (see *Other agents*
+below). Idempotent; safe to re-run:
 
 ```bash
 omind setup --vault "$HOME/Documents/Obsidian Vault"
@@ -214,39 +221,40 @@ and Codex's trust model means you must run `/hooks` in Codex once and **trust**
 the omind hook before it takes effect. `omind guard selftest` replays a canned
 deny through every harness's renderer to confirm the wiring without a live agent.
 
-Each does the same four things, adjusted for where that agent keeps its config:
+`omind setup --agent <name>` adapts to where each agent keeps its config. The
+three **memory-backing** agents — Hermes, OpenClaw, and OpenCode — get the full
+treatment:
 
-1. The shared steps — OMI folder scaffold, mesh initialization — identical to
-   the Claude Code path, so all agents talk to **one** memory folder through
+1. The shared steps — OMI folder scaffold + mesh initialization — identical to
+   the Claude Code path, so every agent talks to **one** memory folder through
    the same `omind node` server.
-2. Registers the MCP server where the agent looks for it: the `mcp_servers`
-   block in `~/.hermes/config.yaml` (Hermes Agent), or the `mcp.servers` block
-   in `~/.openclaw/openclaw.json` (OpenClaw — legacy `~/.clawdbot` /
-   `~/.moltbot` installs are detected too). Only omind's own entry is ever
-   touched; a config file that doesn't parse is never overwritten.
-3. Installs an `omind-omi-memory` skill into the agent's skills directory that
-   teaches it to **read** memory through the MCP tools and **write** it through
-   `omind note` — the single-writer path that keeps concurrently running
-   agents from corrupting the folder (see
+2. Registers the `omi` MCP server where the agent looks for it: `mcp_servers` in
+   `~/.hermes/config.yaml` (Hermes), `mcp.servers` in `~/.openclaw/openclaw.json`
+   (OpenClaw — legacy `~/.clawdbot` / `~/.moltbot` installs detected too), or the
+   `mcp` block in `~/.config/opencode/opencode.json` (OpenCode). Only omind's own
+   entry is ever touched; a config file that doesn't parse is never overwritten.
+3. Installs an `omind-omi-memory` skill that teaches the agent to **read** memory
+   through the MCP tools and **write** it through `omind note` — the single-writer
+   path that keeps concurrently running agents from corrupting the folder (see
    [docs/mesh.md](docs/mesh.md) → "Node types & the single-writer rule").
-4. **Wires session-start priming** so the agent reads OMI *first*, without
-   depending on it remembering to. Each agent receives the same priming payload
-   (recent-memory index + latest session state) through its own mechanism:
-   Claude Code via a `SessionStart` hook, Hermes Agent via a `pre_llm_call`
-   hook (injected once per session, and pre-approved in Hermes'
-   `shell-hooks-allowlist.json` so it loads without a prompt), and OpenClaw via
-   a managed `MEMORY.md` bootstrap file registered under `bootstrap-extra-files`.
-   All three run the same `omind hook` command, so there is one source of truth
-   for what gets injected.
+4. **Wires session-start priming** so the agent reads OMI *first* — Hermes via a
+   `pre_llm_call` hook (pre-approved in its `shell-hooks-allowlist.json` so it
+   loads without a prompt), OpenClaw via a managed `MEMORY.md` bootstrap. It is
+   the same `omind hook` payload (recent-memory index + latest session state)
+   Claude Code injects through its `SessionStart` hook.
 
-`omind doctor --agent hermes|openclaw` diagnoses that agent's wiring, and
-`omind quickstart --agent hermes|openclaw` prints the manual steps (YAML/JSON
+**Codex CLI** is wired **guard-only** — just the `~/.codex/hooks.json` hard-block
+hooks described above; its MCP-memory registration, skill, and priming are a
+separate follow-up. **OpenCode** priming is likewise not wired yet (its MCP server
+and skill are). The cross-harness **guard** itself reaches the most agents: Claude
+Code, Hermes, OpenCode, and Codex (OpenClaw's guard is still on the backlog).
+
+`omind doctor --agent hermes|openclaw|opencode|codex` diagnoses that agent's
+wiring, and `omind quickstart --agent <name>` prints the manual steps (YAML/JSON
 snippets personalized to your paths) if you'd rather merge them in yourself.
 
-The auto-memory **journal** hooks (the per-action trail) remain Claude
-Code-only for now — Hermes Agent and OpenClaw emit different per-tool payloads;
-their actions reach OMI through the skill instead. Session **priming** (step 4)
-is wired for all three.
+The auto-memory **journal** hooks (the per-action trail) remain Claude Code-only;
+the other agents' actions reach OMI through the MCP skill instead.
 
 See [CHANGELOG.md](CHANGELOG.md) for release notes.
 
