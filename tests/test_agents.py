@@ -369,6 +369,70 @@ def test_opencode_setup_registers_mcp_and_guard_plugin(tmp_path: Path) -> None:
     assert "tool.execute.before" in body and "--harness opencode" in body
 
 
+def test_codex_setup_installs_guard_hooks(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)  # simulate Codex installed
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    data = json.loads(agents.codex_hooks_path().read_text(encoding="utf-8"))
+    for event in ("PreToolUse", "PermissionRequest"):
+        groups = data[event]
+        assert len(groups) == 1
+        handler = groups[0]["hooks"][0]
+        assert handler["type"] == "command"
+        assert "guard adapter --harness codex" in handler["command"]
+
+
+def test_codex_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    hooks_path = agents.codex_hooks_path()
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "PreToolUse": [{"hooks": [{"type": "command", "command": "my-own-hook"}]}],
+                "SessionStart": [{"hooks": [{"type": "command", "command": "user-start"}]}],
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    pre_cmds = [g["hooks"][0]["command"] for g in data["PreToolUse"]]
+    assert "my-own-hook" in pre_cmds  # user's own PreToolUse hook preserved
+    assert any("--harness codex" in c for c in pre_cmds)  # omind appended
+    assert data["SessionStart"][0]["hooks"][0]["command"] == "user-start"  # other events untouched
+
+    run_setup_for(config, log=_quiet)  # second run must not duplicate
+    data2 = json.loads(hooks_path.read_text(encoding="utf-8"))
+    omind_groups = [g for g in data2["PreToolUse"] if "--harness codex" in g["hooks"][0]["command"]]
+    assert len(omind_groups) == 1
+
+
+def test_diagnose_codex_reports_guard_state(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    config = _config(tmp_path, "codex")
+    before = {r.key: r for r in agents.diagnose_codex(config)}
+    assert before["codex_guard"].level == "fail"  # not wired yet
+
+    run_setup_for(config, log=_quiet)
+    after = {r.key: r for r in agents.diagnose_codex(config)}
+    assert after["codex_guard"].level == "ok"
+    assert after["codex_root"].level == "ok"
+
+
+def test_codex_provisioner_honors_codex_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "alt-codex"
+    monkeypatch.setenv("CODEX_HOME", str(home))
+    home.mkdir(parents=True, exist_ok=True)
+    assert agents.codex_config_dir() == home
+    run_setup_for(_config(tmp_path, "codex"), log=_quiet)
+    assert (home / "hooks.json").is_file()
+
+
 def test_openclaw_setup_installs_bootstrap_priming(
     tmp_path: Path, openclaw_home: Path
 ) -> None:

@@ -127,6 +127,22 @@ def opencode_guard_plugin_path() -> Path:
     return opencode_config_dir() / "plugin" / "omi-guard.js"
 
 
+def codex_config_dir() -> Path:
+    """OpenAI Codex CLI's config directory: ``$CODEX_HOME`` or ``~/.codex``."""
+    base = os.environ.get("CODEX_HOME")
+    return Path(base) if base else Path.home() / ".codex"
+
+
+def codex_hooks_path() -> Path:
+    """Codex's lifecycle-hooks file (same event schema as Claude Code hooks)."""
+    return codex_config_dir() / "hooks.json"
+
+
+#: Substring identifying omind's own Codex guard hook command, so a re-run finds
+#: and replaces only our entry (and never duplicates) inside the user's hooks.json.
+CODEX_GUARD_MARKER = "guard adapter --harness codex"
+
+
 # -- shared agent machinery ---------------------------------------------------
 
 
@@ -664,6 +680,110 @@ class OpenCodeProvisioner(AgentProvisioner):
         self._write_managed(dest, content)
 
 
+# -- Codex CLI ------------------------------------------------------------------
+
+
+class CodexProvisioner(AgentProvisioner):
+    """Wire the OMI guard into OpenAI Codex CLI via its lifecycle hooks.
+
+    Codex (>= 0.117) adopted the Claude-Code hook schema: ``PreToolUse`` /
+    ``PermissionRequest`` command hooks loaded from ``~/.codex/hooks.json`` (the
+    ``hooks`` feature is stable and on by default — no ``config.toml`` change
+    needed). omind mounts ``omind guard adapter --harness codex`` on BOTH events
+    (PreToolUse blocks at the tool call; PermissionRequest is the approval-path
+    backstop); on a hard-rule deny the adapter emits Codex's
+    ``permissionDecision: deny`` / ``decision.behavior: deny`` shape.
+
+    Guard-only: Codex MCP-memory registration is a separate concern (``codex mcp
+    add`` / ``config.toml`` ``[mcp_servers]``) and is intentionally not bundled
+    here. Codex's trust model records hooks by hash and SKIPS untrusted ones, so
+    the user must review + trust the hook once via ``/hooks``.
+    """
+
+    AGENT_LABEL = "Codex CLI"
+    INSTALL_HINT = "Install Codex CLI (`npm i -g @openai/codex`, or the snap), then re-run."
+    DONE_MESSAGE = (
+        "Done. In Codex run `/hooks` and TRUST the omind guard hook — Codex skips "
+        "untrusted hooks until reviewed. Requires Codex >= 0.117 (PreToolUse hooks)."
+    )
+
+    def agent_root(self) -> Path:
+        return codex_config_dir()
+
+    def integrate(self) -> None:
+        # Guard-only wiring (no MCP/skill/priming — see the class docstring).
+        self.install_guard()
+
+    def _guard_hook_group(self) -> dict[str, Any]:
+        """One Claude-schema matcher group running the omind codex adapter on all
+        tools. Codex pipes the event JSON on stdin; the adapter reads it directly."""
+        omind = shutil.which("omind") or "omind"
+        return {
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{omind} guard adapter --harness codex",
+                    "timeout": 30,
+                }
+            ]
+        }
+
+    def install_guard(self) -> None:
+        """Merge omind's guard hook into ``~/.codex/hooks.json`` for ``PreToolUse``
+        and ``PermissionRequest``, replacing only our own entry (by
+        :data:`CODEX_GUARD_MARKER`) so user-authored hooks are preserved."""
+        path = codex_hooks_path()
+        data = self._read_settings(path)
+        desired = self._guard_hook_group()
+        changed = False
+        for event in ("PreToolUse", "PermissionRequest"):
+            groups = data.get(event)
+            existing = groups if isinstance(groups, list) else []
+            kept = [
+                g
+                for g in existing
+                if not (isinstance(g, dict) and CODEX_GUARD_MARKER in json.dumps(g))
+            ]
+            merged = kept + [desired]
+            if merged != existing:
+                data[event] = merged
+                changed = True
+        if changed or self.config.force:
+            self._record(
+                f"install OMI guard hooks (PreToolUse + PermissionRequest) in {path}"
+            )
+            if not self.config.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        else:
+            self.log(f"  OMI guard hooks already installed in {path}")
+
+    def _guard_wired(self) -> bool:
+        try:
+            data = self._read_settings(codex_hooks_path())
+        except ProvisionError:
+            return False
+        return all(
+            any(
+                isinstance(g, dict) and CODEX_GUARD_MARKER in json.dumps(g)
+                for g in (data.get(event) or [])
+            )
+            for event in ("PreToolUse", "PermissionRequest")
+        )
+
+    def verify(self) -> None:
+        if self.config.dry_run:
+            return
+        if self._guard_wired():
+            self.log(f"  verified: OMI guard wired into Codex ({codex_hooks_path()})")
+            self.log("  NEXT: run `/hooks` in Codex and TRUST the omind hook.")
+        else:
+            self.log(
+                "  NOTE: could not confirm the OMI guard in Codex's hooks.json; "
+                "re-run with --force."
+            )
+
+
 # -- diagnose -------------------------------------------------------------------
 
 
@@ -735,6 +855,38 @@ def diagnose_opencode(config: SetupConfig) -> list[CheckResult]:
     return _diagnose_agent(OpenCodeProvisioner(config=config, log=lambda _msg: None))
 
 
+def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
+    """Codex is guard-only (no MCP/skill), so its doctor checks the hooks.json
+    guard wiring rather than the MCP-registration path the others share."""
+    prov = CodexProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+    root = codex_config_dir()
+    if root.is_dir():
+        results.append(CheckResult("codex_root", "ok", f"Codex CLI found: {root}"))
+    else:
+        results.append(
+            CheckResult("codex_root", "fail", f"Codex CLI not found: {root} does not exist")
+        )
+    results.extend(_diagnose_omi_folder(prov.config))
+    if prov._guard_wired():
+        results.append(
+            CheckResult(
+                "codex_guard",
+                "ok",
+                f"OMI guard wired into {codex_hooks_path()} (run `/hooks` in Codex to trust it)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "codex_guard",
+                "fail",
+                "OMI guard not in Codex hooks.json (run `omind setup --agent codex`)",
+            )
+        )
+    return results
+
+
 # -- dispatch -------------------------------------------------------------------
 
 PROVISIONERS: dict[str, type[Provisioner]] = {
@@ -742,6 +894,7 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "hermes": HermesProvisioner,
     "openclaw": OpenClawProvisioner,
     "opencode": OpenCodeProvisioner,
+    "codex": CodexProvisioner,
 }
 
 DIAGNOSERS = {
@@ -749,6 +902,7 @@ DIAGNOSERS = {
     "hermes": diagnose_hermes,
     "openclaw": diagnose_openclaw,
     "opencode": diagnose_opencode,
+    "codex": diagnose_codex,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)

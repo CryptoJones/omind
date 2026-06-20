@@ -76,7 +76,16 @@ def run_adapter(
     from omind import harness as harness_mod
 
     src = stream if stream is not None else sys.stdin
-    action = normalize_action(guard._load(src))
+    event = guard._load(src)
+    action = normalize_action(event)
     verdict = guard.check_action(action)
     spec = harness_mod.spec_for(harness)
-    return harness_mod.render_decision(verdict, spec.block_format, sys.stdout, sys.stderr)
+    # Codex's deny shape depends on which hook fired (PreToolUse vs
+    # PermissionRequest); pass the event name through (ignored by other harnesses).
+    return harness_mod.render_decision(
+        verdict,
+        spec.block_format,
+        sys.stdout,
+        sys.stderr,
+        event=str(event.get("hook_event_name") or ""),
+    )

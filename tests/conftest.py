@@ -62,6 +62,15 @@ def _isolate_config_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
 
 
 @pytest.fixture(autouse=True)
+def _isolate_codex_home(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop ``CODEX_HOME`` so the Codex provisioner's ``codex_config_dir()`` falls
+    back to the (isolated) HOME ``~/.codex`` instead of a developer's real Codex
+    config — the same class of leak the HOME/CLAUDE_CONFIG_DIR isolation guards.
+    A test exercising ``CODEX_HOME`` sets it itself after this fixture runs."""
+    monkeypatch.delenv("CODEX_HOME", raising=False)
+
+
+@pytest.fixture(autouse=True)
 def _isolate_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
     """Drop ``CLAUDE_CONFIG_DIR`` so Claude config/settings/skill paths fall back
     to the (isolated) HOME instead of the developer's real config dir.

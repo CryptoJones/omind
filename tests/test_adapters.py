@@ -71,3 +71,59 @@ def test_run_adapter_opencode_renders_json_signal(capsys: pytest.CaptureFixture[
     out = capsys.readouterr().out
     assert code == 2
     assert json.loads(out)["allow"] is False
+
+
+# -- 2.41.3: Codex (snake_case stdin, per-event deny shape) ------------------
+
+
+def test_normalize_codex_shape() -> None:
+    # Codex sends Claude-shaped snake_case fields; normalize handles them as-is.
+    action = adapters.normalize_action(
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh repo delete a/b"},
+            "session_id": "cx",
+            "tool_use_id": "t1",
+        }
+    )
+    assert action["command"] == "gh repo delete a/b" and action["session"] == "cx"
+
+
+def test_run_adapter_codex_pretooluse_deny(capsys: pytest.CaptureFixture[str]) -> None:
+    payload = {
+        "hook_event_name": "PreToolUse",
+        "tool_name": "Bash",
+        "tool_input": {"command": "gh repo delete a/b"},
+        "session_id": "cx1",
+    }
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="codex")
+    out = capsys.readouterr().out
+    assert code == 0  # the deny rides in the JSON, not the exit code
+    hso = json.loads(out)["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PreToolUse" and hso["permissionDecision"] == "deny"
+
+
+def test_run_adapter_codex_permissionrequest_deny(capsys: pytest.CaptureFixture[str]) -> None:
+    payload = {
+        "hook_event_name": "PermissionRequest",
+        "tool_name": "Bash",
+        "tool_input": {"command": "gh repo delete a/b"},
+        "session_id": "cx2",
+    }
+    adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="codex")
+    hso = json.loads(capsys.readouterr().out)["hookSpecificOutput"]
+    assert hso["hookEventName"] == "PermissionRequest"
+    assert hso["decision"] == {"behavior": "deny", "message": hso["decision"]["message"]}
+
+
+def test_run_adapter_codex_allow_emits_nothing(capsys: pytest.CaptureFixture[str]) -> None:
+    guard.clear_gate("cx3")
+    consult = io.StringIO(json.dumps({"tool_name": "mcp__omi__read-note", "session_id": "cx3"}))
+    assert adapters.run_adapter(consult, harness="codex") == 0  # consult clears the gate
+    capsys.readouterr()
+    payload = {"hook_event_name": "PreToolUse", "tool_name": "Bash",
+               "tool_input": {"command": "ls"}, "session_id": "cx3"}
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="codex")
+    assert code == 0 and capsys.readouterr().out == ""  # allow -> empty stdout
+    guard.clear_gate("cx3")

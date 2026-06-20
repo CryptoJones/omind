@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.41.3] - 2026-06-20
+
+### Added
+
+- **Cross-harness guard: OpenAI Codex CLI (closes #59).** Codex (>= 0.117)
+  adopted the Claude-Code hook schema, so the harness-agnostic guard now
+  hard-blocks under Codex too. `omind setup --agent codex` writes a
+  `~/.codex/hooks.json` mounting `omind guard adapter --harness codex` on both
+  **`PreToolUse`** (blocks at the tool call) and **`PermissionRequest`** (the
+  approval-path backstop). On a hard-rule deny the adapter emits Codex's exact
+  contract — `{"hookSpecificOutput":{"permissionDecision":"deny",…}}` for
+  PreToolUse and `{… "decision":{"behavior":"deny",…}}` for PermissionRequest;
+  an allow is empty stdout + exit 0. Verified live against Codex 0.136.
+  - A new `codex` `HarnessSpec` (`CAP_HARD_BLOCK`, `FMT_CODEX_HOOK`) + renderer;
+    `omind guard selftest` now covers Codex. The adapter reuses the existing
+    normalizer (Codex sends Claude-shaped snake_case `tool_name`/`tool_input`).
+  - Guard-only wiring — Codex's MCP-memory registration is a separate concern.
+    Codex records hooks by hash and skips untrusted ones, so the provisioner
+    points the user at `/hooks` to review + trust the omind hook once.
+  - `omind doctor --agent codex` reports the hooks.json guard wiring; tests
+    isolate `CODEX_HOME` so they never touch a real `~/.codex`.
+
 ## [2.41.2] - 2026-06-20
 
 ### Added

@@ -187,18 +187,32 @@ warns about the degradation.
 **Copy `~/.config/omind/backup.pass` somewhere safe off-machine.** It encrypts
 every snapshot; losing it with the disk makes the backups unreadable.
 
-## Other agents: Hermes Agent and OpenClaw
+## Other agents: Hermes Agent, OpenClaw, OpenCode, and Codex CLI
 
 [Claude Code](https://github.com/anthropics/claude-code) is the default, but the
-same OMI folder can back any agent. `omind setup --agent ...` provisions two
+same OMI folder can back any agent. `omind setup --agent ...` provisions several
 more out of the box —
-[Hermes Agent](https://github.com/NousResearch/hermes-agent) and
-[OpenClaw](https://github.com/openclaw/openclaw):
+[Hermes Agent](https://github.com/NousResearch/hermes-agent),
+[OpenClaw](https://github.com/openclaw/openclaw),
+[OpenCode](https://github.com/sst/opencode), and
+[OpenAI Codex CLI](https://github.com/openai/codex):
 
 ```bash
 omind setup --agent hermes   --vault "$HOME/Documents/Obsidian Vault"   # Hermes Agent
 omind setup --agent openclaw --vault "$HOME/Documents/Obsidian Vault"   # OpenClaw
+omind setup --agent opencode --vault "$HOME/Documents/Obsidian Vault"   # OpenCode
+omind setup --agent codex    --vault "$HOME/Documents/Obsidian Vault"   # OpenAI Codex CLI
 ```
+
+The **OMI-compliance guard** (hard-blocks + the per-turn consult gate) enforces
+across harnesses, not just Claude Code: Hermes via its `pre_tool_call` hook,
+OpenCode via a `tool.execute.before` plugin, and **Codex CLI** (>= 0.117) via its
+Claude-schema `PreToolUse`/`PermissionRequest` command hooks in
+`~/.codex/hooks.json` — so a rule learned under one agent blocks under all of
+them. Codex wiring is **guard-only** (its MCP-memory registration is separate),
+and Codex's trust model means you must run `/hooks` in Codex once and **trust**
+the omind hook before it takes effect. `omind guard selftest` replays a canned
+deny through every harness's renderer to confirm the wiring without a live agent.
 
 Each does the same four things, adjusted for where that agent keeps its config:
 

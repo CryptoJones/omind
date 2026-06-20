@@ -30,6 +30,7 @@ CAP_DETECT_ONLY = "detect-only"
 FMT_EXIT2 = "exit2"  # Claude Code / shell hook: stderr reason + exit 2
 FMT_CLAUDE_JSON = "claude_json"  # Hermes pre_tool_call: {"decision":"block","reason"} on stdout
 FMT_JSON_SIGNAL = "json_signal"  # OpenCode plugin reads {allow, reason} JSON and throws in JS
+FMT_CODEX_HOOK = "codex_hook"  # Codex PreToolUse/PermissionRequest: hookSpecificOutput deny JSON
 
 
 @dataclass(frozen=True)
@@ -51,6 +52,9 @@ HARNESSES: dict[str, HarnessSpec] = {
     "opencode": HarnessSpec(
         "opencode", CAP_HARD_BLOCK, FMT_JSON_SIGNAL, "OpenCode plugin tool.execute.before"
     ),
+    "codex": HarnessSpec(
+        "codex", CAP_HARD_BLOCK, FMT_CODEX_HOOK, "Codex PreToolUse/PermissionRequest hook"
+    ),
 }
 
 
@@ -59,9 +63,41 @@ def spec_for(harness: str) -> HarnessSpec:
     return HARNESSES.get(harness, HARNESSES["claude"])
 
 
-def render_decision(verdict: Verdict, fmt: str, out: TextIO, err: TextIO) -> int:
+def render_decision(
+    verdict: Verdict, fmt: str, out: TextIO, err: TextIO, *, event: str = ""
+) -> int:
     """Render a guard :class:`~omind.guard.Verdict` in a harness's block-output
-    format; return the process exit code the adapter should exit with."""
+    format; return the process exit code the adapter should exit with.
+
+    ``event`` is the harness's hook-event name (only Codex needs it — its deny
+    shape differs between ``PreToolUse`` and ``PermissionRequest``).
+    """
+    if fmt == FMT_CODEX_HOOK:
+        # Codex reads a camelCase `hookSpecificOutput` JSON on stdout (exit 0; the
+        # deny lives in the JSON, NOT the exit code). Empty stdout + exit 0 = allow.
+        # PreToolUse and PermissionRequest take different deny shapes.
+        if verdict.allow:
+            return 0
+        import json
+
+        reason = f"OMI guard: {verdict.reason}"
+        if event == "PermissionRequest":
+            payload = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {"behavior": "deny", "message": reason},
+                }
+            }
+        else:  # PreToolUse (the primary mount) or unknown → block at the tool call
+            payload = {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": reason,
+                }
+            }
+        out.write(json.dumps(payload) + "\n")
+        return 0
     if fmt == FMT_CLAUDE_JSON:
         # Hermes reads the hook's stdout JSON. Emit a block decision on deny; on
         # allow emit nothing (Hermes treats an absent decision as allow).
@@ -113,6 +149,16 @@ _SELFTEST_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
         {"tool": "bash", "tool_input": {"command": "gh auth setup-git"}, "session_id": "st"},
         True,
     ),
+    (
+        "codex",
+        {
+            "hook_event_name": "PreToolUse",
+            "tool_name": "Bash",
+            "tool_input": {"command": "gh repo delete acme/widget"},
+            "session_id": "st",
+        },
+        True,
+    ),
 )
 
 
@@ -129,7 +175,9 @@ def run_selftest() -> list[dict[str, Any]]:
         verdict = guard.decide(action)
         spec = spec_for(name)
         out, err = io.StringIO(), io.StringIO()
-        render_decision(verdict, spec.block_format, out, err)
+        render_decision(
+            verdict, spec.block_format, out, err, event=str(event.get("hook_event_name") or "")
+        )
         blocked = not verdict.allow
         results.append(
             {
