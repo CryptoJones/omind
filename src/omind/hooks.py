@@ -325,6 +325,22 @@ def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
     return "\n".join(bullets[-limit:])
 
 
+def _update_nudge_line() -> str | None:
+    """The "newer omind available" line for the SessionStart context, or ``None``.
+
+    Reuses :func:`omind.update.update_nudge` (its own once-a-day cached, fail-open
+    check), so surfacing it here costs no extra network call — it just makes the
+    nudge visible every session instead of only once at ``omind node`` startup.
+    Fully defensive: a version check must never break priming."""
+    try:
+        from omind.update import update_nudge
+
+        nudge = update_nudge()
+    except Exception:
+        return None
+    return f"⚠️ {nudge}" if nudge else None
+
+
 def build_session_start_context(omi_dir: Path | str) -> str:
     """Build the SessionStart ``additionalContext`` payload.
 
@@ -364,6 +380,12 @@ def build_session_start_context(omi_dir: Path | str) -> str:
                 f"===== OMI/{journal_path.name} — recent actions (auto-journal) =====\n{tail}"
             )
 
+    # An "omind X.Y.Z available" line, surfaced every session (not just once at
+    # node startup) so the update prompt is reliably visible. Defensive: a
+    # version check must never break priming.
+    nudge = _update_nudge_line()
+    prefix = f"{nudge}\n\n" if nudge else ""
+
     header = (
         "OMI memory is the source of truth (do NOT use Claude Code's built-in "
         "memory). The OMI vault lives at "
@@ -371,7 +393,7 @@ def build_session_start_context(omi_dir: Path | str) -> str:
         "already read. Read any [[wikilinked]] note you need before acting."
     )
     if not sections and not dynamic:
-        return (
+        return prefix + (
             header
             + " (Priming notes could not be read this session; read index.md, "
             "Memory Workflow.md, and CLAUDE CODE PERSONALITY.md from the vault "
@@ -386,7 +408,7 @@ def build_session_start_context(omi_dir: Path | str) -> str:
         if len(section) > remaining:
             section = section[: remaining - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
         payload += "\n\n" + section
-    return payload
+    return prefix + payload
 
 
 def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -> None:

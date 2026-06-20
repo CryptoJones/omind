@@ -23,6 +23,7 @@ import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
@@ -108,6 +109,7 @@ def write_provision_manifest() -> None:
     payload = {"omind_version": __version__, "hooks": _shipped_hook_shas()}
     path = _provision_manifest_path()
     with contextlib.suppress(OSError):
+        _guard_test_isolation(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
 
@@ -156,6 +158,28 @@ Logger = Callable[[str], None]
 
 class ProvisionError(Exception):
     """A setup precondition failed (missing tool, bad vault layout, ...)."""
+
+
+def _guard_test_isolation(target: Path) -> None:
+    """Belt-and-suspenders against the test-isolation footgun (2.40.1).
+
+    Under pytest, refuse to write a managed config/hook file outside the temp
+    dir, so a test that forgot to isolate ``HOME``/``CLAUDE_CONFIG_DIR`` fails
+    LOUDLY instead of silently clobbering the developer's real ``~/.claude`` —
+    which twice rewrote this machine's live ``omi-guard.sh`` to a pytest temp
+    path and wedged the consult gate. No-op outside a pytest run."""
+    if not os.environ.get("PYTEST_CURRENT_TEST"):
+        return
+    tmp = Path(tempfile.gettempdir()).resolve()
+    try:
+        resolved = target.expanduser().resolve()
+    except OSError:
+        return
+    if resolved != tmp and tmp not in resolved.parents:
+        raise ProvisionError(
+            f"omind refused to write {target} outside {tmp} during a test — "
+            "isolate HOME and CLAUDE_CONFIG_DIR in the test fixture (2.40.1 guard)"
+        )
 
 
 def default_vault_path() -> Path:
@@ -309,6 +333,7 @@ class Provisioner:
             return
         self._record(f"write {path}")
         if not self.config.dry_run:
+            _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
@@ -331,6 +356,7 @@ class Provisioner:
         else:
             self._record(f"write {path}")
         if not self.config.dry_run:
+            _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(content, encoding="utf-8")
 
@@ -626,6 +652,7 @@ class Provisioner:
             f"{path}"
         )
         if not self.config.dry_run:
+            _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -666,6 +693,7 @@ class Provisioner:
         data["hooks"] = hooks_cfg
         self._record(f"install PreToolUse(Bash) fresh-base git guard in {path}")
         if not self.config.dry_run:
+            _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
@@ -769,6 +797,22 @@ class Provisioner:
             perms = {}
         allow = perms.get("allow")
         allow_list = list(allow) if isinstance(allow, list) else []
+        # Prune stale Read(...) allow-rules pointing under the temp dir — but NOT
+        # this vault's own rule (a test vault legitimately lives under the temp
+        # dir). These accumulate when a mis-isolated test run provisions against a
+        # pytest vault (the 2.40.1 footgun left 3 such rules in this machine's
+        # live settings.json); a real OMI vault never lives under the temp dir, so
+        # this only removes litter, and a plain `omind setup` self-cleans.
+        desired_read = f"Read({self.config.omi_dir}/**)"
+        tmp_prefix = f"Read({Path(tempfile.gettempdir())}/"
+        deparented = [
+            r
+            for r in allow_list
+            if r == desired_read or not (isinstance(r, str) and r.startswith(tmp_prefix))
+        ]
+        if deparented != allow_list:
+            allow_list = deparented
+            changed = True
         for rule in (
             f"Read({self.config.omi_dir}/**)",
             "mcp__omi__read-note",
@@ -790,6 +834,7 @@ class Provisioner:
             f"install OMI-compliance guard (PreToolUse '*' + UserPromptSubmit) in {path}"
         )
         if not self.config.dry_run:
+            _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 

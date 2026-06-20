@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.40.1] - 2026-06-20
+
+### Added
+
+- **Update nudge surfaces every session.** The "omind X.Y.Z available" notice is
+  now injected into the SessionStart priming context (on top of the existing
+  `omind node` stderr nudge + `omind doctor` line), so a pending update is visible
+  every session instead of only once at MCP-server startup. Reuses the same
+  once-a-day cached check — no extra network calls, fully fail-open.
+
+### Fixed
+
+- **Tests can no longer clobber the real `~/.claude`.** A provisioning test that
+  didn't isolate `HOME`/`CLAUDE_CONFIG_DIR` could rewrite the developer's live
+  `settings.json` to point its guard hook at a pytest temp path, wedging the OMI
+  consult gate. The test suite now isolates `HOME` **and** `CLAUDE_CONFIG_DIR`
+  (and disables the update-check network call), and the provisioner refuses to
+  write a config/hook file outside the temp dir during a `pytest` run — so a
+  mis-isolated test fails loudly instead of silently clobbering live config.
+- **`omind setup` prunes stale temp-dir `Read(...)` allow-rules** that such test
+  runs accumulated in `settings.json` (a real OMI vault never lives under the temp
+  dir; this only removes litter).
+
 ## [2.40.0] - 2026-06-20
 
 ### Added

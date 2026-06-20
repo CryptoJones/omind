@@ -52,3 +52,27 @@ def _isolate_config_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Non
     was added for.
     """
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg-config"))
+
+
+@pytest.fixture(autouse=True)
+def _isolate_claude_config_dir(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Drop ``CLAUDE_CONFIG_DIR`` so Claude config/settings/skill paths fall back
+    to the (isolated) HOME instead of the developer's real config dir.
+
+    The HOME isolation alone was NOT enough: ``claude_settings_path`` /
+    ``claude_config_path`` / ``claude_skill_dir`` key off ``CLAUDE_CONFIG_DIR``
+    FIRST, while the hook destinations key off ``Path.home()``. A test that ran
+    provisioning therefore wrote hook *files* to the temp HOME but rewrote the
+    REAL ``settings.json`` (under ``$CLAUDE_CONFIG_DIR``) to point at those temp
+    hooks — wedging the live consult gate a second time. Tests that exercise
+    ``CLAUDE_CONFIG_DIR`` set it themselves after this fixture runs."""
+    monkeypatch.delenv("CLAUDE_CONFIG_DIR", raising=False)
+
+
+@pytest.fixture(autouse=True)
+def _no_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Disable the GitHub version check in every test — no network, no flake.
+
+    ``build_session_start_context`` now surfaces the update nudge, so without this
+    every priming test would otherwise incur a (fail-open) network round-trip."""
+    monkeypatch.setenv("OMIND_NO_UPDATE_CHECK", "1")

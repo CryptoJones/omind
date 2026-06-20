@@ -8,6 +8,7 @@ import io
 import json
 import os
 import subprocess
+import tempfile
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -853,3 +854,36 @@ def test_diagnose_enforcement_warns_without_claude(monkeypatch: pytest.MonkeyPat
     by_name = {c.key: c for c in provision._diagnose_enforcement()}
     assert by_name["verifier_backend"].level == "warn"
     assert by_name["compliance_log"].message == "compliance log: no violations recorded yet"
+
+
+# -- 2.40.1: test-isolation guard + stale allow-rule pruning ------------------
+
+
+def test_guard_test_isolation_blocks_non_temp_write_during_pytest() -> None:
+    # PYTEST_CURRENT_TEST is set while this runs; a non-temp target must raise.
+    with pytest.raises(provision.ProvisionError, match="2.40.1 guard"):
+        provision._guard_test_isolation(Path("/usr/local/omind-nope/settings.json"))
+
+
+def test_guard_test_isolation_allows_temp_write(tmp_path: Path) -> None:
+    provision._guard_test_isolation(tmp_path / "x.json")  # under the temp dir -> no raise
+
+
+def test_guard_test_isolation_is_noop_outside_pytest(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("PYTEST_CURRENT_TEST", raising=False)
+    provision._guard_test_isolation(Path("/usr/local/omind-nope/settings.json"))  # no-op
+
+
+def test_ensure_omi_guard_prunes_stale_temp_allow_rules(
+    tmp_path: Path, fake_tools: None, isolate_settings: Path
+) -> None:
+    stale = f"Read({tempfile.gettempdir()}/pytest-of-hermes/pytest-99/Vault/OMI/**)"
+    real = "Read(/home/someone/Documents/Obsidian Vault/OMI/**)"
+    isolate_settings.write_text(
+        json.dumps({"permissions": {"allow": [stale, real, "Bash(ls:*)"]}}), encoding="utf-8"
+    )
+    provision.Provisioner(_config(tmp_path), log=_quiet).ensure_omi_guard_installed()
+    allow = json.loads(isolate_settings.read_text(encoding="utf-8"))["permissions"]["allow"]
+    assert stale not in allow  # temp-dir Read rule pruned (the 2.40.1 litter)
+    assert real in allow  # a real OMI Read rule is kept
+    assert "Bash(ls:*)" in allow  # unrelated rules untouched

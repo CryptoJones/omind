@@ -453,3 +453,47 @@ def test_run_hook_breadcrumbs_unexpected_errors_and_still_returns_0(
     rc = hooks.run_hook("PostToolUse", tmp_path / "OMI", stdin=io.StringIO("{}"))
     assert rc == 0
     assert "run_hook" in hooks.failure_log_path().read_text(encoding="utf-8")
+
+
+# -- update nudge in SessionStart context ------------------------------------
+
+
+def test_session_start_context_surfaces_update_nudge(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import update
+
+    monkeypatch.setattr(
+        update,
+        "update_nudge",
+        lambda: "omind 9.9.9 is available (you're on 1.0.0) — run `omind self-update` to upgrade.",
+    )
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert ctx.startswith("⚠️")  # surfaced at the very top
+    assert "omind 9.9.9 is available" in ctx
+    assert "OMI memory is the source of truth" in ctx  # priming still present
+
+
+def test_session_start_context_no_nudge_when_up_to_date(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import update
+
+    monkeypatch.setattr(update, "update_nudge", lambda: None)
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "⚠️" not in ctx
+    assert "self-update" not in ctx
+
+
+def test_session_start_context_survives_nudge_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import update
+
+    def boom() -> str:
+        raise RuntimeError("network down")
+
+    monkeypatch.setattr(update, "update_nudge", boom)
+    ctx = hooks.build_session_start_context(tmp_path)  # must never raise
+    assert "OMI memory is the source of truth" in ctx
+    assert "⚠️" not in ctx
