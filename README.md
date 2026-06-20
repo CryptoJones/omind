@@ -53,6 +53,13 @@ reads and writes as long-term memory. `omind` does two things with it:
 - **`omind backup`** — encrypted, unattended off-machine backup of the OMI
   folder, wrapping [restic](https://restic.net/) (see
   [Encrypted backup](#encrypted-backup) below).
+- **`omind guard`** — the **OMI-compliance guard**: a layered set of agent hooks
+  that make the agent *consult memory before it acts* and *hard-block* dangerous
+  commands, enforcing identically across Claude Code, Hermes, OpenCode, and Codex
+  (see [The OMI-compliance guard](#the-omi-compliance-guard) below).
+- **`omind checkpoint`** — a scheduled job that records what the agent has been
+  doing every N minutes into a daily worklog note, by mining the trails the hooks
+  already capture (see [Activity checkpoints](#activity-checkpoints) below).
 
 The web UI works **fully offline** (fonts, styles, and the Markdown renderer are
 vendored — no CDN). It shows **backlinks** for the open note, refreshes the list
@@ -193,6 +200,107 @@ warns about the degradation.
 
 **Copy `~/.config/omind/backup.pass` somewhere safe off-machine.** It encrypts
 every snapshot; losing it with the disk makes the backups unreadable.
+
+## How memory is stored
+
+OMI is just a folder of plain Markdown notes — one note per memory, fully
+human-editable (open the folder as an Obsidian vault). Each note has a stable
+shape so tools and the merge driver can read and write individual fields without
+stepping on each other:
+
+- a `# Title` and a `## Metadata` block (created date, `#tags`, and the mesh
+  `Rev:` Lamport stamp);
+- `## Summary` / `## Details` free text;
+- `## Connections` — `[[wikilinks]]` to related notes (the graph the web UI and
+  `omind lint` traverse);
+- `## Action Items` (a checkbox list) and `## References`.
+
+**One writer, always.** Every write — `omind note`, the `omind node` MCP server an
+agent calls, the web UI, the mesh merge — goes through a single locked, atomic
+path: an advisory `flock`, an atomic `os.replace`, and a `note_version`
+compare-and-swap that rejects a write made against a stale read. That is what lets
+several agents and tools touch the same folder at once without corrupting it.
+"Deleting" a note **archives** it (hidden, restorable) rather than removing it.
+
+A maintained `index.md` lists the most recent notes; that index plus the latest
+session state is exactly what the guard's priming injects at session start. Run
+`omind lint` to catch drift (broken wikilinks, orphaned or near-duplicate notes,
+missing titles). The cross-machine replication story — git-backed mesh, per-note
+Lamport versioning, the field-level merge driver — is its own section:
+[The memory mesh](#the-memory-mesh-20).
+
+## The OMI-compliance guard
+
+Memory only helps if the agent actually reads it *before* acting — and an agent
+left to its own devices consults memory inconsistently and will happily run a
+destructive command. The guard closes both gaps with a small stack of hooks
+around every tool call. `omind setup` installs it for Claude Code; the other
+harnesses wire it through [the per-agent adapters](#other-agents-hermes-agent-openclaw-opencode-and-codex-cli).
+It enforces the same rules everywhere and **fails open** at every layer — a
+broken hook can never wedge the agent.
+
+- **Priming (injection).** On session start the agent is handed the recent-memory
+  index + latest session state, so the relevant memory is in front of it before
+  the first turn (Claude Code `SessionStart`, Hermes `pre_llm_call`, …).
+- **The consult gate.** A `PreToolUse` hook blocks the *first* action of each turn
+  until the agent reads OMI; one OMI search/read clears the gate for the rest of
+  the turn. The gate is a per-turn sentinel under the state dir, reset on the
+  harness's turn boundary.
+- **The verifier.** Clearing the gate by reading *any* note isn't enough, so a
+  `PostToolUse` verifier judges whether the consult was actually **relevant** to
+  the turn's task — a deterministic keyword-overlap prefilter decides the clear
+  cases, and only the ambiguous middle shells out to headless `claude -p`
+  (fail-open). Default is **WARN** (it logs the off-topic consult and nudges
+  toward better notes); opt-in **REQUIRE** (`OMI_VERIFY_REQUIRE=1`) re-closes the
+  gate until a relevant consult happens. The thresholds
+  (`OMI_VERIFY_HIGH`/`OMI_VERIFY_LOW`) and an always-relevant allowlist
+  (`OMI_VERIFY_ALWAYS_RELEVANT`) are tunable, and the check primes on the agent's
+  own recent off-topic consults.
+- **Hard blocks.** A policy of high-risk command patterns (deleting a repo, a
+  destructive git push, rewriting auth config, …) is blocked **unconditionally**,
+  regardless of the gate, with the reason and the on-point notes to read.
+- **The compliance log + learning loop.** Every guard-relevant action is appended
+  to `compliance.jsonl`; a `PostToolUse` detector records soft-rule matches as
+  evidence, and recidivism escalates a rule (soft → hard → verifier) over time
+  (`omind guard learn` / `escalate`).
+
+**Cross-harness by construction.** Each harness is described as data — a
+`HarnessSpec` (can it hard-block? which block-output format?) — and its hook pipes
+its event to `omind guard adapter --harness <name>`, so a rule learned under one
+agent blocks under all of them. `omind guard selftest` replays canned deny events
+through every harness's renderer to verify the wiring without a live agent.
+
+Inspect and operate it with `omind guard log` (recent denies/violations),
+`omind guard policy` (active rules), `omind guard status` (which harnesses are
+guarded), `omind guard explain "<cmd>"` (dry-run a command), and
+`omind guard verify --explain` (why a consult scored relevant or off-topic).
+`omind guard repair` (and `omind doctor`) re-heal a wedged or drifted hook-set.
+
+## Activity checkpoints
+
+You can't reliably *force* a running agent to do something on a wall clock —
+agents are turn-driven and idle between messages. So to "record recent work every
+N minutes," omind doesn't ask the agent: `omind checkpoint` is a scheduled job
+that mines the two trails the hooks already capture — the per-action **journal**
+(`Journal/Session Journal <date>.md`) and the cross-harness **compliance log** —
+and upserts a per-day **`Worklog <date>`** note with a timestamped section per
+run (one note per day, so it stays a single recent-memory slot instead of
+flooding the index).
+
+```bash
+# summarize the last 15 minutes into today's worklog note, now
+omind checkpoint --since 15m
+
+# or run it unattended every 15 minutes via a systemd user timer
+omind checkpoint install-timer --every 15m
+omind checkpoint uninstall-timer            # stop + remove it
+```
+
+The summary is deterministic (action counts by tool + guard denies/violations);
+`--llm` adds a one-paragraph `claude -p` narrative, fail-open to the deterministic
+text. Because it's a scheduled job — the same systemd-user-timer mechanism as
+`omind backup` and `omind mesh` — it doesn't depend on the agent's cooperation,
+which is what makes it a reliable *record* rather than a hopeful instruction.
 
 ## Other agents: Hermes Agent, OpenClaw, OpenCode, and Codex CLI
 
