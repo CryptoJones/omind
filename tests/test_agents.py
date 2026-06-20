@@ -315,7 +315,9 @@ def test_hermes_priming_is_idempotent(tmp_path: Path, hermes_home: Path) -> None
     allow = json.loads(
         (hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8")
     )
-    assert len(allow["approvals"]) == 1
+    # Priming (pre_llm_call) + the guard (pre_tool_call), each approved once.
+    assert len(allow["approvals"]) == 2
+    assert sorted(a["event"] for a in allow["approvals"]) == ["pre_llm_call", "pre_tool_call"]
 
 
 def test_hermes_priming_tolerates_corrupt_allowlist(
@@ -327,6 +329,44 @@ def test_hermes_priming_tolerates_corrupt_allowlist(
     assert (hermes_home / "shell-hooks-allowlist.json").read_text(
         encoding="utf-8"
     ) == "{bad"
+
+
+def test_hermes_guard_hook_installed(tmp_path: Path, hermes_home: Path) -> None:
+    config = _config(tmp_path, "hermes")
+    run_setup_for(config, log=_quiet)
+
+    # The pre_tool_call guard script is written with placeholders substituted.
+    script = agents.hermes_guard_script_path()
+    body = script.read_text(encoding="utf-8")
+    assert "__OMIND_BIN__" not in body and "__OMI_DIR__" not in body
+    assert str(config.omi_dir) in body
+    assert "guard adapter --harness hermes" in body
+
+    # config.yaml pre_tool_call is wired to the guard script.
+    hooks = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))["hooks"]
+    assert any("omi-guard-hermes.sh" in e["command"] for e in hooks["pre_tool_call"])
+
+    # ...and the guard hook is pre-approved in the allowlist.
+    allow = json.loads((hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8"))
+    assert any(a["event"] == "pre_tool_call" for a in allow["approvals"])
+
+
+def test_opencode_setup_registers_mcp_and_guard_plugin(tmp_path: Path) -> None:
+    agents.opencode_config_dir().mkdir(parents=True, exist_ok=True)  # simulate OpenCode installed
+    config = _config(tmp_path, "opencode")
+    run_setup_for(config, log=_quiet)
+
+    # The omi MCP server is registered in OpenCode's local format.
+    data = json.loads(agents.opencode_config_path().read_text(encoding="utf-8"))
+    omi = data["mcp"]["omi"]
+    assert omi["type"] == "local" and omi["enabled"] is True
+    assert "node" in omi["command"] and str(config.vault) in omi["command"]
+
+    # The guard plugin is written into OpenCode's auto-loaded plugin/ dir.
+    body = agents.opencode_guard_plugin_path().read_text(encoding="utf-8")
+    assert "__OMIND_BIN__" not in body and "__OMI_DIR__" not in body
+    assert str(config.omi_dir) in body
+    assert "tool.execute.before" in body and "--harness opencode" in body
 
 
 def test_openclaw_setup_installs_bootstrap_priming(

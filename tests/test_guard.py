@@ -159,3 +159,45 @@ def test_is_omi_consult_with_target_is_recorded() -> None:
     )
     assert guard.consults("t5")[0]["target"] == "Note.md"
     guard.clear_gate("t5")
+
+
+# -- 2.41.0: observability + repair ------------------------------------------
+
+
+def test_guard_policy_and_status(capsys: pytest.CaptureFixture[str]) -> None:
+    assert guard.run_guard("policy") == 0
+    out = capsys.readouterr().out
+    assert "gh-pr-create-merge" in out and "seed" in out
+    assert guard.run_guard("status") == 0
+    status = capsys.readouterr().out
+    assert "hermes" in status and "opencode" in status and "claude" in status
+
+
+def test_guard_explain_allow_and_deny(capsys: pytest.CaptureFixture[str]) -> None:
+    assert guard.run_guard("explain", command="ls -la") == 0
+    assert "ALLOW" in capsys.readouterr().out
+    assert guard.run_guard("explain", command="gh repo delete x/y") == 0
+    out = capsys.readouterr().out
+    assert "DENY" in out and "gh-repo-delete" in out
+    assert guard.run_guard("explain", command="") == 1  # no command -> error
+
+
+def test_guard_log(capsys: pytest.CaptureFixture[str]) -> None:
+    from omind import compliance
+
+    compliance.log_event(
+        compliance.KIND_DECISION, rule_id="gh-repo-delete", command="x", outcome="deny"
+    )
+    assert guard.run_guard("log", limit=10) == 0
+    out = capsys.readouterr().out
+    assert "gh-repo-delete" in out and "deny" in out
+
+
+def test_guard_repair_invokes_heal(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    from omind import provision
+
+    monkeypatch.setattr(provision, "heal_omi_guard", lambda **kw: True)
+    assert guard.run_guard("repair", omi_dir=Path("/x/OMI")) == 0
+    assert "repaired" in capsys.readouterr().out

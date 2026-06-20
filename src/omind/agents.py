@@ -19,6 +19,8 @@ entry it owns, refuse to overwrite a file it cannot parse.
 
 from __future__ import annotations
 
+import contextlib
+import importlib.resources
 import json
 import os
 import shutil
@@ -56,6 +58,11 @@ def hermes_config_path() -> Path:
 
 def hermes_skill_dir() -> Path:
     return hermes_root() / "skills" / "memory" / "omind-omi-memory"
+
+
+def hermes_guard_script_path() -> Path:
+    """Where omind writes Hermes' OMI-guard ``pre_tool_call`` adapter script."""
+    return hermes_root() / "hooks" / "omi-guard-hermes.sh"
 
 
 def hermes_allowlist_path() -> Path:
@@ -101,6 +108,23 @@ def openclaw_bootstrap_path() -> Path:
     omind controls (basename ``MEMORY.md`` so OpenClaw recognizes it) so a
     user-authored ``~/.openclaw/MEMORY.md`` is never touched."""
     return openclaw_root() / "omind" / "MEMORY.md"
+
+
+def opencode_config_dir() -> Path:
+    """OpenCode's config directory: ``$XDG_CONFIG_HOME/opencode`` or
+    ``~/.config/opencode``."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    return root / "opencode"
+
+
+def opencode_config_path() -> Path:
+    return opencode_config_dir() / "opencode.json"
+
+
+def opencode_guard_plugin_path() -> Path:
+    """Where omind writes the OMI-guard OpenCode plugin (a plugin/ entry)."""
+    return opencode_config_dir() / "plugin" / "omi-guard.js"
 
 
 # -- shared agent machinery ---------------------------------------------------
@@ -319,13 +343,85 @@ class HermesProvisioner(AgentProvisioner):
         else:
             self.log(f"  OMI priming hook already installed in {path}")
 
-        self._allowlist_priming_hook(command)
+        self._allowlist_hook("pre_llm_call", command, HOOK_MARKER)
 
-    def _allowlist_priming_hook(self, command: str) -> None:
-        """Pre-approve the priming hook in Hermes' consent allowlist so it loads
-        without a TTY prompt. Matching is by (event, command); we replace any
-        prior omind-owned ``pre_llm_call`` approval so a drifted command can't
-        leave a stale grant behind. Never overwrites a file it can't parse."""
+    def integrate(self) -> None:
+        super().integrate()
+        self.install_guard()
+
+    def _write_guard_script(self) -> None:
+        """Write Hermes' OMI-guard ``pre_tool_call`` adapter from package data,
+        substituting the omind binary + OMI folder. Managed (refreshed on drift)."""
+        dest = hermes_guard_script_path()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("omi-guard-hermes.sh")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(f"  WARNING: could not read omi-guard-hermes.sh from package data: {exc}")
+            return
+        omind_exe = shutil.which("omind") or "omind"
+        content = content.replace("__OMIND_BIN__", omind_exe).replace(
+            "__OMI_DIR__", str(self.config.omi_dir)
+        )
+        self._write_managed(dest, content)
+        if not self.config.dry_run:
+            with contextlib.suppress(OSError):
+                dest.chmod(0o755)
+
+    def install_guard(self) -> None:
+        """Install the OMI-compliance guard into Hermes' ``pre_tool_call`` hook.
+
+        Hermes' ``pre_tool_call`` can BLOCK (it accepts Claude-Code-style
+        ``{"decision":"block"}``), so this gives Hermes the same hard-blocks +
+        per-turn consult gate the Claude adapter enforces; the per-turn RESET
+        rides on the existing ``pre_llm_call`` priming hook (Hermes' turn
+        boundary). The guard entry is identified by the script filename, so
+        re-runs never duplicate and user hooks are preserved."""
+        self._write_guard_script()
+        path = hermes_config_path()
+        data = self._read_config()
+        command = str(hermes_guard_script_path())
+        marker = hermes_guard_script_path().name
+        desired = {"command": command, "timeout": 10}
+
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        entries = hooks.get("pre_tool_call")
+        existing = entries if isinstance(entries, list) else []
+        kept = [
+            e
+            for e in existing
+            if not (
+                isinstance(e, dict)
+                and isinstance(e.get("command"), str)
+                and marker in e["command"]
+            )
+        ]
+        merged = kept + [desired]
+        if merged != existing or self.config.force:
+            hooks["pre_tool_call"] = merged
+            data["hooks"] = hooks
+            self._record(f"install OMI guard hook (pre_tool_call) in {path}")
+            if not self.config.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(
+                    yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
+                    encoding="utf-8",
+                )
+        else:
+            self.log(f"  OMI guard hook already installed in {path}")
+        self._allowlist_hook("pre_tool_call", command, marker)
+
+    def _allowlist_hook(self, event: str, command: str, marker: str) -> None:
+        """Pre-approve a hook command in Hermes' consent allowlist so it loads
+        without a TTY prompt. Matching is by (event, command); replaces any prior
+        omind-owned approval for that event (identified by ``marker`` in the
+        command) so a drifted command can't leave a stale grant. Never overwrites
+        a file it can't parse."""
         path = hermes_allowlist_path()
         try:
             raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -341,9 +437,7 @@ class HermesProvisioner(AgentProvisioner):
         approvals = approvals if isinstance(approvals, list) else []
 
         already = any(
-            isinstance(e, dict)
-            and e.get("event") == "pre_llm_call"
-            and e.get("command") == command
+            isinstance(e, dict) and e.get("event") == event and e.get("command") == command
             for e in approvals
         )
         if already and not self.config.force:
@@ -354,13 +448,13 @@ class HermesProvisioner(AgentProvisioner):
             for e in approvals
             if not (
                 isinstance(e, dict)
-                and e.get("event") == "pre_llm_call"
-                and HOOK_MARKER in str(e.get("command", ""))
+                and e.get("event") == event
+                and marker in str(e.get("command", ""))
             )
         ]
-        kept.append({"event": "pre_llm_call", "command": command})
+        kept.append({"event": event, "command": command})
         data["approvals"] = kept
-        self._record(f"pre-approve OMI priming hook in {path}")
+        self._record(f"pre-approve OMI {event} hook in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(
@@ -481,6 +575,95 @@ class OpenClawProvisioner(AgentProvisioner):
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
 
+# -- OpenCode -------------------------------------------------------------------
+
+
+class OpenCodeProvisioner(AgentProvisioner):
+    """Wire OpenCode: the ``omi`` MCP server in ``opencode.json`` + the OMI-guard
+    plugin. OpenCode auto-loads any module under ``~/.config/opencode/plugin/``;
+    the plugin's ``tool.execute.before`` hook throws on a hard-rule deny."""
+
+    AGENT_LABEL = "OpenCode"
+    INSTALL_HINT = "Install OpenCode (`npm i -g opencode-ai`), then re-run."
+    DONE_MESSAGE = "Done. Restart OpenCode to load the OMI memory + guard plugin."
+
+    def agent_root(self) -> Path:
+        return opencode_config_dir()
+
+    def skill_dir(self) -> Path:
+        return opencode_config_dir() / "skill" / "omind-omi-memory"
+
+    def registered_server(self) -> dict[str, Any] | None:
+        try:
+            data = self._read_settings(opencode_config_path())
+        except ProvisionError:
+            return None
+        mcp = data.get("mcp")
+        server = mcp.get(self.config.server_name) if isinstance(mcp, dict) else None
+        return server if isinstance(server, dict) else None
+
+    def desired_server_entry(self) -> dict[str, Any]:
+        # OpenCode local MCP server: a `type: local` + command array.
+        omind = shutil.which("omind") or "omind"
+        return {
+            "type": "local",
+            "command": [
+                omind,
+                "node",
+                "--vault",
+                str(self.config.vault),
+                "--folder",
+                self.config.folder,
+            ],
+            "enabled": True,
+        }
+
+    def register_mcp(self) -> None:
+        path = opencode_config_path()
+        data = self._read_settings(path)
+        desired = self.desired_server_entry()
+        if self.registered_server() == desired and not self.config.force:
+            self.log(
+                f"  MCP server '{self.config.server_name}' already points at "
+                f"{self.config.omi_dir}"
+            )
+            return
+        mcp = data.get("mcp")
+        if not isinstance(mcp, dict):
+            mcp = {}
+        mcp[self.config.server_name] = desired
+        data["mcp"] = mcp
+        self._record(
+            f"register MCP server '{self.config.server_name}' in {path} -> {self.config.omi_dir}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def integrate(self) -> None:
+        super().integrate()
+        self.install_guard()
+
+    def install_guard(self) -> None:
+        """Write the OMI-guard plugin into OpenCode's auto-loaded ``plugin/`` dir,
+        substituting the omind binary + OMI folder. Managed (refreshed on drift)."""
+        dest = opencode_guard_plugin_path()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("omi-guard.opencode.js")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(f"  WARNING: could not read omi-guard.opencode.js from package data: {exc}")
+            return
+        omind_exe = shutil.which("omind") or "omind"
+        content = content.replace("__OMIND_BIN__", omind_exe).replace(
+            "__OMI_DIR__", str(self.config.omi_dir)
+        )
+        self._write_managed(dest, content)
+
+
 # -- diagnose -------------------------------------------------------------------
 
 
@@ -548,25 +731,31 @@ def diagnose_openclaw(config: SetupConfig) -> list[CheckResult]:
     return _diagnose_agent(OpenClawProvisioner(config=config, log=lambda _msg: None))
 
 
+def diagnose_opencode(config: SetupConfig) -> list[CheckResult]:
+    return _diagnose_agent(OpenCodeProvisioner(config=config, log=lambda _msg: None))
+
+
 # -- dispatch -------------------------------------------------------------------
 
 PROVISIONERS: dict[str, type[Provisioner]] = {
     "claude": Provisioner,
     "hermes": HermesProvisioner,
     "openclaw": OpenClawProvisioner,
+    "opencode": OpenCodeProvisioner,
 }
 
 DIAGNOSERS = {
     "claude": diagnose,
     "hermes": diagnose_hermes,
     "openclaw": diagnose_openclaw,
+    "opencode": diagnose_opencode,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)
 
 
 def run_setup_for(config: SetupConfig, log: Logger = print) -> list[str]:
-    """Run the provisioner for ``config.agent`` (claude, hermes, or openclaw)."""
+    """Run the provisioner for ``config.agent`` (claude, hermes, openclaw, opencode)."""
     return PROVISIONERS[config.agent](config=config, log=log).run()
 
 

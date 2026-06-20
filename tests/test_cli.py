@@ -157,3 +157,35 @@ def test_note_reads_details_from_stdin(
     rc = main(["note", "--title", "Piped", "--vault", str(tmp_path), "--folder", "OMI"])
     assert rc == 0
     assert "piped body text" in (tmp_path / "OMI" / "Piped.md").read_text(encoding="utf-8")
+
+
+# -- 2.41.0: note --connection (comma-safe) + omind search -------------------
+
+
+def test_note_connection_flag_preserves_comma_titles(tmp_path: Path) -> None:
+    rc = main([
+        "note", "--title", "Test Note",
+        "--summary", "s", "--details", "body",
+        "--connection", "A Note, with a comma",
+        "--connection", "Plain Other",
+        "--connections", "CsvOne,CsvTwo",
+        "--vault", str(tmp_path), "--folder", "OMI",
+    ])
+    assert rc == 0
+    note = (tmp_path / "OMI" / "Test Note.md").read_text(encoding="utf-8")
+    assert "[[A Note, with a comma]]" in note  # comma title kept whole
+    assert "[[Plain Other]]" in note
+    assert "[[CsvOne]]" in note and "[[CsvTwo]]" in note  # CSV still splits on commas
+
+
+def test_search_finds_notes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+    from omind.store import NoteFields, OmiStore
+
+    OmiStore(tmp_path / "OMI").create_note(
+        NoteFields(title="Codeberg Note", summary="about codeberg releases")
+    )
+    assert main(["search", "codeberg", "--vault", str(tmp_path), "--folder", "OMI"]) == 0
+    assert "Codeberg Note" in capsys.readouterr().out
+    # a miss prints "no matches"
+    assert main(["search", "zzznotthere", "--vault", str(tmp_path), "--folder", "OMI"]) == 0
+    assert "no matches" in capsys.readouterr().out

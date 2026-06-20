@@ -7,6 +7,8 @@ from __future__ import annotations
 import io
 import json
 
+import pytest
+
 from omind import adapters, guard
 
 
@@ -50,3 +52,22 @@ def test_run_guard_adapter_action_dispatches() -> None:
     event = io.StringIO(json.dumps({"tool": "shell", "command": "ls", "session": "a3"}))
     assert guard.run_guard("adapter", event) == 2
     guard.clear_gate("a3")
+
+
+# -- 2.41.0: per-harness rendering ------------------------------------------
+
+
+def test_run_adapter_hermes_renders_claude_json(capsys: pytest.CaptureFixture[str]) -> None:
+    event = io.StringIO(json.dumps({"tool": "shell", "command": "gh pr create", "session": "h1"}))
+    code = adapters.run_adapter(event, harness="hermes")
+    out = capsys.readouterr().out
+    assert code == 0  # block is in the JSON, not the exit code
+    assert json.loads(out)["decision"] == "block"
+
+
+def test_run_adapter_opencode_renders_json_signal(capsys: pytest.CaptureFixture[str]) -> None:
+    payload = {"tool": "bash", "command": "gh repo delete a/b", "session": "o1"}
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="opencode")
+    out = capsys.readouterr().out
+    assert code == 2
+    assert json.loads(out)["allow"] is False

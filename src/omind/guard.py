@@ -237,6 +237,27 @@ def decide(action: dict[str, Any]) -> Verdict:
     return Verdict(allow=False, reason=f"omi-gate: {GATE_MESSAGE}", rule_id="omi-gate")
 
 
+def check_action(action: dict[str, Any]) -> Verdict:
+    """Decide an action and log a real policy-rule deny to the compliance log.
+
+    The shared core behind ``omind guard check`` and the per-harness adapters
+    (:mod:`omind.adapters`), so every harness logs + decides identically. The
+    routine ``omi-gate`` "you didn't consult" deny is friction, not logged.
+    """
+    verdict = decide(action)
+    if not verdict.allow and verdict.rule_id and verdict.rule_id != "omi-gate":
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session=str(action.get("session") or ""),
+            tool=str(action.get("tool") or ""),
+            command=str(action.get("command") or ""),
+            rule_id=verdict.rule_id,
+            severity=policy.SEVERITY_HARD,
+            outcome="deny",
+        )
+    return verdict
+
+
 def _load(stream: TextIO) -> dict[str, Any]:
     try:
         data = json.loads(stream.read() or "{}")
@@ -246,7 +267,13 @@ def _load(stream: TextIO) -> dict[str, Any]:
 
 
 def run_guard(
-    action_name: str, stream: TextIO | None = None, *, omi_dir: Path | None = None
+    action_name: str,
+    stream: TextIO | None = None,
+    *,
+    omi_dir: Path | None = None,
+    harness: str = "claude",
+    limit: int = 20,
+    command: str = "",
 ) -> int:
     """CLI entry for ``omind guard <action>``. Returns the process exit code.
 
@@ -267,6 +294,16 @@ def run_guard(
         return _run_learn(_load(src), omi_dir)
     if action_name == "escalate":
         return _run_escalate()
+    if action_name == "log":
+        return _run_log(limit)
+    if action_name == "policy":
+        return _run_policy()
+    if action_name == "explain":
+        return _run_explain(command)
+    if action_name == "status":
+        return _run_status()
+    if action_name == "repair":
+        return _run_repair(omi_dir)
     if action_name == "suggest":
         return _run_suggest(_load(src), omi_dir)
     if action_name == "verify":
@@ -274,7 +311,18 @@ def run_guard(
     if action_name == "adapter":
         from omind import adapters
 
-        return adapters.run_adapter(src, omi_dir=omi_dir)
+        return adapters.run_adapter(src, omi_dir=omi_dir, harness=harness)
+    if action_name == "selftest":
+        from omind import harness as harness_mod
+
+        results = harness_mod.run_selftest()
+        for r in results:
+            mark = "ok" if r["ok"] else "FAIL"
+            sys.stdout.write(
+                f"[{mark}] {r['harness']:8} {r['format']:12} "
+                f"blocked={r['blocked']} :: {r['command']}\n"
+            )
+        return 0 if all(r["ok"] for r in results) else 1
     if action_name == "export-corpus":
         from omind import corpus
 
@@ -282,22 +330,9 @@ def run_guard(
         sys.stderr.write(f"exported {count} corpus example(s)\n")
         return 0
     if action_name == "check":
-        action = _load(src)
-        verdict = decide(action)
+        verdict = check_action(_load(src))
         if not verdict.allow:
             sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
-            # Log only real policy-rule denies — the routine "you didn't consult"
-            # gate deny is friction, not a violation worth learning from.
-            if verdict.rule_id and verdict.rule_id != "omi-gate":
-                compliance.log_event(
-                    compliance.KIND_DECISION,
-                    session=str(action.get("session") or ""),
-                    tool=str(action.get("tool") or ""),
-                    command=str(action.get("command") or ""),
-                    rule_id=verdict.rule_id,
-                    severity=policy.SEVERITY_HARD,
-                    outcome="deny",
-                )
         return verdict.exit_code
     return 0
 
@@ -370,4 +405,89 @@ def _run_verify(data: dict[str, Any], omi_dir: Path | None) -> int:
 
     verdict = verify.verify_consult(data, omi_dir)
     sys.stdout.write((verdict or "not-a-consult") + "\n")
+    return 0
+
+
+def _run_log(limit: int) -> int:
+    """``omind guard log``: human view of the compliance log + a rollup."""
+    summary = compliance.summary()
+    sys.stdout.write(
+        f"compliance log: {summary['total']} event(s), {summary['denies']} deny, "
+        f"{summary['violations']} violation(s)"
+        + (f"; last {summary['last_ts']}" if summary["last_ts"] else "")
+        + "\n"
+    )
+    if summary["top_rules"]:
+        top = ", ".join(f"{rid}×{n}" for rid, n in summary["top_rules"])
+        sys.stdout.write(f"top rules: {top}\n")
+    for event in compliance.read_events(limit=limit):
+        sys.stdout.write(
+            f"  {event.get('ts', ''):19}  {str(event.get('kind', '')):9} "
+            f"{str(event.get('outcome', '')):9} {str(event.get('rule_id', '')):24} "
+            f"{event.get('command', '')}\n"
+        )
+    return 0
+
+
+def _run_policy() -> int:
+    """``omind guard policy``: list the active deny set (seed + learned)."""
+    rules = policy.load_policy()
+    for rule in rules:
+        flag = " [verify]" if rule.verify else ""
+        sys.stdout.write(
+            f"  [{rule.severity:4}] {rule.tier:11} {rule.source:7} "
+            f"hits={rule.hits:<3} {rule.id}{flag}\n"
+        )
+    learned = sum(1 for rule in rules if rule.source == "learned")
+    sys.stdout.write(f"{len(rules)} rule(s): {len(rules) - learned} seed + {learned} learned\n")
+    return 0
+
+
+def _run_explain(command: str) -> int:
+    """``omind guard explain --command "<cmd>"``: which policy rules a command
+    hits + the verdict, WITHOUT touching the gate/sentinel (a pure dry-run)."""
+    if not command:
+        sys.stderr.write('guard explain: pass --command "<cmd>"\n')
+        return 1
+    matched: list[tuple[policy.Rule, bool]] = []
+    for rule in policy.load_policy():
+        if rule.compiled().search(command):
+            opted_in = bool(rule.opt_in and re.search(rule.opt_in, command))
+            matched.append((rule, opted_in))
+    if not matched:
+        sys.stdout.write(f"ALLOW (no policy rule matches): {command}\n")
+        return 0
+    for rule, opted_in in matched:
+        state = "opt-in→allow" if opted_in else rule.severity
+        sys.stdout.write(f"  [{state}] {rule.id} ({rule.tier}): {rule.message}\n")
+    blocking = [r for r, opted in matched if r.severity == policy.SEVERITY_HARD and not opted]
+    sys.stdout.write(("DENY" if blocking else "ALLOW") + f": {command}\n")
+    return 0
+
+
+def _run_status() -> int:
+    """``omind guard status``: the harnesses omind can guard + their capability."""
+    from omind import harness as harness_mod
+
+    for name, spec in harness_mod.HARNESSES.items():
+        sys.stdout.write(
+            f"  {name:10} capability={spec.capability:11} "
+            f"format={spec.block_format:12} — {spec.description}\n"
+        )
+    return 0
+
+
+def _run_repair(omi_dir: Path | None) -> int:
+    """``omind guard repair``: re-provision the OMI guard hook-set, fixing a
+    clobbered/stale settings hook path or OMI_DIR mismatch (the wedge we hit)."""
+    from omind.provision import heal_omi_guard
+
+    vault = omi_dir.parent if omi_dir is not None else None
+    folder = omi_dir.name if omi_dir is not None else "OMI"
+    changed = heal_omi_guard(vault=vault, folder=folder, log=print)
+    sys.stdout.write(
+        "repaired the OMI guard hook-set\n"
+        if changed
+        else "OMI guard already healthy (nothing to repair)\n"
+    )
     return 0

@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.41.0] - 2026-06-20
+
+### Added
+
+- **Cross-harness guard — Hermes + OpenCode.** The harness-agnostic guard core now
+  enforces under two more agents, not just Claude Code. A declarative
+  `HarnessSpec` (`omind.harness`) describes each harness as data — capability
+  (`hard-block`/`detect-only`, with graceful degradation) + block-output format —
+  and a renderer emits a verdict in each harness's contract. `omind guard selftest`
+  validates all three against canned events without a live harness.
+  - **Hermes**: a `pre_tool_call` adapter (`omi-guard-hermes.sh`) that blocks with
+    Claude-Code-style `{"decision":"block"}`; the per-turn gate resets on the
+    existing `pre_llm_call` hook (Hermes' turn boundary).
+  - **OpenCode**: a `@opencode-ai/plugin` (`omi-guard.opencode.js`) that throws in
+    `tool.execute.before` on a hard-rule deny; installed via a new
+    `OpenCodeProvisioner` (`omind setup --agent opencode`). The consult gate is not
+    enforced there (its signals are unverified) — only the absolute hard blocks.
+- **Guard observability + recovery (QoL).**
+  - `omind guard repair` — re-provision a wedged guard hook-set (clobbered/stale
+    settings hook path, `OMI_DIR` mismatch).
+  - `omind guard log` / `policy` / `status` — view the compliance log, the active
+    deny set, and the guardable harnesses.
+  - `omind guard explain --command "<cmd>"` — dry-run a command through the policy
+    (which rules it hits + the verdict) without touching the gate.
+- **`omind search "<query>"`** — search the vault from the terminal.
+- **`omind note --connection TITLE`** (repeatable) — comma-safe connection titles
+  (the CSV `--connections` wrongly split titles containing commas).
+- **`scripts/test.sh`** — run the suite in a sandboxed `HOME`/`CLAUDE_CONFIG_DIR`,
+  a harness-level belt to the in-code test-isolation guard.
+
 ## [2.40.1] - 2026-06-20
 
 ### Added

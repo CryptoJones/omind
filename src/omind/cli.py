@@ -281,8 +281,23 @@ def build_parser() -> argparse.ArgumentParser:
     note.add_argument("--tags", default="", help="comma-separated tags (no '#' needed)")
     note.add_argument("--related-to", default="", help="free-text 'related to' line")
     note.add_argument("--connections", default="", help="comma-separated note titles to [[link]]")
+    note.add_argument(
+        "--connection",
+        action="append",
+        default=[],
+        metavar="TITLE",
+        help="a single connection title (repeatable) — use for titles that "
+        "contain commas, which --connections would wrongly split",
+    )
     note.add_argument("--references", default="", help="comma-separated references")
     _add_vault_args(note)
+
+    search = sub.add_parser("search", help="search OMI notes from the terminal")
+    search.add_argument(
+        "query", help="case-insensitive substring over title/summary/details/tags"
+    )
+    search.add_argument("--tag", default=None, help="also require this tag")
+    _add_vault_args(search)
 
     rollup = sub.add_parser(
         "rollup",
@@ -337,13 +352,19 @@ def build_parser() -> argparse.ArgumentParser:
             "verify",
             "suggest",
             "adapter",
+            "selftest",
             "export-corpus",
+            "log",
+            "policy",
+            "explain",
+            "status",
+            "repair",
         ),
-        help="check/reset the per-turn gate (stdin JSON); learn a violation into "
-        "a rule + note; escalate recidivist rules; verify a consult's relevance; "
-        "suggest notes relevant to this turn's task; adapter normalizes another "
-        "harness's event into a check; export-corpus emits the compliance log as "
-        "fine-tuning JSONL",
+        help="check/reset the gate; learn/escalate rules; verify/suggest; adapter "
+        "normalizes another harness's event; selftest replays canned events; "
+        "export-corpus emits fine-tuning JSONL; log/policy/status inspect the "
+        "compliance log, active rules, and guardable harnesses; explain dry-runs a "
+        "command (--command); repair re-provisions a wedged guard hook-set",
     )
     guard.add_argument(
         "--omi-dir",
@@ -351,6 +372,21 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="OMI folder for actions that read/write notes (learn/verify/suggest); "
         "defaults to the standard vault's OMI folder",
+    )
+    guard.add_argument(
+        "--harness",
+        default="claude",
+        help="harness whose event shape + block-output format the adapter targets "
+        "(claude, hermes, opencode); default: claude",
+    )
+    guard.add_argument(
+        "--command",
+        dest="guard_command",
+        default="",
+        help="the command to dry-run (for `guard explain`)",
+    )
+    guard.add_argument(
+        "--limit", type=int, default=20, help="max compliance-log rows (for `guard log`)"
     )
 
     selfupdate = sub.add_parser(
@@ -593,6 +629,20 @@ def _run_reindex(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_search(args: argparse.Namespace) -> int:
+    from omind.store import OmiStore
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    results = OmiStore(omi_dir).search(args.query, tag=args.tag)
+    if not results:
+        print("no matches")
+        return 0
+    for note in results:
+        summary = f" — {note.summary}" if note.summary else ""
+        print(f"{note.title}{summary}")
+    return 0
+
+
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated CLI flag into a clean list."""
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -611,7 +661,10 @@ def _run_note(args: argparse.Namespace) -> int:
         details=details.strip(),
         tags=_split_csv(args.tags),
         related_to=args.related_to.strip(),
-        connections=_split_csv(args.connections),
+        # CSV titles plus any repeatable --connection (exact titles, comma-safe).
+        connections=(
+            _split_csv(args.connections) + [c.strip() for c in args.connection if c.strip()]
+        ),
         references=_split_csv(args.references),
     )
     omi_dir = (args.vault / args.folder).expanduser()
@@ -690,6 +743,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_export(args)
     if args.command == "import":
         return _run_import(args)
+    if args.command == "search":
+        return _run_search(args)
     if args.command == "reindex":
         return _run_reindex(args)
     if args.command == "note":
@@ -700,7 +755,13 @@ def main(argv: list[str] | None = None) -> int:
         return _run_hook(args)
     if args.command == "guard":
         omi_dir = args.omi_dir if args.omi_dir is not None else (default_vault_path() / "OMI")
-        return run_guard(args.action, omi_dir=omi_dir)
+        return run_guard(
+            args.action,
+            omi_dir=omi_dir,
+            harness=args.harness,
+            limit=args.limit,
+            command=args.guard_command,
+        )
     if args.command == "self-update":
         return _run_self_update(args)
     parser.print_help()

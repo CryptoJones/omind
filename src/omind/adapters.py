@@ -21,8 +21,6 @@ exercised by the test-suite against each harness's event shape.
 
 from __future__ import annotations
 
-import io
-import json
 import sys
 from pathlib import Path
 from typing import Any, TextIO
@@ -68,12 +66,17 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
     }
 
 
-def run_adapter(stream: TextIO | None = None, *, omi_dir: Path | None = None) -> int:
-    """Read a harness event on stdin, normalize it, and run the guard check.
+def run_adapter(
+    stream: TextIO | None = None, *, omi_dir: Path | None = None, harness: str = "claude"
+) -> int:
+    """Read a harness event on stdin, normalize it, decide, and render the verdict
+    in ``harness``'s block-output format (exit-2 for shell harnesses, a
+    ``{"decision":"block"}`` JSON for Hermes, an ``{allow,reason}`` signal for the
+    OpenCode plugin). Returns the exit code the adapter should exit with."""
+    from omind import harness as harness_mod
 
-    Returns the guard's exit code (0 allow / 2 deny), so a harness can gate on it
-    exactly like the Claude adapter gates on ``omind guard check``.
-    """
     src = stream if stream is not None else sys.stdin
     action = normalize_action(guard._load(src))
-    return guard.run_guard("check", io.StringIO(json.dumps(action)), omi_dir=omi_dir)
+    verdict = guard.check_action(action)
+    spec = harness_mod.spec_for(harness)
+    return harness_mod.render_decision(verdict, spec.block_format, sys.stdout, sys.stderr)

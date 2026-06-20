@@ -465,12 +465,22 @@ def emit_pre_llm_call_context(
     stdout: TextIO | None = None,
 ) -> None:
     """Emit OMI priming as Hermes' ``pre_llm_call`` ``{"context": ...}`` payload,
-    once per session. Silent no-op on later turns of the same session. Never
-    raises — a broken priming hook must never wedge the agent."""
+    once per session, and **reset the per-turn consult gate every turn** (Hermes'
+    ``pre_llm_call`` fires before each LLM turn — it is Hermes' turn boundary, the
+    analogue of Claude's UserPromptSubmit). Silent no-op on the priming side for
+    later turns of the same session. Never raises — a broken priming/reset hook
+    must never wedge the agent."""
     sink = stdout if stdout is not None else sys.stdout
     try:
         event = read_event(stdin)
-        if _already_primed(event.get("session_id") or ""):
+        session = str(event.get("session_id") or "")
+        # Re-arm the consult gate for the new turn + capture its task (best-effort;
+        # the Hermes guard's pre_tool_call adapter enforces the gate this re-arms).
+        from omind import guard
+
+        guard.clear_gate(session)
+        guard.begin_turn(session, str(event.get("prompt") or ""))
+        if _already_primed(session):
             return
         payload = {"context": build_session_start_context(omi_dir)}
         sink.write(json.dumps(payload) + "\n")
