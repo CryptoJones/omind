@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.42.0] - 2026-06-20
+
+### Added
+
+- **`omind checkpoint` — scheduled recent-work recorder.** You can't reliably
+  *force* a running agent to act on a wall clock (agents are turn-driven and idle
+  between messages), so the robust way to "record recent work every N minutes" is
+  a **scheduled job that mines the trails the hooks already capture** — not asking
+  the agent. `omind checkpoint` reads the **journal** (per-action work trail) and
+  the **compliance log** (cross-harness guard events), filters them to a recent
+  window, and upserts a per-day **`Worklog <date>`** note with a timestamped
+  section per run (one note/day — a single recent-memory slot, not a flood).
+  - `omind checkpoint --since 15m` runs one checkpoint now (deterministic
+    summary: action counts by tool + guard denies/violations). `--llm` adds a
+    headless `claude -p` narrative, fail-open to the deterministic summary.
+  - `omind checkpoint install-timer --every 15m` wires a **systemd user timer**
+    (the same mechanism `omind backup`/`omind mesh` use) so it runs unattended —
+    the agent's cooperation is never required, which is what makes it a real
+    *force*; `uninstall-timer` removes it. `Type=oneshot`, so a failing checkpoint
+    never blocks anything.
+
 ## [2.41.3] - 2026-06-20
 
 ### Added

@@ -314,6 +314,35 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_vault_args(lint)
 
+    checkpoint = sub.add_parser(
+        "checkpoint",
+        help="summarize recent activity (journal + compliance log) into a daily "
+        "worklog note; install-timer runs it unattended every N minutes",
+    )
+    checkpoint.add_argument(
+        "action",
+        nargs="?",
+        default="run",
+        choices=("run", "install-timer", "uninstall-timer"),
+        help="run a checkpoint now (default), or install/remove the systemd user timer",
+    )
+    checkpoint.add_argument(
+        "--since",
+        default="15m",
+        help="window to summarize for `run` (e.g. 15m, 1h, 90; default: 15m)",
+    )
+    checkpoint.add_argument(
+        "--every",
+        default="15m",
+        help="timer interval for install-timer (e.g. 15m, 1h; default: 15m)",
+    )
+    checkpoint.add_argument(
+        "--llm",
+        action="store_true",
+        help="add a headless `claude -p` narrative (fail-open to the deterministic summary)",
+    )
+    _add_vault_args(checkpoint)
+
     rollup = sub.add_parser(
         "rollup",
         help="compact weeks of daily session journals into one summary note each, "
@@ -680,6 +709,21 @@ def _run_lint(args: argparse.Namespace) -> int:
     return 1 if any(i.severity == "error" for i in issues) else 0
 
 
+def _run_checkpoint(args: argparse.Namespace) -> int:
+    from omind import checkpoint
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    if args.action == "install-timer":
+        checkpoint.install_timer(args.every, args.vault, args.folder)
+        return 0
+    if args.action == "uninstall-timer":
+        checkpoint.uninstall_timer()
+        return 0
+    action, filename = checkpoint.write_checkpoint(omi_dir, since=args.since, llm=args.llm)
+    print(f"{action} {filename}")
+    return 0
+
+
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated CLI flag into a clean list."""
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -784,6 +828,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_search(args)
     if args.command == "lint":
         return _run_lint(args)
+    if args.command == "checkpoint":
+        return _run_checkpoint(args)
     if args.command == "reindex":
         return _run_reindex(args)
     if args.command == "note":
