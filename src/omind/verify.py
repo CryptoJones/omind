@@ -47,6 +47,14 @@ _NOTE_EXCERPT_CAP = 4000
 _DEFAULT_TIMEOUT = 15
 _REQUIRE_ENV = "OMI_VERIFY_REQUIRE"
 _TIMEOUT_ENV = "OMI_VERIFY_TIMEOUT"
+#: REQUIRE mode re-closes the gate when an off-topic consult leaves the turn with
+#: no relevant consult — but it must NEVER deadlock. A terse/abstract task scores
+#: ~0 keyword-overlap against every note, so the agent could not raise the score
+#: no matter what it reads. After this many re-closes in a turn, stop re-closing
+#: (degrade to WARN): the lazy single-arbitrary-read shortcut is still re-closed
+#: and logged, but a genuinely-stuck agent always escapes. 0 disables re-closing.
+_MAX_RECLOSE_ENV = "OMI_VERIFY_MAX_RECLOSE"
+_DEFAULT_MAX_RECLOSE = 2
 _HIGH_ENV = "OMI_VERIFY_HIGH"
 _LOW_ENV = "OMI_VERIFY_LOW"
 #: Comma-separated substrings; a consult whose target matches one is ALWAYS
@@ -56,6 +64,11 @@ _ALWAYS_RELEVANT_ENV = "OMI_VERIFY_ALWAYS_RELEVANT"
 
 #: Synthetic rule id for an off-topic consult in the compliance log.
 OFF_TOPIC_RULE = "off-topic-consult"
+
+#: Synthetic rule id for the anti-wedge floor: REQUIRE mode hit its per-turn
+#: re-close cap with no relevant consult and let the agent proceed anyway. Logged
+#: so a chronically off-target task (a verifier blind spot) is visible, not silent.
+NO_RELEVANT_FLOOR_RULE = "verify-reclose-floor"
 
 
 def _threshold(env: str, default: float) -> float:
@@ -202,6 +215,13 @@ def _require_mode(require: bool | None) -> bool:
     return bool(os.environ.get(_REQUIRE_ENV))
 
 
+def _max_reclose() -> int:
+    try:
+        return max(0, int(os.environ.get(_MAX_RECLOSE_ENV) or _DEFAULT_MAX_RECLOSE))
+    except (ValueError, TypeError):
+        return _DEFAULT_MAX_RECLOSE
+
+
 def _any_relevant(session: str) -> bool:
     return any(c.get("relevant") is True for c in guard.consults(session))
 
@@ -249,7 +269,23 @@ def verify_consult(
     if _require_mode(require) and not _any_relevant(session):
         # REQUIRE mode: re-close the gate so the next action is blocked until a
         # relevant consult happens. Enforcement stays off the PreToolUse hot path.
-        guard.clear_gate(session)
+        # BUT a verifier must never deadlock the agent — cap the re-closes per turn
+        # so a terse task (which scores ~0 against every note) can't wedge it
+        # forever. Past the cap, degrade to WARN: stop re-closing, but record the
+        # backstop so the floor is visible in the compliance log.
+        if guard.bump_reclose(session) <= _max_reclose():
+            guard.clear_gate(session)
+        else:
+            compliance.log_event(
+                compliance.KIND_VIOLATION,
+                session=session,
+                tool=str(event.get("tool_name") or ""),
+                command=target,
+                rule_id=NO_RELEVANT_FLOOR_RULE,
+                severity="soft",
+                outcome="floor",
+                now=now,
+            )
     return "irrelevant"
 
 

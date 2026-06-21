@@ -146,6 +146,33 @@ def test_verify_consult_require_keeps_gate_when_a_relevant_consult_exists(
     assert guard.consulted_this_turn("v4")  # a relevant consult exists -> gate stays open
 
 
+def test_verify_require_caps_recloses_so_it_cannot_deadlock(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A terse/abstract task scores ~0 against every note, so naive REQUIRE would
+    re-close the gate on every consult forever — an unbreakable wedge. The per-turn
+    cap breaks it: past the cap the verifier degrades to WARN (gate stays open) and
+    logs the floor. A verifier must never deadlock the agent."""
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    monkeypatch.setenv("OMI_VERIFY_MAX_RECLOSE", "1")
+    omi = _omi(tmp_path)
+    note = omi / "Smoothie.md"
+    note.write_text("# Smoothie\n\nbanana mango ice recipe\n", encoding="utf-8")
+    guard.begin_turn("cap", "how to codeberg release push")  # zero the re-close counter
+    payload = {"tool_name": "Read", "session_id": "cap", "tool_input": {"file_path": str(note)}}
+
+    # 1st off-topic consult: within the cap -> re-closes the gate (forces a retry).
+    guard.mark_consulted("cap")
+    verify.verify_consult(payload, omi, require=True, out=io.StringIO())
+    assert not guard.consulted_this_turn("cap")
+
+    # 2nd off-topic consult: past the cap -> WARN, gate STAYS open, floor logged.
+    guard.mark_consulted("cap")
+    verify.verify_consult(payload, omi, require=True, out=io.StringIO())
+    assert guard.consulted_this_turn("cap")  # the agent is never deadlocked
+    assert compliance.read_events()[-1]["rule_id"] == verify.NO_RELEVANT_FLOOR_RULE
+
+
 def test_verify_consult_ignores_non_consult_events(tmp_path: Path) -> None:
     omi = _omi(tmp_path)
     assert verify.verify_consult(

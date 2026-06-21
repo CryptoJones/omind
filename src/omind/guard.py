@@ -90,7 +90,11 @@ def _turn_path(session: str) -> Path:
 
 def begin_turn(session: str, task: str) -> None:
     """Record this turn's task (best-effort, never raises). Written by
-    ``omind guard reset``; the Claude adapter writes the same file in pure bash."""
+    ``omind guard reset``; the Claude adapter writes the same file in pure bash.
+
+    Also resets the per-turn re-close counter, so the verifier's anti-wedge cap is
+    measured per turn (the bash turn-start hook clears the same counter file)."""
+    _clear_reclose(session)
     with contextlib.suppress(OSError):
         path = _turn_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -189,9 +193,61 @@ def clear_gate(session: str) -> None:
 
     Also reaps legacy ``/tmp/omi-gate-*`` sentinels left by the pre-state-dir
     prototype guard, so a machine upgrading from that version does not keep stale
-    sentinels around (the canonical guard never writes ``/tmp``)."""
+    sentinels around (the canonical guard never writes ``/tmp``).
+
+    Does NOT touch the re-close counter — the verifier re-closes the gate by
+    calling this, and the counter must survive across re-closes within a turn (it
+    is reset only at turn start, by :func:`begin_turn`)."""
     with contextlib.suppress(OSError):
         _sentinel_path(session).unlink()
+    _reap_legacy_sentinels()
+
+
+def _reclose_path(session: str) -> Path:
+    """Per-turn count of how many times REQUIRE-mode re-closed the gate. A sibling
+    of the sentinel that SURVIVES :func:`clear_gate` (which the re-close calls), so
+    the verifier can cap re-closes and never deadlock the agent. Reset at turn
+    start, alongside the sentinel."""
+    return paths.state_dir() / f"reclose-{_safe_sid(session)}"
+
+
+def reclose_count(session: str) -> int:
+    """How many times the gate was re-closed this turn (0 when none/absent)."""
+    try:
+        return int(_reclose_path(session).read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def bump_reclose(session: str) -> int:
+    """Increment and return this turn's re-close count. Never raises."""
+    nxt = reclose_count(session) + 1
+    with contextlib.suppress(OSError):
+        path = _reclose_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(nxt), encoding="utf-8")
+    return nxt
+
+
+def _clear_reclose(session: str) -> None:
+    with contextlib.suppress(OSError):
+        _reclose_path(session).unlink()
+
+
+def clear_all_gates() -> None:
+    """Clear EVERY per-turn sentinel + re-close counter — the recovery path for a
+    by-hand ``omind guard reset`` with no session id (a human un-wedging the gate
+    cannot know the live session id, so a single-session clear would miss it).
+    Also reaps the legacy ``/tmp`` sentinels. Never raises."""
+    state = paths.state_dir()
+    for pattern in ("gate-*", "reclose-*"):
+        try:
+            stale = list(state.glob(pattern))
+        except OSError:
+            continue
+        for path in stale:
+            with contextlib.suppress(OSError):
+                path.unlink()
     _reap_legacy_sentinels()
 
 
@@ -259,6 +315,15 @@ def check_action(action: dict[str, Any]) -> Verdict:
 
 
 def _load(stream: TextIO) -> dict[str, Any]:
+    # Reading an interactive terminal blocks forever — and a by-hand recovery run
+    # (`omind guard reset` typed at a shell) has no piped payload. Treat a TTY
+    # stdin as empty rather than hang. Hook input is always piped (never a TTY),
+    # so the live path is unchanged; only a human running the command benefits.
+    try:
+        if stream.isatty():
+            return {}
+    except (AttributeError, ValueError, OSError):
+        pass
     try:
         data = json.loads(stream.read() or "{}")
     except (ValueError, OSError):
@@ -288,8 +353,14 @@ def run_guard(
     if action_name == "reset":
         data = _load(src)
         session = str(data.get("session") or data.get("session_id") or "")
-        clear_gate(session)
-        begin_turn(session, str(data.get("prompt") or ""))
+        if session:
+            clear_gate(session)
+            begin_turn(session, str(data.get("prompt") or ""))
+        else:
+            # No session id — a human running `omind guard reset` by hand to
+            # recover a wedged gate. Clear every gate, since they can't know which
+            # session is stuck. (The hook path always supplies a session.)
+            clear_all_gates()
         return 0
     if action_name == "learn":
         return _run_learn(_load(src), omi_dir)

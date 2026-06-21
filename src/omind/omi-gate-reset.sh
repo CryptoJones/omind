@@ -15,6 +15,9 @@ sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 
 [ -z "$sid" ] && sid="nosid"
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omind"
 rm -f "$STATE/gate-$sid" 2>/dev/null
+# Reset the verifier's per-turn re-close counter (its anti-wedge cap is measured
+# per turn; guard.py reads reclose-<sid>). Best-effort.
+rm -f "$STATE/reclose-$sid" 2>/dev/null
 # Capture this turn's task so the verifier/retrieval can judge consult relevance
 # (guard.py reads turn-<sid>.txt). Best-effort; empty prompt is fine.
 mkdir -p "$STATE" 2>/dev/null

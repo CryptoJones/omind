@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.42.1] - 2026-06-21
+
+### Fixed
+
+- **The consult gate could permanently wedge under `OMI_VERIFY_REQUIRE=1`.** A
+  terse or abstract turn task (e.g. "start picking off backlog items") scores
+  near-zero keyword overlap against every note, so the verifier judged *every*
+  consult off-topic and re-closed the gate after each one — an unbreakable loop,
+  since no note the agent reads can raise the score. The verifier now caps
+  re-closes per turn (`OMI_VERIFY_MAX_RECLOSE`, default 2); past the cap it
+  degrades to WARN and lets the agent proceed, logging a `verify-reclose-floor`
+  event so the blind spot stays visible rather than silent. The lazy
+  single-arbitrary-read shortcut is still re-closed and logged — only a
+  genuinely-stuck agent reaches the floor. A verifier must never deadlock the
+  agent.
+- **`omind guard reset` hung when run by hand.** It read the action payload from
+  stdin unconditionally, so a bare invocation at a terminal blocked forever on a
+  TTY read (Ctrl-D was the only escape). It now treats an interactive stdin as
+  empty, so a by-hand recovery run returns immediately.
+- **`omind guard reset` with no session id now clears every gate.** Run by hand to
+  recover a wedge, it previously cleared only the `nosid` sentinel — never the
+  live session's — so manual recovery silently did nothing. It now clears all
+  per-turn sentinels and re-close counters. The hook path, which always carries a
+  session id, is unchanged.
+
 ## [2.42.0] - 2026-06-20
 
 ### Added

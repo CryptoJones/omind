@@ -95,6 +95,7 @@ def _isolate_verify_env(monkeypatch: pytest.MonkeyPatch) -> None:
         "OMI_VERIFY_ALWAYS_RELEVANT",
         "OMI_VERIFY_HIGH",
         "OMI_VERIFY_LOW",
+        "OMI_VERIFY_MAX_RECLOSE",
     ):
         monkeypatch.delenv(var, raising=False)
 

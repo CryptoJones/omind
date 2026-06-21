@@ -133,6 +133,48 @@ def test_reset_clears_gate_and_captures_task() -> None:
     assert guard.turn_task("t2") == "do the thing"  # task captured for the verifier
 
 
+def test_reset_with_no_session_clears_every_gate() -> None:
+    """A by-hand ``omind guard reset`` (no session id) clears ALL gates — the
+    recovery path, since a human un-wedging the gate cannot know the live sid."""
+    guard.mark_consulted("recoverA")
+    guard.mark_consulted("recoverB")
+    guard.bump_reclose("recoverA")
+    assert guard.consulted_this_turn("recoverA") and guard.consulted_this_turn("recoverB")
+    assert guard.run_guard("reset", io.StringIO("")) == 0  # empty payload, no session
+    assert not guard.consulted_this_turn("recoverA")
+    assert not guard.consulted_this_turn("recoverB")
+    assert guard.reclose_count("recoverA") == 0  # counters reaped too
+
+
+def test_reset_does_not_hang_on_an_interactive_tty() -> None:
+    """``omind guard reset`` typed at a shell has no piped payload; reading the
+    TTY would block forever, so ``_load`` short-circuits an interactive stdin."""
+
+    class _Tty(io.StringIO):
+        def isatty(self) -> bool:
+            return True
+
+    # If ``_load`` read this stream the content would parse as JSON; it must NOT
+    # touch a TTY (that is the hang), and return ``{}`` instead.
+    assert guard._load(_Tty('{"session": "ttysess"}')) == {}
+    guard.mark_consulted("ttysess")
+    assert guard.run_guard("reset", _Tty("")) == 0  # clears all gates, never hangs
+    assert not guard.consulted_this_turn("ttysess")
+
+
+def test_reclose_counter_survives_clear_gate_and_resets_each_turn() -> None:
+    """The verifier's anti-wedge cap is per turn: the counter increments, SURVIVES
+    ``clear_gate`` (which a re-close calls), and zeroes at turn start."""
+    guard.begin_turn("rc", "some task")  # turn start zeroes the counter
+    assert guard.reclose_count("rc") == 0
+    assert guard.bump_reclose("rc") == 1
+    guard.clear_gate("rc")  # a re-close must NOT reset the counter
+    assert guard.reclose_count("rc") == 1
+    assert guard.bump_reclose("rc") == 2
+    guard.begin_turn("rc", "next turn")  # a new turn resets it
+    assert guard.reclose_count("rc") == 0
+
+
 def test_record_consult_accumulates_and_survives_a_bash_touch(tmp_path: Path) -> None:
     guard.record_consult("t3", kind="read", target="A.md", relevant=True)
     guard.record_consult("t3", kind="search", target="codeberg", relevant=None)
