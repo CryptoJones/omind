@@ -9,11 +9,22 @@ import io
 import json
 import shutil
 import subprocess
+import sys
 from pathlib import Path
 
 import pytest
 
 from omind import guard, paths
+
+#: The omi-guard.sh adapter is a POSIX bash+jq deployment artifact (Claude Code on
+#: Linux/macOS). Its subprocess tests only make sense where a real bash + jq run it —
+#: NOT on Windows, where Git Bash's CRLF/path quirks make the same script exit 1 and
+#: where the hook isn't the deployed form anyway.
+_HOOK_TESTABLE = (
+    sys.platform != "win32"
+    and shutil.which("bash") is not None
+    and shutil.which("jq") is not None
+)
 
 
 def test_omi_consult_is_allowed_and_sets_the_per_turn_sentinel() -> None:
@@ -391,14 +402,14 @@ def _run_hook(hook: Path, event: dict[str, object]) -> int:
 _BASH_EVENT = {"tool_name": "Bash", "session_id": "h", "tool_input": {"command": "echo hi"}}
 
 
-@pytest.mark.skipif(shutil.which("jq") is None, reason="hook parses the event with jq")
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
 def test_hook_fails_closed_when_omind_is_missing(tmp_path: Path) -> None:
     """#1: a Bash command must never run if the core can't evaluate its hard-rules."""
     hook = _render_hook(tmp_path, "/nonexistent/omind")
     assert _run_hook(hook, _BASH_EVENT) == 2  # BLOCK, not the old fall-through
 
 
-@pytest.mark.skipif(shutil.which("jq") is None, reason="hook parses the event with jq")
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
 def test_hook_fails_closed_on_unexpected_core_exit(tmp_path: Path) -> None:
     fake = tmp_path / "fakeomind"
     fake.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
@@ -407,7 +418,7 @@ def test_hook_fails_closed_on_unexpected_core_exit(tmp_path: Path) -> None:
     assert _run_hook(hook, _BASH_EVENT) == 2  # 99 != 0/2 => policy not evaluated => BLOCK
 
 
-@pytest.mark.skipif(shutil.which("jq") is None, reason="hook parses the event with jq")
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
 def test_hook_allows_when_core_allows(tmp_path: Path) -> None:
     fake = tmp_path / "fakeomind"
     fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")

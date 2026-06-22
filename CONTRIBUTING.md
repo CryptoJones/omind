@@ -94,6 +94,19 @@ the web app build on. Keep it framework-free.
 - **Tests with changes.** New behavior comes with a test. Bug fixes come with a
   regression test.
 
+## Versioning
+
+omind follows [SemVer](https://semver.org). **Start a fix at the patch level** — a
+bug fix, a CI/test fix, a docs touch-up bumps the **patch** (`3.0.0 → 3.0.1`), never
+the minor. New backward-compatible features bump the **minor** (`3.0.x → 3.1.0`);
+breaking changes or a flagship release bump the **major**. When in doubt, prefer the
+smaller bump.
+
+The version is declared in three places that must stay in lockstep — `pyproject.toml`,
+`src/omind/__init__.py`, and `uv.lock` — and a test asserts `__version__` matches
+`pyproject.toml`, so a release can't leave one behind. Every version bump gets a
+`CHANGELOG.md` entry under its number.
+
 ## Pull requests
 
 1. Branch off `main` with a conventional name: `feat/…`, `fix/…`, `test/…`,

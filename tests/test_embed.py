@@ -64,7 +64,8 @@ def test_similarity_and_encode_handle_empty_input() -> None:
 
 
 @pytest.mark.skipif(not _HAS_EMBED, reason="needs the [embed] extra (model2vec + numpy)")
-def test_real_similarity_orders_paraphrase_above_unrelated() -> None:
+def test_real_similarity_orders_paraphrase_above_unrelated(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv("OMI_EMBED_DISABLE", raising=False)  # opt back in past the suite default
     embed.reset()
     para = embed.similarity(
         "cut a release and push to the forge", "publish a new version to the git remote"

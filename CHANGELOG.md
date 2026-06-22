@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.1] - 2026-06-22
+
+### Fixed
+
+- **CI: the `omi-guard.sh` fail-closed tests now skip on Windows.** They shell out to
+  `bash omi-guard.sh` (a POSIX bash+jq deployment artifact); GitHub's Windows runners
+  *have* `jq`, so the old `jq`-only skip let them run under Git Bash, where CRLF/path
+  quirks make the script exit 1 and redded the `windows-latest` matrix legs (since
+  2.46.0). They're now gated on a real POSIX bash+jq (`sys.platform != "win32"`).
+  Test-only; no shipped behavior change.
+- **Test suite is now deterministic w.r.t. the `[embed]` extra.** A conftest autouse
+  fixture pins the semantic backend OFF by default, so the keyword-path tests (recall,
+  relevance, dedup — written before 3.0.0) pass whether or not `[embed]` is installed;
+  the semantic tests opt back in. Without this, running `pytest` in an env that has
+  `[embed]` failed five keyword-assuming tests.
+
+### Documentation
+
+- Documented the **versioning convention** in `CONTRIBUTING.md` (a new `## Versioning`
+  section): SemVer, and a fix/CI/docs change starts at the **patch** bump, never the
+  minor — `pyproject.toml` / `__init__.py` / `uv.lock` stay in lockstep.
+
 ## [3.0.0] - 2026-06-22
 
 ### Added

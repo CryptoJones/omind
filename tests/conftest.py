@@ -11,6 +11,7 @@ live when local pytest runs left hook-failure breadcrumbs in the real
 
 from __future__ import annotations
 
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -47,6 +48,25 @@ def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 def _isolate_state_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     """Point XDG_STATE_HOME at a per-test temp dir for every test."""
     monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "xdg-state"))
+
+
+@pytest.fixture(autouse=True)
+def _embed_off_by_default(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Pin the semantic backend (3.0.0) OFF for the default suite.
+
+    The keyword-path tests (recall, relevance, dedup) were written before semantics
+    and assert keyword behavior; with the optional ``[embed]`` extra installed they'd
+    see semantic results and fail nondeterministically depending on the dev/CI env.
+    Disabling embed by default makes every suite deterministic; the embed/vectorindex
+    tests opt back in (``embed.set_backend`` / monkeypatching ``embed.available`` /
+    ``delenv OMI_EMBED_DISABLE``), and ``embed.reset()`` clears the cached resolution
+    so one test's backend can't leak into the next."""
+    monkeypatch.setenv("OMI_EMBED_DISABLE", "1")
+    from omind import embed
+
+    embed.reset()
+    yield None
+    embed.reset()
 
 
 @pytest.fixture(autouse=True)
