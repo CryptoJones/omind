@@ -15,6 +15,7 @@ from omind.agents import (
     HermesProvisioner,
     OpenClawProvisioner,
     diagnose_for,
+    diagnose_gemini,
     diagnose_hermes,
     diagnose_openclaw,
     run_setup_for,
@@ -433,6 +434,133 @@ def test_codex_provisioner_honors_codex_home(
     assert (home / "hooks.json").is_file()
 
 
+# -- #88: OpenClaw detect-only guard ------------------------------------------
+
+
+def test_openclaw_setup_installs_detect_only_guard(
+    tmp_path: Path, openclaw_home: Path
+) -> None:
+    config = _config(tmp_path, "openclaw")
+    run_setup_for(config, log=_quiet)
+    data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
+    entries = data["hooks"]["agent"]
+    omind_entries = [e for e in entries if "--harness openclaw" in e["command"]]
+    assert len(omind_entries) == 1
+    assert omind_entries[0]["event"] == "pre_tool"
+    assert omind_entries[0]["command"].startswith("/usr/bin/omind ")
+
+
+def test_openclaw_guard_preserves_user_hooks_and_is_idempotent(
+    tmp_path: Path, openclaw_home: Path
+) -> None:
+    (openclaw_home / "openclaw.json").write_text(
+        json.dumps({"hooks": {"agent": [{"event": "pre_tool", "command": "my-own-hook"}]}}),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, "openclaw")
+    run_setup_for(config, log=_quiet)
+    cmds = [
+        e["command"]
+        for e in json.loads(
+            (openclaw_home / "openclaw.json").read_text(encoding="utf-8")
+        )["hooks"]["agent"]
+    ]
+    assert "my-own-hook" in cmds  # user hook preserved
+    assert any("--harness openclaw" in c for c in cmds)  # omind appended
+
+    run_setup_for(config, log=_quiet)  # second run must not duplicate
+    omind_cmds = [
+        e["command"]
+        for e in json.loads(
+            (openclaw_home / "openclaw.json").read_text(encoding="utf-8")
+        )["hooks"]["agent"]
+        if "--harness openclaw" in e["command"]
+    ]
+    assert len(omind_cmds) == 1
+
+
+# -- #90: Gemini CLI guard ----------------------------------------------------
+
+
+def test_gemini_setup_installs_beforetool_guard(tmp_path: Path) -> None:
+    agents.gemini_config_dir().mkdir(parents=True, exist_ok=True)  # simulate Gemini installed
+    config = _config(tmp_path, "gemini")
+    run_setup_for(config, log=_quiet)
+
+    data = json.loads(agents.gemini_settings_path().read_text(encoding="utf-8"))
+    groups = data["hooks"]["BeforeTool"]
+    assert len(groups) == 1
+    assert groups[0]["matcher"] == ".*"  # gate every tool
+    handler = groups[0]["hooks"][0]
+    assert handler["type"] == "command"
+    assert "guard adapter --harness gemini" in handler["command"]
+
+
+def test_gemini_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> None:
+    agents.gemini_config_dir().mkdir(parents=True, exist_ok=True)
+    settings = agents.gemini_settings_path()
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "BeforeTool": [{"matcher": "write_file", "hooks": [{"command": "user-hook"}]}],
+                    "SessionStart": [{"hooks": [{"command": "user-start"}]}],
+                },
+                "mcpServers": {"other": {"command": "x"}},
+            }
+        ),
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, "gemini")
+    run_setup_for(config, log=_quiet)
+
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    cmds = [g["hooks"][0]["command"] for g in data["hooks"]["BeforeTool"]]
+    assert "user-hook" in cmds  # user's own BeforeTool hook preserved
+    assert any("--harness gemini" in c for c in cmds)  # omind appended
+    assert data["hooks"]["SessionStart"][0]["hooks"][0]["command"] == "user-start"  # untouched
+    assert data["mcpServers"] == {"other": {"command": "x"}}  # MCP block untouched
+
+    run_setup_for(config, log=_quiet)  # second run must not duplicate
+    omind_groups = [
+        g
+        for g in json.loads(settings.read_text(encoding="utf-8"))["hooks"]["BeforeTool"]
+        if "--harness gemini" in g["hooks"][0]["command"]
+    ]
+    assert len(omind_groups) == 1
+
+
+def test_gemini_provisioner_honors_gemini_home(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    home = tmp_path / "alt-gemini"
+    monkeypatch.setenv("GEMINI_HOME", str(home))
+    home.mkdir(parents=True, exist_ok=True)
+    assert agents.gemini_config_dir() == home
+    run_setup_for(_config(tmp_path, "gemini"), log=_quiet)
+    assert (home / "settings.json").is_file()
+
+
+def test_gemini_setup_fails_without_gemini_install(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setenv("GEMINI_HOME", str(tmp_path / "nope"))
+    with pytest.raises(ProvisionError, match="Gemini CLI not found"):
+        run_setup_for(_config(tmp_path, "gemini"), log=_quiet)
+
+
+def test_diagnose_gemini_reports_guard_state(tmp_path: Path) -> None:
+    agents.gemini_config_dir().mkdir(parents=True, exist_ok=True)
+    config = _config(tmp_path, "gemini")
+    before = {r.key: r for r in diagnose_gemini(config)}
+    assert before["gemini_guard"].level == "fail"  # not wired yet
+
+    run_setup_for(config, log=_quiet)
+    after = {r.key: r for r in diagnose_gemini(config)}
+    assert after["gemini_guard"].level == "ok"
+    assert after["gemini_root"].level == "ok"
+
+
 def test_openclaw_setup_installs_bootstrap_priming(
     tmp_path: Path, openclaw_home: Path
 ) -> None:
@@ -525,6 +653,7 @@ def test_diagnose_openclaw_all_ok_after_setup(tmp_path: Path, openclaw_home: Pat
     assert results["openclaw_root"].level == "ok"
     assert results["openclaw_mcp_registration"].level == "ok"
     assert results["openclaw_skill"].level == "ok"
+    assert results["openclaw_guard"].level == "ok"  # detect-only guard wired (#88)
 
 
 def test_diagnose_for_dispatches_on_agent(tmp_path: Path, hermes_home: Path) -> None:

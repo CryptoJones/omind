@@ -6,11 +6,12 @@ from __future__ import annotations
 
 import io
 import json
+from datetime import datetime
 from pathlib import Path
 
 import pytest
 
-from omind import compliance, guard, verify
+from omind import compliance, guard, hooks, verify
 
 
 def _omi(tmp_path: Path) -> Path:
@@ -292,3 +293,109 @@ def test_word_form_variant_consult_is_relevant_first_try(
     )
     assert verdict == "relevant"
     assert guard.consulted_this_turn("wf")  # never re-closed: relevant on first try
+
+
+# -- #95: score relevance against what the agent is DOING, not only the last
+#    user prompt — delegated/background work must not re-close the gate --
+
+
+def _journal(omi: Path, session: str, *details: str, now: datetime | None = None) -> None:
+    """Write today's session journal with one bullet per ``details`` entry, in the
+    exact shape ``verify.recent_activity`` parses."""
+    when = now or datetime.now()
+    directory = hooks.journal_dir(omi)
+    directory.mkdir(parents=True, exist_ok=True)
+    sid = hooks.short_session_id(session)
+    lines = [f"- 09:0{i} [session {sid}] PostToolUse {d}" for i, d in enumerate(details)]
+    (directory / hooks.journal_name(when)).write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_recent_activity_filters_by_session_and_drops_omi_consults(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    _journal(
+        omi,
+        "build1",
+        "Read -> /src/matcher/merge.rs (ok)",
+        "Bash -> `cargo build -p matcher` (ok)",
+        f"Read -> {omi}/Some Note.md (ok)",  # an OMI read: must be excluded
+    )
+    # A different session's bullets must not leak in.
+    other = hooks.journal_dir(omi) / hooks.journal_name(datetime.now())
+    other_sid = hooks.short_session_id("other9")
+    other.write_text(
+        other.read_text(encoding="utf-8")
+        + f"- 09:09 [session {other_sid}] PostToolUse Read -> /x/secret.py (ok)\n",
+        encoding="utf-8",
+    )
+    activity = verify.recent_activity("build1", omi)
+    assert "matcher" in activity and "cargo" in activity
+    assert "Some Note" not in activity  # OMI consult excluded (no relevance bootstrap)
+    assert "secret" not in activity  # other session excluded
+    assert "PostToolUse" not in activity and "(ok)" not in activity  # scaffolding stripped
+
+
+def test_empty_journal_falls_back_to_task_only(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    assert verify.recent_activity("nojournal", omi) == ""  # no journal -> no signal
+
+
+def test_delegated_work_consult_is_relevant_via_activity(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model must never be needed: the deterministic activity overlap alone
+    # lifts the consult into the relevant band.
+    monkeypatch.setattr(
+        verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+    omi = _omi(tmp_path)
+    note = omi / "Matcher Merge.md"
+    note.write_text(
+        "# Matcher Merge\n\nthe matcher crate merge and bsim signature context\n",
+        encoding="utf-8",
+    )
+    # The user delegated background work: the captured turn task is about virus
+    # samples / guard rails, but the agent has actually been building the matcher.
+    task = "pull virus samples and test the guard rails"
+    guard.begin_turn("build1", task)
+    guard.mark_consulted("build1")
+    _journal(
+        omi,
+        "build1",
+        "Read -> /src/matcher/merge.rs (ok)",
+        "Grep -> matcher merge bsim signature (ok)",
+    )
+    # Pre-fix: judged against the user line alone, this consult is OFF-topic.
+    assert verify.judge(task, note.read_text(encoding="utf-8")) is False
+    # Post-fix: blending in what the agent is DOING makes it relevant.
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "build1", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert verdict == "relevant"
+    assert guard.consulted_this_turn("build1")  # gate not re-closed
+
+
+def test_consult_off_topic_to_both_task_and_activity_still_irrelevant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The widening must not defeat the gate: a consult matching NEITHER the task
+    # nor the agent's activity is still irrelevant.
+    monkeypatch.setattr(
+        verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+    omi = _omi(tmp_path)
+    note = omi / "Banana.md"
+    note.write_text("# Banana\n\nbanana mango smoothie recipe\n", encoding="utf-8")
+    task = "pull virus samples and test the guard rails"
+    guard.begin_turn("build2", task)
+    guard.mark_consulted("build2")
+    _journal(omi, "build2", "Read -> /src/matcher/merge.rs (ok)")
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "build2", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert verdict == "irrelevant"

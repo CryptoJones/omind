@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.44.0] - 2026-06-22
+
+### Added
+
+- **Cross-harness: Google Gemini CLI guard (#90).** `omind setup --agent gemini`
+  now wires the OMI guard into the Gemini CLI via its `BeforeTool` hook (the
+  PreToolUse analog) under the `hooks` key in `~/.gemini/settings.json`, matching
+  every tool (`matcher: ".*"`). On a deny the `gemini` adapter emits Gemini's
+  `{"decision":"deny","reason":…}` shape on stdout (exit 0), which the CLI
+  enforces as a hard tool block. `omind doctor --agent gemini` reports the guard
+  wiring; the consult-gate recognizes Gemini's single-underscore MCP tool names
+  (`mcp_<server>_<tool>`). Guard-only — MCP-memory registration is a separate
+  concern, intentionally not bundled.
+- **Cross-harness: OpenClaw guard (#88), detect-only.** `OpenClawProvisioner` now
+  installs a gateway hook (`omind guard adapter --harness openclaw`) into
+  `openclaw.json`; the adapter renders an `{allow,reason,rule_id}` verdict the
+  POST `/hooks/agent` gateway reads. Because OpenClaw's deny-enforcement could not
+  be verified against a live gateway, the harness is registered **detect-only**
+  (the verdict is advisory, exit 0) until hard-block is proven — then it can be
+  promoted to `hard-block` in a follow-up. `omind doctor --agent openclaw` now
+  also reports the guard hook.
+
+### Changed
+
+- **Verifier scores relevance against what the agent is *doing*, not only the last
+  user prompt (#95).** The verifier captured `turn_task` from the most recent user
+  message and scored every consult against it, so when the user delegated
+  background/parallel work ("build X *while* I do Y") the agent's genuinely
+  on-topic consults scored off-topic against the stale user line and (under
+  `OMI_VERIFY_REQUIRE=1`) re-closed the gate. The verifier now also blends in the
+  agent's recent **non-OMI** journal activity for the same session and judges a
+  consult relevant if it overlaps *either* signal (`max` of the two overlaps, so
+  neither dilutes the other). Prior OMI consults are excluded from the activity
+  blob so an agent can't bootstrap relevance by reading an arbitrary note. This is
+  a distinct root cause from the 2.43.2 stemming fix (topic mismatch, not word-form
+  mismatch); the activity window is tunable via `OMI_VERIFY_ACTIVITY` (default 8
+  bullets). `omind guard verify --explain` now reports `task_score` and
+  `activity_score` separately.
+
 ## [2.43.2] - 2026-06-22
 
 ### Fixed

@@ -127,3 +127,58 @@ def test_run_adapter_codex_allow_emits_nothing(capsys: pytest.CaptureFixture[str
     code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="codex")
     assert code == 0 and capsys.readouterr().out == ""  # allow -> empty stdout
     guard.clear_gate("cx3")
+
+
+# -- 2.44.0: Gemini CLI (BeforeTool, single-underscore MCP names) ------------
+
+
+def test_normalize_gemini_shape() -> None:
+    # Gemini's run_shell_command carries the command in tool_input.
+    action = adapters.normalize_action(
+        {
+            "hook_event_name": "BeforeTool",
+            "tool_name": "run_shell_command",
+            "tool_input": {"command": "gh pr merge 5"},
+            "session_id": "gm",
+        }
+    )
+    assert action["command"] == "gh pr merge 5" and action["session"] == "gm"
+    # Gemini namespaces MCP tools with single underscores (mcp_<server>_<tool>);
+    # the consult must still be recognized so it can clear the gate.
+    consult = adapters.normalize_action(
+        {"tool_name": "mcp_omi_search-vault", "session_id": "gm"}
+    )
+    assert consult["is_omi_consult"] is True
+
+
+def test_run_adapter_gemini_deny_emits_decision_json(capsys: pytest.CaptureFixture[str]) -> None:
+    payload = {
+        "hook_event_name": "BeforeTool",
+        "tool_name": "run_shell_command",
+        "tool_input": {"command": "gh repo delete a/b"},
+        "session_id": "gm1",
+    }
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="gemini")
+    out = capsys.readouterr().out
+    assert code == 0  # deny rides in the JSON, not the exit code
+    assert json.loads(out)["decision"] == "deny"
+
+
+def test_run_adapter_gemini_consult_clears_gate(capsys: pytest.CaptureFixture[str]) -> None:
+    guard.clear_gate("gm2")
+    consult = io.StringIO(json.dumps({"tool_name": "mcp_omi_read-note", "session_id": "gm2"}))
+    assert adapters.run_adapter(consult, harness="gemini") == 0  # Gemini consult clears it
+    assert guard.consulted_this_turn("gm2")
+    guard.clear_gate("gm2")
+
+
+# -- 2.44.0: OpenClaw gateway (detect-only) ---------------------------------
+
+
+def test_run_adapter_openclaw_detect_only(capsys: pytest.CaptureFixture[str]) -> None:
+    payload = {"tool": "shell", "command": "gh repo delete a/b", "session": "oc1"}
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="openclaw")
+    out = capsys.readouterr().out
+    assert code == 0  # detect-only: the verdict is advisory, never aborts
+    body = json.loads(out)
+    assert body["allow"] is False and body["rule_id"]  # the deny is still reported

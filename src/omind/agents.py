@@ -143,6 +143,25 @@ def codex_hooks_path() -> Path:
 CODEX_GUARD_MARKER = "guard adapter --harness codex"
 
 
+def gemini_config_dir() -> Path:
+    """Gemini CLI's config directory: ``$GEMINI_HOME`` or ``~/.gemini``."""
+    base = os.environ.get("GEMINI_HOME")
+    return Path(base) if base else Path.home() / ".gemini"
+
+
+def gemini_settings_path() -> Path:
+    """Gemini CLI's settings file (``hooks`` + ``mcpServers`` both live here)."""
+    return gemini_config_dir() / "settings.json"
+
+
+#: Substring identifying omind's own Gemini guard hook command inside the user's
+#: settings.json, so a re-run replaces only our entry and never duplicates it.
+GEMINI_GUARD_MARKER = "guard adapter --harness gemini"
+
+#: Substring identifying omind's own OpenClaw guard gateway hook in openclaw.json.
+OPENCLAW_GUARD_MARKER = "guard adapter --harness openclaw"
+
+
 # -- shared agent machinery ---------------------------------------------------
 
 
@@ -590,6 +609,158 @@ class OpenClawProvisioner(AgentProvisioner):
             path.parent.mkdir(parents=True, exist_ok=True)
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
+    def integrate(self) -> None:
+        super().integrate()
+        self.install_guard()
+
+    def install_guard(self) -> None:
+        """Register the OMI guard as an OpenClaw gateway hook in ``openclaw.json``.
+
+        OpenClaw's hook transport is an HTTP/WebSocket gateway (POST /hooks/agent
+        on :18789, loopback), not a stdout shell hook — so we register a command
+        entry the gateway invokes as ``omind guard adapter --harness openclaw``;
+        the adapter emits an ``{"allow","reason","rule_id"}`` verdict the gateway
+        reads. Until that gateway is confirmed to ENFORCE a deny against a live
+        instance, OpenClaw is wired DETECT-ONLY (issue #88) and the verdict is
+        advisory. Touches only our own entry (by :data:`OPENCLAW_GUARD_MARKER`),
+        preserving any user-authored hooks.
+        """
+        path = openclaw_config_path()
+        data = self._read_settings(path)
+        command = f"{shutil.which('omind') or 'omind'} guard adapter --harness openclaw"
+        desired = {"event": "pre_tool", "command": command, "enabled": True}
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        agent_hooks = hooks.get("agent")
+        existing = agent_hooks if isinstance(agent_hooks, list) else []
+        kept = [
+            e
+            for e in existing
+            if not (isinstance(e, dict) and OPENCLAW_GUARD_MARKER in json.dumps(e))
+        ]
+        merged = kept + [desired]
+        if merged != existing or self.config.force:
+            hooks["agent"] = merged
+            data["hooks"] = hooks
+            self._record(f"register OMI guard gateway hook (detect-only) in {path}")
+            if not self.config.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        else:
+            self.log(f"  OMI guard gateway hook already installed in {path}")
+
+    def _guard_wired(self) -> bool:
+        try:
+            data = self._read_settings(openclaw_config_path())
+        except ProvisionError:
+            return False
+        hooks = data.get("hooks")
+        agent_hooks = hooks.get("agent") if isinstance(hooks, dict) else None
+        return any(
+            isinstance(e, dict) and OPENCLAW_GUARD_MARKER in json.dumps(e)
+            for e in (agent_hooks or [])
+        )
+
+
+# -- Gemini CLI -----------------------------------------------------------------
+
+
+class GeminiProvisioner(AgentProvisioner):
+    """Wire the OMI guard into the Google Gemini CLI via its ``BeforeTool`` hook.
+
+    Gemini CLI's hooks live under a top-level ``hooks`` key in
+    ``~/.gemini/settings.json``. ``BeforeTool`` is the PreToolUse analog and can
+    HARD-BLOCK: omind mounts ``omind guard adapter --harness gemini`` matching
+    every tool (``matcher: ".*"``). On a deny the adapter prints
+    ``{"decision":"deny","reason":...}`` on stdout (exit 0), which Gemini enforces
+    as a tool block.
+
+    Guard-only: Gemini MCP-memory registration (``mcpServers`` in the same file)
+    is a separate concern and intentionally not bundled here.
+    """
+
+    AGENT_LABEL = "Gemini CLI"
+    INSTALL_HINT = "Install the Gemini CLI (`npm i -g @google/gemini-cli`), then re-run."
+    DONE_MESSAGE = (
+        "Done. Restart the Gemini CLI to load the OMI guard "
+        "(needs a Gemini CLI with BeforeTool hook support)."
+    )
+
+    def agent_root(self) -> Path:
+        return gemini_config_dir()
+
+    def integrate(self) -> None:
+        # Guard-only wiring (no MCP/skill/priming — see the class docstring).
+        self.install_guard()
+
+    def _guard_hook_group(self) -> dict[str, Any]:
+        """One ``BeforeTool`` matcher group running the omind gemini adapter on
+        every tool. Gemini pipes the event JSON on stdin; the adapter reads it."""
+        omind = shutil.which("omind") or "omind"
+        return {
+            "matcher": ".*",
+            "hooks": [
+                {
+                    "type": "command",
+                    "command": f"{omind} guard adapter --harness gemini",
+                    "name": "omind-omi-guard",
+                    "timeout": 30000,
+                }
+            ],
+        }
+
+    def install_guard(self) -> None:
+        """Merge omind's guard hook into ``~/.gemini/settings.json`` under
+        ``hooks.BeforeTool``, replacing only our own entry (by
+        :data:`GEMINI_GUARD_MARKER`) so user-authored hooks are preserved."""
+        path = gemini_settings_path()
+        data = self._read_settings(path)
+        desired = self._guard_hook_group()
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        groups = hooks.get("BeforeTool")
+        existing = groups if isinstance(groups, list) else []
+        kept = [
+            g
+            for g in existing
+            if not (isinstance(g, dict) and GEMINI_GUARD_MARKER in json.dumps(g))
+        ]
+        merged = kept + [desired]
+        if merged != existing or self.config.force:
+            hooks["BeforeTool"] = merged
+            data["hooks"] = hooks
+            self._record(f"install OMI guard hook (BeforeTool) in {path}")
+            if not self.config.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+        else:
+            self.log(f"  OMI guard hook already installed in {path}")
+
+    def _guard_wired(self) -> bool:
+        try:
+            data = self._read_settings(gemini_settings_path())
+        except ProvisionError:
+            return False
+        hooks = data.get("hooks")
+        groups = hooks.get("BeforeTool") if isinstance(hooks, dict) else None
+        return any(
+            isinstance(g, dict) and GEMINI_GUARD_MARKER in json.dumps(g)
+            for g in (groups or [])
+        )
+
+    def verify(self) -> None:
+        if self.config.dry_run:
+            return
+        if self._guard_wired():
+            self.log(f"  verified: OMI guard wired into Gemini CLI ({gemini_settings_path()})")
+        else:
+            self.log(
+                "  NOTE: could not confirm the OMI guard in Gemini's settings.json; "
+                "re-run with --force."
+            )
+
 
 # -- OpenCode -------------------------------------------------------------------
 
@@ -848,7 +1019,25 @@ def diagnose_hermes(config: SetupConfig) -> list[CheckResult]:
 
 
 def diagnose_openclaw(config: SetupConfig) -> list[CheckResult]:
-    return _diagnose_agent(OpenClawProvisioner(config=config, log=lambda _msg: None))
+    prov = OpenClawProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_agent(prov)
+    if prov._guard_wired():
+        results.append(
+            CheckResult(
+                "openclaw_guard",
+                "ok",
+                f"OMI guard (detect-only) wired into {openclaw_config_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "openclaw_guard",
+                "warn",
+                "OMI guard not in openclaw.json (run `omind setup --agent openclaw`)",
+            )
+        )
+    return results
 
 
 def diagnose_opencode(config: SetupConfig) -> list[CheckResult]:
@@ -887,6 +1076,34 @@ def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
     return results
 
 
+def diagnose_gemini(config: SetupConfig) -> list[CheckResult]:
+    """Gemini is guard-only here (no MCP/skill), so its doctor checks the
+    settings.json ``BeforeTool`` guard wiring rather than MCP registration."""
+    prov = GeminiProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+    root = gemini_config_dir()
+    if root.is_dir():
+        results.append(CheckResult("gemini_root", "ok", f"Gemini CLI found: {root}"))
+    else:
+        results.append(
+            CheckResult("gemini_root", "fail", f"Gemini CLI not found: {root} does not exist")
+        )
+    results.extend(_diagnose_omi_folder(prov.config))
+    if prov._guard_wired():
+        results.append(
+            CheckResult("gemini_guard", "ok", f"OMI guard wired into {gemini_settings_path()}")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "gemini_guard",
+                "fail",
+                "OMI guard not in Gemini settings.json (run `omind setup --agent gemini`)",
+            )
+        )
+    return results
+
+
 # -- dispatch -------------------------------------------------------------------
 
 PROVISIONERS: dict[str, type[Provisioner]] = {
@@ -895,6 +1112,7 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "openclaw": OpenClawProvisioner,
     "opencode": OpenCodeProvisioner,
     "codex": CodexProvisioner,
+    "gemini": GeminiProvisioner,
 }
 
 DIAGNOSERS = {
@@ -903,6 +1121,7 @@ DIAGNOSERS = {
     "openclaw": diagnose_openclaw,
     "opencode": diagnose_opencode,
     "codex": diagnose_codex,
+    "gemini": diagnose_gemini,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)

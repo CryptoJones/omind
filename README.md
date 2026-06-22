@@ -374,13 +374,17 @@ treatment:
    the same `omind hook` payload (recent-memory index + latest session state)
    Claude Code injects through its `SessionStart` hook.
 
-**Codex CLI** is wired **guard-only** — just the `~/.codex/hooks.json` hard-block
-hooks described above; its MCP-memory registration, skill, and priming are a
-separate follow-up. **OpenCode** priming is likewise not wired yet (its MCP server
-and skill are). The cross-harness **guard** itself reaches the most agents: Claude
-Code, Hermes, OpenCode, and Codex (OpenClaw's guard is still on the backlog).
+**Codex CLI** and the **Gemini CLI** are wired **guard-only** — just the hard-block
+hooks described above (`~/.codex/hooks.json` for Codex; the `BeforeTool` hook under
+`hooks` in `~/.gemini/settings.json` for Gemini); their MCP-memory registration,
+skill, and priming are a separate follow-up. **OpenCode** priming is likewise not
+wired yet (its MCP server and skill are). The cross-harness **guard** reaches Claude
+Code, Hermes, OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
+**detect-only** — its POST `/hooks/agent` gateway receives the guard verdict but
+deny-enforcement is unverified against a live gateway, so the verdict is advisory
+until hard-block is proven.
 
-`omind doctor --agent hermes|openclaw|opencode|codex` diagnoses that agent's
+`omind doctor --agent hermes|openclaw|opencode|codex|gemini` diagnoses that agent's
 wiring, and `omind quickstart --agent <name>` prints the manual steps (YAML/JSON
 snippets personalized to your paths) if you'd rather merge them in yourself.
 

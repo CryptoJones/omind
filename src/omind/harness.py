@@ -31,6 +31,8 @@ FMT_EXIT2 = "exit2"  # Claude Code / shell hook: stderr reason + exit 2
 FMT_CLAUDE_JSON = "claude_json"  # Hermes pre_tool_call: {"decision":"block","reason"} on stdout
 FMT_JSON_SIGNAL = "json_signal"  # OpenCode plugin reads {allow, reason} JSON and throws in JS
 FMT_CODEX_HOOK = "codex_hook"  # Codex PreToolUse/PermissionRequest: hookSpecificOutput deny JSON
+FMT_GEMINI = "gemini"  # Gemini CLI BeforeTool: {"decision":"deny","reason"} on stdout, exit 0
+FMT_OPENCLAW = "openclaw"  # OpenClaw gateway: {allow,reason,rule_id} JSON (detect-only, exit 0)
 
 
 @dataclass(frozen=True)
@@ -54,6 +56,12 @@ HARNESSES: dict[str, HarnessSpec] = {
     ),
     "codex": HarnessSpec(
         "codex", CAP_HARD_BLOCK, FMT_CODEX_HOOK, "Codex PreToolUse/PermissionRequest hook"
+    ),
+    "gemini": HarnessSpec("gemini", CAP_HARD_BLOCK, FMT_GEMINI, "Gemini CLI BeforeTool hook"),
+    # Detect-only until a live gateway is confirmed to enforce a deny (issue #88):
+    # the verdict is rendered + sent, but we don't yet CLAIM hard-block capability.
+    "openclaw": HarnessSpec(
+        "openclaw", CAP_DETECT_ONLY, FMT_OPENCLAW, "OpenClaw POST /hooks/agent gateway"
     ),
 }
 
@@ -119,6 +127,28 @@ def render_decision(
             + "\n"
         )
         return verdict.exit_code
+    if fmt == FMT_GEMINI:
+        # Gemini CLI's BeforeTool hook reads a JSON decision on stdout (exit 0; the
+        # deny rides in the JSON). Emit ONLY the decision JSON on deny — any other
+        # stdout breaks Gemini's parser; on allow emit nothing (= proceed).
+        if not verdict.allow:
+            import json
+
+            out.write(json.dumps({"decision": "deny", "reason": verdict.reason}) + "\n")
+        return 0
+    if fmt == FMT_OPENCLAW:
+        # OpenClaw's gateway reads a JSON verdict. DETECT-ONLY for now (issue #88):
+        # we can't live-verify the gateway enforces a deny, so always exit 0 and
+        # let the verdict be advisory until hard-block is proven against a gateway.
+        import json
+
+        out.write(
+            json.dumps(
+                {"allow": verdict.allow, "reason": verdict.reason, "rule_id": verdict.rule_id}
+            )
+            + "\n"
+        )
+        return 0
     # FMT_EXIT2 (default): stderr reason + exit 2 — the Claude/shell contract.
     if not verdict.allow:
         err.write(f"BLOCKED by {verdict.reason}\n")
@@ -157,6 +187,21 @@ _SELFTEST_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
             "tool_input": {"command": "gh repo delete acme/widget"},
             "session_id": "st",
         },
+        True,
+    ),
+    (
+        "gemini",
+        {
+            "hook_event_name": "BeforeTool",
+            "tool_name": "run_shell_command",
+            "tool_input": {"command": "gh pr merge 5"},
+            "session_id": "st",
+        },
+        True,
+    ),
+    (
+        "openclaw",
+        {"tool": "shell", "command": "gh repo delete a/b", "session": "st"},
         True,
     ),
 )

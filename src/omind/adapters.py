@@ -27,9 +27,10 @@ from typing import Any, TextIO
 
 from omind import guard
 
-#: Tool-name prefixes that denote an OMI consult across harnesses (the omind MCP
-#: server is registered under the same tool namespace everywhere).
-_OMI_CONSULT_PREFIXES = ("mcp__omi__",)
+#: Tool-name prefixes that denote an OMI consult across harnesses. Most harnesses
+#: namespace MCP tools as ``mcp__<server>__<tool>`` (double underscore); the Gemini
+#: CLI uses ``mcp_<server>_<tool>`` (single underscore), so both forms are listed.
+_OMI_CONSULT_PREFIXES = ("mcp__omi__", "mcp_omi_")
 
 
 def _first_str(data: dict[str, Any], keys: tuple[str, ...]) -> str:

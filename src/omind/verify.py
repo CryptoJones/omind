@@ -28,6 +28,7 @@ reuses :mod:`omind.retrieve`, which de-prioritizes them).
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 import sys
@@ -35,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from omind import compliance, guard, retrieve
+from omind import compliance, guard, hooks, retrieve
 
 #: Overlap at/above this is relevant with no model call; at/below the low mark is
 #: irrelevant with no model call; the band between is referred to the model.
@@ -61,6 +62,15 @@ _LOW_ENV = "OMI_VERIFY_LOW"
 #: relevant (never re-closes the gate) — e.g. release/project notes you always
 #: consult. The escape hatch for the REQUIRE-mode false negatives on terse tasks.
 _ALWAYS_RELEVANT_ENV = "OMI_VERIFY_ALWAYS_RELEVANT"
+#: How many of the most-recent same-session journal bullets feed the "what the
+#: agent is doing" signal (issue #95). Tunable for very chatty/quiet sessions.
+_ACTIVITY_LIMIT_ENV = "OMI_VERIFY_ACTIVITY"
+_DEFAULT_ACTIVITY_LIMIT = 8
+#: A journal action bullet, capturing the (short) session id and the action text:
+#: ``- HH:MM [session <id>] <label> <tool> -> <target> (<outcome>)``.
+_ACTIVITY_BULLET_RE = re.compile(r"^-\s+\d{1,2}:\d{2}\s+\[session\s+([^\]]*)\]\s+(.*)$")
+#: The trailing ``(ok)`` / ``(error: …)`` outcome marker on a journal bullet.
+_OUTCOME_RE = re.compile(r"\([^)]*\)\s*$")
 
 #: Synthetic rule id for an off-topic consult in the compliance log.
 OFF_TOPIC_RULE = "off-topic-consult"
@@ -87,6 +97,61 @@ def _always_relevant(target: str) -> bool:
         if pat and pat in low:
             return True
     return False
+
+
+def _activity_limit() -> int:
+    try:
+        return max(0, int(os.environ.get(_ACTIVITY_LIMIT_ENV) or _DEFAULT_ACTIVITY_LIMIT))
+    except (ValueError, TypeError):
+        return _DEFAULT_ACTIVITY_LIMIT
+
+
+def recent_activity(
+    session: str, omi_dir: Path | str, *, now: datetime | None = None, limit: int | None = None
+) -> str:
+    """What the agent has recently been *doing* this session, as one scored blob.
+
+    Issue #95: the captured ``turn_task`` is only the user's last prompt, so when
+    the user delegates background/parallel work the agent's genuinely on-topic
+    consults score off-topic against it and the gate re-closes. Blending in the
+    agent's recent **non-OMI** journal bullets (the same per-action trail the
+    journal already records) gives the verifier a second, on-topic signal.
+
+    Prior OMI consults are deliberately excluded so an agent can't bootstrap
+    relevance by reading an arbitrary note and then citing it as "activity".
+    Best-effort: returns ``""`` when the journal is absent/unreadable, so the
+    caller falls back to task-only scoring (no behaviour change).
+    """
+    sid = hooks.short_session_id(session)
+    if not sid or sid == "unknown":
+        return ""
+    when = now or datetime.now()
+    omi_marker = str(Path(omi_dir))
+    cap = _activity_limit() if limit is None else max(0, limit)
+    if cap == 0:
+        return ""
+    path = hooks.journal_dir(omi_dir) / hooks.journal_name(when)
+    try:
+        text = path.read_text(encoding="utf-8")
+    except OSError:
+        return ""
+    details: list[str] = []
+    for line in text.splitlines():
+        match = _ACTIVITY_BULLET_RE.match(line.strip())
+        if not match or match.group(1).strip() != sid:
+            continue
+        detail = match.group(2)
+        if "mcp__omi__" in detail or "mcp_omi_" in detail or omi_marker in detail:
+            continue  # don't let prior OMI consults bootstrap relevance
+        # Keep the meaningful target/command, dropping the ``<label> <tool> ->``
+        # prefix and the trailing ``(outcome)`` so journal scaffolding (tool names,
+        # "ok"/"error") doesn't dilute the overlap with the consult.
+        if "->" in detail:
+            detail = detail.split("->", 1)[1]
+        detail = _OUTCOME_RE.sub("", detail).strip()
+        if detail:
+            details.append(detail)
+    return " ".join(details[-cap:])
 
 
 def _past_mistakes_context(limit: int = 5) -> str:
@@ -192,21 +257,33 @@ def _ask_model(task: str, text: str) -> bool | None:
     return _parse_verdict(result.stdout or "")
 
 
-def judge(task: str, text: str) -> bool:
-    """Relevance verdict for a single consult. Deterministic prefilter first (with
-    operator-tunable thresholds), the model only for the ambiguous middle, fail-open
-    everywhere else."""
-    if not task or not text:
+def judge_with_activity(task: str, activity: str, text: str) -> bool:
+    """Relevance verdict blending the captured task with the agent's recent
+    activity (issue #95): a consult is relevant if it overlaps **either** signal.
+    Same deterministic-prefilter → model-fallback ladder as :func:`judge`, scoring
+    against ``max`` of the two overlaps so neither dilutes the other (concatenating
+    would inflate the recall denominator — the dilution 2.43.2 fought)."""
+    if not text or (not task and not activity):
         return True  # can't judge without both sides -> fail open (relevant)
     high = _threshold(_HIGH_ENV, _HIGH)
     low = _threshold(_LOW_ENV, _LOW)
-    score = retrieve.overlap_score(task, text)
+    score = max(
+        retrieve.overlap_score(task, text) if task else 0.0,
+        retrieve.overlap_score(activity, text) if activity else 0.0,
+    )
     if score >= high:
         return True
     if score <= low:
         return False
-    verdict = _ask_model(task, text)
+    verdict = _ask_model(task or activity, text)
     return True if verdict is None else verdict
+
+
+def judge(task: str, text: str) -> bool:
+    """Relevance verdict for a single consult against the turn task alone.
+    Deterministic prefilter first (with operator-tunable thresholds), the model
+    only for the ambiguous middle, fail-open everywhere else."""
+    return judge_with_activity(task, "", text)
 
 
 def _require_mode(require: bool | None) -> bool:
@@ -250,7 +327,10 @@ def verify_consult(
     kind, target = target_info
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
-    relevant = _always_relevant(target) or judge(task, _consult_text(kind, target, omi_dir))
+    activity = recent_activity(session, omi_dir, now=now)
+    relevant = _always_relevant(target) or judge_with_activity(
+        task, activity, _consult_text(kind, target, omi_dir)
+    )
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:
         return "relevant"
@@ -300,13 +380,16 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
     kind, target = target_info
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
+    activity = recent_activity(session, omi_dir, now=None)
     text = _consult_text(kind, target, omi_dir)
     high = _threshold(_HIGH_ENV, _HIGH)
     low = _threshold(_LOW_ENV, _LOW)
-    score = retrieve.overlap_score(task, text)
+    task_score = retrieve.overlap_score(task, text) if task else 0.0
+    activity_score = retrieve.overlap_score(activity, text) if activity else 0.0
+    score = max(task_score, activity_score)
     if _always_relevant(target):
         band, verdict = "always-relevant (allowlist)", True
-    elif not task or not text:
+    elif (not task and not activity) or not text:
         band, verdict = "fail-open (no task/text)", True
     elif score >= high:
         band, verdict = "high → deterministic relevant", True
@@ -319,6 +402,8 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
         "target": target,
         "task": task[:160],
         "score": round(score, 3),
+        "task_score": round(task_score, 3),
+        "activity_score": round(activity_score, 3),  # issue #95: what the agent is doing
         "high": high,
         "low": low,
         "band": band,
