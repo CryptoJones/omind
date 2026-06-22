@@ -60,6 +60,11 @@ def _omi_gate_reset_dest() -> Path:
     return Path.home() / ".claude" / "hooks" / "omi-gate-reset.sh"
 
 
+def _fleet_sudo_dest() -> Path:
+    """The `fleet-sudo` wrapper install path — on PATH beside the omind binary."""
+    return Path.home() / ".local" / "bin" / "fleet-sudo"
+
+
 def _legacy_omi_guard_dest() -> Path:
     """The retired hand-rolled guard adapter (pre-omind-core prototype). Provision
     strips it from settings.json and deletes this file so a machine that ran the
@@ -584,6 +589,32 @@ class Provisioner:
             with contextlib.suppress(OSError):
                 dest.chmod(0o755)
 
+    def _write_fleet_sudo_script(self) -> None:
+        """Install the `fleet-sudo` wrapper from package data to ~/.local/bin/.
+
+        Agents run `fleet-sudo <cmd>` instead of raw sudo: it reads the fleet sudo
+        password from pass (resolving the per-host entry itself), so no instance
+        ever guesses the entry or hands CJ a command to run. The guard blocks raw
+        `sudo` and points here; see the OMI Playbook.
+        """
+        dest = _fleet_sudo_dest()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("fleet-sudo.sh")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(f"  WARNING: could not read fleet-sudo from package data: {exc}")
+            return
+        if not self.config.dry_run:
+            with contextlib.suppress(OSError):
+                dest.parent.mkdir(parents=True, exist_ok=True)
+        self._write_managed(dest, content)
+        if not self.config.dry_run:
+            with contextlib.suppress(OSError):
+                dest.chmod(0o755)
+
     def install_claude_skill(self) -> None:
         """Install omind's Claude Code skill (OMI memory workflow + CLI ops).
 
@@ -873,6 +904,7 @@ class Provisioner:
         self.register_mcp()
         self._write_enforce_hook_script()
         self._write_guard_hook_script()
+        self._write_fleet_sudo_script()
         self.ensure_hooks_installed()
         self.ensure_guard_hook_installed()
         self._write_omi_guard_scripts()

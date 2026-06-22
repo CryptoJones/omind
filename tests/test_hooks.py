@@ -39,6 +39,19 @@ def _action_bullets(text: str) -> list[str]:
 # -- naming ------------------------------------------------------------------
 
 
+def test_playbook_is_primed_every_session(tmp_path: Path) -> None:
+    """The Playbook is a priming file injected verbatim at SessionStart, so its
+    operator rules reach a fresh instance whether or not it reads the vault."""
+    assert "Playbook.md" in hooks.PRIMING_FILES
+    (tmp_path / "Playbook.md").write_text(
+        "# OMI Playbook\n\n- sudo -> fleet-sudo; never hand CJ homework.\n",
+        encoding="utf-8",
+    )
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "OMI/Playbook.md" in ctx
+    assert "fleet-sudo" in ctx
+
+
 def test_journal_name_is_deterministic_per_day() -> None:
     assert hooks.journal_name(_NOW) == "Session Journal 2026-06-09.md"
 
@@ -350,7 +363,8 @@ def test_session_start_journal_tail_is_last_bullets_only(tmp_path: Path) -> None
 
 
 def test_session_start_total_cap_truncates_dynamic_first(tmp_path: Path) -> None:
-    _write_priming_files(tmp_path, body="s" * 13_990 + " STATIC-END")  # ~42k static
+    per = 42_000 // len(hooks.PRIMING_FILES) - 80  # ~42k static total, regardless of count
+    _write_priming_files(tmp_path, body="s" * per + " STATIC-END")
     state = tmp_path / "Session State 2026-06-09.md"
     state.write_text("d" * hooks._PRIMING_FILE_CHAR_CAP, encoding="utf-8")
     ctx = hooks.build_session_start_context(tmp_path)

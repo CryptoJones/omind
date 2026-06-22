@@ -55,7 +55,7 @@ _TARGET_LIMIT = 80
 
 # Notes whose *content* is injected verbatim at SessionStart so OMI is in
 # context whether or not the agent remembers to read it. Order = priming order.
-PRIMING_FILES = ("index.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
+PRIMING_FILES = ("index.md", "Playbook.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
 _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood context
 
 # Dynamic priming: the newest handoff note and the tail of today's auto-journal

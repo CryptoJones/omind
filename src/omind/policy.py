@@ -39,6 +39,7 @@ SEVERITY_SOFT = "soft"
 
 TIER_DESTRUCTIVE = "destructive"
 TIER_GITHUB_PUSH = "github_push"
+TIER_SUDO = "sudo"
 TIER_LEARNED = "learned"
 
 
@@ -67,7 +68,11 @@ class Rule:
     def label(self) -> str:
         """The parenthetical the guard prints: ``github-push`` for that tier,
         else the severity (preserved wording for existing reasons)."""
-        return "github-push" if self.tier == TIER_GITHUB_PUSH else self.severity
+        if self.tier == TIER_GITHUB_PUSH:
+            return "github-push"
+        if self.tier == TIER_SUDO:
+            return "sudo"
+        return self.severity
 
 
 #: The destructive / forge deny set + the github-push opt-in tier, ported
@@ -127,6 +132,18 @@ SEED_RULES: tuple[Rule, ...] = (
         ),
         tier=TIER_GITHUB_PUSH,
         opt_in="OMI_PUSH_GITHUB=1",
+    ),
+    Rule(
+        id="sudo-use-fleet-sudo",
+        pattern=r"(?<![\w-])sudo\b",
+        message=(
+            "raw sudo is blocked — run `fleet-sudo <cmd>` instead (it reads the "
+            "fleet sudo password from pass; never guess the per-host entry, never "
+            "hand CJ a command to run). Deliberate raw sudo opts in with "
+            "OMI_SUDO_OK=1. See the OMI Playbook."
+        ),
+        tier=TIER_SUDO,
+        opt_in="OMI_SUDO_OK=1",
     ),
 )
 

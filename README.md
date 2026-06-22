@@ -276,6 +276,29 @@ guarded), `omind guard explain "<cmd>"` (dry-run a command), and
 `omind guard verify --explain` (why a consult scored relevant or off-topic).
 `omind guard repair` (and `omind doctor`) re-heal a wedged or drifted hook-set.
 
+## The Playbook
+
+The **Playbook** is the small set of always-on operator rules — the cross-cutting
+procedures (sudo, secrets, forges, "pull before you work", "do it yourself") that a
+fresh agent instance otherwise keeps re-learning the hard way. It lives as a priming
+file, `Playbook.md`, in the OMI vault, and omind surfaces it two ways:
+
+- **Always in context.** `Playbook.md` is injected verbatim into *every* session's
+  SessionStart context (alongside `index.md`), so the rules are present whether or
+  not the agent thinks to search for them — they do not depend on the per-turn
+  gate's relevance matching to surface.
+- **Enforced at the action.** The guard backs the most-violated rules with hard
+  blocks keyed on the *command*, not the task. Raw `sudo` is blocked and redirected
+  to the installed **`fleet-sudo`** wrapper, which reads the fleet sudo password
+  from `pass` itself — so no instance ever guesses a per-host `pass` entry or hands
+  the user a command to paste. A deliberate raw `sudo` opts in with `OMI_SUDO_OK=1`,
+  exactly like the Codeberg-mirror `OMI_PUSH_GITHUB=1` escape hatch.
+
+Edit the rules by editing `Playbook.md` in the vault; add enforcement with a seed
+rule in `omind.policy`. The Playbook is the guard's priming made explicit: *don't
+ask a fresh instance to remember — put the rule in front of it, and block the wrong
+action.*
+
 ## Activity checkpoints
 
 You can't reliably *force* a running agent to do something on a wall clock —

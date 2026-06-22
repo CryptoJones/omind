@@ -75,6 +75,21 @@ def test_github_push_is_opt_in_not_hard() -> None:
     guard.clear_gate("s7")
 
 
+def test_raw_sudo_blocked_but_fleet_sudo_and_opt_in_allowed() -> None:
+    guard.mark_consulted("sSudo")
+    # raw sudo is a hard block that names the fleet-sudo rule
+    verdict = guard.decide({"command": "sudo systemctl reload nginx", "session": "sSudo"})
+    assert not verdict.allow
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
+    # fleet-sudo is NOT caught by the sudo rule (the "-sudo" suffix is excluded)
+    assert guard.decide(
+        {"command": "fleet-sudo systemctl reload nginx", "session": "sSudo"}
+    ).allow
+    # a deliberate raw sudo opts in, like the Codeberg-mirror escape hatch
+    assert guard.decide({"command": "OMI_SUDO_OK=1 sudo reboot", "session": "sSudo"}).allow
+    guard.clear_gate("sSudo")
+
+
 def test_run_guard_check_and_reset_exit_codes() -> None:
     guard.clear_gate("s6")
     blocked = guard.run_guard("check", io.StringIO(json.dumps({"command": "ls", "session": "s6"})))

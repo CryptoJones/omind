@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
+- **The Playbook — always-on operator rules.** A curated priming file
+  (`Playbook.md`) injected verbatim into every session's SessionStart context, so
+  cross-cutting operating rules (sudo, secrets, forges, pull-before-you-work,
+  do-it-yourself) reach a fresh instance without relying on per-turn relevance
+  matching. Documented in the README under "The Playbook".
+- **`fleet-sudo` wrapper**, installed by `omind setup` to `~/.local/bin`. Runs a
+  command under sudo using the fleet sudo password from `pass`, resolving the
+  per-host entry itself — so no agent guesses a `pass` entry or hands the user a
+  command to run. Works over ssh (`ssh <host> fleet-sudo <cmd>`).
+- **Guard rule `sudo-use-fleet-sudo`.** Raw `sudo` in a command is now a hard block
+  that points to `fleet-sudo`; a deliberate raw sudo opts in with `OMI_SUDO_OK=1`
+  (mirrors the `OMI_PUSH_GITHUB=1` Codeberg-mirror tier).
+
 ## [2.42.1] - 2026-06-21
 
 ### Fixed

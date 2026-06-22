@@ -91,13 +91,13 @@ def test_learned_hard_rule_blocks_via_guard_decide() -> None:
     policy.append_learned_rule(
         policy.Rule(
             id="learned-block",
-            pattern=r"\bsudo\s+shutdown\b",
-            message="no shutting the box down from a hook",
+            pattern=r"\bnpm\s+publish\b",
+            message="no npm publish from a hook",
             severity=policy.SEVERITY_HARD,
             tier=policy.TIER_LEARNED,
         )
     )
-    verdict = guard.decide({"command": "sudo shutdown now", "session": "plc"})
+    verdict = guard.decide({"command": "npm publish --tag latest", "session": "plc"})
     assert not verdict.allow
     assert verdict.rule_id == "learned-block"
     guard.clear_gate("plc")
