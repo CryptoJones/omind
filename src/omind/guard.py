@@ -270,13 +270,49 @@ def _clear_reclose(session: str) -> None:
         _reclose_path(session).unlink()
 
 
+def _offtopic_path(session: str) -> Path:
+    """Running count of CONSECUTIVE off-topic consults this SESSION — a relevant consult
+    resets it (see :func:`reset_offtopic`). Unlike the per-turn re-close counter this
+    SURVIVES turn boundaries (it is NOT cleared by :func:`begin_turn`): it measures a
+    sustained off-topic STREAK, the signal that separates an agent gaming the gate (only
+    ever reads arbitrary notes) from one doing honest work (lands relevant consults,
+    which reset the streak). The graduated gate (#98) escalates REQUIRE-mode enforcement
+    only once the streak crosses a threshold; a new session is a new id, so it starts at 0."""
+    return paths.state_dir() / f"offtopic-{_safe_sid(session)}"
+
+
+def offtopic_count(session: str) -> int:
+    """The current consecutive off-topic-consult streak this session (0 if none)."""
+    try:
+        return int(_offtopic_path(session).read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def bump_offtopic(session: str) -> int:
+    """Increment and return the consecutive off-topic streak. Never raises."""
+    nxt = offtopic_count(session) + 1
+    with contextlib.suppress(OSError):
+        path = _offtopic_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(nxt), encoding="utf-8")
+    return nxt
+
+
+def reset_offtopic(session: str) -> None:
+    """Reset the off-topic streak — called on a RELEVANT consult, so honest work breaks
+    the streak and sporadic off-topic flags never accumulate to enforcement (#98)."""
+    with contextlib.suppress(OSError):
+        _offtopic_path(session).unlink()
+
+
 def clear_all_gates() -> None:
     """Clear EVERY per-turn sentinel + re-close counter — the recovery path for a
     by-hand ``omind guard reset`` with no session id (a human un-wedging the gate
     cannot know the live session id, so a single-session clear would miss it).
     Also reaps the legacy ``/tmp`` sentinels. Never raises."""
     state = paths.state_dir()
-    for pattern in ("gate-*", "reclose-*", "pending-*"):
+    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*"):
         try:
             stale = list(state.glob(pattern))
         except OSError:

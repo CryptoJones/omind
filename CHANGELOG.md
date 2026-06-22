@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.45.0] - 2026-06-22
+
+### Changed
+
+- **Graduated consult-gate: relevance is now warn-then-enforce, not block-every-time
+  (#98).** The compliance log showed REQUIRE-mode's relevance re-close was near-pure
+  friction on a cooperative operator — 112 `off-topic-consult` + 16
+  `verify-reclose-floor` events, *every one a legitimate on-topic note* flagged by
+  keyword overlap, vs **zero** bypasses caught (all 7 real denies were hard rules). So
+  an off-topic consult is now a **warning** until a session's *consecutive* off-topic
+  streak crosses `OMI_VERIFY_OFFTOPIC_ESCALATE` (default **5**); only then does REQUIRE
+  re-close. A **relevant** consult resets the streak, so honest work — even with the
+  odd keyword false-positive — never accrues to enforcement, while a sustained
+  off-topic streak (the gaming pattern) still earns it. The first crossing logs
+  `verify-offtopic-escalated`, so warning→enforcing is visible, not silent.
+  `OMI_VERIFY_OFFTOPIC_ESCALATE=0` keeps the legacy enforce-from-first behavior; the
+  per-turn re-close cap is unchanged (never a wedge). Hard-rule denials are untouched —
+  that's the real guardrail, and it keeps working. (Semantic relevance — embeddings to
+  cut the keyword false-positives at the source — is the planned follow-on.)
+
 ## [2.44.2] - 2026-06-22
 
 ### Fixed

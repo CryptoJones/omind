@@ -114,6 +114,7 @@ def test_verify_consult_require_mode_recloses_the_gate(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    monkeypatch.setenv("OMI_VERIFY_OFFTOPIC_ESCALATE", "1")  # #98: enforce from the 1st off-topic
     omi = _omi(tmp_path)
     note = omi / "Smoothie.md"
     note.write_text("# Smoothie\n\nbanana mango ice recipe\n", encoding="utf-8")
@@ -156,6 +157,7 @@ def test_verify_require_caps_recloses_so_it_cannot_deadlock(
     logs the floor. A verifier must never deadlock the agent."""
     monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
     monkeypatch.setenv("OMI_VERIFY_MAX_RECLOSE", "1")
+    monkeypatch.setenv("OMI_VERIFY_OFFTOPIC_ESCALATE", "1")  # #98: enforce from the 1st off-topic
     omi = _omi(tmp_path)
     note = omi / "Smoothie.md"
     note.write_text("# Smoothie\n\nbanana mango ice recipe\n", encoding="utf-8")
@@ -467,3 +469,53 @@ def test_consult_off_topic_to_task_activity_and_pending_still_irrelevant(
         out=io.StringIO(),
     )
     assert verdict == "irrelevant"  # banana matches none of task / activity / pending
+
+
+# -- #98: the GRADUATED gate — off-topic is a WARNING until a sustained streak crosses
+#    the threshold; a relevant consult resets it; only then does REQUIRE re-close --
+
+
+def test_offtopic_streak_warns_below_threshold_then_enforces(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    monkeypatch.setenv("OMI_VERIFY_OFFTOPIC_ESCALATE", "2")  # warn once, enforce on the 2nd
+    omi = _omi(tmp_path)
+    note = omi / "Smoothie.md"
+    note.write_text("# Smoothie\n\nbanana mango ice recipe\n", encoding="utf-8")
+    guard.begin_turn("g1", "how to codeberg release push")
+    payload = {"tool_name": "Read", "session_id": "g1", "tool_input": {"file_path": str(note)}}
+
+    # 1st off-topic: WARN only — the gate is left open (the agent isn't taxed yet).
+    guard.mark_consulted("g1")
+    verify.verify_consult(payload, omi, require=True, out=io.StringIO())
+    assert guard.consulted_this_turn("g1")
+    assert guard.offtopic_count("g1") == 1
+
+    # 2nd off-topic: streak hits the threshold -> REQUIRE re-closes, escalation logged.
+    guard.mark_consulted("g1")
+    verify.verify_consult(payload, omi, require=True, out=io.StringIO())
+    assert not guard.consulted_this_turn("g1")
+    assert compliance.read_events()[-1]["rule_id"] == verify.OFFTOPIC_ESCALATED_RULE
+
+
+def test_relevant_consult_resets_the_offtopic_streak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    monkeypatch.setenv("OMI_VERIFY_OFFTOPIC_ESCALATE", "2")
+    omi = _omi(tmp_path)
+    good = omi / "Codeberg.md"
+    good.write_text("# Codeberg\n\ncodeberg release push mirror\n", encoding="utf-8")
+    bad = omi / "Smoothie.md"
+    bad.write_text("# Smoothie\n\nbanana mango\n", encoding="utf-8")
+    base = {"tool_name": "Read", "session_id": "g2"}
+    guard.begin_turn("g2", "how to codeberg release push")
+    guard.mark_consulted("g2")
+
+    verify.verify_consult(
+        {**base, "tool_input": {"file_path": str(bad)}}, omi, require=True, out=io.StringIO()
+    )
+    assert guard.offtopic_count("g2") == 1  # off-topic bumps the streak
+    verify.verify_consult({**base, "tool_input": {"file_path": str(good)}}, omi, require=True)
+    assert guard.offtopic_count("g2") == 0  # a RELEVANT consult resets it

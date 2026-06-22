@@ -56,6 +56,13 @@ _TIMEOUT_ENV = "OMI_VERIFY_TIMEOUT"
 #: and logged, but a genuinely-stuck agent always escapes. 0 disables re-closing.
 _MAX_RECLOSE_ENV = "OMI_VERIFY_MAX_RECLOSE"
 _DEFAULT_MAX_RECLOSE = 2
+#: The GRADUATED gate (#98): an off-topic consult is a WARNING until the session's
+#: CONSECUTIVE off-topic streak reaches this many; only then does REQUIRE mode start
+#: re-closing. So sporadic off-topic (incl. keyword false-positives — a later relevant
+#: consult resets the streak) is free; a sustained streak (the gaming pattern) earns
+#: enforcement. 0 = legacy (enforce from the first off-topic).
+_OFFTOPIC_ESCALATE_ENV = "OMI_VERIFY_OFFTOPIC_ESCALATE"
+_DEFAULT_OFFTOPIC_ESCALATE = 5
 _HIGH_ENV = "OMI_VERIFY_HIGH"
 _LOW_ENV = "OMI_VERIFY_LOW"
 #: Comma-separated substrings; a consult whose target matches one is ALWAYS
@@ -79,6 +86,11 @@ OFF_TOPIC_RULE = "off-topic-consult"
 #: re-close cap with no relevant consult and let the agent proceed anyway. Logged
 #: so a chronically off-target task (a verifier blind spot) is visible, not silent.
 NO_RELEVANT_FLOOR_RULE = "verify-reclose-floor"
+
+#: Synthetic rule id logged the moment a session's off-topic streak crosses the
+#: escalation threshold and REQUIRE-mode enforcement begins (#98) — so the transition
+#: from "warning" to "enforcing" is visible in the compliance log, never silent.
+OFFTOPIC_ESCALATED_RULE = "verify-offtopic-escalated"
 
 
 def _threshold(env: str, default: float) -> float:
@@ -307,6 +319,13 @@ def _max_reclose() -> int:
         return _DEFAULT_MAX_RECLOSE
 
 
+def _offtopic_escalate() -> int:
+    try:
+        return max(0, int(os.environ.get(_OFFTOPIC_ESCALATE_ENV) or _DEFAULT_OFFTOPIC_ESCALATE))
+    except (ValueError, TypeError):
+        return _DEFAULT_OFFTOPIC_ESCALATE
+
+
 def _any_relevant(session: str) -> bool:
     return any(c.get("relevant") is True for c in guard.consults(session))
 
@@ -336,12 +355,14 @@ def verify_consult(
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=now)
-    pending = retrieve.normalize_intent(guard.pending_intent(session))  # #96/#97: blocked action, path noise stripped
+    # #96/#97: the gate-blocked action (path noise stripped) — the agent's freshest intent.
+    pending = retrieve.normalize_intent(guard.pending_intent(session))
     relevant = _always_relevant(target) or judge_with_activity(
         task, activity, _consult_text(kind, target, omi_dir), pending
     )
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:
+        guard.reset_offtopic(session)  # #98: honest work breaks the off-topic streak
         return "relevant"
 
     compliance.log_event(
@@ -355,7 +376,26 @@ def verify_consult(
         now=now,
     )
     _nudge(task, omi_dir, out if out is not None else sys.stderr)
-    if _require_mode(require) and not _any_relevant(session):
+    # #98 GRADUATED gate: an off-topic consult is a WARNING until the session's
+    # consecutive off-topic STREAK crosses the escalation threshold; only then does
+    # REQUIRE mode re-close. Sporadic off-topic costs nothing (a later relevant consult
+    # resets the streak); a sustained streak — the gaming pattern — earns enforcement.
+    # The first crossing is logged so warning→enforcing is visible.
+    streak = guard.bump_offtopic(session)
+    escalate_at = _offtopic_escalate()
+    enforcing = streak >= escalate_at
+    if enforcing and escalate_at > 0 and streak == escalate_at:
+        compliance.log_event(
+            compliance.KIND_VIOLATION,
+            session=session,
+            tool=str(event.get("tool_name") or ""),
+            command=target,
+            rule_id=OFFTOPIC_ESCALATED_RULE,
+            severity="soft",
+            outcome="escalated",
+            now=now,
+        )
+    if _require_mode(require) and enforcing and not _any_relevant(session):
         # REQUIRE mode: re-close the gate so the next action is blocked until a
         # relevant consult happens. Enforcement stays off the PreToolUse hot path.
         # BUT a verifier must never deadlock the agent — cap the re-closes per turn

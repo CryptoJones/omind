@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "2.44.2"
+version = "2.45.0"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
