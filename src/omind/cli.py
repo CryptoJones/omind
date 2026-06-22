@@ -402,13 +402,17 @@ def build_parser() -> argparse.ArgumentParser:
             "policy",
             "explain",
             "status",
+            "pause",
+            "resume",
             "repair",
         ),
         help="check/reset the gate; learn/escalate rules; verify/suggest; adapter "
         "normalizes another harness's event; selftest replays canned events; "
         "export-corpus emits fine-tuning JSONL; log/policy/status inspect the "
         "compliance log, active rules, and guardable harnesses; explain dry-runs a "
-        "command (--command); repair re-provisions a wedged guard hook-set",
+        "command (--command); pause/resume time-box off the consult-gate + verifier "
+        "for mission-critical speed (--for; hard blocks stay on); repair "
+        "re-provisions a wedged guard hook-set",
     )
     guard.add_argument(
         "--omi-dir",
@@ -431,6 +435,13 @@ def build_parser() -> argparse.ArgumentParser:
     )
     guard.add_argument(
         "--limit", type=int, default=20, help="max compliance-log rows (for `guard log`)"
+    )
+    guard.add_argument(
+        "--for",
+        dest="pause_for",
+        default="",
+        help="pause duration for `guard pause` (e.g. 30m, 2h, 90s, or a bare number "
+        "= minutes; default 30m)",
     )
     guard.add_argument(
         "--explain",
@@ -847,6 +858,7 @@ def main(argv: list[str] | None = None) -> int:
             limit=args.limit,
             command=args.guard_command,
             explain=args.explain,
+            duration=args.pause_for,
         )
     if args.command == "self-update":
         return _run_self_update(args)

@@ -519,3 +519,28 @@ def test_relevant_consult_resets_the_offtopic_streak(
     assert guard.offtopic_count("g2") == 1  # off-topic bumps the streak
     verify.verify_consult({**base, "tool_input": {"file_path": str(good)}}, omi, require=True)
     assert guard.offtopic_count("g2") == 0  # a RELEVANT consult resets it
+
+
+def test_verify_consult_short_circuits_when_gate_paused(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """While `omind guard pause` is engaged, an off-topic consult that would
+    normally log a violation + re-close (REQUIRE mode) is judged relevant with no
+    model call, no violation, and no re-close — the gate is open anyway."""
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    omi = _omi(tmp_path)
+    note = omi / "Smoothie.md"
+    note.write_text("# Smoothie\n\nbanana mango ice recipe\n", encoding="utf-8")
+    guard.begin_turn("vpause", "how to codeberg release push")  # off-topic vs the note
+    guard.mark_consulted("vpause")
+    before = len(compliance.read_events())
+    guard.pause_gate(60)
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "vpause", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+    )
+    assert verdict == "relevant"  # paused: judged relevant, enforcement skipped
+    assert guard.consulted_this_turn("vpause")  # gate not re-closed
+    assert len(compliance.read_events()) == before  # no off-topic violation logged
+    guard.resume_gate()

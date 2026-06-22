@@ -41,6 +41,7 @@ import json
 import re
 import sys
 import tempfile
+import time
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
@@ -306,6 +307,63 @@ def reset_offtopic(session: str) -> None:
         _offtopic_path(session).unlink()
 
 
+#: Default pause window if ``omind guard pause`` is run without ``--for`` — long
+#: enough for a burst of mission-critical work, short enough that a forgotten pause
+#: self-heals within the hour.
+_DEFAULT_PAUSE_SECONDS = 1800
+
+
+def _pause_path() -> Path:
+    """The OPERATOR pause sentinel. While it exists and is unexpired, the consult
+    gate + the PostToolUse verifier are skipped for a time-boxed fast window
+    (``omind guard pause``) — for mission-critical speed / token savings. The HARD
+    destructive blocks are NOT affected (they run earlier in :func:`decide`). It is
+    deliberately NOT named ``gate-*`` so :func:`clear_all_gates` (the by-hand
+    un-wedge) leaves an intentional pause intact, and it has no session id — a
+    by-hand ``omind guard pause`` cannot know the live session, so the pause is
+    machine-global for its window. Stores the expiry epoch so it auto-resumes."""
+    return paths.state_dir() / "paused"
+
+
+def pause_gate(seconds: int, *, now: float | None = None) -> float:
+    """Engage the operator pause for ``seconds`` and return the expiry epoch.
+    Persisting the expiry (not just a flag) makes the gate auto-resume, so a fast
+    window can never silently become the permanent state. Never raises."""
+    when = (now if now is not None else time.time()) + max(0, seconds)
+    with contextlib.suppress(OSError):
+        path = _pause_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(str(int(when)), encoding="utf-8")
+    return when
+
+
+def resume_gate() -> None:
+    """Clear the operator pause (re-arm the gate immediately). Never raises."""
+    with contextlib.suppress(OSError):
+        _pause_path().unlink()
+
+
+def pause_remaining(now: float | None = None) -> int:
+    """Seconds left on the operator pause (0 if not paused / expired / malformed).
+    An expired sentinel is reaped, so a stale file can never read as paused forever
+    — the gate fails *safe* (re-armed) when the window lapses."""
+    try:
+        expiry = int(_pause_path().read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        return 0
+    left = expiry - int(now if now is not None else time.time())
+    if left <= 0:
+        with contextlib.suppress(OSError):
+            _pause_path().unlink()
+        return 0
+    return left
+
+
+def gate_paused(now: float | None = None) -> bool:
+    """True while the operator pause is engaged and unexpired (gate/verifier off)."""
+    return pause_remaining(now) > 0
+
+
 def clear_all_gates() -> None:
     """Clear EVERY per-turn sentinel + re-close counter — the recovery path for a
     by-hand ``omind guard reset`` with no session id (a human un-wedging the gate
@@ -328,6 +386,19 @@ def clear_all_gates() -> None:
 #: to clear the gate is to consult OMI, but where the OMI tools are deferred the
 #: consult needs the very schema this tool loads.
 _GATE_EXEMPT_TOOLS = frozenset({"ToolSearch"})
+
+
+def _opt_in_satisfied(opt_in: str, command: str) -> bool:
+    """True only when the ``VAR=VALUE`` opt-in token appears as a REAL leading
+    environment assignment — at the command start, right after a shell separator
+    (``;`` / ``&&`` / ``|``), or via ``env`` — so it actually takes effect.
+
+    A bare substring match (the old behaviour) let the token be forged in a comment
+    or a string arg (``rm -rf / # OMI_SUDO_OK=1``, ``echo "OMI_SUDO_OK=1"``) and
+    silently bypass a hard rule without ever setting the variable. That is not a
+    deliberate opt-in, so it must not skip the deny."""
+    pattern = r"(?:^|[;&|]|\benv)\s*" + re.escape(opt_in) + r"(?=\s|$)"
+    return re.search(pattern, command) is not None
 
 
 def decide(action: dict[str, Any]) -> Verdict:
@@ -358,7 +429,7 @@ def decide(action: dict[str, Any]) -> Verdict:
             continue
         if not rule.compiled().search(command):
             continue
-        if rule.opt_in and re.search(rule.opt_in, command):
+        if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
             continue
         return Verdict(
             allow=False,
@@ -371,6 +442,14 @@ def decide(action: dict[str, Any]) -> Verdict:
     # a schema is not a consult), so a deferred OMI tool can be loaded and then
     # actually consulted to clear the gate — otherwise the turn deadlocks.
     if str(action.get("tool") or "") in _GATE_EXEMPT_TOOLS:
+        return Verdict(allow=True)
+
+    # 2.6) Operator pause (`omind guard pause --for ...`): a time-boxed fast window
+    # that skips the consult-gate + verifier for mission-critical speed / token
+    # savings. ONLY the gate — the HARD destructive blocks above already ran, so a
+    # pause can never green-light a repo-delete / discretionary push / raw sudo. It
+    # auto-expires (see :func:`pause_remaining`); engaging it is logged for audit.
+    if gate_paused():
         return Verdict(allow=True)
 
     # 3) The gate — block until OMI was consulted this turn.
@@ -431,6 +510,7 @@ def run_guard(
     limit: int = 20,
     command: str = "",
     explain: bool = False,
+    duration: str = "",
 ) -> int:
     """CLI entry for ``omind guard <action>``. Returns the process exit code.
 
@@ -465,6 +545,10 @@ def run_guard(
         return _run_explain(command)
     if action_name == "status":
         return _run_status()
+    if action_name == "pause":
+        return _run_pause(duration)
+    if action_name == "resume":
+        return _run_resume()
     if action_name == "repair":
         return _run_repair(omi_dir)
     if action_name == "suggest":
@@ -636,7 +720,7 @@ def _run_explain(command: str) -> int:
     matched: list[tuple[policy.Rule, bool]] = []
     for rule in policy.load_policy():
         if rule.compiled().search(command):
-            opted_in = bool(rule.opt_in and re.search(rule.opt_in, command))
+            opted_in = bool(rule.opt_in and _opt_in_satisfied(rule.opt_in, command))
             matched.append((rule, opted_in))
     if not matched:
         sys.stdout.write(f"ALLOW (no policy rule matches): {command}\n")
@@ -649,10 +733,78 @@ def _run_explain(command: str) -> int:
     return 0
 
 
+#: ``30m`` / ``2h`` / ``90s`` / a bare ``45`` (minutes). Anchored so a malformed
+#: value is rejected, never silently pausing for a surprising length.
+_DURATION_RE = re.compile(r"^\s*(\d+)\s*([smh]?)\s*$", re.IGNORECASE)
+
+
+def _parse_duration(text: str) -> int | None:
+    """Seconds for a duration string, or ``None`` if malformed. A bare number is
+    minutes (the natural unit for a work-burst pause)."""
+    match = _DURATION_RE.match(text or "")
+    if not match:
+        return None
+    return int(match.group(1)) * {"s": 1, "m": 60, "h": 3600, "": 60}[match.group(2).lower()]
+
+
+def _fmt_secs(secs: int) -> str:
+    if secs >= 3600:
+        return f"{secs // 3600}h{(secs % 3600) // 60:02d}m"
+    if secs >= 60:
+        return f"{secs // 60}m{secs % 60:02d}s"
+    return f"{secs}s"
+
+
+def _run_pause(duration: str) -> int:
+    """``omind guard pause [--for 30m]``: skip the consult-gate + verifier for a
+    time-boxed fast window (mission-critical speed / token savings). The HARD
+    destructive blocks stay on; the window auto-resumes; the engagement is logged."""
+    seconds = _DEFAULT_PAUSE_SECONDS if not duration else _parse_duration(duration)
+    if seconds is None:
+        sys.stderr.write(f"guard pause: bad --for {duration!r} (use 30m / 2h / 90s / 45)\n")
+        return 1
+    if seconds <= 0:
+        resume_gate()
+        sys.stdout.write("consult-gate re-armed (pause duration was 0).\n")
+        return 0
+    pause_gate(seconds)
+    compliance.log_event(
+        compliance.KIND_DECISION,
+        session="",
+        tool="guard",
+        command=f"pause --for {_fmt_secs(seconds)}",
+        rule_id="gate-paused",
+        severity=policy.SEVERITY_SOFT,
+        outcome="paused",
+    )
+    sys.stdout.write(
+        f"consult-gate + verifier PAUSED for {_fmt_secs(seconds)} (auto-resumes). "
+        "HARD destructive blocks stay ON. Run `omind guard resume` to re-arm now.\n"
+    )
+    return 0
+
+
+def _run_resume() -> int:
+    """``omind guard resume``: re-arm the consult-gate immediately."""
+    was = pause_remaining()
+    resume_gate()
+    if was > 0:
+        sys.stdout.write(f"consult-gate re-armed ({_fmt_secs(was)} of pause discarded).\n")
+    else:
+        sys.stdout.write("consult-gate already armed (no active pause).\n")
+    return 0
+
+
 def _run_status() -> int:
     """``omind guard status``: the harnesses omind can guard + their capability."""
     from omind import harness as harness_mod
 
+    remaining = pause_remaining()
+    if remaining > 0:
+        sys.stdout.write(
+            f"  PAUSED: consult-gate + verifier off for {_fmt_secs(remaining)} more "
+            "(hard blocks still on) — `omind guard resume` to re-arm\n"
+        )
     for name, spec in harness_mod.HARNESSES.items():
         sys.stdout.write(
             f"  {name:10} capability={spec.capability:11} "

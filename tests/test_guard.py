@@ -7,6 +7,8 @@ from __future__ import annotations
 import importlib.resources
 import io
 import json
+import shutil
+import subprocess
 from pathlib import Path
 
 import pytest
@@ -276,3 +278,139 @@ def test_guard_repair_invokes_heal(
     monkeypatch.setattr(provision, "heal_omi_guard", lambda **kw: True)
     assert guard.run_guard("repair", omi_dir=Path("/x/OMI")) == 0
     assert "repaired" in capsys.readouterr().out
+
+
+def test_pause_skips_the_gate_but_keeps_hard_blocks() -> None:
+    """`omind guard pause` opens the consult-gate for a window, but a hard
+    destructive rule still denies — the pause check sits AFTER the hard blocks."""
+    # Unconsulted action is gate-blocked normally...
+    assert not guard.decide({"command": "ls", "session": "pz"}).allow
+    guard.pause_gate(60)
+    assert guard.gate_paused()
+    # ...and allowed while paused, with no consult.
+    assert guard.decide({"command": "ls", "session": "pz"}).allow
+    # But a hard destructive command is STILL denied even while paused.
+    blocked = guard.decide({"command": "gh repo delete acme/x", "session": "pz"})
+    assert not blocked.allow and blocked.rule_id == "gh-repo-delete"
+
+
+def test_pause_auto_expires_and_reaps_the_sentinel() -> None:
+    guard.pause_gate(5, now=0.0)  # expiry at epoch 5
+    assert guard.gate_paused(now=1.0)
+    assert guard.pause_remaining(now=1.0) == 4
+    assert not guard.gate_paused(now=100.0)  # window lapsed -> re-armed (fails safe)
+    assert not guard._pause_path().exists()  # expired sentinel reaped
+
+
+def test_resume_re_arms_immediately() -> None:
+    guard.pause_gate(3600)
+    assert guard.gate_paused()
+    guard.resume_gate()
+    assert not guard.gate_paused()
+    assert not guard.decide({"command": "ls", "session": "pr"}).allow  # gate back on
+
+
+def test_clear_all_gates_leaves_an_intentional_pause_intact() -> None:
+    guard.pause_gate(3600)
+    guard.clear_all_gates()  # the by-hand un-wedge must not kill a deliberate pause
+    assert guard.gate_paused()
+
+
+def test_parse_duration_units() -> None:
+    assert guard._parse_duration("90s") == 90
+    assert guard._parse_duration("30m") == 1800
+    assert guard._parse_duration("2h") == 7200
+    assert guard._parse_duration("45") == 45 * 60  # bare number = minutes
+    assert guard._parse_duration("banana") is None
+    assert guard._parse_duration("") is None
+
+
+def test_run_pause_default_and_resume(capsys: pytest.CaptureFixture[str]) -> None:
+    assert guard.run_guard("pause") == 0  # no --for -> default window
+    assert guard.gate_paused()
+    assert "PAUSED" in capsys.readouterr().out
+    assert guard.run_guard("resume") == 0
+    assert not guard.gate_paused()
+    assert "re-armed" in capsys.readouterr().out
+
+
+def test_run_pause_rejects_a_bad_duration(capsys: pytest.CaptureFixture[str]) -> None:
+    assert guard.run_guard("pause", duration="banana") == 1
+    assert not guard.gate_paused()  # nothing engaged on a bad value
+    assert "bad --for" in capsys.readouterr().err
+
+
+def test_pause_engagement_is_logged_for_audit() -> None:
+    from omind import compliance
+
+    guard.run_guard("pause", duration="15m")
+    assert any(
+        e.get("rule_id") == "gate-paused" and e.get("outcome") == "paused"
+        for e in compliance.read_events()
+    )
+
+
+def test_opt_in_must_be_a_real_leading_assignment_not_a_substring() -> None:
+    """#2: the opt-in token only bypasses a hard rule when it is a genuine leading
+    env assignment — forging it in a comment or a string must NOT skip the deny."""
+    guard.mark_consulted("optf")
+    # forged in a trailing comment -> not a real assignment -> still denied
+    assert not guard.decide({"command": "sudo reboot   # OMI_SUDO_OK=1", "session": "optf"}).allow
+    # forged inside a string arg -> still denied
+    assert not guard.decide(
+        {"command": 'echo "OMI_SUDO_OK=1 to allow" && sudo reboot', "session": "optf"}
+    ).allow
+    # genuine leading assignment -> allowed (the deliberate opt-in)
+    assert guard.decide({"command": "OMI_SUDO_OK=1 sudo reboot", "session": "optf"}).allow
+    # genuine, after a separator -> allowed
+    assert guard.decide(
+        {
+            "command": "cd /r && OMI_PUSH_GITHUB=1 git push https://x@github.com/o/r main",
+            "session": "optf",
+        }
+    ).allow
+    guard.clear_gate("optf")
+
+
+def _render_hook(tmp_path: Path, omind_bin: str) -> Path:
+    """Render the package omi-guard.sh with substituted paths to a runnable file."""
+    src = importlib.resources.files("omind").joinpath("omi-guard.sh").read_text(encoding="utf-8")
+    src = src.replace("__OMIND_BIN__", omind_bin).replace("__OMI_DIR__", str(tmp_path / "OMI"))
+    hook = tmp_path / "omi-guard.sh"
+    hook.write_text(src, encoding="utf-8")
+    hook.chmod(0o755)
+    return hook
+
+
+def _run_hook(hook: Path, event: dict[str, object]) -> int:
+    return subprocess.run(
+        ["bash", str(hook)], input=json.dumps(event), capture_output=True, text=True
+    ).returncode
+
+
+_BASH_EVENT = {"tool_name": "Bash", "session_id": "h", "tool_input": {"command": "echo hi"}}
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="hook parses the event with jq")
+def test_hook_fails_closed_when_omind_is_missing(tmp_path: Path) -> None:
+    """#1: a Bash command must never run if the core can't evaluate its hard-rules."""
+    hook = _render_hook(tmp_path, "/nonexistent/omind")
+    assert _run_hook(hook, _BASH_EVENT) == 2  # BLOCK, not the old fall-through
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="hook parses the event with jq")
+def test_hook_fails_closed_on_unexpected_core_exit(tmp_path: Path) -> None:
+    fake = tmp_path / "fakeomind"
+    fake.write_text("#!/usr/bin/env bash\nexit 99\n", encoding="utf-8")
+    fake.chmod(0o755)
+    hook = _render_hook(tmp_path, str(fake))
+    assert _run_hook(hook, _BASH_EVENT) == 2  # 99 != 0/2 => policy not evaluated => BLOCK
+
+
+@pytest.mark.skipif(shutil.which("jq") is None, reason="hook parses the event with jq")
+def test_hook_allows_when_core_allows(tmp_path: Path) -> None:
+    fake = tmp_path / "fakeomind"
+    fake.write_text("#!/usr/bin/env bash\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    hook = _render_hook(tmp_path, str(fake))
+    assert _run_hook(hook, _BASH_EVENT) == 0  # a clean allow is still honoured

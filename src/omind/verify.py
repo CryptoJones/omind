@@ -353,6 +353,14 @@ def verify_consult(
         return None
     kind, target = target_info
     session = str(event.get("session_id") or "")
+    if guard.gate_paused():
+        # Operator pause (`omind guard pause`): the gate is open anyway, so skip
+        # relevance judging entirely — no overlap compute, no `claude -p` tiebreak,
+        # no re-close. Record the consult (relevant) so the turn history is intact
+        # and the off-topic streak doesn't accrue against a paused window.
+        guard.record_consult(session, kind=kind, target=target, relevant=True)
+        guard.reset_offtopic(session)
+        return "relevant"
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=now)
     # #96/#97: the gate-blocked action (path noise stripped) — the agent's freshest intent.

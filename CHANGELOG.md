@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.46.0] - 2026-06-22
+
+### Added
+
+- **Operator pause switch for mission-critical speed — `omind guard pause [--for 30m]`
+  / `omind guard resume`.** Time-boxes OFF the consult-gate and the PostToolUse verifier
+  (the friction + the verifier's `claude -p` tiebreaks — the real latency/token cost; the
+  gate itself calls no model), while the **hard destructive blocks stay fully on** — the
+  pause is checked *after* the hard-rule layer in `guard.decide`, so a paused window can
+  never green-light a repo-delete / discretionary push / raw sudo. Stores an expiry epoch
+  so it **auto-resumes** (a fast window can't silently become permanent) and **fails safe**
+  (an expired/missing sentinel re-arms the gate). Engagement is logged (`gate-paused`) and
+  surfaced by `omind guard status`. Lives in `decide`, so every harness honours it; the
+  bash hook adds a zero-subprocess fast-path for non-Bash tools.
+
+### Changed
+
+- **The guard now fails CLOSED on its own errors (#1).** Previously a Bash command ran
+  *unchecked* whenever the adapter couldn't evaluate it — missing `jq` (`exit 0`), an
+  unset `$HOME` tripping `set -u` (`exit 1`), or an unresolvable/ crashing `omind` core
+  (`exit 127`) all read as non-blocking in Claude Code, silently disabling the destructive
+  blocks. Now: `$HOME` is defaulted so it can't crash; missing `jq` fails **closed** for
+  anything that looks like a Bash command (open, but loud, for non-destructive tools so a
+  misconfigured host isn't wedged); and the Bash delegation trusts **only** a clean
+  allow(0)/deny(2) from the core — any other exit code BLOCKS. A guard that fails open
+  grants false confidence; the destructive path now errs toward blocking.
+- **Opt-in tokens must be a real leading env assignment, not a substring (#2).**
+  `OMI_PUSH_GITHUB=1` / `OMI_SUDO_OK=1` previously bypassed their hard rule if the token
+  appeared *anywhere* in the command — including a comment (`sudo rm -rf / # OMI_SUDO_OK=1`)
+  or a quoted string — without ever setting the variable. The opt-in is now honoured only
+  when it appears as a genuine leading assignment (command start, after a `;`/`&&`/`|`
+  separator, or via `env`), so a forged token can't silently skip a deny.
+
 ## [2.45.0] - 2026-06-22
 
 ### Changed
