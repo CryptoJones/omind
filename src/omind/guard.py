@@ -251,6 +251,13 @@ def clear_all_gates() -> None:
     _reap_legacy_sentinels()
 
 
+#: Tools that load OTHER tools' schemas (so a deferred OMI MCP tool can become
+#: callable) must never be gated. Gating them deadlocks the turn: the only way
+#: to clear the gate is to consult OMI, but where the OMI tools are deferred the
+#: consult needs the very schema this tool loads.
+_GATE_EXEMPT_TOOLS = frozenset({"ToolSearch"})
+
+
 def decide(action: dict[str, Any]) -> Verdict:
     """The harness-agnostic policy. See the module docstring for the schema."""
     session = str(action.get("session") or "")
@@ -286,6 +293,13 @@ def decide(action: dict[str, Any]) -> Verdict:
             reason=f"omi-guard ({rule.label()}): {rule.message}",
             rule_id=rule.id,
         )
+
+    # 2.5) Tool-schema loading (e.g. ToolSearch) is never gated. It already
+    # passed the hard blocks above; skip the gate WITHOUT satisfying it (loading
+    # a schema is not a consult), so a deferred OMI tool can be loaded and then
+    # actually consulted to clear the gate — otherwise the turn deadlocks.
+    if str(action.get("tool") or "") in _GATE_EXEMPT_TOOLS:
+        return Verdict(allow=True)
 
     # 3) The gate — block until OMI was consulted this turn.
     if consulted_this_turn(session):

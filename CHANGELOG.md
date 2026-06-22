@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.43.1] - 2026-06-22
+
+### Fixed
+
+- **Consult-gate no longer deadlocks subagents whose OMI tools are deferred.**
+  The per-turn gate exempted `mcp__omi__*` consults and OMI-folder Reads but not
+  `ToolSearch` — yet where the OMI MCP tools are deferred (e.g. inside a Claude
+  Code subagent), `ToolSearch` is the only way to load their schemas so a consult
+  can happen at all. Gating it left no tool call able to clear the gate: a true
+  deadlock. `ToolSearch` is now allowed through both bash adapters
+  (`omi-guard.sh`, `omi-guard-hermes.sh`) and the core `decide()`, WITHOUT
+  satisfying the gate (loading a schema is not a consult).
+
 ## [2.43.0] - 2026-06-22
 
 ### Added

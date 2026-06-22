@@ -132,6 +132,24 @@ def test_guard_and_reset_adapters_share_one_sentinel_path() -> None:
     assert "/tmp/omi-gate" not in guard_sh
 
 
+def test_toolsearch_is_never_gated_and_does_not_satisfy_the_gate() -> None:
+    """Regression: ToolSearch (the only way to load a deferred OMI MCP tool's
+    schema) must pass the gate so a consult is possible, yet must NOT itself
+    count as a consult — otherwise it would silently clear the gate."""
+    guard.clear_gate("sTS")
+    verdict = guard.decide({"tool": "ToolSearch", "session": "sTS"})
+    assert verdict.allow  # allowed with nothing consulted — no deadlock
+    assert not guard.consulted_this_turn("sTS")  # but it did NOT clear the gate
+    guard.clear_gate("sTS")
+
+
+def test_bash_adapters_exempt_toolsearch_from_the_gate() -> None:
+    files = importlib.resources.files("omind")
+    for name in ("omi-guard.sh", "omi-guard-hermes.sh"):
+        sh = files.joinpath(name).read_text(encoding="utf-8")
+        assert "ToolSearch)" in sh, f"{name} must exempt ToolSearch from the gate"
+
+
 def test_turn_task_capture_roundtrip() -> None:
     guard.begin_turn("t1", "fix the codeberg release workflow")
     assert guard.turn_task("t1") == "fix the codeberg release workflow"

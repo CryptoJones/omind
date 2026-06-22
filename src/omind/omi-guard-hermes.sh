@@ -30,6 +30,10 @@ SENT="$STATE/gate-$sid"
 # `touch` (not truncate) so the PostToolUse verifier's JSON survives the turn.
 case "$tool" in
   mcp__omi__*) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+  # Tool-schema loading is never gated: deferred OMI MCP tools become callable
+  # only via ToolSearch, so gating it deadlocks the turn (no consult possible).
+  # Allow it through WITHOUT clearing the gate — loading a schema is not a consult.
+  ToolSearch) exit 0 ;;
 esac
 if [ "$tool" = "Read" ] || [ "$tool" = "read_file" ]; then
   fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // .extra.path // empty' 2>/dev/null)"

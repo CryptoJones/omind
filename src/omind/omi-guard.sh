@@ -31,6 +31,10 @@ SENT="$STATE/gate-$sid"
 # consult in the turn must not wipe the first.
 case "$tool" in
   mcp__omi__*) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+  # Tool-schema loading is never gated: deferred OMI MCP tools become callable
+  # only via ToolSearch, so gating it deadlocks the turn (no consult possible).
+  # Allow it through WITHOUT clearing the gate — loading a schema is not a consult.
+  ToolSearch) exit 0 ;;
 esac
 if [ "$tool" = "Read" ]; then
   fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty' 2>/dev/null)"
