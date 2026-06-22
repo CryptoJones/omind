@@ -257,25 +257,30 @@ def _ask_model(task: str, text: str) -> bool | None:
     return _parse_verdict(result.stdout or "")
 
 
-def judge_with_activity(task: str, activity: str, text: str) -> bool:
-    """Relevance verdict blending the captured task with the agent's recent
-    activity (issue #95): a consult is relevant if it overlaps **either** signal.
-    Same deterministic-prefilter → model-fallback ladder as :func:`judge`, scoring
-    against ``max`` of the two overlaps so neither dilutes the other (concatenating
-    would inflate the recall denominator — the dilution 2.43.2 fought)."""
-    if not text or (not task and not activity):
-        return True  # can't judge without both sides -> fail open (relevant)
+def judge_with_activity(task: str, activity: str, text: str, pending: str = "") -> bool:
+    """Relevance verdict blending the captured task, the agent's recent activity
+    (issue #95), and the action the consult-gate just BLOCKED (issue #96): a consult
+    is relevant if it overlaps **any** of the three. Same deterministic-prefilter →
+    model-fallback ladder as :func:`judge`, scoring against ``max`` of the overlaps so
+    none dilutes another (concatenating would inflate the recall denominator — the
+    dilution 2.43.2 fought). The pending (blocked) action is the agent's freshest
+    intent: at a work *transition* the task and activity are both cold (still the
+    previous thread), but the blocked action is the new-thread work that tripped the
+    gate, so the FIRST consult clears instead of burning re-closes."""
+    if not text or (not task and not activity and not pending):
+        return True  # can't judge without a signal -> fail open (relevant)
     high = _threshold(_HIGH_ENV, _HIGH)
     low = _threshold(_LOW_ENV, _LOW)
     score = max(
         retrieve.overlap_score(task, text) if task else 0.0,
         retrieve.overlap_score(activity, text) if activity else 0.0,
+        retrieve.overlap_score(pending, text) if pending else 0.0,
     )
     if score >= high:
         return True
     if score <= low:
         return False
-    verdict = _ask_model(task or activity, text)
+    verdict = _ask_model(task or activity or pending, text)
     return True if verdict is None else verdict
 
 
@@ -328,8 +333,9 @@ def verify_consult(
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=now)
+    pending = guard.pending_intent(session)  # #96: the action the gate just blocked
     relevant = _always_relevant(target) or judge_with_activity(
-        task, activity, _consult_text(kind, target, omi_dir)
+        task, activity, _consult_text(kind, target, omi_dir), pending
     )
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:
@@ -381,15 +387,17 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=None)
+    pending = guard.pending_intent(session)
     text = _consult_text(kind, target, omi_dir)
     high = _threshold(_HIGH_ENV, _HIGH)
     low = _threshold(_LOW_ENV, _LOW)
     task_score = retrieve.overlap_score(task, text) if task else 0.0
     activity_score = retrieve.overlap_score(activity, text) if activity else 0.0
-    score = max(task_score, activity_score)
+    pending_score = retrieve.overlap_score(pending, text) if pending else 0.0
+    score = max(task_score, activity_score, pending_score)
     if _always_relevant(target):
         band, verdict = "always-relevant (allowlist)", True
-    elif (not task and not activity) or not text:
+    elif (not task and not activity and not pending) or not text:
         band, verdict = "fail-open (no task/text)", True
     elif score >= high:
         band, verdict = "high → deterministic relevant", True
@@ -404,6 +412,7 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
         "score": round(score, 3),
         "task_score": round(task_score, 3),
         "activity_score": round(activity_score, 3),  # issue #95: what the agent is doing
+        "pending_score": round(pending_score, 3),  # issue #96: the gate-blocked action
         "high": high,
         "low": low,
         "band": band,

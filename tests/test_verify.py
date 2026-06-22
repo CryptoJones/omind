@@ -399,3 +399,71 @@ def test_consult_off_topic_to_both_task_and_activity_still_irrelevant(
         out=io.StringIO(),
     )
     assert verdict == "irrelevant"
+
+
+# -- #96: blend the gate-blocked action (pending intent) so the FIRST consult after
+#    a work-transition clears — task + activity both cold, but the blocked action hot --
+
+
+def test_gate_block_records_pending_intent_and_turn_start_clears_it() -> None:
+    guard.begin_turn("pi", "some task")
+    # Not consulted yet: the gate blocks a (benign) Bash action and records its command.
+    verdict = guard.decide(
+        {"tool": "Bash", "command": "cargo test -p scylla-merge", "session": "pi"}
+    )
+    assert not verdict.allow and verdict.rule_id == "omi-gate"
+    assert guard.pending_intent("pi") == "cargo test -p scylla-merge"
+    guard.begin_turn("pi", "next turn")  # turn start resets the per-turn pending intent
+    assert guard.pending_intent("pi") == ""
+
+
+def test_transition_consult_relevant_via_pending_intent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model must never be needed: the pending-action overlap alone lifts the
+    # consult into the relevant band. Task + activity are both COLD (previous thread).
+    monkeypatch.setattr(
+        verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+    omi = _omi(tmp_path)
+    note = omi / "Matcher.md"
+    note.write_text(
+        "# Matcher\n\nthe matcher crate merge and bsim signature context\n", encoding="utf-8"
+    )
+    guard.begin_turn("xfer", "go back to looping the work")  # terse, off-topic to the note
+    guard.mark_consulted("xfer")
+    _journal(omi, "xfer", "Read -> /docs/resume.tex (ok)", "Bash -> `git push` (ok)")  # prev thread
+    # The agent pivots to matcher work; the gate blocked that action, recording its intent.
+    guard.record_pending("xfer", "grep -rn matcher merge bsim signature crates/scylla-merge")
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "xfer", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert verdict == "relevant"
+    assert guard.consulted_this_turn("xfer")  # not re-closed: the pending intent matched
+
+
+def test_consult_off_topic_to_task_activity_and_pending_still_irrelevant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The third signal must not defeat the gate either: a consult matching NONE of
+    # task / activity / pending is still irrelevant.
+    monkeypatch.setattr(
+        verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+    omi = _omi(tmp_path)
+    note = omi / "Banana.md"
+    note.write_text("# Banana\n\nbanana mango smoothie recipe\n", encoding="utf-8")
+    guard.begin_turn("b3", "pull virus samples and test the guard rails")
+    guard.mark_consulted("b3")
+    _journal(omi, "b3", "Read -> /src/matcher/merge.rs (ok)")
+    guard.record_pending("b3", "cargo build -p scylla-merge")
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "b3", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert verdict == "irrelevant"  # banana matches none of task / activity / pending

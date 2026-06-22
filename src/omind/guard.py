@@ -92,9 +92,11 @@ def begin_turn(session: str, task: str) -> None:
     """Record this turn's task (best-effort, never raises). Written by
     ``omind guard reset``; the Claude adapter writes the same file in pure bash.
 
-    Also resets the per-turn re-close counter, so the verifier's anti-wedge cap is
-    measured per turn (the bash turn-start hook clears the same counter file)."""
+    Also resets the per-turn re-close counter and the pending-intent (#96), so the
+    verifier's anti-wedge cap and the transition signal are both measured per turn
+    (the bash turn-start hook clears the same counter file)."""
     _clear_reclose(session)
+    _clear_pending(session)
     with contextlib.suppress(OSError):
         path = _turn_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -107,6 +109,40 @@ def turn_task(session: str) -> str:
         return _turn_path(session).read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+
+
+def _pending_path(session: str) -> Path:
+    """The text of the most recent action the consult-gate BLOCKED this turn — the
+    agent's freshest statement of intent. The verifier scores a consult against it
+    (#96) so the FIRST consult after a work-transition, where the captured task and
+    recent activity are both still cold (the previous thread), clears instead of
+    burning re-closes. A sibling of the turn-task path; reset at turn start."""
+    return paths.state_dir() / f"pending-{_safe_sid(session)}.txt"
+
+
+def record_pending(session: str, text: str) -> None:
+    """Stash the gate-blocked action's text as this turn's pending intent
+    (best-effort, never raises). Empty/blank text is a no-op."""
+    text = (text or "").strip()
+    if not text:
+        return
+    with contextlib.suppress(OSError):
+        path = _pending_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(text, encoding="utf-8")
+
+
+def pending_intent(session: str) -> str:
+    """This turn's most-recent gate-blocked action text, or ``""``. Never raises."""
+    try:
+        return _pending_path(session).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _clear_pending(session: str) -> None:
+    with contextlib.suppress(OSError):
+        _pending_path(session).unlink()
 
 
 def _read_sentinel(session: str) -> dict[str, Any]:
@@ -240,7 +276,7 @@ def clear_all_gates() -> None:
     cannot know the live session id, so a single-session clear would miss it).
     Also reaps the legacy ``/tmp`` sentinels. Never raises."""
     state = paths.state_dir()
-    for pattern in ("gate-*", "reclose-*"):
+    for pattern in ("gate-*", "reclose-*", "pending-*"):
         try:
             stale = list(state.glob(pattern))
         except OSError:
@@ -304,6 +340,11 @@ def decide(action: dict[str, Any]) -> Verdict:
     # 3) The gate — block until OMI was consulted this turn.
     if consulted_this_turn(session):
         return Verdict(allow=True)
+    # Record what we were about to do (#96): the verifier scores the next consult
+    # against this, so the FIRST consult after a work-transition clears even when the
+    # captured task + recent activity are both still cold. (Bash block path; the
+    # non-Bash gate-block records it via `guard suggest`.)
+    record_pending(session, command)
     return Verdict(allow=False, reason=f"omi-gate: {GATE_MESSAGE}", rule_id="omi-gate")
 
 
@@ -465,11 +506,27 @@ def _run_escalate() -> int:
     return 0
 
 
+def _action_intent(event: dict[str, Any]) -> str:
+    """A short text of what an action is about — the file path / command / query the
+    tool input carries — for recording the gate-blocked intent (#96)."""
+    ti = event.get("tool_input")
+    ti = ti if isinstance(ti, dict) else {}
+    for key in ("command", "file_path", "query", "pattern", "path", "url", "prompt"):
+        val = ti.get(key)
+        if isinstance(val, str) and val.strip():
+            return val.strip()
+    return ""
+
+
 def _run_suggest(data: dict[str, Any], omi_dir: Path | None) -> int:
     """``omind guard suggest``: print the gate-deny message naming the notes
     relevant to this turn's task (Phase 3.2). Prints to STDOUT and exits 0 so the
     bash adapter can capture it and emit the actual exit-2 deny itself."""
     session = str(data.get("session_id") or data.get("session") or "")
+    # The non-Bash gate-block path (Read/Edit/Write/…) reaches the core only here;
+    # record what the agent was about to do (#96) so the verifier can judge the next
+    # consult against it. (The Bash block path records it in decide().)
+    record_pending(session, _action_intent(data))
     task = turn_task(session)
     if omi_dir is not None:
         from omind import retrieve

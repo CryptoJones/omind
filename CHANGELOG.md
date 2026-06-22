@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.44.1] - 2026-06-22
+
+### Fixed
+
+- **Verifier no longer burns re-closes at a work-transition (#96).** #95's
+  activity-blend fixed *sustained* delegated work, but the first consult of a NEW
+  work-thread still re-closed: the captured task is terse/stale and the recent
+  journal activity is still the *previous* thread's, so both signals are cold. The
+  verifier now scores the consult against a third signal — the action the
+  consult-gate just BLOCKED (the agent's freshest intent, recorded as the turn's
+  "pending intent") — and judges relevant on `max(task, activity, pending)`. At a
+  transition the blocked action is the new-thread work that tripped the gate, so the
+  first consult clears. Zero extra cost: no model call, no extra consult — it reuses
+  the blocked-action text the guard already has plus the existing overlap score. It's
+  recorded on both block paths (Bash via `decide()`, non-Bash via `guard suggest`),
+  reset at turn start, and surfaced as `pending_score` in `guard verify --explain`.
+  It cannot weaken the gate — matching the agent's own real pending action *is*
+  "consult about what you're doing", and a consult off-topic to all three is still
+  irrelevant.
+
 ## [2.44.0] - 2026-06-22
 
 ### Added
