@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [2.43.2] - 2026-06-22
+
 ### Fixed
 
 - **Verifier relevance scoring no longer mis-scores a real consult as off-topic
