@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.0] - 2026-06-22
+
+### Added
+
+- **Semantic relevance layer (the 3.0.0 flagship).** A pluggable static-embedding
+  backend (`omind.embed`, model2vec — numpy-only, no torch/onnxruntime) measures
+  relevance by *meaning* instead of shared tokens, fixing the keyword false-positives
+  the 2.45.0 graduated gate had to work *around*. Wired into three places:
+  - **Recall** — `store.search` (and so the `search-vault` MCP tool) now *augments*
+    substring hits with notes close in meaning, so a natural-language query no longer
+    returns `[]`. `retrieve.relevant_titles` (the gate's note suggestions) ranks
+    semantically too, with the credential de-prioritization preserved.
+  - **Verifier** — `judge` blends semantic cosine into its `max(...)`, so an on-topic
+    but keyword-poor consult is no longer flagged off-topic. (`guard verify --explain`
+    now reports `semantic_score`.) This reduces friction; it is **not** anti-gaming —
+    an echo of the task is similar on both axes.
+  - **Dedup** — `omind note` hints (non-blocking) when a new note is close in meaning
+    to an existing one, so the same insight updates in place instead of duplicating.
+  - A new `omind.vectorindex` embeds note *metadata* (title + summary + tags),
+    persists machine-locally, and re-embeds **incrementally** (only changed notes).
+  - Optional `[embed]` extra (`pip install 'omind[embed]'`). **Everything fails open**
+    to the exact 2.x keyword path when the extra is absent, the model can't load, or
+    an encode raises. `OMI_EMBED_DISABLE=1` forces the keyword path; `OMI_EMBED_MODEL`
+    overrides the model. `omind guard status` reports whether semantics are on.
+
+### Changed — red-team hardenings folded in (#B1, #B2)
+
+- **Widened the destructive deny-set** to close the regex gaps the red-team found
+  (#B1): the `gh api` repo-delete rule is now argument-order-independent; raw
+  `curl -X DELETE …api.github.com/repos/…` is blocked; opening a PR via
+  `gh api …/pulls` is blocked (reads still pass); and `pkexec` / `doas` / `run0` /
+  `su` join `sudo` in the privilege-escalation tier (same `OMI_SUDO_OK=1` opt-in).
+  *Framing: this catches honest mistakes — string-matching is never a boundary
+  against a determined agent; that requires controls outside the agent.*
+- **Self-protection awareness** (#B2): `omind guard status` now flags when the
+  guard's own config (hook, learned policy, Claude settings) is agent-writable — the
+  kill-shot surface (clear the gate once, then edit the hook to disable it). The real
+  mitigation (root-owned + immutable config, server-side branch protection) lives
+  outside the agent and is out of scope for code.
+
 ## [2.46.0] - 2026-06-22
 
 ### Added

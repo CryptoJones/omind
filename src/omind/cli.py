@@ -766,7 +766,40 @@ def _run_note(args: argparse.Namespace) -> int:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     print(f"{action} {filename}")
+    if action == "created":
+        _dedup_hint(omi_dir, fields, filename)
     return 0
+
+
+def _dedup_hint(omi_dir: Path, fields: object, filename: str) -> None:
+    """After CREATING a note, hint (to stderr, non-blocking) when a semantically
+    very similar note already exists — so the next insight updates it instead of
+    duplicating (3.0.0). Silent unless the embed backend is installed and a close
+    match is found; never raises, never blocks the write."""
+    try:
+        from omind import vectorindex
+
+        title = getattr(fields, "title", "")
+        summary = getattr(fields, "summary", "")
+        tags = getattr(fields, "tags", []) or []
+        text = "\n".join([title, summary, " ".join(tags)]).strip()
+        near = vectorindex.VectorIndex(omi_dir).nearest(text, exclude=filename, limit=1)
+        if not near:
+            return
+        name, score = near[0]
+        try:
+            threshold = float(os.environ.get("OMI_DEDUP_THRESHOLD") or 0.6)
+        except ValueError:
+            threshold = 0.6
+        if score >= threshold:
+            other = name[:-3] if name.endswith(".md") else name
+            print(
+                f"note: this looks similar to [[{other}]] (cosine {score:.2f}) — if it is "
+                "the same insight, re-run with that title to update it in place.",
+                file=sys.stderr,
+            )
+    except Exception:
+        return
 
 
 def _run_rollup(args: argparse.Namespace) -> int:

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import re
 from pathlib import Path
+from typing import Any
 
 #: Stopword set — common function words plus the *instruction filler* that wraps
 #: a request ("please fix … before we move any further") and otherwise inflates
@@ -168,6 +169,38 @@ def _score_note(
     return score
 
 
+def _semantic_titles(
+    task: str, omi_dir: Path | str, notes: list[Any], *, task_is_cred: bool, limit: int
+) -> list[str] | None:
+    """Semantic-similarity ranking of notes to the task (3.0.0) — better gate/nudge
+    suggestions than keyword overlap, which surfaced off-topic notes. Preserves the
+    credential de-prioritization (never steer to secrets unless the task is about
+    them). ``None`` when no embed backend, so the caller falls back to keyword."""
+    try:
+        from omind import embed, vectorindex
+
+        if not embed.available():
+            return None
+        title_by_file: dict[str, str] = {}
+        cred_files: set[str] = set()
+        for note in notes:
+            stem = note.filename[:-3] if note.filename.endswith(".md") else note.filename
+            title_by_file[note.filename] = note.title or stem
+            if not task_is_cred and _looks_credential(
+                note.title, note.summary, " ".join(note.tags)
+            ):
+                cred_files.add(note.filename)
+        ranked = vectorindex.VectorIndex(omi_dir).rank(task, limit=limit + len(cred_files) + 1)
+        if ranked is None:
+            return None
+        titles = [
+            title_by_file[fn] for fn, _ in ranked if fn in title_by_file and fn not in cred_files
+        ]
+        return titles[:limit]
+    except Exception:
+        return None
+
+
 def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[str]:
     """Titles of the notes most relevant to ``task`` (best first), or ``[]``.
 
@@ -184,6 +217,9 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
     except Exception:
         return []
     task_is_cred = bool(task_terms & _CREDENTIAL_STEMS)
+    semantic = _semantic_titles(task, omi_dir, notes, task_is_cred=task_is_cred, limit=limit)
+    if semantic is not None:
+        return semantic
     scored: list[tuple[float, str]] = []
     for note in notes:
         stem = note.filename[:-3] if note.filename.endswith(".md") else note.filename

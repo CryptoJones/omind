@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "2.46.0"
+version = "3.0.0"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,6 +41,13 @@ dependencies = [
 e2e = [
     "runpod>=1.7",
 ]
+# Semantic relevance (omind 3.0.0): a static-embedding backend over note metadata.
+# model2vec is numpy-only (no torch/onnxruntime) so this stays light; everything in
+# omind.embed FAILS OPEN to the keyword path when this extra is not installed.
+embed = [
+    "model2vec>=0.3",
+    "numpy>=1.24",
+]
 dev = [
     "pytest>=8.0",
     "pytest-cov>=5.0",
@@ -79,6 +86,16 @@ select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 [tool.mypy]
 python_version = "3.10"
 strict = true
+
+# The [embed] extra is optional and may be absent in the type-check env; omind.embed
+# fails open without it. Don't fail the strict check on the missing stubs.
+[[tool.mypy.overrides]]
+module = ["model2vec", "model2vec.*", "numpy", "numpy.*"]
+ignore_missing_imports = true
+# numpy's shipped stubs use 3.12+ `type` syntax; we target 3.10. Treat the optional
+# embed deps as Any (present or absent) rather than analyse their stubs.
+follow_imports = "skip"
+ignore_errors = true
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

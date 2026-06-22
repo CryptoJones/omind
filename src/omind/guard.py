@@ -38,6 +38,7 @@ from __future__ import annotations
 
 import contextlib
 import json
+import os
 import re
 import sys
 import tempfile
@@ -795,6 +796,27 @@ def _run_resume() -> int:
     return 0
 
 
+def _config_protection() -> list[tuple[str, bool]]:
+    """The guard's own config files and whether each is writable by THIS user — the
+    kill-shot surface the red-team found (clear the gate once, then edit the hook /
+    settings to disable the guard). Surfaced by ``guard status`` so the exposure is
+    visible; the real mitigation (root-owned + immutable config) lives outside the
+    agent. Best-effort; never raises."""
+    out: list[tuple[str, bool]] = []
+    with contextlib.suppress(Exception):
+        from omind import provision
+
+        candidates: list[tuple[str, Path]] = [
+            ("PreToolUse hook", provision._omi_guard_dest()),
+            ("learned policy", policy.policy_path()),
+            ("Claude settings", Path.home() / ".claude" / "settings.json"),
+        ]
+        for label, path in candidates:
+            if path.exists():
+                out.append((label, os.access(path, os.W_OK)))
+    return out
+
+
 def _run_status() -> int:
     """``omind guard status``: the harnesses omind can guard + their capability."""
     from omind import harness as harness_mod
@@ -810,6 +832,23 @@ def _run_status() -> int:
             f"  {name:10} capability={spec.capability:11} "
             f"format={spec.block_format:12} — {spec.description}\n"
         )
+    from omind import embed
+
+    es = embed.status()
+    if es["available"]:
+        sys.stdout.write(f"  semantic relevance: ON (model {es['model']})\n")
+    else:
+        sys.stdout.write(f"  semantic relevance: off (keyword path) — {es['reason']}\n")
+    protection = _config_protection()
+    writable = [label for label, can_write in protection if can_write]
+    if writable:
+        sys.stdout.write(
+            "  self-protection: guard config is AGENT-WRITABLE (" + ", ".join(writable) + ") — "
+            "clearing the gate once is enough to edit it and disable the guard. Harden by "
+            "making these root-owned + immutable (chattr +i), outside the agent's reach.\n"
+        )
+    elif protection:
+        sys.stdout.write("  self-protection: guard config is write-protected\n")
     return 0
 
 

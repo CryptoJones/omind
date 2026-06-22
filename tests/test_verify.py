@@ -544,3 +544,17 @@ def test_verify_consult_short_circuits_when_gate_paused(
     assert guard.consulted_this_turn("vpause")  # gate not re-closed
     assert len(compliance.read_events()) == before  # no off-topic violation logged
     guard.resume_gate()
+
+
+def test_semantic_blend_rescues_a_keyword_poor_consult(monkeypatch: pytest.MonkeyPatch) -> None:
+    """3.0.0: a consult that is on-topic in MEANING but shares no keywords with the
+    task is off-topic under keyword overlap alone, but relevant once the semantic
+    backend rates it close — the false-negative friction the blend targets."""
+    task = "publish a new version to the git remote"
+    text = "the steps to cut a release and ship it to the forge"
+    # keyword-only (no backend): no shared terms -> judged irrelevant, as in 2.x
+    monkeypatch.setattr(verify.embed, "similarity", lambda a, b: None)
+    assert verify.judge(task, text) is False
+    # with a semantic backend rating them close, the blend lifts it to relevant
+    monkeypatch.setattr(verify.embed, "similarity", lambda a, b: 0.82)
+    assert verify.judge(task, text) is True

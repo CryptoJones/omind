@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from omind import compliance, guard, hooks, retrieve
+from omind import compliance, embed, guard, hooks, retrieve
 
 #: Overlap at/above this is relevant with no model call; at/below the low mark is
 #: irrelevant with no model call; the band between is referred to the model.
@@ -269,6 +269,21 @@ def _ask_model(task: str, text: str) -> bool | None:
     return _parse_verdict(result.stdout or "")
 
 
+def _signal_score(signal: str, text: str) -> float:
+    """Relevance of ``text`` to one signal: the max of keyword overlap and (when an
+    embed backend is present) semantic cosine (#3.0.0). Semantic lifts a consult
+    that is on-topic in MEANING but keyword-poor — the false-negative friction the
+    graduated gate worked around. With no backend, ``embed.similarity`` is ``None``
+    and this is exactly the 2.x keyword score (fail open). Note: this REDUCES
+    friction, it is not anti-gaming — an echo of the task scores high on both axes,
+    same as before; the gaming fix is a separate axis (score what was retrieved)."""
+    if not signal:
+        return 0.0
+    keyword = retrieve.overlap_score(signal, text)
+    semantic = embed.similarity(signal, text)
+    return max(keyword, semantic) if semantic is not None else keyword
+
+
 def judge_with_activity(task: str, activity: str, text: str, pending: str = "") -> bool:
     """Relevance verdict blending the captured task, the agent's recent activity
     (issue #95), and the action the consult-gate just BLOCKED (issue #96): a consult
@@ -287,9 +302,9 @@ def judge_with_activity(task: str, activity: str, text: str, pending: str = "") 
     high = _threshold(_HIGH_ENV, _HIGH)
     low = _threshold(_LOW_ENV, _LOW)
     score = max(
-        retrieve.overlap_score(task, text) if task else 0.0,
-        retrieve.overlap_score(activity, text) if activity else 0.0,
-        retrieve.overlap_score(pending, text) if pending else 0.0,
+        _signal_score(task, text),
+        _signal_score(activity, text),
+        _signal_score(pending, text),
     )
     if score >= high:
         return True
@@ -445,7 +460,11 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
     task_score = retrieve.overlap_score(task, text) if task else 0.0
     activity_score = retrieve.overlap_score(activity, text) if activity else 0.0
     pending_score = retrieve.overlap_score(pending, text) if pending else 0.0
-    score = max(task_score, activity_score, pending_score)
+    signals = [s for s in (task, activity, pending) if s]
+    semantic_score = (
+        max((embed.similarity(s, text) or 0.0) for s in signals) if signals and text else 0.0
+    )
+    score = max(task_score, activity_score, pending_score, semantic_score)
     if _always_relevant(target):
         band, verdict = "always-relevant (allowlist)", True
     elif (not task and not activity and not pending) or not text:
@@ -464,6 +483,7 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
         "task_score": round(task_score, 3),
         "activity_score": round(activity_score, 3),  # issue #95: what the agent is doing
         "pending_score": round(pending_score, 3),  # issue #96: the gate-blocked action
+        "semantic_score": round(semantic_score, 3),  # 3.0.0: best embed cosine over the signals
         "high": high,
         "low": low,
         "band": band,

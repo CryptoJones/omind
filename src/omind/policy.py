@@ -105,10 +105,44 @@ SEED_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         id="gh-api-repo-delete",
-        pattern=r"gh\s+api[^|;&]*(-X\s*|--method\s*)DELETE[^|;&]*repos/",
+        # Order-independent (red-team #B1): two lookaheads after `gh api`, so
+        # `gh api repos/o/r -X DELETE` (path before method) is caught as well as
+        # `gh api -X DELETE repos/o/r`. Both lookaheads stay within one simple
+        # command (no pipe/;/&), so an unrelated later command can't trip it.
+        pattern=r"gh\s+api(?=[^|;&]*(?:-X\s*|--method\s*)DELETE)(?=[^|;&]*repos/)",
         message=(
             "never DELETE a repo via the API. Typed-name confirmation only. "
             "Read OMI: Operational Rules - Git Repos and Secrets."
+        ),
+    ),
+    Rule(
+        id="curl-api-repo-delete",
+        # red-team #B1: the gh rules only cover `gh`; a raw `curl -X DELETE
+        # https://api.github.com/repos/...` deleted a repo (or sub-resource)
+        # straight past them. Order-independent like the gh-api rule.
+        pattern=(
+            r"curl(?=[^|;&]*(?:-X\s*|--request\s*)DELETE)"
+            r"(?=[^|;&]*api\.github\.com/repos/)"
+        ),
+        message=(
+            "never DELETE a GitHub repo/resource via the raw API. Use the reviewed "
+            "path; typed-name confirmation only. Read OMI: Operational Rules - Git "
+            "Repos and Secrets."
+        ),
+    ),
+    Rule(
+        id="gh-api-pr-create",
+        # red-team #B1: `gh pr create` is blocked, but the same PR could be opened
+        # via `gh api repos/o/r/pulls -f ...`. Match a WRITE to .../pulls (a -f field
+        # or an explicit POST); a plain GET listing has neither, so reads pass.
+        pattern=(
+            r"gh\s+api(?=[^|;&]*repos/[^|;&]*/pulls)"
+            r"(?=[^|;&]*(?:-f\b|--field\b|--method\s*POST|-X\s*POST))"
+        ),
+        message=(
+            "GitHub never gets a PR — not via `gh pr create` nor the API. PR + merge "
+            "happen on Codeberg; GitHub mirrors Codeberg's exact commit. Read OMI: "
+            "codeberg-authoritative."
         ),
     ),
     Rule(
@@ -140,6 +174,21 @@ SEED_RULES: tuple[Rule, ...] = (
             "raw sudo is blocked — run `fleet-sudo <cmd>` instead (it reads the "
             "fleet sudo password from pass; never guess the per-host entry, never "
             "hand CJ a command to run). Deliberate raw sudo opts in with "
+            "OMI_SUDO_OK=1. See the OMI Playbook."
+        ),
+        tier=TIER_SUDO,
+        opt_in="OMI_SUDO_OK=1",
+    ),
+    Rule(
+        id="privesc-alternatives",
+        # red-team #B1: only the literal `sudo` was blocked, so pkexec / doas /
+        # run0 / su walked straight past. Same tier + opt-in as raw sudo. The
+        # lookbehind keeps `sudo` (handled by its own rule) and words ending in
+        # these tokens from matching; `su` won't match inside `sudo`/`issue`/etc.
+        pattern=r"(?<![\w-])(pkexec|doas|run0|su)\b",
+        message=(
+            "raw privilege escalation is blocked — run `fleet-sudo <cmd>` instead "
+            "(pkexec/doas/run0/su included). Deliberate raw escalation opts in with "
             "OMI_SUDO_OK=1. See the OMI Playbook."
         ),
         tier=TIER_SUDO,

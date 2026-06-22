@@ -414,3 +414,38 @@ def test_hook_allows_when_core_allows(tmp_path: Path) -> None:
     fake.chmod(0o755)
     hook = _render_hook(tmp_path, str(fake))
     assert _run_hook(hook, _BASH_EVENT) == 0  # a clean allow is still honoured
+
+
+def test_widened_destructive_rules_close_red_team_gaps() -> None:
+    """#B1: the bypasses the red-team found are now denied, while reads still pass."""
+    guard.mark_consulted("b1")
+    blocked = [
+        "gh api repos/acme/widget -X DELETE",  # path-before-method reorder
+        "curl -X DELETE https://api.github.com/repos/acme/widget",  # curl, not gh
+        "gh api repos/acme/widget/pulls -f title=x -f head=y",  # PR via the API
+        "pkexec rm -rf /tmp/x",
+        "doas reboot",
+        "su -c 'rm -rf /tmp/x' root",
+    ]
+    for cmd in blocked:
+        assert not guard.decide({"command": cmd, "session": "b1"}).allow, cmd
+    # a GET listing of pulls (no write field / POST) is NOT a PR create -> allowed
+    assert guard.decide({"command": "gh api repos/acme/widget/pulls", "session": "b1"}).allow
+    # privesc still has the deliberate opt-in (a real leading assignment, #2)
+    assert guard.decide(
+        {"command": "OMI_SUDO_OK=1 pkexec systemctl restart x", "session": "b1"}
+    ).allow
+    guard.clear_gate("b1")
+
+
+def test_guard_status_flags_agent_writable_config(capsys: pytest.CaptureFixture[str]) -> None:
+    """#B2: status surfaces the kill-shot surface when the guard's own config is
+    writable by the agent (here, under the test's isolated HOME)."""
+    from omind import provision
+
+    hook = provision._omi_guard_dest()
+    hook.parent.mkdir(parents=True, exist_ok=True)
+    hook.write_text("#!/bin/sh\n", encoding="utf-8")
+    assert guard.run_guard("status") == 0
+    out = capsys.readouterr().out
+    assert "self-protection" in out and "AGENT-WRITABLE" in out

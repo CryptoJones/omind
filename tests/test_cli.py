@@ -189,3 +189,37 @@ def test_search_finds_notes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     # a miss prints "no matches"
     assert main(["search", "zzznotthere", "--vault", str(tmp_path), "--folder", "OMI"]) == 0
     assert "no matches" in capsys.readouterr().out
+
+
+def test_dedup_hint_warns_about_a_similar_existing_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """3.0.0: creating a note close in meaning to an existing one hints (to stderr,
+    non-blocking) to update the existing note instead of duplicating."""
+    from omind import embed
+    from omind.cli import _dedup_hint
+    from omind.store import NoteFields, OmiStore
+
+    vocab = ["release", "push", "forge", "smoothie"]
+
+    def _enc(texts: list[str]) -> list[list[float]]:
+        rows = []
+        for text in texts:
+            low = text.lower()
+            vec = [float(low.count(w)) for w in vocab]
+            norm = sum(x * x for x in vec) ** 0.5 or 1.0
+            rows.append([x / norm for x in vec])
+        return rows
+
+    monkeypatch.setattr(embed, "available", lambda: True)
+    monkeypatch.setattr(embed, "encode", _enc)
+    monkeypatch.setenv("OMI_DEDUP_THRESHOLD", "0.3")
+    omi = tmp_path / "OMI"
+    OmiStore(omi).create_note(
+        NoteFields(title="Release Guide", summary="how to release and push to the forge")
+    )
+    fields = NoteFields(title="Shipping Steps", summary="release and push to the forge")
+    _dedup_hint(omi, fields, "Shipping Steps.md")
+    err = capsys.readouterr().err
+    assert "Release Guide" in err and "similar" in err
+    embed.reset()

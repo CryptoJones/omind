@@ -664,7 +664,39 @@ class OmiStore:
                 continue
             results.append(self._summarize_fields(path, fields))
         results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
+        # Semantic recall (3.0.0): augment the substring hits with notes close in
+        # MEANING that share no literal term with the query — the fix for a
+        # natural-language query returning []. Substring hits keep their place
+        # (date order); semantic-only matches are appended in similarity order.
+        # Fails open to substring-only when no embed backend is installed.
+        if query.strip():
+            seen = {s.filename for s in results}
+            results.extend(self._semantic_recall(query, tag_needle, include_disabled, seen))
         return results
+
+    def _semantic_recall(
+        self, query: str, tag_needle: str, include_disabled: bool, seen: set[str]
+    ) -> list[NoteSummary]:
+        """Notes semantically closest to ``query`` that the substring pass missed.
+        ``[]`` when no embed backend (the caller keeps just the substring results)."""
+        try:
+            from omind import vectorindex
+
+            notes = self.list_notes(include_disabled=include_disabled)
+            candidates = {
+                s.filename
+                for s in notes
+                if not tag_needle or tag_needle in {t.lower() for t in s.tags}
+            }
+            ranked = vectorindex.VectorIndex(self.omi_dir).rank(
+                query, limit=10, candidates=candidates
+            )
+            if not ranked:
+                return []
+            by_name = {s.filename: s for s in notes}
+            return [by_name[fn] for fn, _ in ranked if fn in by_name and fn not in seen]
+        except Exception:
+            return []
 
     def backlinks(self, name: str) -> list[NoteSummary]:
         """Notes that ``[[wikilink]]`` to the given note (by title or stem)."""
