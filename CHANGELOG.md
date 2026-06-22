@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Verifier relevance scoring no longer mis-scores a real consult as off-topic
+  on word-form mismatch.** The deterministic prefilter (`retrieve.overlap_score`)
+  tokenized with exact word matching and no stemming, so a consult that *was*
+  about the task scored near zero purely because the task said `relevance` /
+  `scoring` / `verifier` while the note said `relevant` / `scores` / `verified` —
+  landing at/below the `LOW` band, judged irrelevant, and (under
+  `OMI_VERIFY_REQUIRE=1`) re-closing the gate. Compounding it, instruction filler
+  ("please fix … before we move any further") inflated the task's term count and
+  dragged the recall-based score down. The tokenizer now folds morphological
+  variants onto a shared stem (`consult`/`consults`/`consulted`,
+  `score`/`scored`/`scoring`, `relevance`/`relevant`) and drops generic
+  instruction filler from the task. Credential detection runs against the same
+  stemmed terms, so the secrets-note de-prioritization is unaffected. The cap +
+  escape hatch from 2.43.x already bounded this to *friction*; this removes the
+  friction at its source so a relevant consult clears the gate on the first try.
+
 ## [2.43.1] - 2026-06-22
 
 ### Fixed

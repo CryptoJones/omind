@@ -74,3 +74,53 @@ def test_suggest_message_names_notes_or_falls_back(tmp_path: Path) -> None:
     assert "credential" in msg.lower()  # keeps the do-not-open-secrets caveat
     # No task -> generic gate message (never invents a note).
     assert retrieve.suggest_message("", omi) == guard.GATE_MESSAGE
+
+
+# -- 2.43.2: stemming + instruction-filler stopwords so a real consult isn't
+#    scored off-topic purely from word-form mismatch (the verifier-wedge fix) --
+
+
+def test_stem_folds_morphological_variants() -> None:
+    # The families that bit us: a note saying "relevant"/"scored"/"consulted"
+    # must match a task saying "relevance"/"scoring"/"consult".
+    assert retrieve._stem("scoring") == retrieve._stem("scored") == retrieve._stem("score")
+    assert retrieve._stem("consult") == retrieve._stem("consults") == retrieve._stem("consulted")
+    assert retrieve._stem("relevance") == retrieve._stem("relevant")
+    assert retrieve._stem("gate") == retrieve._stem("gating") == retrieve._stem("gated")
+    # Conservative guards: short words and double-s endings are left whole.
+    assert retrieve._stem("fix") == "fix"
+    assert retrieve._stem("pass") == "pass"
+    assert retrieve._stem("address") == "address"
+
+
+def test_overlap_score_matches_across_word_forms() -> None:
+    # Before the fix this scored ~0 (no exact token shared) and the verifier
+    # re-closed the gate; stemming makes the shared subject visible.
+    score = retrieve.overlap_score(
+        "verifier relevance scoring",
+        "the verifier scored each consult for relevant material",
+    )
+    assert score == 1.0  # all three task stems are covered
+    # A genuinely-unrelated consult still scores zero (the gate still bites).
+    assert retrieve.overlap_score("verifier relevance scoring", "banana mango smoothie") == 0.0
+
+
+def test_instruction_filler_does_not_dilute_the_task() -> None:
+    # The chatty wrapper ("please … before we move any further") must not inflate
+    # the task's term count and drag a relevant consult below the relevant band.
+    bare = retrieve.overlap_score("fix the verifier scoring", "the verifier scoring logic")
+    chatty = retrieve.overlap_score(
+        "please fix the verifier scoring before we get any further",
+        "the verifier scoring logic",
+    )
+    assert chatty == bare  # filler stripped -> identical, undiluted score
+    assert chatty >= 0.5
+
+
+def test_credential_detection_survives_stemming(tmp_path: Path) -> None:
+    # Stemming must not break the de-prioritization (else the gate could steer
+    # toward the secrets notes). Plural/variant credential words still register.
+    omi = _vault(tmp_path)
+    titles = retrieve.relevant_titles("rotating the api tokens and secrets", omi)
+    assert "Credential locations" in titles  # task_is_cred true despite stemming
+    assert retrieve._looks_credential("the API tokens and passwords")

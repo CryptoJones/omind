@@ -261,3 +261,34 @@ def test_run_guard_verify_explain(tmp_path: Path) -> None:
     payload = {"tool_name": "Read", "session_id": "ge", "tool_input": {"file_path": str(note)}}
     event = io.StringIO(json.dumps(payload))
     assert guard.run_guard("verify", event, omi_dir=omi, explain=True) == 0
+
+
+# -- 2.43.2: a consult that addresses the task in different WORD FORMS is judged
+#    relevant on the first try, deterministically (no model, no re-close) --
+
+
+def test_word_form_variant_consult_is_relevant_first_try(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The model must NOT be needed: stemming lifts the deterministic score into
+    # the relevant band even though task and note share no exact token.
+    monkeypatch.setattr(
+        verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError)
+    )
+    omi = _omi(tmp_path)
+    note = omi / "Verifier.md"
+    note.write_text(
+        "# Verifier\n\nthe verifier scores how relevant each consult is\n", encoding="utf-8"
+    )
+    # Chatty task in different word forms than the note ("scoring" vs "scores",
+    # "relevance" vs "relevant", "consults" vs "consult").
+    guard.begin_turn("wf", "please fix the verifier relevance scoring before we move on")
+    guard.mark_consulted("wf")
+    verdict = verify.verify_consult(
+        {"tool_name": "Read", "session_id": "wf", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert verdict == "relevant"
+    assert guard.consulted_this_turn("wf")  # never re-closed: relevant on first try

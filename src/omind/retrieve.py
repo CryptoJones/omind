@@ -22,13 +22,49 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-#: Tiny stopword set — enough to stop "the/and/for" dominating the overlap.
+#: Stopword set — common function words plus the *instruction filler* that wraps
+#: a request ("please fix … before we move any further") and otherwise inflates
+#: the task's term count, dragging the recall-based overlap score down so a
+#: genuinely-relevant consult reads as off-topic.
 _STOPWORDS = frozenset(
     {
+        # function words
         "and", "are", "but", "for", "from", "has", "have", "how", "into", "its",
         "that", "the", "their", "then", "there", "these", "this", "was", "were",
         "what", "when", "which", "who", "why", "with", "you", "your", "our", "does",
+        "than", "them", "they", "here", "over", "out",
+        # instruction filler / generic verbs that never carry the task's topic
+        "please", "before", "after", "again", "also", "just", "now", "more",
+        "most", "want", "wants", "need", "needs", "make", "makes", "made", "let",
+        "lets", "use", "uses", "used", "using", "can", "will", "would", "should",
+        "could", "must", "may", "might", "get", "gets", "got", "about", "any",
+        "all", "further",
     }
+)
+
+#: Inflectional + light derivational suffixes, folded (longest match first, one
+#: per word) onto a shared stem so the overlap score treats morphological
+#: variants as the same term — consult/consults/consulted, score/scored/scoring,
+#: relevance/relevant, gate/gating. Without this, an on-topic consult scores near
+#: zero purely from word-form mismatch and the verifier re-closes the gate. It is
+#: deliberately conservative (never strips below a 3-char root); an occasional
+#: over-merge of two unrelated words only clears the gate more easily — the safe
+#: failure direction, since what we are fixing is a *real* consult judged off-topic.
+_SUFFIXES: tuple[str, ...] = tuple(
+    sorted(
+        {
+            "ization", "isation", "ational",
+            "fulness", "iveness", "ousness",
+            "ation", "ition", "ement",
+            "ance", "ence", "able", "ible",
+            "ingly", "edly", "fully",
+            "tion", "sion", "ness", "ment", "ical",
+            "ing", "ies", "ied", "ity", "ive", "ous", "ant", "ent",
+            "er", "or", "al", "ed", "es", "ly", "s",
+        },
+        key=len,
+        reverse=True,
+    )
 )
 
 #: Single-token terms that mark a note as credential/auth material (the tokenizer
@@ -47,8 +83,40 @@ _WORD_RE = re.compile(r"[a-z0-9]+")
 _CREDENTIAL_PENALTY = 0.1
 
 
+def _stem(word: str) -> str:
+    """Fold a word onto a shared stem by stripping one inflectional/derivational
+    suffix (longest first) and a trailing ``e``. Conservative: a ≤3-char word is
+    untouched, no strip leaves a <3-char root, and the ``s`` of a double-``s``
+    ending is kept (``pass``/``address`` stay whole)."""
+    if len(word) <= 3:
+        return word
+    for suf in _SUFFIXES:
+        if not word.endswith(suf):
+            continue
+        if suf == "s" and word.endswith("ss"):
+            continue  # plural-vs-"ss": keep "pass", "address"
+        if len(word) - len(suf) >= 3:
+            word = word[: -len(suf)]
+            break
+    if len(word) > 3 and word.endswith("e"):
+        word = word[:-1]  # score/scoring/scored -> "scor"; gate/gating -> "gat"
+    return word
+
+
+#: ``_CREDENTIAL_TERMS`` run through the same stemmer the tokenizer applies, so
+#: credential detection still fires once tokens are stemmed (``credentials`` ->
+#: ``credential``, ``credential`` -> ``credenti``). Comparing raw terms against
+#: stemmed tokens would silently miss, re-opening the "gate steers toward the
+#: secrets notes" failure the de-prioritization exists to prevent.
+_CREDENTIAL_STEMS = frozenset(_stem(t) for t in _CREDENTIAL_TERMS)
+
+
 def _tokens(text: str) -> set[str]:
-    return {w for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS and len(w) > 2}
+    return {
+        _stem(w)
+        for w in _WORD_RE.findall(text.lower())
+        if w not in _STOPWORDS and len(w) > 2
+    }
 
 
 def overlap_score(task: str, text: str) -> float:
@@ -65,8 +133,8 @@ def overlap_score(task: str, text: str) -> float:
 
 
 def _looks_credential(*texts: str) -> bool:
-    blob = _tokens(" ".join(texts))
-    return bool(blob & _CREDENTIAL_TERMS)
+    blob = _tokens(" ".join(texts))  # stemmed -> compare against stemmed terms
+    return bool(blob & _CREDENTIAL_STEMS)
 
 
 def _score_note(
@@ -99,7 +167,7 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
         notes = OmiStore(omi_dir).list_notes()
     except Exception:
         return []
-    task_is_cred = bool(task_terms & _CREDENTIAL_TERMS)
+    task_is_cred = bool(task_terms & _CREDENTIAL_STEMS)
     scored: list[tuple[float, str]] = []
     for note in notes:
         stem = note.filename[:-3] if note.filename.endswith(".md") else note.filename
