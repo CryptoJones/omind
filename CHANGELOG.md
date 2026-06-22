@@ -7,7 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [2.44.1] - 2026-06-22
+## [2.44.2] - 2026-06-22
+
+### Fixed
+
+- **Verifier: path noise no longer keeps a path-heavy blocked command out of a
+  clean gate-clear (#97).** Follow-up to #96 (pending-intent). `overlap_score`
+  divides by ALL of the pending command's tokens, so the many path components of
+  a path-heavy blocked command (`prototype`, `corpus`, `bin`, `elf`, …) diluted
+  the meaningful overlap into the model-tiebreaker band instead of a clean
+  deterministic clear. The pending intent is now normalized before scoring
+  (`retrieve.normalize_intent`): a leading `cd <dir> &&|;` is dropped and each
+  path-like token is reduced to its basename, so directory components stop
+  padding the denominator and a path-heavy command clears as cleanly as a
+  keyword-rich one. Deterministic, no model — the recorded pending stays raw,
+  only the scoring view is normalized.
 
 ### Fixed
 

@@ -266,7 +266,10 @@ def judge_with_activity(task: str, activity: str, text: str, pending: str = "") 
     dilution 2.43.2 fought). The pending (blocked) action is the agent's freshest
     intent: at a work *transition* the task and activity are both cold (still the
     previous thread), but the blocked action is the new-thread work that tripped the
-    gate, so the FIRST consult clears instead of burning re-closes."""
+    gate, so the FIRST consult clears instead of burning re-closes. Path noise in a
+    blocked command is normalized away first (#97). Only the REACTIVE order (attempt →
+    blocked → consult) records a pending; a proactive consult at a transition has none
+    to lean on, so prefer attempting the new work first at a transition."""
     if not text or (not task and not activity and not pending):
         return True  # can't judge without a signal -> fail open (relevant)
     high = _threshold(_HIGH_ENV, _HIGH)
@@ -333,7 +336,7 @@ def verify_consult(
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=now)
-    pending = guard.pending_intent(session)  # #96: the action the gate just blocked
+    pending = retrieve.normalize_intent(guard.pending_intent(session))  # #96/#97: blocked action, path noise stripped
     relevant = _always_relevant(target) or judge_with_activity(
         task, activity, _consult_text(kind, target, omi_dir), pending
     )
@@ -387,7 +390,7 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
     session = str(event.get("session_id") or "")
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=None)
-    pending = guard.pending_intent(session)
+    pending = retrieve.normalize_intent(guard.pending_intent(session))
     text = _consult_text(kind, target, omi_dir)
     high = _threshold(_HIGH_ENV, _HIGH)
     low = _threshold(_LOW_ENV, _LOW)

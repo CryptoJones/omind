@@ -124,3 +124,26 @@ def test_credential_detection_survives_stemming(tmp_path: Path) -> None:
     titles = retrieve.relevant_titles("rotating the api tokens and secrets", omi)
     assert "Credential locations" in titles  # task_is_cred true despite stemming
     assert retrieve._looks_credential("the API tokens and passwords")
+
+
+def test_normalize_intent_strips_cd_and_paths() -> None:
+    assert retrieve.normalize_intent("cd /srv/www && deploy.sh now") == "deploy.sh now"
+    assert retrieve.normalize_intent("cd repo; ./run.sh") == "run.sh"
+    assert retrieve.normalize_intent("a/b/c.py x/y.txt") == "c.py y.txt"
+    assert retrieve.normalize_intent("plain command here") == "plain command here"
+    assert retrieve.normalize_intent("") == ""
+
+
+def test_normalize_intent_lifts_path_heavy_pending_score() -> None:
+    # #97: a path-heavy blocked command's directory tokens diluted the overlap
+    # denominator into the model-tiebreaker band. Normalizing to basenames drops
+    # the dir noise, so a consult about the real subject scores higher — and the
+    # path-dir tokens no longer appear in the scored text at all.
+    pending = (
+        "./spike/bsim/run-spike.sh prototype/corpus/bin/mathlib.x86-64.O0.elf "
+        "prototype/corpus/bin/mathlib.i386.O0.elf | grep '[bsim]'"
+    )
+    consult = "bsim spike harness for mathlib decompilation matching"
+    norm = retrieve.normalize_intent(pending)
+    assert "prototype" not in norm and "corpus" not in norm  # dir scaffolding gone
+    assert retrieve.overlap_score(norm, consult) > retrieve.overlap_score(pending, consult)

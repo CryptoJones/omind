@@ -79,6 +79,9 @@ _CREDENTIAL_TERMS = frozenset(
 )
 
 _WORD_RE = re.compile(r"[a-z0-9]+")
+#: A leading ``cd <dir> &&|;|||`` on a blocked command — pure scaffolding, stripped
+#: from the pending intent (#97) so the directory never enters the score.
+_CD_PREFIX_RE = re.compile(r"^\s*cd\s+\S+\s*(?:&&|\|\||;)\s*", re.IGNORECASE)
 #: How far below a normal note a credential note is ranked when off-topic.
 _CREDENTIAL_PENALTY = 0.1
 
@@ -130,6 +133,19 @@ def overlap_score(task: str, text: str) -> float:
     if not task_terms:
         return 0.0
     return len(task_terms & _tokens(text)) / len(task_terms)
+
+
+def normalize_intent(text: str) -> str:
+    """Strip command scaffolding from a gate-blocked action before it is scored
+    as the turn's *pending intent* (#97). Drops a leading ``cd <dir> &&|;`` and
+    reduces each path-like token to its basename, so directory components
+    (``prototype/corpus/bin``) stop padding the overlap-score denominator and a
+    path-heavy command (``…/mathlib.elf …/mathlib.elf | grep bsim``) clears the
+    gate as cleanly as a keyword-rich one. Deterministic; no model."""
+    if not text:
+        return text
+    text = _CD_PREFIX_RE.sub("", text)
+    return " ".join(tok.rsplit("/", 1)[-1] or tok for tok in text.split())
 
 
 def _looks_credential(*texts: str) -> bool:
