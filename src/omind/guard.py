@@ -392,13 +392,19 @@ _GATE_EXEMPT_TOOLS = frozenset({"ToolSearch"})
 def _opt_in_satisfied(opt_in: str, command: str) -> bool:
     """True only when the ``VAR=VALUE`` opt-in token appears as a REAL leading
     environment assignment — at the command start, right after a shell separator
-    (``;`` / ``&&`` / ``|``), or via ``env`` — so it actually takes effect.
+    (``;`` / ``&&`` / ``|`` / a NEWLINE), or via ``env`` — so it actually takes effect.
 
     A bare substring match (the old behaviour) let the token be forged in a comment
     or a string arg (``rm -rf / # OMI_SUDO_OK=1``, ``echo "OMI_SUDO_OK=1"``) and
     silently bypass a hard rule without ever setting the variable. That is not a
-    deliberate opt-in, so it must not skip the deny."""
-    pattern = r"(?:^|[;&|]|\benv)\s*" + re.escape(opt_in) + r"(?=\s|$)"
+    deliberate opt-in, so it must not skip the deny.
+
+    A newline IS a shell command boundary, so a line-leading assignment inside a
+    multi-line script (``…\n  OMI_PUSH_GITHUB=1 git push …``) is legitimate and must
+    be recognised — omitting ``\\n`` from the separator class wrongly rejected it
+    (3.0.2). A plain space is NOT a separator, so a mid-line ``echo OMI_SUDO_OK=1``
+    still doesn't count."""
+    pattern = r"(?:^|[;&|\n]|\benv)\s*" + re.escape(opt_in) + r"(?=\s|$)"
     return re.search(pattern, command) is not None
 
 

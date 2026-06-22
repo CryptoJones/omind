@@ -383,6 +383,20 @@ def test_opt_in_must_be_a_real_leading_assignment_not_a_substring() -> None:
     guard.clear_gate("optf")
 
 
+def test_opt_in_is_recognized_on_a_newline_led_line_in_a_multiline_command() -> None:
+    """3.0.2 regression: a newline is a shell command boundary, so an opt-in assignment
+    at the START of a line inside a multi-line script is a real leading assignment and
+    must satisfy — the 2.46.0 separator class omitted `\\n` and wrongly re-blocked it."""
+    guard.mark_consulted("mlopt")
+    multiline = "git fetch codeberg main\n  OMI_PUSH_GITHUB=1 git push --force github main"
+    assert guard.decide({"command": multiline, "session": "mlopt"}).allow
+    # the forgery guard still holds: a mid-line (space-led) token is NOT a leading assignment
+    assert not guard.decide(
+        {"command": "git push github main\necho OMI_PUSH_GITHUB=1", "session": "mlopt"}
+    ).allow
+    guard.clear_gate("mlopt")
+
+
 def _render_hook(tmp_path: Path, omind_bin: str) -> Path:
     """Render the package omi-guard.sh with substituted paths to a runnable file."""
     src = importlib.resources.files("omind").joinpath("omi-guard.sh").read_text(encoding="utf-8")

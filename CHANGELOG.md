@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.0.2] - 2026-06-22
+
+### Fixed
+
+- **Opt-in env assignment is now recognized on a newline-led line in a multi-line
+  command** (regression from the 2.46.0 #2 hardening). The leading-assignment check
+  treated only `^` / `;` / `&` / `|` as command boundaries, so a legitimate
+  `OMI_PUSH_GITHUB=1 git push … github` (or `OMI_SUDO_OK=1 …`) at the start of a
+  *line* inside a multi-line script was not seen as a leading assignment and got
+  blocked. A newline **is** a shell command boundary, so it's now in the separator
+  class (`[;&|]` → `[;&|\n]`). A plain space still isn't a separator, so the
+  forgery guard (`echo "OMI_SUDO_OK=1"`, trailing-comment tokens) is unchanged. +1
+  regression test.
+
 ## [3.0.1] - 2026-06-22
 
 ### Fixed
