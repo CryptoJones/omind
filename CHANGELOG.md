@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.1.0] - 2026-06-24
+
+### Added
+
+- **Autonomous-loop guard (`omind loop arm|disarm|status`).** While *armed*, the Claude Code `Stop`
+  hook refuses to stop — it emits `{"decision": "block", "reason": ...}` so the agent keeps working
+  instead of halting at a self-declared "natural stopping point" or pausing to ask. Advisory memory
+  notes weren't enough; this is the enforcement. An operator switch, like the guard pause. Bounded
+  three ways so a runaway no-stop hook can't trap the agent or burn tokens: real work
+  (`PostToolUse`) resets a consecutive-block counter; exceeding `--max-blocks` (default 25)
+  consecutive *no-work* stops auto-disarms and allows the stop; and an `--hours` expiry (default 24)
+  self-clears a forgotten flag. Like the rest of the hook layer it fails **open** — to *allowing*
+  the stop — on any error. New module `omind/loopguard.py`; the `Stop`/`PostToolUse` paths in
+  `omind/hooks.py` consult it; `omind loop` CLI added.
+
 ## [3.0.2] - 2026-06-22
 
 ### Fixed

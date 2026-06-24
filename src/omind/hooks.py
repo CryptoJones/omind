@@ -507,7 +507,22 @@ def run_hook(
         line = format_entry(event, event_name=event_name)
         if line:
             append_entry(omi_dir, line)
+        if event_name == "Stop":
+            # Loop guard: while an autonomous loop is ARMED, refuse the stop so the
+            # agent keeps working (operator switch — `omind loop arm/disarm`). Fails
+            # open to allowing the stop on any error (a broken guard must never trap).
+            from omind import loopguard
+
+            blocked, reason = loopguard.register_block()
+            if blocked:
+                sink = stdout if stdout is not None else sys.stdout
+                sink.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
+                return 0
         if event_name == "PostToolUse":
+            # Real work happened: reset the loop guard's no-work spin counter.
+            from omind import loopguard
+
+            loopguard.reset()
             # Layer E: scan the command that actually ran against the policy and
             # record any rule match into the compliance log (the learning corpus).
             from omind import compliance, verify

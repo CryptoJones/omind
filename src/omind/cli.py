@@ -23,7 +23,7 @@ import os
 import sys
 from pathlib import Path
 
-from omind import __version__
+from omind import __version__, loopguard
 from omind.agents import AGENT_CHOICES, diagnose_for, run_setup_for
 from omind.guard import run_guard
 from omind.hooks import ALL_HOOK_EVENTS, run_hook
@@ -380,6 +380,28 @@ def build_parser() -> argparse.ArgumentParser:
         "Hermes Agent: pre_llm_call)",
     )
     _add_vault_args(hook)
+
+    loop = sub.add_parser(
+        "loop",
+        help="autonomous-loop guard: while ARMED, the Stop hook refuses to stop so "
+        "the agent keeps working (arm/disarm/status)",
+    )
+    loop.add_argument("action", choices=("arm", "disarm", "status"))
+    loop.add_argument(
+        "--reason", default=None, help="why the loop is armed (surfaced in the directive)"
+    )
+    loop.add_argument(
+        "--max-blocks",
+        type=int,
+        default=loopguard.DEFAULT_MAX_BLOCKS,
+        help="auto-disarm after this many consecutive stops with NO work between (backstop)",
+    )
+    loop.add_argument(
+        "--hours",
+        type=float,
+        default=loopguard.DEFAULT_HOURS,
+        help="auto-expire the armed flag after this many hours (0 = never)",
+    )
 
     guard = sub.add_parser(
         "guard",
@@ -837,6 +859,32 @@ def _run_hook(args: argparse.Namespace) -> int:
     return run_hook(args.event, omi_dir)  # always 0; must never block the agent
 
 
+def _run_loop(args: argparse.Namespace) -> int:
+    """Operator switch for the autonomous-loop guard (arm/disarm/status)."""
+    if args.action == "arm":
+        st = loopguard.arm(reason=args.reason, max_blocks=args.max_blocks, hours=args.hours)
+        exp = st["expires_at"] or "never"
+        print(
+            f"loop guard ARMED — the Stop hook will refuse to stop until `omind loop disarm`.\n"
+            f"  backstop: auto-disarm after {st['max_blocks']} consecutive stops with no work; "
+            f"expires {exp}."
+        )
+        return 0
+    if args.action == "disarm":
+        loopguard.disarm()
+        print("loop guard DISARMED — stops are allowed again.")
+        return 0
+    st = loopguard.status()
+    state = "ARMED" if st["armed"] else "disarmed"
+    print(
+        f"loop guard: {state}"
+        + (f" (reason: {st['reason']})" if st.get("reason") else "")
+        + f"\n  blocks={st['blocks']}/{st['max_blocks']}  armed_at={st['armed_at']}"
+        + f"  expires={st['expires_at']}"
+    )
+    return 0
+
+
 def _run_self_update(args: argparse.Namespace) -> int:
     from omind.update import self_update
 
@@ -882,6 +930,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_rollup(args)
     if args.command == "hook":
         return _run_hook(args)
+    if args.command == "loop":
+        return _run_loop(args)
     if args.command == "guard":
         omi_dir = args.omi_dir if args.omi_dir is not None else (default_vault_path() / "OMI")
         return run_guard(
