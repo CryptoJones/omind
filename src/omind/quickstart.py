@@ -20,8 +20,13 @@ import yaml
 from omind import paths, seeds
 from omind.agents import (
     AgentProvisioner,
+    AmazonQProvisioner,
+    ClaudeDesktopProvisioner,
     HermesProvisioner,
+    KiroProvisioner,
+    McpOnlyProvisioner,
     OpenClawProvisioner,
+    VsCodeProvisioner,
     hermes_config_path,
     openclaw_config_path,
 )
@@ -137,10 +142,73 @@ Undo: delete the '{config.server_name}' entry from {agent_config} and remove
 """
 
 
+#: MCP-registration-only targets, keyed by their ``--agent`` value.
+MCP_ONLY_PROVISIONERS: dict[str, type[McpOnlyProvisioner]] = {
+    "claude-desktop": ClaudeDesktopProvisioner,
+    "kiro": KiroProvisioner,
+    "vscode": VsCodeProvisioner,
+    "q": AmazonQProvisioner,
+}
+
+
+def _build_mcp_only_quickstart(config: SetupConfig) -> str:
+    """Manual steps for an MCP-registration-only target (Claude Desktop, Kiro,
+    VS Code, Amazon Q): scaffold + mesh + a single config-block to merge."""
+    prov = MCP_ONLY_PROVISIONERS[config.agent](config=config, log=lambda _msg: None)
+    agent_config = prov.config_path()
+    snippet = json.dumps(
+        {prov.BLOCK_KEY: {config.server_name: prov.desired_server_entry()}},
+        indent=2,
+    )
+    snippet_block = f"```json\n{snippet}\n```"
+    omi = config.omi_dir
+    scaffold_block, mesh_block = _scaffold_and_mesh_blocks(config)
+
+    return f"""\
+omind quickstart — manual {prov.AGENT_LABEL} wiring for {omi}
+
+Everything below is exactly what `omind setup --agent {config.agent}` would do
+for you. Apply the steps you want by hand; each is independent and safe to
+re-run. Prefer the automated path? Just run:
+
+    omind setup --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
+
+[1/3] Scaffold the memory folder
+Create the folder and a minimal Obsidian config so it opens directly as a
+vault (skip any file you already have):
+
+{scaffold_block}
+
+[2/3] Initialize the mesh node
+Makes the folder a git working tree with omind's field-level merge driver,
+mints this machine's node identity, and locks the folder to owner-only:
+
+{mesh_block}
+
+[3/3] Register the MCP server with {prov.AGENT_LABEL}
+The server is omind's own node server (`omind node`) — no Node.js, npm, or
+third-party MCP package involved. MERGE into the existing JSON in
+{agent_config} (create the file if absent; don't replace other keys):
+
+{snippet_block}
+
+Verify the wiring (pure inspection, changes nothing):
+
+    omind doctor --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
+
+Then restart {prov.AGENT_LABEL} to load the tools.
+
+Undo: delete the '{config.server_name}' entry from {agent_config}. Your notes
+in "{omi}" are never touched by any of this.
+"""
+
+
 def build_quickstart(config: SetupConfig) -> str:
     """The full quickstart text for one vault/folder/server-name/agent combination."""
     if config.agent in ("hermes", "openclaw"):
         return _build_agent_quickstart(config)
+    if config.agent in MCP_ONLY_PROVISIONERS:
+        return _build_mcp_only_quickstart(config)
     prov = Provisioner(config=config, log=lambda _msg: None)
     omi = config.omi_dir
     omi_q = f'"{omi}"'

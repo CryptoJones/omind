@@ -7,7 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.2.0] - 2026-06-25
+## [3.3.0] - 2026-06-25
+
+### Added
+
+- **Four more `omind setup --agent` targets: Claude Desktop, Kiro, VS Code, and Amazon Q.**
+  `omind setup --agent claude-desktop|kiro|vscode|q` registers omind's own node server (`omind
+  node`, the `omi` MCP server) into each tool's config so the OMI memory tools are one command (or
+  one copy-paste) away — no hand-editing JSON. Targets and config files: Claude Desktop
+  (`claude_desktop_config.json` under the OS application-support dir), Kiro
+  (`~/.kiro/settings/mcp.json`), VS Code (user-level `mcp.json`, a `servers` block with `type:
+  stdio`), and Amazon Q (`~/.aws/amazonq/mcp.json`). These are MCP-registration only — no guard
+  hook and no skill file — and merge idempotently, touching only the `omi` entry they own and
+  refusing to overwrite config they cannot parse. `omind quickstart --agent <x>` prints the same
+  wiring as copy-paste steps, and `omind doctor --agent <x>` verifies it.
 
 ### Added
 

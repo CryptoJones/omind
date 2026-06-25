@@ -24,6 +24,7 @@ import importlib.resources
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -160,6 +161,65 @@ GEMINI_GUARD_MARKER = "guard adapter --harness gemini"
 
 #: Substring identifying omind's own OpenClaw guard gateway hook in openclaw.json.
 OPENCLAW_GUARD_MARKER = "guard adapter --harness openclaw"
+
+
+# -- MCP-only agent locations (Claude Desktop, Kiro, VS Code, Amazon Q) --------
+#
+# These four register the omi MCP server into a JSON config file and nothing
+# else (no guard, no skill). Claude Desktop and VS Code keep their config under
+# the OS application-support dir; Kiro and Amazon Q under a fixed ``~`` subdir.
+
+
+def _app_support_dir() -> Path:
+    """The per-user directory GUI apps store config under: ``~/Library/Application
+    Support`` (macOS), ``%APPDATA%`` (Windows), else ``$XDG_CONFIG_HOME`` /
+    ``~/.config`` (Linux)."""
+    if sys.platform == "darwin":
+        return Path.home() / "Library" / "Application Support"
+    if sys.platform == "win32":
+        base = os.environ.get("APPDATA")
+        return Path(base) if base else Path.home() / "AppData" / "Roaming"
+    base = os.environ.get("XDG_CONFIG_HOME")
+    return Path(base) if base else Path.home() / ".config"
+
+
+def claude_desktop_dir() -> Path:
+    """Claude Desktop's config directory (per-OS application-support / Claude)."""
+    return _app_support_dir() / "Claude"
+
+
+def claude_desktop_config_path() -> Path:
+    return claude_desktop_dir() / "claude_desktop_config.json"
+
+
+def kiro_root() -> Path:
+    """Kiro IDE's state directory (``~/.kiro``)."""
+    return Path.home() / ".kiro"
+
+
+def kiro_config_path() -> Path:
+    """Kiro's user-level MCP config (``~/.kiro/settings/mcp.json``)."""
+    return kiro_root() / "settings" / "mcp.json"
+
+
+def vscode_user_dir() -> Path:
+    """VS Code's per-user config directory (application-support / Code / User)."""
+    return _app_support_dir() / "Code" / "User"
+
+
+def vscode_config_path() -> Path:
+    """VS Code's user-level MCP config (``<User>/mcp.json``)."""
+    return vscode_user_dir() / "mcp.json"
+
+
+def amazonq_root() -> Path:
+    """Amazon Q Developer's config directory (``~/.aws/amazonq``)."""
+    return Path.home() / ".aws" / "amazonq"
+
+
+def amazonq_config_path() -> Path:
+    """Amazon Q's global MCP config (``~/.aws/amazonq/mcp.json``)."""
+    return amazonq_root() / "mcp.json"
 
 
 # -- shared agent machinery ---------------------------------------------------
@@ -955,6 +1015,142 @@ class CodexProvisioner(AgentProvisioner):
             )
 
 
+# -- MCP-only targets (register the omi server, no guard / skill / priming) -----
+
+
+class McpOnlyProvisioner(AgentProvisioner):
+    """An agent wired purely by writing the ``omi`` MCP server into a JSON config
+    block — no guard hook, no memory skill, no priming.
+
+    Subclasses set :attr:`AGENT_LABEL`, :attr:`INSTALL_HINT`, :attr:`DONE_MESSAGE`,
+    :meth:`agent_root` and :meth:`config_path`. Most use the standard
+    ``{"command", "args"}`` stdio entry under an ``mcpServers`` block; VS Code
+    overrides :attr:`BLOCK_KEY` to ``"servers"`` and :attr:`STDIO_TYPE` to emit an
+    explicit ``"type": "stdio"`` field.
+    """
+
+    #: Top-level JSON key the agent reads its MCP servers from.
+    BLOCK_KEY: ClassVar[str] = "mcpServers"
+    #: Whether each server entry carries an explicit ``"type": "stdio"`` (VS Code).
+    STDIO_TYPE: ClassVar[bool] = False
+
+    def config_path(self) -> Path:
+        raise NotImplementedError
+
+    def registered_server(self) -> dict[str, Any] | None:
+        try:
+            data = self._read_settings(self.config_path())
+        except ProvisionError:
+            return None
+        block = data.get(self.BLOCK_KEY)
+        server = block.get(self.config.server_name) if isinstance(block, dict) else None
+        return server if isinstance(server, dict) else None
+
+    def desired_server_entry(self) -> dict[str, Any]:
+        omind = shutil.which("omind") or "omind"
+        entry: dict[str, Any] = {}
+        if self.STDIO_TYPE:
+            entry["type"] = "stdio"
+        entry["command"] = omind
+        entry["args"] = [
+            "node",
+            "--vault",
+            str(self.config.vault),
+            "--folder",
+            self.config.folder,
+        ]
+        return entry
+
+    def register_mcp(self) -> None:
+        path = self.config_path()
+        data = self._read_settings(path)
+        desired = self.desired_server_entry()
+        if self.registered_server() == desired and not self.config.force:
+            self.log(
+                f"  MCP server '{self.config.server_name}' already points at "
+                f"{self.config.omi_dir}"
+            )
+            return
+        block = data.get(self.BLOCK_KEY)
+        if not isinstance(block, dict):
+            block = {}
+        self._drop_legacy_entry(block)
+        block[self.config.server_name] = desired
+        data[self.BLOCK_KEY] = block
+        self._record(
+            f"register MCP server '{self.config.server_name}' in {path} -> {self.config.omi_dir}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
+    def integrate(self) -> None:
+        # MCP registration only — no skill / priming / guard for these targets.
+        self.register_mcp()
+
+
+class ClaudeDesktopProvisioner(McpOnlyProvisioner):
+    """Wire the Claude Desktop app: the ``omi`` server in its
+    ``claude_desktop_config.json`` (``mcpServers`` block, stdio)."""
+
+    AGENT_LABEL = "Claude Desktop"
+    INSTALL_HINT = "Install the Claude Desktop app and launch it once, then re-run."
+    DONE_MESSAGE = "Done. Restart Claude Desktop to load the OMI memory tools."
+
+    def agent_root(self) -> Path:
+        return claude_desktop_dir()
+
+    def config_path(self) -> Path:
+        return claude_desktop_config_path()
+
+
+class KiroProvisioner(McpOnlyProvisioner):
+    """Wire Kiro IDE: the ``omi`` server in ``~/.kiro/settings/mcp.json``
+    (``mcpServers`` block, stdio)."""
+
+    AGENT_LABEL = "Kiro"
+    INSTALL_HINT = "Install Kiro (it creates ~/.kiro on first run), then re-run."
+    DONE_MESSAGE = "Done. Restart Kiro (or reconnect MCP) to load the OMI memory tools."
+
+    def agent_root(self) -> Path:
+        return kiro_root()
+
+    def config_path(self) -> Path:
+        return kiro_config_path()
+
+
+class VsCodeProvisioner(McpOnlyProvisioner):
+    """Wire VS Code's native MCP: the ``omi`` server in the user-level
+    ``mcp.json`` (a ``servers`` block with an explicit ``type: stdio``)."""
+
+    AGENT_LABEL = "VS Code"
+    INSTALL_HINT = "Install VS Code and launch it once (creates its User dir), then re-run."
+    DONE_MESSAGE = "Done. Reload VS Code to load the OMI memory tools (needs MCP/agent mode)."
+    BLOCK_KEY = "servers"
+    STDIO_TYPE = True
+
+    def agent_root(self) -> Path:
+        return vscode_user_dir()
+
+    def config_path(self) -> Path:
+        return vscode_config_path()
+
+
+class AmazonQProvisioner(McpOnlyProvisioner):
+    """Wire the Amazon Q Developer CLI/IDE: the ``omi`` server in
+    ``~/.aws/amazonq/mcp.json`` (``mcpServers`` block, stdio)."""
+
+    AGENT_LABEL = "Amazon Q"
+    INSTALL_HINT = "Install Amazon Q (it creates ~/.aws/amazonq), then re-run."
+    DONE_MESSAGE = "Done. Restart Amazon Q to load the OMI memory tools."
+
+    def agent_root(self) -> Path:
+        return amazonq_root()
+
+    def config_path(self) -> Path:
+        return amazonq_config_path()
+
+
 # -- diagnose -------------------------------------------------------------------
 
 
@@ -1104,6 +1300,67 @@ def diagnose_gemini(config: SetupConfig) -> list[CheckResult]:
     return results
 
 
+def _diagnose_mcp_only(provisioner: McpOnlyProvisioner) -> list[CheckResult]:
+    """Doctor checks for an MCP-registration-only target: tools + agent root +
+    OMI folder + MCP registration. No skill check (these install none)."""
+    config = provisioner.config
+    label = provisioner.AGENT_LABEL
+    key = config.agent
+    results = _diagnose_tools(provisioner.REQUIRED_TOOLS)
+
+    root = provisioner.agent_root()
+    if root.is_dir():
+        results.append(CheckResult(f"{key}_root", "ok", f"{label} found: {root}"))
+    else:
+        results.append(
+            CheckResult(f"{key}_root", "fail", f"{label} not found: {root} does not exist")
+        )
+
+    results.extend(_diagnose_omi_folder(config))
+
+    name = config.server_name
+    server = provisioner.registered_server()
+    if server is None:
+        results.append(
+            CheckResult(
+                f"{key}_mcp_registration",
+                "fail",
+                f"MCP server '{name}' not in the {label} config "
+                f"(run `omind setup --agent {key}`)",
+            )
+        )
+    elif server != provisioner.desired_server_entry():
+        results.append(
+            CheckResult(
+                f"{key}_mcp_registration",
+                "warn",
+                f"MCP server '{name}' in the {label} config differs from the "
+                f"expected wiring (run `omind setup --agent {key}`)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(f"{key}_mcp_registration", "ok", f"MCP server '{name}' -> {config.omi_dir}")
+        )
+    return results
+
+
+def diagnose_claude_desktop(config: SetupConfig) -> list[CheckResult]:
+    return _diagnose_mcp_only(ClaudeDesktopProvisioner(config=config, log=lambda _msg: None))
+
+
+def diagnose_kiro(config: SetupConfig) -> list[CheckResult]:
+    return _diagnose_mcp_only(KiroProvisioner(config=config, log=lambda _msg: None))
+
+
+def diagnose_vscode(config: SetupConfig) -> list[CheckResult]:
+    return _diagnose_mcp_only(VsCodeProvisioner(config=config, log=lambda _msg: None))
+
+
+def diagnose_q(config: SetupConfig) -> list[CheckResult]:
+    return _diagnose_mcp_only(AmazonQProvisioner(config=config, log=lambda _msg: None))
+
+
 # -- dispatch -------------------------------------------------------------------
 
 PROVISIONERS: dict[str, type[Provisioner]] = {
@@ -1113,6 +1370,10 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "opencode": OpenCodeProvisioner,
     "codex": CodexProvisioner,
     "gemini": GeminiProvisioner,
+    "claude-desktop": ClaudeDesktopProvisioner,
+    "kiro": KiroProvisioner,
+    "vscode": VsCodeProvisioner,
+    "q": AmazonQProvisioner,
 }
 
 DIAGNOSERS = {
@@ -1122,13 +1383,18 @@ DIAGNOSERS = {
     "opencode": diagnose_opencode,
     "codex": diagnose_codex,
     "gemini": diagnose_gemini,
+    "claude-desktop": diagnose_claude_desktop,
+    "kiro": diagnose_kiro,
+    "vscode": diagnose_vscode,
+    "q": diagnose_q,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)
 
 
 def run_setup_for(config: SetupConfig, log: Logger = print) -> list[str]:
-    """Run the provisioner for ``config.agent`` (claude, hermes, openclaw, opencode)."""
+    """Run the provisioner for ``config.agent`` (claude, hermes, openclaw, opencode,
+    codex, gemini, claude-desktop, kiro, vscode, q)."""
     return PROVISIONERS[config.agent](config=config, log=log).run()
 
 

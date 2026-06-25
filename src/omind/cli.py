@@ -4,7 +4,8 @@
 
 Subcommands:
   * ``omind setup``  — provision the OMI/Obsidian MCP wiring for an AI agent
-    (``--agent`` claude (default), hermes, or openclaw).
+    (``--agent`` claude (default), hermes, openclaw, opencode, codex, gemini,
+    claude-desktop, kiro, vscode, q).
   * ``omind serve``  — run the local web UI over an OMI memory folder.
   * ``omind doctor`` — diagnose the wiring.
   * ``omind export`` — write the entire OMI dataset to a json or tar.gz bundle.
