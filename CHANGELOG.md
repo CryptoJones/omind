@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.2.0] - 2026-06-25
+
+### Added
+
+- **Knowledge graph over the vault's `[[wikilinks]]` (`omind graph`, MCP `graph-*` tools).** Every
+  note is a node and every `[[wikilink]]` a directed edge; the store already answered the inbound
+  question (`backlinks`) and `lint` already flagged orphans/broken links one note at a time — this
+  adds the whole-graph view they leave out. New `omind graph` subcommands: `neighbors <note>
+  [--depth N] [--direction out|in|both]` (multi-hop BFS), `path <a> <b>` (shortest link path),
+  `orphans` (fully disconnected notes), `dangling` (wikilinks resolving to no note), `stats`, and
+  `export [--format json|dot]` (Graphviz-renderable). The same surface is exposed to agents as MCP
+  tools `graph-neighbors`, `graph-path`, `graph-orphans`, `graph-dangling`, and `graph-stats`.
+  Resolution mirrors `backlinks`/`lint` (a link resolves by note stem or title, case-insensitive);
+  self-links and disabled notes are ignored. New module `omind/graph.py` — pure standard library,
+  no graph dependency; read-only throughout. Closes #99.
+
 ## [3.1.0] - 2026-06-24
 
 ### Added
