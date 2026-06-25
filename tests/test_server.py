@@ -35,6 +35,11 @@ EXPECTED_TOOLS = {
     "restore-note",
     "backlinks",
     "list-tags",
+    "graph-neighbors",
+    "graph-path",
+    "graph-orphans",
+    "graph-dangling",
+    "graph-stats",
 }
 
 
@@ -144,6 +149,31 @@ def test_backlinks_and_tags(server: FastMCP) -> None:
     links = call(server, "backlinks", {"name": "Hub.md"})["result"]
     assert [n["filename"] for n in links] == ["Spoke.md"]
     assert call(server, "list-tags", {})["result"] == ["one", "two"]
+
+
+def test_graph_tools(server: FastMCP) -> None:
+    call(server, "create-note", {"title": "A", "summary": "s", "connections": ["B"]})
+    call(server, "create-note", {"title": "B", "summary": "s", "connections": ["C"]})
+    call(server, "create-note", {"title": "C", "summary": "s"})
+    call(server, "create-note", {"title": "Lonely", "summary": "see [[Ghost]]"})
+
+    nbrs = call(server, "graph-neighbors", {"name": "A", "depth": 2, "direction": "out"})["result"]
+    assert [n["filename"] for n in nbrs] == ["B.md", "C.md"]
+
+    assert call(server, "graph-path", {"source": "A", "target": "C"})["path"] == [
+        "A.md",
+        "B.md",
+        "C.md",
+    ]
+    assert call(server, "graph-orphans", {})["result"] == ["Lonely.md"]
+    dangling = call(server, "graph-dangling", {})["result"]
+    assert dangling == [{"source": "Lonely.md", "target": "Ghost"}]
+    assert call(server, "graph-stats", {})["notes"] == 4
+
+
+def test_graph_neighbors_unknown_note_is_a_tool_error(server: FastMCP) -> None:
+    with pytest.raises(ToolError, match="not found"):
+        call(server, "graph-neighbors", {"name": "Nope"})
 
 
 def test_missing_note_is_a_tool_error(server: FastMCP) -> None:

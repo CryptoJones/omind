@@ -11,6 +11,8 @@ Subcommands:
   * ``omind import`` — load an OMI dataset bundle back into a folder.
   * ``omind reindex`` — regenerate index.md under the inter-process write lock.
   * ``omind quickstart`` — print the manual-wiring steps `setup` automates.
+  * ``omind graph`` — query the [[wikilink]] knowledge graph (neighbors, path,
+    orphans, dangling links, stats, export).
   * ``omind note`` — safely create/update one OMI note through OmiStore.
   * ``omind rollup`` — compact weeks of daily session journals into summaries.
   * ``omind backup`` — encrypted off-machine backup of the OMI folder (restic).
@@ -313,6 +315,43 @@ def build_parser() -> argparse.ArgumentParser:
         help="exit non-zero on any issue (default: only on an error-severity issue)",
     )
     _add_vault_args(lint)
+
+    graph_p = sub.add_parser(
+        "graph",
+        help="query the [[wikilink]] knowledge graph: neighbors, path, orphans, "
+        "dangling links, stats, export",
+    )
+    gsub = graph_p.add_subparsers(
+        dest="graph_command",
+        metavar="{neighbors,path,orphans,dangling,stats,export}",
+        required=True,
+    )
+    g_neighbors = gsub.add_parser("neighbors", help="notes within N hops of a note")
+    g_neighbors.add_argument("note", help="note filename, stem, or title")
+    g_neighbors.add_argument(
+        "--depth", type=int, default=1, help="hops to traverse (default: 1)"
+    )
+    g_neighbors.add_argument(
+        "--direction",
+        choices=("out", "in", "both"),
+        default="both",
+        help="follow links it makes (out), links to it (in), or both (default: both)",
+    )
+    g_path = gsub.add_parser("path", help="shortest link path between two notes")
+    g_path.add_argument("source", help="start note (filename, stem, or title)")
+    g_path.add_argument("target", help="end note (filename, stem, or title)")
+    g_orphans = gsub.add_parser("orphans", help="notes with no inbound or outbound links")
+    g_dangling = gsub.add_parser("dangling", help="wikilinks pointing at no existing note")
+    g_stats = gsub.add_parser("stats", help="counts: notes, links, orphans, dangling")
+    g_export = gsub.add_parser("export", help="dump the whole graph for visualization")
+    g_export.add_argument(
+        "--format",
+        choices=("json", "dot"),
+        default="json",
+        help="output format (default: json)",
+    )
+    for gp in (g_neighbors, g_path, g_orphans, g_dangling, g_stats, g_export):
+        _add_vault_args(gp)
 
     checkpoint = sub.add_parser(
         "checkpoint",
@@ -742,6 +781,58 @@ def _run_lint(args: argparse.Namespace) -> int:
     return 1 if any(i.severity == "error" for i in issues) else 0
 
 
+def _run_graph(args: argparse.Namespace) -> int:
+    import json
+
+    from omind import graph as graphmod
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    g = graphmod.build_graph(omi_dir)
+    cmd = args.graph_command
+    try:
+        if cmd == "neighbors":
+            hits = graphmod.neighbors(
+                g, args.note, depth=args.depth, direction=args.direction
+            )
+            if not hits:
+                print("no neighbors")
+                return 0
+            for filename, distance in hits:
+                print(f"{distance}\t{filename}")
+            return 0
+        if cmd == "path":
+            path = graphmod.shortest_path(g, args.source, args.target)
+            if path is None:
+                print("no path")
+                return 1
+            print(" -> ".join(path))
+            return 0
+    except ValueError as exc:
+        print(str(exc), file=sys.stderr)
+        return 1
+    if cmd == "orphans":
+        found = graphmod.orphans(g)
+        print("\n".join(found) if found else "no orphan notes")
+        return 0
+    if cmd == "dangling":
+        links = graphmod.dangling_links(g)
+        if not links:
+            print("no dangling links")
+            return 0
+        for src, target in links:
+            print(f"{src}\t[[{target}]]")
+        return 0
+    if cmd == "stats":
+        print(json.dumps(graphmod.stats(g), indent=2))
+        return 0
+    # cmd == "export"
+    if args.format == "dot":
+        print(graphmod.to_dot(g))
+    else:
+        print(json.dumps(graphmod.to_json(g), indent=2))
+    return 0
+
+
 def _run_checkpoint(args: argparse.Namespace) -> int:
     from omind import checkpoint
 
@@ -920,6 +1011,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_search(args)
     if args.command == "lint":
         return _run_lint(args)
+    if args.command == "graph":
+        return _run_graph(args)
     if args.command == "checkpoint":
         return _run_checkpoint(args)
     if args.command == "reindex":

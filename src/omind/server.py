@@ -20,6 +20,7 @@ from pathlib import Path
 
 from mcp.server.fastmcp import FastMCP
 
+from omind import graph
 from omind.store import ActionItem, NoteFields, OmiStore, parse_note
 
 SERVER_NAME = "omi"
@@ -192,6 +193,61 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     @mcp.tool(name="list-tags", description="List every tag in use across the notes.")
     def list_tags() -> list[str]:
         return store.all_tags()
+
+    @mcp.tool(
+        name="graph-neighbors",
+        description=(
+            "Notes within `depth` hops of a note in the [[wikilink]] graph. "
+            "direction: out (links it makes), in (links to it), or both (default)."
+        ),
+    )
+    def graph_neighbors(
+        name: str, depth: int = 1, direction: str = "both"
+    ) -> list[dict[str, object]]:
+        g = graph.build_graph(store.omi_dir)
+        return [
+            {"filename": filename, "distance": distance}
+            for filename, distance in graph.neighbors(
+                g, name, depth=depth, direction=direction
+            )
+        ]
+
+    @mcp.tool(
+        name="graph-path",
+        description=(
+            "Shortest [[wikilink]] path between two notes, as a list of filenames; "
+            "`path` is null when no path connects them."
+        ),
+    )
+    def graph_path(source: str, target: str) -> dict[str, object]:
+        g = graph.build_graph(store.omi_dir)
+        return {"path": graph.shortest_path(g, source, target)}
+
+    @mcp.tool(
+        name="graph-orphans",
+        description=(
+            "Notes with no inbound or outbound [[wikilinks]] (disconnected from the graph)."
+        ),
+    )
+    def graph_orphans() -> list[str]:
+        return graph.orphans(graph.build_graph(store.omi_dir))
+
+    @mcp.tool(
+        name="graph-dangling",
+        description=(
+            "[[wikilinks]] that resolve to no existing note (broken links), with their source."
+        ),
+    )
+    def graph_dangling() -> list[dict[str, str]]:
+        g = graph.build_graph(store.omi_dir)
+        return [{"source": src, "target": target} for src, target in graph.dangling_links(g)]
+
+    @mcp.tool(
+        name="graph-stats",
+        description="Whole-graph counts: notes, links, orphans, and dangling links.",
+    )
+    def graph_stats() -> dict[str, int]:
+        return graph.stats(graph.build_graph(store.omi_dir))
 
     return mcp
 
