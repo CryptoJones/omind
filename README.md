@@ -15,9 +15,9 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 
 ---
 
-![omind web UI — viewing a memory note in the Midnight theme](docs/screenshot.png)
+![omind's knowledge graph over a vault's [[wikilinks]]](docs/graph.png)
 
-*The `omind serve` web UI viewing a memory note in the Midnight theme — one of five built-in themes.*
+*`omind graph` over an OMI vault — every note a node, every `[[wikilink]]` an edge. Rendered from `omind graph export` (see [docs/graph-demo](docs/graph-demo/)).*
 
 ## What it does
 
