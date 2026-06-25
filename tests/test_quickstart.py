@@ -77,3 +77,34 @@ def test_cli_quickstart_prints_and_exits_zero(
     out = capsys.readouterr().out
     assert "omind quickstart — manual wiring for" in out
     assert json.loads(_fenced(out, "json")[0])["hooks"]
+
+
+# -- MCP-only targets: the rendered block must equal what setup would write -----
+
+
+@pytest.mark.parametrize(
+    "agent,block,has_type",
+    [
+        ("claude-desktop", "mcpServers", False),
+        ("kiro", "mcpServers", False),
+        ("vscode", "servers", True),
+        ("q", "mcpServers", False),
+    ],
+)
+def test_mcp_only_quickstart_block_matches_provisioner(
+    tmp_path: Path, agent: str, block: str, has_type: bool
+) -> None:
+    from omind.quickstart import MCP_ONLY_PROVISIONERS
+
+    config = SetupConfig(vault=tmp_path / "Vault", folder="OMI", agent=agent)
+    out = build_quickstart(config)
+
+    assert f'omind setup --agent {agent} --vault "{config.vault}" --folder OMI' in out
+    assert f"omind doctor --agent {agent}" in out
+
+    blocks = _fenced(out, "json")
+    assert len(blocks) == 1
+    data = json.loads(blocks[0])
+    prov = MCP_ONLY_PROVISIONERS[agent](config=config, log=lambda _m: None)
+    assert data == {block: {config.server_name: prov.desired_server_entry()}}
+    assert ("type" in data[block][config.server_name]) is has_type

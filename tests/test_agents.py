@@ -352,6 +352,100 @@ def test_hermes_guard_hook_installed(tmp_path: Path, hermes_home: Path) -> None:
     assert any(a["event"] == "pre_tool_call" for a in allow["approvals"])
 
 
+# -- MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q -----------------
+
+# (agent, root-helper, config-path-helper, block key, carries explicit type=stdio)
+MCP_ONLY_CASES = [
+    ("claude-desktop", "claude_desktop_dir", "claude_desktop_config_path", "mcpServers", False),
+    ("kiro", "kiro_root", "kiro_config_path", "mcpServers", False),
+    ("vscode", "vscode_user_dir", "vscode_config_path", "servers", True),
+    ("q", "amazonq_root", "amazonq_config_path", "mcpServers", False),
+]
+
+
+def _install_mcp_agent(agent: str) -> None:
+    """Create the agent's root dir so check_prereqs treats it as installed."""
+    root_fn = {a: root for a, root, _cfg, _b, _t in MCP_ONLY_CASES}[agent]
+    getattr(agents, root_fn)().mkdir(parents=True, exist_ok=True)
+
+
+@pytest.mark.parametrize("agent,_root_fn,path_fn,block,has_type", MCP_ONLY_CASES)
+def test_mcp_only_setup_registers_omi_server(
+    tmp_path: Path, agent: str, _root_fn: str, path_fn: str, block: str, has_type: bool
+) -> None:
+    _install_mcp_agent(agent)
+    config = _config(tmp_path, agent, no_mesh=True)
+    run_setup_for(config, log=_quiet)
+
+    data = json.loads(getattr(agents, path_fn)().read_text(encoding="utf-8"))
+    entry = data[block]["omi"]
+    assert entry["args"][0] == "node"
+    assert str(config.vault) in entry["args"]
+    assert entry["args"][-1] == config.folder
+    # VS Code carries an explicit transport type; the others do not.
+    assert ("type" in entry) is has_type
+    if has_type:
+        assert entry["type"] == "stdio"
+
+
+def test_mcp_only_setup_is_idempotent(tmp_path: Path) -> None:
+    _install_mcp_agent("kiro")
+    config = _config(tmp_path, "kiro", no_mesh=True)
+    run_setup_for(config, log=_quiet)
+    run_setup_for(config, log=_quiet)  # second run must not duplicate
+    data = json.loads(agents.kiro_config_path().read_text(encoding="utf-8"))
+    assert list(data["mcpServers"]) == ["omi"]
+
+
+def test_mcp_only_setup_preserves_foreign_keys(tmp_path: Path) -> None:
+    _install_mcp_agent("claude-desktop")
+    path = agents.claude_desktop_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"mcpServers": {"other": {"command": "x"}}, "globalShortcut": "Cmd+K"}),
+        encoding="utf-8",
+    )
+    run_setup_for(_config(tmp_path, "claude-desktop", no_mesh=True), log=_quiet)
+
+    data = json.loads(path.read_text(encoding="utf-8"))
+    assert data["mcpServers"]["other"] == {"command": "x"}  # other server untouched
+    assert "omi" in data["mcpServers"]  # ours added
+    assert data["globalShortcut"] == "Cmd+K"  # sibling keys preserved
+
+
+def test_mcp_only_setup_rejects_unparseable_config(tmp_path: Path) -> None:
+    _install_mcp_agent("q")
+    path = agents.amazonq_config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("{ not json", encoding="utf-8")
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path, "q", no_mesh=True), log=_quiet)
+
+
+def test_mcp_only_setup_errors_when_not_installed(tmp_path: Path) -> None:
+    # The VS Code User dir is never created → check_prereqs must fail clearly.
+    with pytest.raises(ProvisionError, match="VS Code not found"):
+        run_setup_for(_config(tmp_path, "vscode", no_mesh=True), log=_quiet)
+
+
+def test_mcp_only_setup_dry_run_writes_nothing(tmp_path: Path) -> None:
+    _install_mcp_agent("kiro")
+    run_setup_for(_config(tmp_path, "kiro", dry_run=True, no_mesh=True), log=_quiet)
+    assert not agents.kiro_config_path().exists()
+
+
+def test_diagnose_mcp_only_reports_registration_state(tmp_path: Path) -> None:
+    _install_mcp_agent("q")
+    config = _config(tmp_path, "q", no_mesh=True)
+    before = {r.key: r for r in diagnose_for(config)}
+    assert before["q_mcp_registration"].level == "fail"  # not wired yet
+    assert before["q_root"].level == "ok"  # but the agent is "installed"
+
+    run_setup_for(config, log=_quiet)
+    after = {r.key: r for r in diagnose_for(config)}
+    assert after["q_mcp_registration"].level == "ok"
+
+
 def test_opencode_setup_registers_mcp_and_guard_plugin(tmp_path: Path) -> None:
     agents.opencode_config_dir().mkdir(parents=True, exist_ok=True)  # simulate OpenCode installed
     config = _config(tmp_path, "opencode")

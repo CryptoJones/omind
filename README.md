@@ -26,7 +26,8 @@ reads and writes as long-term memory. `omind` does two things with it:
 
 - **`omind setup`** — idempotently registers **omind's own node MCP server**
   (`omind node`) with your agent — **Claude Code** by default, or **Hermes,
-  OpenClaw, OpenCode, and Codex CLI** via `--agent` (see *Other agents* below) —
+  OpenClaw, OpenCode, Codex CLI, Gemini CLI, Claude Desktop, Kiro, VS Code, and
+  Amazon Q** via `--agent` (see *Other agents* below) —
   pointed at an OMI folder inside an Obsidian vault, and initializes the folder
   as a **mesh node** (see below). After this, the agent persists memory across
   sessions through the MCP tools — and across machines through the mesh. Setup
@@ -110,8 +111,8 @@ pip install -e ".[dev]"
 ## Quick start
 
 Provision the MCP wiring for your agent — Claude Code by default; add
-`--agent hermes|openclaw|opencode|codex` for the others (see *Other agents*
-below). Idempotent; safe to re-run:
+`--agent hermes|openclaw|opencode|codex|gemini|claude-desktop|kiro|vscode|q`
+for the others (see *Other agents* below). Idempotent; safe to re-run:
 
 ```bash
 omind setup --vault "$HOME/Documents/Obsidian Vault"
@@ -325,7 +326,7 @@ text. Because it's a scheduled job — the same systemd-user-timer mechanism as
 `omind backup` and `omind mesh` — it doesn't depend on the agent's cooperation,
 which is what makes it a reliable *record* rather than a hopeful instruction.
 
-## Other agents: Hermes Agent, OpenClaw, OpenCode, and Codex CLI
+## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Claude Desktop, Kiro, VS Code, Amazon Q
 
 [Claude Code](https://github.com/anthropics/claude-code) is the default, but the
 same OMI folder can back any agent. `omind setup --agent ...` provisions several
@@ -384,9 +385,32 @@ Code, Hermes, OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
 deny-enforcement is unverified against a live gateway, so the verdict is advisory
 until hard-block is proven.
 
-`omind doctor --agent hermes|openclaw|opencode|codex|gemini` diagnoses that agent's
-wiring, and `omind quickstart --agent <name>` prints the manual steps (YAML/JSON
-snippets personalized to your paths) if you'd rather merge them in yourself.
+### MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q
+
+Four more agents are wired by **MCP registration alone** — omind drops the `omi`
+server into the tool's own config file and nothing else (no guard, no skill); the
+agent reaches memory through the MCP tools the server exposes:
+
+```bash
+omind setup --agent claude-desktop --vault "$HOME/Documents/Obsidian Vault"  # Claude Desktop app
+omind setup --agent kiro           --vault "$HOME/Documents/Obsidian Vault"  # Kiro IDE
+omind setup --agent vscode         --vault "$HOME/Documents/Obsidian Vault"  # VS Code (native MCP)
+omind setup --agent q              --vault "$HOME/Documents/Obsidian Vault"  # Amazon Q
+```
+
+Each writes only the `omi` entry it owns and refuses to overwrite a config file it
+can't parse. Config locations: Claude Desktop's `claude_desktop_config.json` (under
+`~/Library/Application Support/Claude` on macOS, `~/.config/Claude` on Linux,
+`%APPDATA%\Claude` on Windows; `mcpServers` block); Kiro's `~/.kiro/settings/mcp.json`
+(`mcpServers`); VS Code's user-level `mcp.json` (under the same per-OS app-support dir
+as Claude Desktop but `Code/User`; a `servers` block with `type: stdio`); and Amazon
+Q's `~/.aws/amazonq/mcp.json` (`mcpServers`). Restart the tool afterward to load the
+server.
+
+`omind doctor --agent hermes|openclaw|opencode|codex|gemini|claude-desktop|kiro|vscode|q`
+diagnoses that agent's wiring, and `omind quickstart --agent <name>` prints the manual
+steps (YAML/JSON snippets personalized to your paths) if you'd rather merge them in
+yourself.
 
 The auto-memory **journal** hooks (the per-action trail) remain Claude Code-only;
 the other agents' actions reach OMI through the MCP skill instead.
