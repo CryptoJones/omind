@@ -59,6 +59,24 @@ def test_allows_pass_show_captured_into_var(tmp_path: Path) -> None:
     assert _run(_hook(tmp_path), "TOK=$(pass show github/token)") == 0
 
 
+def test_allows_git_credential_helper_echoing_pass(tmp_path: Path) -> None:
+    # The git one-shot credential helper feeds the secret to git's credential
+    # protocol on stdin (not the transcript), so the echo "$(pass …)" inside a
+    # credential.helper definition is not a leak.
+    cmd = (
+        "git -c credential.helper='!f(){ echo username=x; "
+        "echo \"password=$(pass codeberg/api-token)\"; }; f' push -u origin br"
+    )
+    assert _run(_hook(tmp_path), cmd) == 0
+
+
+def test_blocks_literal_token_even_inside_credential_helper(tmp_path: Path) -> None:
+    # The credential-helper exemption must not let a literal token slip through:
+    # the literal-token check runs before the exemption.
+    cmd = "git -c credential.helper=x commit -m ghp_AbCdEf0123456789AbCdEf0123456789AbCd"
+    assert _run(_hook(tmp_path), cmd) == 2
+
+
 def test_blocks_gh_auth_token(tmp_path: Path) -> None:
     assert _run(_hook(tmp_path), "gh auth token") == 2
 

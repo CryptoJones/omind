@@ -21,7 +21,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `Authorization` header), with an audited `OMI_SECRET_OK=1` override. The hook is registered FIRST
   in the existing PreToolUse `Bash` matcher (ahead of `git-fresh-base.sh`) and ships verbatim — no
   install-time path substitution. Closes the leak class that `git add`-style secret guards miss (the
-  exact mistake that printed a GitHub PAT into a conversation).
+  exact mistake that printed a GitHub PAT into a conversation). The guard exempts git one-shot
+  credential helpers (`credential.helper='!f(){ echo "password=$(pass X)"; }'`) — that echo feeds
+  git's credential protocol on stdin, not the transcript — while still blocking a literal token even
+  inside a `credential.helper` command (the literal-token check runs first).
 
 ### Changed
 
