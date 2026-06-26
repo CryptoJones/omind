@@ -447,7 +447,10 @@ def test_widened_destructive_rules_close_red_team_gaps() -> None:
     blocked = [
         "gh api repos/acme/widget -X DELETE",  # path-before-method reorder
         "curl -X DELETE https://api.github.com/repos/acme/widget",  # curl, not gh
-        "gh api repos/acme/widget/pulls -f title=x -f head=y",  # PR via the API
+        # PR via the API to an OWNED (CryptoJones) repo is still blocked; the owner
+        # must use Codeberg. (A third-party owner here would now ALLOW — covered by
+        # test_third_party_pr_allowed_owned_pr_blocked.)
+        "gh api repos/CryptoJones/omind/pulls -f title=x -f head=y",  # PR via the API
         "pkexec rm -rf /tmp/x",
         "doas reboot",
         "su -c 'rm -rf /tmp/x' root",
@@ -461,6 +464,38 @@ def test_widened_destructive_rules_close_red_team_gaps() -> None:
         {"command": "OMI_SUDO_OK=1 pkexec systemctl restart x", "session": "b1"}
     ).allow
     guard.clear_gate("b1")
+
+
+def test_third_party_pr_allowed_owned_pr_blocked() -> None:
+    """The GitHub-PR hard-block is owner-aware: a PR to a repo the owner does NOT
+    control (third-party OSS) is allowed, while a PR to a CryptoJones-owned repo
+    still goes to Codeberg (blocked). A bare `gh pr create|merge` (no `--repo`)
+    defaults to the upstream and stays blocked as the safe default."""
+    guard.mark_consulted("b2")
+
+    def allowed(cmd: str) -> bool:
+        return guard.decide({"command": cmd, "session": "b2"}).allow
+
+    # third-party OSS PRs — ALLOWED (must name --repo <non-CryptoJones>/<repo>)
+    assert allowed("gh pr create --repo yurukusa/claude-code-hooks")
+    assert allowed("gh pr merge --repo yurukusa/x")
+    assert allowed("gh pr create --title x --repo yurukusa/y")
+    # PR to an owned (CryptoJones) repo — BLOCKED (Codeberg-only), case-insensitive
+    assert not allowed("gh pr create --repo CryptoJones/omind")
+    assert not allowed("gh pr create --repo cryptojones/omind")
+    # bare create/merge (no --repo) defaults to the upstream — BLOCKED
+    assert not allowed("gh pr create")
+    assert not allowed("gh pr merge")
+
+    # gh api .../pulls writes: owner-aware the same way
+    assert allowed(
+        "gh api repos/yurukusa/claude-code-hooks/pulls -f title=x -f head=y -f base=main"
+    )
+    assert not allowed("gh api --method POST repos/CryptoJones/omind/pulls -f title=x")
+    # a GET listing of a third-party repo's pulls (no write) is unchanged — allowed
+    assert allowed("gh api repos/yurukusa/x/pulls")
+
+    guard.clear_gate("b2")
 
 
 def test_guard_status_flags_agent_writable_config(capsys: pytest.CaptureFixture[str]) -> None:

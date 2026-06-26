@@ -513,6 +513,81 @@ def test_guard_hook_dry_run_writes_nothing(
     assert not (tmp_path / ".claude" / "hooks" / "git-fresh-base.sh").exists()
 
 
+# -- secret-output guard hook (PreToolUse/Bash) -----------------------------
+
+
+def _secret_guard_entries(settings: Path) -> list[dict[str, object]]:
+    data = json.loads(settings.read_text(encoding="utf-8"))
+    return [
+        e
+        for e in data["hooks"]["PreToolUse"]
+        if provision.SECRET_OUTPUT_GUARD_MARKER in provision._entry_command_text(e)
+    ]
+
+
+def test_setup_writes_secret_output_guard_script(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    Provisioner(_config(tmp_path), log=_quiet)._write_secret_output_guard_script()
+    dest = tmp_path / ".claude" / "hooks" / "secret-output-guard.sh"
+    assert dest.is_file()
+    if os.name != "nt":  # Windows has no POSIX executable bit to assert on
+        assert dest.stat().st_mode & 0o111
+    assert "secret-output-guard" in dest.read_text(encoding="utf-8")
+
+
+def test_bash_guard_entry_wires_both_hooks_in_order(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    """One Bash matcher entry holds both omind guards, secret-output guard FIRST."""
+    Provisioner(_config(tmp_path), log=_quiet).ensure_guard_hook_installed()
+    entries = _secret_guard_entries(isolate_settings)
+    assert len(entries) == 1
+    entry = entries[0]
+    assert entry["matcher"] == "Bash"
+    commands = [h["command"] for h in entry["hooks"]]
+    assert len(commands) == 2
+    assert provision.SECRET_OUTPUT_GUARD_MARKER in commands[0]
+    assert provision.GUARD_HOOK_MARKER in commands[1]  # fresh-base runs second
+
+
+def test_secret_output_guard_installed_idempotently(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).ensure_guard_hook_installed()
+    before = isolate_settings.read_text(encoding="utf-8")
+    Provisioner(config, log=_quiet).ensure_guard_hook_installed()  # second run: no change
+    assert isolate_settings.read_text(encoding="utf-8") == before
+    assert len(_secret_guard_entries(isolate_settings)) == 1
+    assert len(_guard_entries(isolate_settings)) == 1  # still exactly one omind entry
+
+
+def test_secret_output_guard_preserves_user_pretooluse_hook(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    user_entry = {
+        "matcher": "Bash",
+        "hooks": [{"type": "command", "command": "/x/confirm-process-kill.sh"}],
+    }
+    isolate_settings.write_text(json.dumps({"hooks": {"PreToolUse": [user_entry]}}))
+    Provisioner(_config(tmp_path), log=_quiet).ensure_guard_hook_installed()
+    entries = json.loads(isolate_settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert user_entry in entries  # untouched
+    assert len(_secret_guard_entries(isolate_settings)) == 1
+    assert len(entries) == 2  # the user hook + the single omind guard entry
+
+
+def test_secret_output_guard_dry_run_writes_nothing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
+    prov = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)
+    prov._write_secret_output_guard_script()
+    assert not (tmp_path / ".claude" / "hooks" / "secret-output-guard.sh").exists()
+
+
 def test_setup_writes_omi_guard_scripts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
     Provisioner(_config(tmp_path), log=_quiet)._write_omi_guard_scripts()
