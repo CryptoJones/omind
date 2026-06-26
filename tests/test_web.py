@@ -209,3 +209,13 @@ def test_structured_update_round_trips_mesh_metadata(mesh_client: TestClient) ->
     after = mesh_client.get(f"/api/notes/{name}").json()["fields"]
     assert after["summary"] == "edited while archived"
     assert after["disabled"] is True
+
+
+def test_graph_endpoint_returns_nodes_and_edges(client: TestClient) -> None:
+    client.post("/api/notes", json={"title": "B"})
+    client.post("/api/notes", json={"title": "A"})
+    client.put("/api/notes/A.md/raw", json={"content": "# A\n\nsee [[B]]\n"})
+    graph = client.get("/api/graph").json()
+    assert {"nodes", "edges", "dangling"} <= graph.keys()
+    assert {"A.md", "B.md"} <= {n["id"] for n in graph["nodes"]}
+    assert ["A.md", "B.md"] in graph["edges"]

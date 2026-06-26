@@ -19,6 +19,7 @@ from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+from omind import graph as graph_mod
 from omind.store import (
     NoteConflictError,
     NoteError,
@@ -89,6 +90,12 @@ def create_app(omi_dir: Path | str) -> FastAPI:
     @app.get("/api/notes/{name}/backlinks")
     def get_backlinks(name: str) -> list[dict[str, object]]:
         return [asdict(s) for s in _guard(lambda: store.backlinks(name))]
+
+    @app.get("/api/graph")
+    def get_graph() -> dict[str, object]:
+        # The whole [[wikilink]] graph (nodes + edges + dangling) for the UI's
+        # interactive view; same serialisation as `omind graph export --json`.
+        return graph_mod.to_json(graph_mod.build_graph(store.omi_dir))
 
     @app.post("/api/notes", status_code=201)
     def create_note(payload: NoteFieldsModel) -> dict[str, str]:

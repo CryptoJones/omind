@@ -691,6 +691,24 @@ searchEl.addEventListener("input", () => {
 });
 $("#new-btn").addEventListener("click", openNew);
 
+// ---- Graph view -------------------------------------------------------------
+
+function openGraph() {
+  if (!window.OmindGraph) return;
+  state.current = null;
+  try { history.replaceState(null, "", "#graph"); } catch (_) {}
+  renderSidebar();
+  const btn = $("#graph-btn");
+  btn.classList.add("active");
+  window.OmindGraph.render(contentEl, {
+    openNote: (filename) => {
+      btn.classList.remove("active");
+      openNote(filename);
+    },
+  });
+}
+$("#graph-btn").addEventListener("click", openGraph);
+
 // ---- Archived (soft-deleted) notes ------------------------------------------
 
 function renderArchToggle() {
@@ -886,7 +904,8 @@ initI18n();
       .then((m) => (state.mesh = Boolean(m && m.mesh)))
       .catch(() => {});
     await refresh();
-    renderEmpty();
+    if (location.hash === "#graph") openGraph();
+    else renderEmpty();
   } catch (e) {
     contentEl.innerHTML = `<div class="empty"><div class="empty-title">${escapeHtml(
       t("loadError"),

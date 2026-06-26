@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "3.3.0"
+version = "3.4.0"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -79,6 +79,9 @@ exclude = ["src/omind/web/tailwind"]
 [tool.ruff]
 target-version = "py310"
 line-length = 100
+# docs/graph-demo holds illustrative, deliberately terse example scripts — not
+# package code, so they aren't held to the package's import/line-length rules.
+extend-exclude = ["docs/graph-demo"]
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]

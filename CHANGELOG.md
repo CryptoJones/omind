@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.4.0] - 2026-06-25
+
+### Added
+
+- **Interactive `[[wikilink]]` graph view in the `omind serve` web UI.** A new **Graph**
+  button (and a `#graph` deep-link) renders the whole vault as a force-directed graph on a
+  canvas — click a node to open that note, hover to highlight its neighbors, drag/zoom/pan,
+  and "reset view" to re-fit. Hubs are labelled and nodes are coloured by connectivity
+  (orphans stand out). Backed by a new `GET /api/graph` endpoint that reuses
+  `graph.to_json`; the renderer is dependency-free (a small canvas force layout, no d3 / no
+  graph library) and reads the active theme's CSS variables so it re-skins with the UI.
+  Closes #101.
+
+### Fixed
+
+- **Sidebar tag bar no longer pushes the note list off-screen on large vaults.** The
+  `#tag-bar` rendered every tag with no height limit, so a vault with hundreds of tags filled
+  the entire sidebar and shoved the note list below the fold (notes appeared only at the very
+  bottom, cut off by the tags). It's now capped (`max-height: 28vh`) and scrolls. Closes #102.
+
 ## [3.3.0] - 2026-06-25
 
 ### Added

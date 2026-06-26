@@ -1,6 +1,9 @@
 #!/usr/bin/env python3
 """Render omind's graph JSON for the Neuromancer vault in the Cyberdeck theme."""
-import json, subprocess, sys, pathlib
+import json
+import pathlib
+import subprocess
+import sys
 
 demo = sys.argv[1]; out_dot = pathlib.Path(sys.argv[2])
 data = json.loads(subprocess.check_output(
