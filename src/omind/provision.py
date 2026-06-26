@@ -50,6 +50,11 @@ def _guard_hook_dest() -> Path:
     return Path.home() / ".claude" / "hooks" / "git-fresh-base.sh"
 
 
+def _secret_output_guard_dest() -> Path:
+    """Where omind writes the secret-output guard hook script on this machine."""
+    return Path.home() / ".claude" / "hooks" / "secret-output-guard.sh"
+
+
 def _omi_guard_dest() -> Path:
     """Where omind writes the OMI-compliance guard adapter on this machine."""
     return Path.home() / ".claude" / "hooks" / "omi-guard.sh"
@@ -278,6 +283,13 @@ LEGACY_SERVER_NAME = "obsidian"
 GUARD_HOOK_MARKER = "git-fresh-base.sh"
 #: Seconds Claude Code waits for the guard (it runs `git fetch` before deciding).
 GUARD_HOOK_TIMEOUT = 20
+
+#: Marker identifying omind's PreToolUse(Bash) secret-output guard entry in
+#: settings.json — the guard script's filename always appears in its command. It
+#: blocks Bash commands that would print a credential VALUE to the transcript.
+SECRET_OUTPUT_GUARD_MARKER = "secret-output-guard.sh"
+#: Seconds Claude Code waits for the secret guard (pure string inspection, fast).
+SECRET_OUTPUT_GUARD_TIMEOUT = 10
 
 #: Markers identifying omind's OMI-compliance guard entries in settings.json
 #: (each adapter's filename always appears in its command).
@@ -589,6 +601,27 @@ class Provisioner:
             with contextlib.suppress(OSError):
                 dest.chmod(0o755)
 
+    def _write_secret_output_guard_script(self) -> None:
+        """Write the secret-output guard hook from package data to ~/.claude/hooks/.
+
+        Unlike ``omi-guard.sh`` the script has no machine-specific paths, so it
+        ships verbatim with no install-time substitution (like ``git-fresh-base.sh``).
+        """
+        dest = _secret_output_guard_dest()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("secret-output-guard.sh")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(f"  WARNING: could not read secret-output guard hook from package data: {exc}")
+            return
+        self._write_managed(dest, content)
+        if not self.config.dry_run:
+            with contextlib.suppress(OSError):
+                dest.chmod(0o755)
+
     def _write_fleet_sudo_script(self) -> None:
         """Install the `fleet-sudo` wrapper from package data to ~/.local/bin/.
 
@@ -688,12 +721,14 @@ class Provisioner:
             path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
 
     def ensure_guard_hook_installed(self) -> None:
-        """Idempotently register the PreToolUse(Bash) fresh-base git guard.
+        """Idempotently register the PreToolUse(Bash) guard hooks.
 
-        Identifies omind's guard entry by ``GUARD_HOOK_MARKER`` (the script's
-        filename in the command), so a user's own PreToolUse Bash hooks are kept
-        and re-runs never accumulate duplicates. Writes only when something
-        changed (or ``--force``).
+        Registers two omind guards in a single ``Bash`` matcher entry — the
+        secret-output guard FIRST (it cheaply blocks credential leaks), then the
+        fresh-base git guard. Identifies omind's entry by either guard marker (the
+        scripts' filenames in the command), so a user's own PreToolUse Bash hooks
+        are kept and re-runs never accumulate duplicates. Writes only when
+        something changed (or ``--force``).
         """
         path = claude_settings_path()
         data = self._read_settings(path)
@@ -706,23 +741,33 @@ class Provisioner:
             "hooks": [
                 {
                     "type": "command",
+                    "command": str(_secret_output_guard_dest()),
+                    "timeout": SECRET_OUTPUT_GUARD_TIMEOUT,
+                },
+                {
+                    "type": "command",
                     "command": str(_guard_hook_dest()),
                     "timeout": GUARD_HOOK_TIMEOUT,
-                }
+                },
             ],
         }
         existing = hooks_cfg.get("PreToolUse")
         existing_list = existing if isinstance(existing, list) else []
-        kept = [e for e in existing_list if GUARD_HOOK_MARKER not in _entry_command_text(e)]
+        kept = [
+            e
+            for e in existing_list
+            if GUARD_HOOK_MARKER not in _entry_command_text(e)
+            and SECRET_OUTPUT_GUARD_MARKER not in _entry_command_text(e)
+        ]
         merged = kept + [desired]
 
         if merged == existing_list and not self.config.force:
-            self.log(f"  fresh-base git guard hook already installed in {path}")
+            self.log(f"  PreToolUse(Bash) guard hooks already installed in {path}")
             return
 
         hooks_cfg["PreToolUse"] = merged
         data["hooks"] = hooks_cfg
-        self._record(f"install PreToolUse(Bash) fresh-base git guard in {path}")
+        self._record(f"install PreToolUse(Bash) secret-output + fresh-base git guards in {path}")
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
@@ -904,6 +949,7 @@ class Provisioner:
         self.register_mcp()
         self._write_enforce_hook_script()
         self._write_guard_hook_script()
+        self._write_secret_output_guard_script()
         self._write_fleet_sudo_script()
         self.ensure_hooks_installed()
         self.ensure_guard_hook_installed()

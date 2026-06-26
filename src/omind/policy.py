@@ -89,10 +89,21 @@ SEED_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         id="gh-pr-create-merge",
-        pattern=r"\bgh\s+pr\s+(create|merge)\b",
+        # Owner-aware: a PR to a CryptoJones repo must go to Codeberg, so BLOCK it —
+        # but a PR to a THIRD-PARTY OSS repo the owner doesn't control is legitimate.
+        # The trailing negative lookahead fails (→ rule doesn't match → ALLOW) only
+        # when an explicit `--repo <non-CryptoJones>/…` is named; a bare
+        # `gh pr create|merge` (which defaults to the upstream, possibly a CryptoJones
+        # repo) stays BLOCKED as the safe default.
+        pattern=(
+            r"\bgh\s+pr\s+(create|merge)\b"
+            r"(?![^|;&]*--repo\s+(?!(?i:CryptoJones)/)[\w.-]+/)"
+        ),
         message=(
-            "GitHub never gets a PR. PR + merge happen on Codeberg; GitHub mirrors "
-            "Codeberg's exact commit. Read OMI: codeberg-authoritative."
+            "GitHub never gets a PR to a repo you own. PR + merge happen on Codeberg; "
+            "GitHub mirrors Codeberg's exact commit. Read OMI: codeberg-authoritative. "
+            "A third-party OSS PR is allowed when you name --repo <owner>/<repo> "
+            "(owner other than CryptoJones)."
         ),
     ),
     Rule(
@@ -135,14 +146,19 @@ SEED_RULES: tuple[Rule, ...] = (
         # red-team #B1: `gh pr create` is blocked, but the same PR could be opened
         # via `gh api repos/o/r/pulls -f ...`. Match a WRITE to .../pulls (a -f field
         # or an explicit POST); a plain GET listing has neither, so reads pass.
+        # Owner-aware: only a write to a CryptoJones-owned repo's /pulls is blocked
+        # (those go to Codeberg); a write to a third-party owner's /pulls is a
+        # legitimate OSS contribution and passes.
         pattern=(
-            r"gh\s+api(?=[^|;&]*repos/[^|;&]*/pulls)"
+            r"gh\s+api(?=[^|;&]*repos/(?i:CryptoJones)/[^|;&]*/pulls)"
             r"(?=[^|;&]*(?:-f\b|--field\b|--method\s*POST|-X\s*POST))"
         ),
         message=(
-            "GitHub never gets a PR — not via `gh pr create` nor the API. PR + merge "
-            "happen on Codeberg; GitHub mirrors Codeberg's exact commit. Read OMI: "
-            "codeberg-authoritative."
+            "GitHub never gets a PR to a repo you own — not via `gh pr create` nor the "
+            "API. PR + merge happen on Codeberg; GitHub mirrors Codeberg's exact "
+            "commit. Read OMI: codeberg-authoritative. A third-party OSS PR via "
+            "`gh api repos/<owner>/<repo>/pulls` is allowed for owners other than "
+            "CryptoJones."
         ),
     ),
     Rule(

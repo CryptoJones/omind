@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.0] - 2026-06-26
+
+### Added
+
+- **New `secret-output-guard.sh` PreToolUse(Bash) hook — stop credential VALUES reaching the
+  transcript.** `omind setup` now installs and wires a portable bash guard that exits 2 to BLOCK a
+  Bash command when a secret value would flow to stdout/the conversation — e.g. `pass show X | head`,
+  bare `pass show X`, `pass <user>/<entry>`, `gh auth token`, `echo $(pass show X)`, or a literal
+  `ghp_…`/`glpat-…`/`xoxb-…`/`AKIA…`/`BEGIN PRIVATE KEY` token pasted into the command. It ALLOWS the
+  safe forms (`TOK=$(pass show X)` captured into a var, `pass show X >/dev/null` or `> file`
+  redirected off the transcript, `pass insert`/`pass ls`, and a token piped into a `curl`
+  `Authorization` header), with an audited `OMI_SECRET_OK=1` override. The hook is registered FIRST
+  in the existing PreToolUse `Bash` matcher (ahead of `git-fresh-base.sh`) and ships verbatim — no
+  install-time path substitution. Closes the leak class that `git add`-style secret guards miss (the
+  exact mistake that printed a GitHub PAT into a conversation).
+
+### Changed
+
+- **GitHub-PR hard-block is now owner-aware — third-party OSS PRs are allowed.** The
+  `gh-pr-create-merge` and `gh-api-pr-create` guard rules previously blocked *every* GitHub PR (the
+  owner's own repos must get PRs on Codeberg, not GitHub). They now BLOCK only when the target repo
+  owner is `CryptoJones` (case-insensitive) and ALLOW a PR to a third-party repo the owner doesn't
+  control. A third-party PR must name the target explicitly: `gh pr create|merge --repo
+  <owner>/<repo>` or `gh api repos/<owner>/<repo>/pulls -f …`. A BARE `gh pr create`/`gh pr merge`
+  (no `--repo`) stays BLOCKED — it defaults to the upstream, which may be a CryptoJones repo, so
+  blocking is the safe default. All existing red-team protections (the `gh api`/`curl` DELETE rules
+  and the GitHub-push rules) are unchanged.
+
 ## [3.4.0] - 2026-06-25
 
 ### Added
