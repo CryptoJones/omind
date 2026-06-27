@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.1] - 2026-06-27
+
+### Fixed
+
+- **Windows CI: `test_mcp_only_setup_errors_when_not_installed` no longer fails on `windows-latest`.**
+  The suite-wide home isolation pinned `HOME`/`USERPROFILE` but not `%APPDATA%`/`%LOCALAPPDATA%`,
+  where Windows GUI apps store config. Because the `windows-latest` runner ships VS Code, the MCP-only
+  provisioners resolved to the real `%APPDATA%\Code\User` and the "errors when not installed" tests saw
+  the prereq satisfied and never raised. The isolation fixture now pins both Windows app-data vars at
+  the per-test temp home. POSIX is unaffected.
+- **CI conformance job degrades gracefully when its token is expired.** The `MCP conformance` job
+  installs the private `mcp-conformance` repo via the `MCP_CONFORMANCE_TOKEN` secret; the guard only
+  skipped when the token was *unset*, so an expired/invalid token authenticated and failed the clone,
+  reddening the build. A failed private-repo install now emits a `::warning::` and skips, honoring the
+  job's "graceful no-op until a working token" intent. A valid token still runs the full suite.
+
 ## [3.5.0] - 2026-06-26
 
 ### Added
