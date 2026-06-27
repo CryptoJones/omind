@@ -7,6 +7,7 @@ neither side drifts.
 
 ## Open
 
+- [ ] **Rotate `MCP_CONFORMANCE_TOKEN` before it expires** ([Codeberg #88](https://codeberg.org/CryptoJones/omind/issues/88), [GitHub #105](https://github.com/CryptoJones/omind/issues/105)) — _chore_ — the conformance CI job installs the private `mcp-conformance` repo via the `MCP_CONFORMANCE_TOKEN` PAT; the job now skips gracefully on auth failure (commit `e9e5763`), so an expired token stops running the suite without redding CI. Rotate the PAT and re-set the secret before expiry.
 - [ ] **Guard hook: substring match on escalation keywords causes false positives** ([#98](https://github.com/CryptoJones/omind/issues/98)) — _bug_ — the Bash guard hook (`hooks/omi-guard.sh`) substring-matches escalation keywords and blocks benign commands.
 - [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91)) — _roadmap (Phase 4)_ — `omind guard export-corpus` already emits instruction-tuning JSONL; what remains is the training run (needs an accumulated corpus + a GPU beyond an 8GB card). The only true in-weights fix.
 

@@ -42,6 +42,14 @@ def _isolate_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     home.mkdir(parents=True, exist_ok=True)
     monkeypatch.setenv("HOME", str(home))
     monkeypatch.setenv("USERPROFILE", str(home))
+    # Windows GUI-app config lives under %APPDATA%/%LOCALAPPDATA%, NOT the home
+    # dir — and the windows-latest runner ships VS Code, so its real
+    # ``%APPDATA%\\Code\\User`` exists. Without pinning these too, the MCP-only
+    # provisioners (VS Code, Claude Desktop) resolved to that live dir and the
+    # "errors when not installed" tests saw the prereq as satisfied and never
+    # raised. POSIX is unaffected (those paths hang off the isolated HOME/XDG).
+    monkeypatch.setenv("APPDATA", str(home / "AppData" / "Roaming"))
+    monkeypatch.setenv("LOCALAPPDATA", str(home / "AppData" / "Local"))
 
 
 @pytest.fixture(autouse=True)
