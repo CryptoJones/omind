@@ -165,23 +165,40 @@ PreToolUse:Bash hook error: [~/.claude/hooks/omi-guard.sh]:
 The guard is registered as a `PreToolUse` `"*"` matcher, so once it trips it
 blocks **all** tools — `Bash`, `Read`, everything — not just Bash.
 
-### Root cause
+> **Fixed (#107).** The guard no longer fails closed on a missing `jq`. Update
+> omind (`omind self-update` / reinstall) and re-run `omind setup` to deploy the
+> fixed hook; on current versions a jq-less host is no longer wedged. The rest of
+> this section explains the old behavior and how to recover a machine still
+> running the pre-fix hook.
 
-The OMI-compliance guard (`omi-guard.sh`) parses the hook event with `jq`, and
-by deliberate design **fails closed** when `jq` is absent (see CHANGELOG, "missing
-`jq` fails **closed**"): if it cannot read the command, it cannot enforce the
-hard-rules, so it refuses the action. That is the safe choice. The trap is that
-`omind setup` *checks for* `jq` but does **not install** it, and on a clean box
-`jq` is usually missing. The result is a bootstrap deadlock: the only way to
-satisfy the guard is to install `jq`, but installing `jq` requires a `Bash` call,
-which the guard now blocks.
+### Root cause (pre-fix)
+
+The OMI-compliance guard (`omi-guard.sh`) parses the hook event with `jq`. The
+pre-fix hook **failed closed** when `jq` was absent: if it could not read the
+command it could not enforce the hard-rules, so it refused the action. The trap
+was that `omind setup` did **not** install `jq` (and, contrary to an earlier
+version of this note, did not actually *check* for it either — `jq` was never in
+`REQUIRED_TOOLS`), and on a clean box `jq` is usually missing. The result was a
+bootstrap deadlock: the only way to satisfy the guard was to install `jq`, but
+installing `jq` requires a `Bash` call, which the guard blocked.
 
 > Note this is the opposite of the *Bash-only* guards `git-fresh-base.sh` and
 > `omi-guard-hermes.sh`, which `exit 0` (fail **open**) when `jq` is missing.
-> Only the `"*"` compliance guard fails closed, which is why it can wedge the
+> Only the `"*"` compliance guard failed closed, which is why it could wedge the
 > whole session.
 
-### Recovery (what to do if you are already wedged)
+### The fix (current behavior)
+
+When `jq` is absent the hook now routes the raw event through `omind guard
+adapter` (the pure-Python core, which parses the event itself and applies the
+**same** hard-blocks + per-turn gate). Enforcement is preserved — the host is no
+longer wedged — and `jq` becomes a *performance* optimization for the fast path,
+not a hard dependency. `omind doctor` now reports a **warning** (not a failure)
+when `jq` is missing. Only if `jq` **and** a working `omind` core are both absent
+does the hook fall back to the conservative last resort: fail open for non-Bash
+tools, fail closed for Bash.
+
+### Recovery (a machine still running the pre-fix hook)
 
 The guard is read live from `~/.claude/settings.json` on every tool call (it is
 active the moment `setup` writes it — no restart needed), so editing that file
@@ -191,27 +208,12 @@ blocked Bash hook to break the loop:
 1. In `~/.claude/settings.json`, temporarily remove the `PreToolUse` block whose
    matcher is `"*"` and whose command is `…/omi-guard.sh` (leave the `Bash`
    matcher block alone). This lifts the fail-closed gate.
-2. Install `jq` (Debian/Ubuntu/Mint): `sudo apt-get install -y jq`
-   (`brew install jq` on macOS; `dnf install jq` on Fedora).
-3. Restore the `"*"` / `omi-guard.sh` block you removed in step 1.
+2. Either install `jq` (`sudo apt-get install -y jq`; `brew install jq` on macOS;
+   `dnf install jq` on Fedora) **or** simply update omind and re-run `omind
+   setup` to deploy the fixed hook (which no longer needs `jq`).
+3. Restore the `"*"` / `omi-guard.sh` block you removed in step 1 (or let
+   `omind setup` rewrite it).
 4. Run `omind doctor` to confirm the guard is wired and the policy loads.
 
-After `jq` is present the guard switches from "blocking everything" to its normal
-behavior — including the per-turn *consult OMI before acting* gate, which is
-cleared by one OMI `read-note`/`search-vault` (or a `Read` of a note under the
-OMI folder) per turn.
-
-### The real fix
-
-`omind setup` should not provision a fail-closed guard whose dependency it only
-*checks for*. Options, in order of preference:
-
-- Have `setup` **install `jq`** (or prompt to) as part of provisioning the
-  compliance guard, the same way it bootstraps `uv`/Python — a guard that fails
-  closed must own its dependencies.
-- Failing that, **refuse to install** the `"*"` compliance guard when `jq` is
-  absent (install the rest, warn loudly, and tell the user to install `jq` then
-  re-run `setup`), so the agent is never wedged by its own provisioning step.
-- At minimum, make the guard's missing-`jq` block message name the exact
-  recovery (edit `settings.json` → install `jq` → restore), since by definition
-  the agent reading it can no longer run a shell to discover the fix.
+Because the fixed hook self-heals on a jq-less host, after step 2's `omind setup`
+no manual `settings.json` edit is needed on subsequent fresh machines.

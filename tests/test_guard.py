@@ -487,6 +487,76 @@ def test_hook_allows_when_core_allows(tmp_path: Path) -> None:
     assert _run_hook(hook, _BASH_EVENT) == 0  # a clean allow is still honoured
 
 
+_NOJQ_TESTABLE = (
+    sys.platform != "win32"
+    and shutil.which("bash") is not None
+    and shutil.which("cat") is not None
+    and shutil.which("grep") is not None
+)
+
+
+def _bin_without_jq(tmp_path: Path) -> Path:
+    """A PATH dir with the tools omi-guard.sh needs symlinked in — but NOT jq — so
+    `command -v jq` fails and the hook must take the pure-Python fallback (#107)."""
+    bindir = tmp_path / "nojqbin"
+    bindir.mkdir()
+    for tool in ("bash", "sh", "cat", "grep", "mkdir", "touch", "tr", "date", "env"):
+        real = shutil.which(tool)
+        if real and not (bindir / tool).exists():
+            (bindir / tool).symlink_to(real)
+    assert shutil.which("jq", path=str(bindir)) is None  # jq really is hidden
+    return bindir
+
+
+def _fake_omind(tmp_path: Path, exit_code: int) -> Path:
+    fake = tmp_path / f"omind{exit_code}"
+    fake.write_text(f"#!/usr/bin/env bash\nexit {exit_code}\n", encoding="utf-8")
+    fake.chmod(0o755)
+    return fake
+
+
+@pytest.mark.skipif(not _NOJQ_TESTABLE, reason="needs posix bash + coreutils")
+def test_hook_routes_through_adapter_when_jq_missing(tmp_path: Path) -> None:
+    """#107: without jq the hook must NOT wedge — it routes the raw event through
+    `omind guard adapter` (pure Python). A Bash event returning 0 can ONLY happen
+    via that route, since the no-core fallback fails CLOSED (2) for Bash."""
+    bindir = _bin_without_jq(tmp_path)
+    bash = shutil.which("bash")
+    assert bash is not None
+    for code in (0, 2):
+        hook = _render_hook(tmp_path, str(_fake_omind(tmp_path, code)))
+        rc = subprocess.run(
+            [bash, str(hook)],
+            input=json.dumps(_BASH_EVENT),
+            capture_output=True,
+            text=True,
+            env={"PATH": str(bindir), "HOME": str(tmp_path)},
+        ).returncode
+        assert rc == code, f"adapter exit {code} should pass through, got {rc}"
+
+
+@pytest.mark.skipif(not _NOJQ_TESTABLE, reason="needs posix bash + coreutils")
+def test_hook_without_jq_and_without_omind_fails_closed_for_bash_only(tmp_path: Path) -> None:
+    """No jq AND no working core: Bash fails CLOSED (2), non-Bash fails OPEN (0)."""
+    bindir = _bin_without_jq(tmp_path)
+    bash = shutil.which("bash")
+    assert bash is not None
+    hook = _render_hook(tmp_path, "/nonexistent/omind")
+
+    def run(event: dict[str, object]) -> int:
+        return subprocess.run(
+            [bash, str(hook)],
+            input=json.dumps(event),
+            capture_output=True,
+            text=True,
+            env={"PATH": str(bindir), "HOME": str(tmp_path)},
+        ).returncode
+
+    assert run(_BASH_EVENT) == 2  # destructive command must not run unchecked
+    edit_event = {"tool_name": "Edit", "session_id": "h", "tool_input": {"file_path": "/x"}}
+    assert run(edit_event) == 0  # a non-Bash tool must not wedge the host
+
+
 def _read_event(omi: Path, name: str, sid: str) -> dict[str, object]:
     return {
         "tool_name": "Read",

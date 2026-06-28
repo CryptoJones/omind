@@ -9,6 +9,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **`omind setup` no longer wedges the agent on a machine without `jq` (#107).** The OMI-compliance
+  guard is a `PreToolUse` `"*"` matcher whose hook parsed events with `jq` and **failed closed** when
+  `jq` was absent — blocking every subsequent tool call, including the `Bash` call needed to install
+  `jq` (a bootstrap deadlock). The hook now routes the raw event through `omind guard adapter` (the
+  pure-Python core) when `jq` is missing, applying the same hard-blocks + gate, so a jq-less host stays
+  enforced instead of wedged. `jq` is now a fast-path optimization, not a hard dependency; `omind
+  doctor` reports a **warning** (not a failure) when it is absent. Only if `jq` *and* a working `omind`
+  core are both missing does the hook fall back to the old fail-open-non-Bash / fail-closed-Bash last
+  resort. (Earlier docs claimed setup *checked* for `jq` — it never did; `jq` is intentionally not in
+  `REQUIRED_TOOLS` so setup can't refuse on a jq-less box.)
 - **Guard no longer false-positives on an escalation keyword that isn't the command being run
   (#98 / #108).** The `sudo-use-fleet-sudo` and `privesc-alternatives` policy rules matched
   `sudo`/`su`/`pkexec`/`doas`/`run0` as a word-bounded token *anywhere* in the command, so benign
