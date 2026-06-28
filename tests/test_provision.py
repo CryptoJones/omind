@@ -229,6 +229,31 @@ def test_missing_prereq_errors(
         Provisioner(config, log=_quiet).run()
 
 
+def test_jq_diagnostic_warns_when_absent_and_is_not_required(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # #107: a missing jq must be a WARN (the guard hook falls back to the
+    # pure-Python adapter), never a fail, and jq must NOT be a hard prereq —
+    # otherwise `omind setup` would refuse on a jq-less box, the original wedge.
+    monkeypatch.setattr(
+        provision.shutil, "which", lambda name: None if name == "jq" else f"/usr/bin/{name}"
+    )
+    res = provision._diagnose_jq()
+    assert res.key == "tool:jq"
+    assert res.level == "warn"
+    assert "fall" in res.message.lower() or "python" in res.message.lower()
+    assert "jq" not in Provisioner.REQUIRED_TOOLS
+    from omind.agents import AgentProvisioner
+
+    assert "jq" not in AgentProvisioner.REQUIRED_TOOLS
+
+
+def test_jq_diagnostic_ok_when_present(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
+    res = provision._diagnose_jq()
+    assert res.level == "ok"
+
+
 def test_idempotent_files_on_rerun(
     tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
 ) -> None:

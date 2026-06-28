@@ -23,16 +23,29 @@ STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omind"
 input="$(cat 2>/dev/null)"
 [ -z "$input" ] && exit 0
 
-# jq is required to parse the event. If it is missing we cannot read the tool /
-# command — fail OPEN for non-destructive tools (so a misconfigured host doesn't
-# wedge every Read/consult) but fail CLOSED (block) for anything that looks like a
-# Bash command: a destructive command must never run with its hard-rules
-# unevaluated. Always scream so the misconfiguration is visible (omind setup +
-# doctor also check for jq).
+# jq parses the event on the fast path. If it is missing, DON'T wedge the host:
+# the matcher is "*", so a fail-closed Bash block here would also block the very
+# command that installs jq (the #107 bootstrap deadlock). Instead route the RAW
+# event through `omind guard adapter`, which parses it in pure Python and applies
+# the SAME hard-blocks + gate — enforcement is preserved, just slower. jq is now a
+# performance optimization, not a hard dependency. Scream once so `doctor` users
+# still see the misconfiguration.
 if ! command -v jq >/dev/null 2>&1; then
-  printf 'omi-guard: jq not found — cannot evaluate this action. Install jq (omind setup/doctor check for it).\n' >&2
+  printf 'omi-guard: jq not found — using the slower pure-Python guard path (install jq for the fast path).\n' >&2
+  if [ -x "$OMIND" ] || command -v "$OMIND" >/dev/null 2>&1; then
+    printf '%s' "$input" | "$OMIND" guard adapter --harness claude --omi-dir "$OMI_DIR"
+    rc=$?
+    # Only a clean allow(0) / block(2) is authoritative; anything else means the
+    # core didn't evaluate — fall through to the conservative last resort below.
+    case "$rc" in
+      0 | 2) exit "$rc" ;;
+    esac
+  fi
+  # No jq AND no working omind core: the policy genuinely couldn't be evaluated.
+  # Fail OPEN for non-Bash (so the host doesn't wedge on every Read/consult) but
+  # CLOSED for Bash (a destructive command must never run unchecked).
   if printf '%s' "$input" | grep -q '"tool_name"[[:space:]]*:[[:space:]]*"Bash"'; then
-    printf 'omi-guard: BLOCKING this Bash command (fail-closed: hard-rules could not be checked).\n' >&2
+    printf 'omi-guard: omind core unreachable too — BLOCKING this Bash command (fail-closed).\n' >&2
     exit 2
   fi
   exit 0

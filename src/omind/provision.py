@@ -1049,6 +1049,22 @@ def _diagnose_tools(tools: dict[str, str]) -> list[CheckResult]:
     return results
 
 
+def _diagnose_jq() -> CheckResult:
+    """#107: `jq` is the guard hook's fast-path parser, but no longer a hard
+    dependency — the hook falls back to `omind guard adapter` (pure Python) when
+    it is absent, so a missing `jq` is a performance warning, not a wedge. Kept
+    OUT of ``REQUIRED_TOOLS`` on purpose: adding it there would make `omind setup`
+    refuse on a jq-less box, which the fallback makes unnecessary."""
+    if shutil.which("jq") is not None:
+        return CheckResult("tool:jq", "ok", "jq found on PATH (guard fast path)")
+    return CheckResult(
+        "tool:jq",
+        "warn",
+        "jq not found — the OMI guard hook falls back to the slower pure-Python "
+        "path (`omind guard adapter`); install jq for the fast path",
+    )
+
+
 def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
     """The agent-independent checks: OMI folder, Obsidian config, seed files."""
     results: list[CheckResult] = []
@@ -1094,6 +1110,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
     fixed; ``warn`` means it'll work but something is off or merely cosmetic.
     """
     results = _diagnose_tools(Provisioner.REQUIRED_TOOLS)
+    results.append(_diagnose_jq())
     results.extend(_diagnose_omi_folder(config))
     omi = config.omi_dir
 
