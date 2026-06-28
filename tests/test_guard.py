@@ -103,6 +103,52 @@ def test_raw_sudo_blocked_but_fleet_sudo_and_opt_in_allowed() -> None:
     guard.clear_gate("sSudo")
 
 
+def test_escalation_keyword_only_matches_in_command_position() -> None:
+    # #98/#108: the keyword must be the COMMAND being run, not a substring in an
+    # argument, path, string, comment, or assignment value. These all USED to be
+    # blocked and must now pass.
+    guard.mark_consulted("sCmdPos")
+    allowed = [
+        'grep -rn "sudo" src/',  # grep argument
+        "cat /var/log/sudo.log",  # path component
+        "find . -name sudo.txt",  # filename
+        'git commit -m "fix sudo handling"',  # commit message
+        "pass show sudo/akclark",  # pass entry value (sudo guard only; see note)
+        "ls /etc/sudoers.d/",  # directory name
+        "FOO=sudo ./run.sh",  # env VALUE, not the command
+        "apt install sudo",  # installing the package
+        "man su",  # su as an argument
+        "cat doas.conf",  # doas in a filename
+        "tmux new -s run0",  # run0 as a session name
+        "git log --grep su",  # su as a grep pattern
+    ]
+    for cmd in allowed:
+        assert guard.decide({"command": cmd, "session": "sCmdPos"}).allow, cmd
+
+    # ...but a real escalation in command position still blocks, including after
+    # every shell separator and past a leading env-assignment.
+    blocked = [
+        "sudo -n true",
+        "sudo apt; echo done",
+        "echo x | sudo tee /etc/hosts",
+        "cd /tmp && sudo reboot",
+        "FOO=1 sudo apt update",
+        "make build\nsudo make install",
+        "$(sudo id)",
+        "(sudo reboot)",
+        "pkexec rm -rf /tmp/x",
+        "doas reboot",
+        'su -c "x" root',
+        "echo x | su",
+        "cd /x && pkexec y",
+    ]
+    for cmd in blocked:
+        v = guard.decide({"command": cmd, "session": "sCmdPos"})
+        assert not v.allow, cmd
+        assert v.rule_id in {"sudo-use-fleet-sudo", "privesc-alternatives"}, cmd
+    guard.clear_gate("sCmdPos")
+
+
 def test_run_guard_check_and_reset_exit_codes() -> None:
     guard.clear_gate("s6")
     blocked = guard.run_guard("check", io.StringIO(json.dumps({"command": "ls", "session": "s6"})))

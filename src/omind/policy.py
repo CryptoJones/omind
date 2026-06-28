@@ -42,6 +42,18 @@ TIER_GITHUB_PUSH = "github_push"
 TIER_SUDO = "sudo"
 TIER_LEARNED = "learned"
 
+#: Prefix that anchors a ``match="command"`` pattern to COMMAND POSITION: the
+#: command start, or immediately after a shell separator (``;`` ``&`` ``|``
+#: NEWLINE ``(`` backtick — single chars suffice since ``&&`` / ``||`` / ``$(``
+#: all END in a char in the class), skipping any leading ``VAR=val`` environment
+#: assignments. This is how a token like ``sudo`` is matched only when it is the
+#: command being run — not when it appears as a grep arg, a path segment, a
+#: filename, a commit message, or a ``pass show sudo/...`` value (the #98/#108
+#: false-positive class). It mirrors the leading-assignment idea already proven
+#: in ``guard._opt_in_satisfied``. Use ``[ \t]`` (not ``\s``) so the
+#: assignment-skip never crosses a newline into another command.
+_CMD_POSITION = r"(?:^|[\n;&|`(])[ \t]*(?:\w+=\S*[ \t]+)*"
+
 
 @dataclass
 class Rule:
@@ -54,6 +66,12 @@ class Rule:
     severity: str = SEVERITY_HARD
     tier: str = TIER_DESTRUCTIVE
     opt_in: str | None = None
+    #: ``"search"`` (default) matches ``pattern`` anywhere in the command.
+    #: ``"command"`` wraps ``pattern`` in :data:`_CMD_POSITION` so it only fires
+    #: when the token is in command position (start / after a shell separator,
+    #: past leading env-assignments) — for escalation-keyword rules that must not
+    #: false-positive on the keyword appearing as an argument or in a string.
+    match: str = "search"
     source: str = "seed"
     created: str = ""
     hits: int = 0
@@ -63,6 +81,8 @@ class Rule:
     verify: bool = False
 
     def compiled(self) -> re.Pattern[str]:
+        if self.match == "command":
+            return re.compile(_CMD_POSITION + r"(?:" + self.pattern + r")")
         return re.compile(self.pattern)
 
     def label(self) -> str:
@@ -185,7 +205,15 @@ SEED_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         id="sudo-use-fleet-sudo",
-        pattern=r"(?<![\w-])sudo\b",
+        # #98/#108: match `sudo` only in COMMAND POSITION (see _CMD_POSITION), not
+        # as any token in the string — so `grep sudo`, `cat /var/log/sudo.log`,
+        # `git commit -m "fix sudo"`, `pass show sudo/akclark`, and the sanctioned
+        # `fleet-sudo --entry akclark/sudo` no longer false-positive, while
+        # `sudo …`, `; sudo …`, `a && sudo …`, `a | sudo …`, `$(sudo …)`, and
+        # `FOO=1 sudo …` still block. `fleet-sudo` never matches (it is not a
+        # command-position `sudo` token), so no lookbehind is needed.
+        pattern=r"sudo\b",
+        match="command",
         message=(
             "raw sudo is blocked — run `fleet-sudo <cmd>` instead (it reads the "
             "fleet sudo password from pass; never guess the per-host entry, never "
@@ -198,10 +226,12 @@ SEED_RULES: tuple[Rule, ...] = (
     Rule(
         id="privesc-alternatives",
         # red-team #B1: only the literal `sudo` was blocked, so pkexec / doas /
-        # run0 / su walked straight past. Same tier + opt-in as raw sudo. The
-        # lookbehind keeps `sudo` (handled by its own rule) and words ending in
-        # these tokens from matching; `su` won't match inside `sudo`/`issue`/etc.
-        pattern=r"(?<![\w-])(pkexec|doas|run0|su)\b",
+        # run0 / su walked straight past. Same tier + opt-in as raw sudo, and the
+        # same command-position anchoring (#98/#108) so `man su`, `git log --grep
+        # su`, `cat doas.conf`, `tmux new -s run0` don't false-positive while
+        # `pkexec …` / `doas …` / `su -c … root` (at command position) still block.
+        pattern=r"(?:pkexec|doas|run0|su)\b",
+        match="command",
         message=(
             "raw privilege escalation is blocked — run `fleet-sudo <cmd>` instead "
             "(pkexec/doas/run0/su included). Deliberate raw escalation opts in with "
