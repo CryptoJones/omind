@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- **Guard no longer false-positives on an escalation keyword that isn't the command being run
+  (#98 / #108).** The `sudo-use-fleet-sudo` and `privesc-alternatives` policy rules matched
+  `sudo`/`su`/`pkexec`/`doas`/`run0` as a word-bounded token *anywhere* in the command, so benign
+  commands were blocked — `grep -rn "sudo" src/`, `cat /var/log/sudo.log`, `git commit -m "fix sudo"`,
+  `pass show sudo/akclark`, and even the sanctioned `fleet-sudo --entry akclark/sudo`. Both rules now
+  use a new `Rule.match="command"` mode that anchors the token to **command position** (command start
+  or after a shell separator `; & | newline ( \``, skipping leading `VAR=val` assignments) via the
+  shared `policy._CMD_POSITION` prefix. Real escalation in command position still blocks — `sudo …`,
+  `; sudo …`, `a && sudo …`, `a | sudo …`, `$(sudo …)`, `FOO=1 sudo …`, and the `pkexec/doas/run0/su`
+  set — and the `OMI_SUDO_OK=1` opt-in is unchanged. Accepted tradeoff: an escalation keyword passed
+  as an *argument* to another command (e.g. `ssh host sudo …`) is no longer caught — consistent with
+  this guard being a cooperative seatbelt, not a security boundary.
+
 ## [3.5.3] - 2026-06-28
 
 ### Fixed
