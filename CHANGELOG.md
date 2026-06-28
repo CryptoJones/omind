@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.4] - 2026-06-28
+
 ### Fixed
 
 - **`omind setup` no longer wedges the agent on a machine without `jq` (#107).** The OMI-compliance
