@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.3] - 2026-06-28
+
+### Fixed
+
+- **`LICENSE` was a paraphrased (non-canonical) Apache 2.0 — replaced with the verbatim text.** The
+  repo declared `Apache-2.0` (`pyproject.toml` + the OSI classifier) but the `LICENSE` body was a
+  reworded rendering missing the entire `1. Definitions` section and all formal term definitions
+  (150 lines vs. the canonical ~201). A reworded license is technically not the Apache 2.0 license and
+  breaks the SPDX `Apache-2.0` identifier and license scanners (GitHub, FOSSA, etc.). Swapped in the
+  verbatim canonical Apache License 2.0, preserving `Copyright 2026 Aaron K. Clark` in the appendix
+  notice. (Codeberg #91, GitHub #113)
+
 ## [3.5.2] - 2026-06-28
 
 ### Fixed
