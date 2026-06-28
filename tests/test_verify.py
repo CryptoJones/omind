@@ -40,6 +40,60 @@ def test_consult_target_extraction(tmp_path: Path) -> None:
     assert verify.consult_target(bash, omi) is None
 
 
+def test_index_and_scaffolding_reads_are_not_consults(tmp_path: Path) -> None:
+    """The vault TOC (index.md), MEMORY.md and the template are 'relevant to
+    everything' — reading one is the gate-dodge, not a consult. consult_target
+    must NOT recognize them (otherwise the PostToolUse verifier's record_consult
+    re-creates the sentinel and re-clears the gate a bash-only fix kept closed)."""
+    omi = _omi(tmp_path)
+    for name in ("index.md", "MEMORY.md", "Memory Template.md"):
+        (omi / name).write_text("## Recent Memories\n", encoding="utf-8")
+        event = {"tool_name": "Read", "tool_input": {"file_path": str(omi / name)}}
+        assert verify.consult_target(event, omi) is None, name
+    # a real content note under the OMI folder is still a consult
+    note = omi / "Codeberg.md"
+    note.write_text("# Codeberg\n", encoding="utf-8")
+    assert verify.consult_target(
+        {"tool_name": "Read", "tool_input": {"file_path": str(note)}}, omi
+    ) == ("read", str(note))
+
+
+def test_verify_consult_index_read_does_not_clear_the_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """End-to-end: reading the index with the gate CLOSED must not satisfy it via
+    the PostToolUse path — verify_consult returns None, records nothing, and leaves
+    the gate closed; a real content note read still clears it (the control)."""
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    omi = _omi(tmp_path)
+    (omi / "index.md").write_text("## Recent Memories\n- [[Whatever]]\n", encoding="utf-8")
+    guard.begin_turn("idx", "how to codeberg release push")
+    guard.clear_gate("idx")  # gate CLOSED — turn start, nothing consulted yet
+    verdict = verify.verify_consult(
+        {
+            "tool_name": "Read",
+            "session_id": "idx",
+            "tool_input": {"file_path": str(omi / "index.md")},
+        },
+        omi,
+    )
+    assert verdict is None  # not a consult
+    assert not guard.consulted_this_turn("idx")  # gate STILL closed — dodge defeated
+    assert guard.consults("idx") == []  # nothing recorded
+    # control: a real content note read DOES clear the gate
+    note = omi / "Codeberg.md"
+    note.write_text("# Codeberg\n\ncodeberg release push mirror workflow\n", encoding="utf-8")
+    verify.verify_consult(
+        {
+            "tool_name": "Read",
+            "session_id": "idx",
+            "tool_input": {"file_path": str(note)},
+        },
+        omi,
+    )
+    assert guard.consulted_this_turn("idx")  # a real consult clears the gate
+
+
 def test_judge_prefilter_high_and_low_skip_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     # If the model were called these would blow up; the prefilter must short-circuit.
     monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError))

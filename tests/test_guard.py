@@ -441,6 +441,47 @@ def test_hook_allows_when_core_allows(tmp_path: Path) -> None:
     assert _run_hook(hook, _BASH_EVENT) == 0  # a clean allow is still honoured
 
 
+def _read_event(omi: Path, name: str, sid: str) -> dict[str, object]:
+    return {
+        "tool_name": "Read",
+        "session_id": sid,
+        "tool_input": {"file_path": str(omi / name)},
+    }
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_index_read_does_not_clear_the_gate_but_real_note_does(tmp_path: Path) -> None:
+    """The index.md gate-dodge: a Read of the vault TOC / MEMORY.md / template
+    under the OMI folder is ALLOWED but must NOT clear the per-turn gate, while a
+    Read of a real content note still does. The core binary is never invoked on a
+    Read, so a nonexistent path is fine here."""
+    hook = _render_hook(tmp_path, "/nonexistent/omind")
+    omi = tmp_path / "OMI"  # matches __OMI_DIR__ substituted by _render_hook
+    for scaffold in ("index.md", "MEMORY.md", "Memory Template.md"):
+        guard.clear_gate("hidx")
+        assert _run_hook(hook, _read_event(omi, scaffold, "hidx")) == 0  # allowed through
+        assert not guard.consulted_this_turn("hidx"), f"{scaffold} wrongly cleared the gate"
+    # a real content note under the OMI folder still clears the gate
+    guard.clear_gate("hidx")
+    assert _run_hook(hook, _read_event(omi, "RealNote.md", "hidx")) == 0
+    assert guard.consulted_this_turn("hidx")
+    guard.clear_gate("hidx")
+
+
+def test_bash_adapters_exclude_the_index_from_the_gate_clear() -> None:
+    """Both bash adapters must NOT clear the gate on a Read of the vault TOC /
+    scaffolding (the index.md dodge); assert the basename exclusion is present and
+    stays in sync with the canonical set."""
+    files = importlib.resources.files("omind")
+    expected = 'index.md|MEMORY.md|"Memory Template.md"'
+    assert {Path(n).name for n in (paths.INDEX_FILENAME, paths.MEMORY_TEMPLATE_FILENAME)} | {
+        "MEMORY.md"
+    } == set(paths.NON_CONSULT_FILENAMES)
+    for name in ("omi-guard.sh", "omi-guard-hermes.sh"):
+        sh = files.joinpath(name).read_text(encoding="utf-8")
+        assert expected in sh, f"{name} must exclude the index/scaffolding from the gate clear"
+
+
 def test_widened_destructive_rules_close_red_team_gaps() -> None:
     """#B1: the bypasses the red-team found are now denied, while reads still pass."""
     guard.mark_consulted("b1")

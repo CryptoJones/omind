@@ -38,7 +38,19 @@ esac
 if [ "$tool" = "Read" ] || [ "$tool" = "read_file" ]; then
   fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // .extra.path // empty' 2>/dev/null)"
   case "$fp" in
-    *"$OMI_DIR"*) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+    *"$OMI_DIR"*)
+      # A Read under the OMI folder clears the gate — EXCEPT the vault's
+      # table-of-contents (index.md), the recent-memories MEMORY.md, and the
+      # template. Those are "relevant to everything", which made re-reading the
+      # index the gate-dodge: it cleared the gate without consulting a relevant
+      # note. Allow the Read through (it is harmless) but do NOT clear the gate —
+      # a REAL content note must be consulted. (Keep this basename list in sync
+      # with paths.NON_CONSULT_FILENAMES.)
+      case "${fp##*/}" in
+        index.md|MEMORY.md|"Memory Template.md") exit 0 ;;
+        *) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+      esac
+      ;;
   esac
 fi
 

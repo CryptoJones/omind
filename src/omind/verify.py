@@ -36,7 +36,7 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
-from omind import compliance, embed, guard, hooks, retrieve
+from omind import compliance, embed, guard, hooks, paths, retrieve
 
 #: Overlap at/above this is relevant with no model call; at/below the low mark is
 #: irrelevant with no model call; the band between is referred to the model.
@@ -206,7 +206,13 @@ def consult_target(event: dict[str, Any], omi_dir: Path | str) -> tuple[str, str
         return ("read", target)
     if tool == "Read":
         fp = str(ti.get("file_path") or "")
-        if fp and _under(fp, omi_dir):
+        # The vault's table-of-contents (index.md), the recent-memories MEMORY.md
+        # and the template are "relevant to everything" — reading one is the
+        # gate-dodge, not a real consult. Excluding them here is load-bearing, not
+        # cosmetic: verify_consult() calls guard.record_consult(), which WRITES the
+        # sentinel and so would re-clear the gate in PostToolUse even after the
+        # PreToolUse adapter declined to. Keep in sync with the bash adapters.
+        if fp and _under(fp, omi_dir) and Path(fp).name not in paths.NON_CONSULT_FILENAMES:
             return ("read", fp)
     return None
 

@@ -19,6 +19,18 @@ INDEX_FILENAME = "index.md"
 #: Files that are scaffolding, not memories — excluded from listings.
 RESERVED_FILENAMES = frozenset({MEMORY_TEMPLATE_FILENAME, INDEX_FILENAME})
 
+#: Basenames that live in (or alongside) the OMI folder but are the vault's
+#: table-of-contents / scaffolding, not a real memory: the derived ``index.md``
+#: ("Recent Memories" TOC), the legacy ``MEMORY.md`` recent-memories index, and
+#: the note template. Reading one is "relevant to everything", which is exactly
+#: why it was the consult-gate DODGE — an agent could clear the per-turn gate
+#: every turn by re-reading the index without ever consulting a task-relevant
+#: note. So a Read of one of these does NOT count as a gate-clearing OMI consult
+#: (the bash guard adapters and :func:`omind.verify.consult_target` both honor
+#: this). Superset of :data:`RESERVED_FILENAMES`. Keep the bash adapters'
+#: hard-coded basename list in sync with this set.
+NON_CONSULT_FILENAMES = RESERVED_FILENAMES | {"MEMORY.md"}
+
 #: Skill manifest name both Hermes and OpenClaw discover in a skill folder.
 AGENT_SKILL_FILENAME = "SKILL.md"
 

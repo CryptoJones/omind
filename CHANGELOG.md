@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.5.2] - 2026-06-28
+
+### Fixed
+
+- **Consult-gate dodge: reading the vault index (`index.md`) no longer clears the gate.** The per-turn
+  consult gate cleared on *any* Read under the OMI folder, including the auto-generated `index.md`
+  ("Recent Memories" table-of-contents), `MEMORY.md`, and the note template. Because the index is
+  "relevant to everything", an agent could satisfy the gate every turn by re-reading it without ever
+  consulting a task-relevant note — the relevance verifier flagged these as `off-topic-consult` but
+  only WARNED, never blocking. A Read of one of those scaffolding files is now allowed through but does
+  **not** clear the gate (like `ToolSearch`); a real content note (or an `mcp__omi__*` search/read)
+  must be consulted. Fixed in both bash adapters (`omi-guard.sh`, `omi-guard-hermes.sh`) on the
+  PreToolUse hot path AND in `verify.consult_target`, since the PostToolUse verifier's
+  `record_consult` would otherwise re-create the sentinel and re-clear the gate. The excluded basenames
+  live in the new `paths.NON_CONSULT_FILENAMES` (superset of `RESERVED_FILENAMES`).
+
 ## [3.5.1] - 2026-06-27
 
 ### Fixed
