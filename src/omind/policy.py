@@ -108,25 +108,6 @@ SEED_RULES: tuple[Rule, ...] = (
         ),
     ),
     Rule(
-        id="gh-pr-create-merge",
-        # Owner-aware: a PR to a CryptoJones repo must go to Codeberg, so BLOCK it —
-        # but a PR to a THIRD-PARTY OSS repo the owner doesn't control is legitimate.
-        # The trailing negative lookahead fails (→ rule doesn't match → ALLOW) only
-        # when an explicit `--repo <non-CryptoJones>/…` is named; a bare
-        # `gh pr create|merge` (which defaults to the upstream, possibly a CryptoJones
-        # repo) stays BLOCKED as the safe default.
-        pattern=(
-            r"\bgh\s+pr\s+(create|merge)\b"
-            r"(?![^|;&]*--repo\s+(?!(?i:CryptoJones)/)[\w.-]+/)"
-        ),
-        message=(
-            "GitHub never gets a PR to a repo you own. PR + merge happen on Codeberg; "
-            "GitHub mirrors Codeberg's exact commit. Read OMI: codeberg-authoritative. "
-            "A third-party OSS PR is allowed when you name --repo <owner>/<repo> "
-            "(owner other than CryptoJones)."
-        ),
-    ),
-    Rule(
         id="gh-repo-delete",
         pattern=r"\bgh\s+repo\s+delete\b",
         message=(
@@ -160,48 +141,6 @@ SEED_RULES: tuple[Rule, ...] = (
             "path; typed-name confirmation only. Read OMI: Operational Rules - Git "
             "Repos and Secrets."
         ),
-    ),
-    Rule(
-        id="gh-api-pr-create",
-        # red-team #B1: `gh pr create` is blocked, but the same PR could be opened
-        # via `gh api repos/o/r/pulls -f ...`. Match a WRITE to .../pulls (a -f field
-        # or an explicit POST); a plain GET listing has neither, so reads pass.
-        # Owner-aware: only a write to a CryptoJones-owned repo's /pulls is blocked
-        # (those go to Codeberg); a write to a third-party owner's /pulls is a
-        # legitimate OSS contribution and passes.
-        pattern=(
-            r"gh\s+api(?=[^|;&]*repos/(?i:CryptoJones)/[^|;&]*/pulls)"
-            r"(?=[^|;&]*(?:-f\b|--field\b|--method\s*POST|-X\s*POST))"
-        ),
-        message=(
-            "GitHub never gets a PR to a repo you own — not via `gh pr create` nor the "
-            "API. PR + merge happen on Codeberg; GitHub mirrors Codeberg's exact "
-            "commit. Read OMI: codeberg-authoritative. A third-party OSS PR via "
-            "`gh api repos/<owner>/<repo>/pulls` is allowed for owners other than "
-            "CryptoJones."
-        ),
-    ),
-    Rule(
-        id="github-https-push",
-        pattern=r"(push|remote\s+(set-url|add))[^|;&]*https://[^\s]*github\.com",
-        message=(
-            "no HTTPS-GitHub push/remote-set. For a deliberate mirror of Codeberg's "
-            "exact commit, prefix OMI_PUSH_GITHUB=1 and use the gh-YOLO pass "
-            "credential helper. Read OMI: github-auth-ssh, codeberg-authoritative."
-        ),
-        tier=TIER_GITHUB_PUSH,
-        opt_in="OMI_PUSH_GITHUB=1",
-    ),
-    Rule(
-        id="github-push-discretionary",
-        pattern=r"\bgit\s+push\b[^|;&]*github",
-        message=(
-            "no discretionary GitHub push. Codeberg is the source of truth (push it "
-            "first). A deliberate mirror push opts in with OMI_PUSH_GITHUB=1. "
-            "Read OMI: codeberg-authoritative."
-        ),
-        tier=TIER_GITHUB_PUSH,
-        opt_in="OMI_PUSH_GITHUB=1",
     ),
     Rule(
         id="sudo-use-fleet-sudo",

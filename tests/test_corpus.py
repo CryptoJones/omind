@@ -21,8 +21,8 @@ def test_examples_carry_deny_and_the_rule_reason() -> None:
     compliance.log_event(
         compliance.KIND_DECISION,
         tool="Bash",
-        command="gh pr create --title x",
-        rule_id="gh-pr-create-merge",
+        command="gh repo delete x/y",
+        rule_id="gh-repo-delete",
         severity="hard",
         outcome="deny",
     )
@@ -30,10 +30,10 @@ def test_examples_carry_deny_and_the_rule_reason() -> None:
     assert len(examples) == 1
     msgs = examples[0]["messages"]
     assert msgs[0]["role"] == "system"
-    assert "gh pr create" in msgs[1]["content"]
+    assert "gh repo delete" in msgs[1]["content"]
     assert msgs[2]["content"].startswith("DENY —")
-    assert "Codeberg" in msgs[2]["content"]  # the seed rule's reason
-    assert examples[0]["meta"]["rule_id"] == "gh-pr-create-merge"
+    assert "Repos and Secrets" in msgs[2]["content"]  # the seed rule's reason
+    assert examples[0]["meta"]["rule_id"] == "gh-repo-delete"
 
 
 def test_off_topic_consult_gets_a_synthetic_reason() -> None:

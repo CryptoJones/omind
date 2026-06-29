@@ -12,15 +12,23 @@ from omind import guard, policy
 def test_seed_rules_are_loaded_even_with_no_file() -> None:
     rules = policy.load_policy()
     ids = {r.id for r in rules}
-    assert "gh-pr-create-merge" in ids
-    assert "github-https-push" in ids
+    # The forge rules were removed (those actions are now allowed); only the six
+    # destructive / privilege-escalation safety rules remain in the seed set.
+    assert ids == {
+        "gh-auth-setup-git",
+        "gh-repo-delete",
+        "gh-api-repo-delete",
+        "curl-api-repo-delete",
+        "sudo-use-fleet-sudo",
+        "privesc-alternatives",
+    }
     assert policy.load_learned() == []  # nothing on disk yet
 
 
 def test_seed_rule_labels_preserve_wording() -> None:
     by_id = {r.id: r for r in policy.SEED_RULES}
-    assert by_id["gh-pr-create-merge"].label() == "hard"  # destructive -> severity
-    assert by_id["github-https-push"].label() == "github-push"  # tier wording
+    assert by_id["gh-repo-delete"].label() == "hard"  # destructive -> severity
+    assert by_id["sudo-use-fleet-sudo"].label() == "sudo"  # tier wording
 
 
 def test_append_learned_rule_roundtrips_and_is_idempotent() -> None:
@@ -61,7 +69,7 @@ def test_corrupt_policy_file_is_ignored() -> None:
     policy.policy_path().parent.mkdir(parents=True, exist_ok=True)
     policy.policy_path().write_text("{not json", encoding="utf-8")
     assert policy.load_learned() == []  # never raises
-    assert any(r.id == "gh-pr-create-merge" for r in policy.load_policy())
+    assert any(r.id == "gh-repo-delete" for r in policy.load_policy())
 
 
 def test_loader_drops_corrupt_entries_and_unknown_keys() -> None:

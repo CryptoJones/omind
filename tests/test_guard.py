@@ -36,7 +36,7 @@ def test_omi_consult_is_allowed_and_sets_the_per_turn_sentinel() -> None:
 
 def test_hard_block_fires_even_when_consulted() -> None:
     guard.mark_consulted("s2")  # gate is satisfied, yet a hard rule still wins
-    verdict = guard.decide({"tool": "Bash", "command": "gh pr merge 9", "session": "s2"})
+    verdict = guard.decide({"tool": "Bash", "command": "gh repo delete x/y", "session": "s2"})
     assert not verdict.allow
     assert "hard" in verdict.reason
     guard.clear_gate("s2")
@@ -55,9 +55,6 @@ def test_full_destructive_set_is_blocked() -> None:
     guard.mark_consulted("s4")
     for cmd in (
         "gh auth setup-git",
-        "git push https://github.com/x/y.git main",
-        "git push github main",
-        "gh pr create --title x",
         "gh repo delete x/y",
         "gh api -X DELETE repos/x/y",
     ):
@@ -70,22 +67,6 @@ def test_codeberg_push_is_allowed_after_consult() -> None:
     cmd = "git push git@codeberg.org:CryptoJones/omind.git main"
     assert guard.decide({"command": cmd, "session": "s5"}).allow
     guard.clear_gate("s5")
-
-
-def test_github_push_is_opt_in_not_hard() -> None:
-    guard.mark_consulted("s7")
-    bare = "git push https://x@github.com/CryptoJones/omind.git main"
-    assert not guard.decide({"command": bare, "session": "s7"}).allow  # blocked by default
-    optin = "OMI_PUSH_GITHUB=1 " + bare
-    assert guard.decide({"command": optin, "session": "s7"}).allow  # deliberate push allowed
-    # the opt-in does NOT bypass the absolute hard rules
-    assert not guard.decide(
-        {"command": "OMI_PUSH_GITHUB=1 gh pr create --title x", "session": "s7"}
-    ).allow
-    assert not guard.decide(
-        {"command": "OMI_PUSH_GITHUB=1 gh repo delete x/y", "session": "s7"}
-    ).allow
-    guard.clear_gate("s7")
 
 
 def test_raw_sudo_blocked_but_fleet_sudo_and_opt_in_allowed() -> None:
@@ -301,7 +282,7 @@ def test_is_omi_consult_with_target_is_recorded() -> None:
 def test_guard_policy_and_status(capsys: pytest.CaptureFixture[str]) -> None:
     assert guard.run_guard("policy") == 0
     out = capsys.readouterr().out
-    assert "gh-pr-create-merge" in out and "seed" in out
+    assert "gh-repo-delete" in out and "seed" in out
     assert guard.run_guard("status") == 0
     status = capsys.readouterr().out
     assert "hermes" in status and "opencode" in status and "claude" in status
@@ -427,20 +408,6 @@ def test_opt_in_must_be_a_real_leading_assignment_not_a_substring() -> None:
         }
     ).allow
     guard.clear_gate("optf")
-
-
-def test_opt_in_is_recognized_on_a_newline_led_line_in_a_multiline_command() -> None:
-    """3.0.2 regression: a newline is a shell command boundary, so an opt-in assignment
-    at the START of a line inside a multi-line script is a real leading assignment and
-    must satisfy — the 2.46.0 separator class omitted `\\n` and wrongly re-blocked it."""
-    guard.mark_consulted("mlopt")
-    multiline = "git fetch codeberg main\n  OMI_PUSH_GITHUB=1 git push --force github main"
-    assert guard.decide({"command": multiline, "session": "mlopt"}).allow
-    # the forgery guard still holds: a mid-line (space-led) token is NOT a leading assignment
-    assert not guard.decide(
-        {"command": "git push github main\necho OMI_PUSH_GITHUB=1", "session": "mlopt"}
-    ).allow
-    guard.clear_gate("mlopt")
 
 
 def _render_hook(tmp_path: Path, omind_bin: str) -> Path:
@@ -604,55 +571,19 @@ def test_widened_destructive_rules_close_red_team_gaps() -> None:
     blocked = [
         "gh api repos/acme/widget -X DELETE",  # path-before-method reorder
         "curl -X DELETE https://api.github.com/repos/acme/widget",  # curl, not gh
-        # PR via the API to an OWNED (CryptoJones) repo is still blocked; the owner
-        # must use Codeberg. (A third-party owner here would now ALLOW — covered by
-        # test_third_party_pr_allowed_owned_pr_blocked.)
-        "gh api repos/CryptoJones/omind/pulls -f title=x -f head=y",  # PR via the API
         "pkexec rm -rf /tmp/x",
         "doas reboot",
         "su -c 'rm -rf /tmp/x' root",
     ]
     for cmd in blocked:
         assert not guard.decide({"command": cmd, "session": "b1"}).allow, cmd
-    # a GET listing of pulls (no write field / POST) is NOT a PR create -> allowed
+    # a GitHub API read (no DELETE) is not a destructive rule -> allowed
     assert guard.decide({"command": "gh api repos/acme/widget/pulls", "session": "b1"}).allow
     # privesc still has the deliberate opt-in (a real leading assignment, #2)
     assert guard.decide(
         {"command": "OMI_SUDO_OK=1 pkexec systemctl restart x", "session": "b1"}
     ).allow
     guard.clear_gate("b1")
-
-
-def test_third_party_pr_allowed_owned_pr_blocked() -> None:
-    """The GitHub-PR hard-block is owner-aware: a PR to a repo the owner does NOT
-    control (third-party OSS) is allowed, while a PR to a CryptoJones-owned repo
-    still goes to Codeberg (blocked). A bare `gh pr create|merge` (no `--repo`)
-    defaults to the upstream and stays blocked as the safe default."""
-    guard.mark_consulted("b2")
-
-    def allowed(cmd: str) -> bool:
-        return guard.decide({"command": cmd, "session": "b2"}).allow
-
-    # third-party OSS PRs — ALLOWED (must name --repo <non-CryptoJones>/<repo>)
-    assert allowed("gh pr create --repo yurukusa/claude-code-hooks")
-    assert allowed("gh pr merge --repo yurukusa/x")
-    assert allowed("gh pr create --title x --repo yurukusa/y")
-    # PR to an owned (CryptoJones) repo — BLOCKED (Codeberg-only), case-insensitive
-    assert not allowed("gh pr create --repo CryptoJones/omind")
-    assert not allowed("gh pr create --repo cryptojones/omind")
-    # bare create/merge (no --repo) defaults to the upstream — BLOCKED
-    assert not allowed("gh pr create")
-    assert not allowed("gh pr merge")
-
-    # gh api .../pulls writes: owner-aware the same way
-    assert allowed(
-        "gh api repos/yurukusa/claude-code-hooks/pulls -f title=x -f head=y -f base=main"
-    )
-    assert not allowed("gh api --method POST repos/CryptoJones/omind/pulls -f title=x")
-    # a GET listing of a third-party repo's pulls (no write) is unchanged — allowed
-    assert allowed("gh api repos/yurukusa/x/pulls")
-
-    guard.clear_gate("b2")
 
 
 def test_guard_status_flags_agent_writable_config(capsys: pytest.CaptureFixture[str]) -> None:

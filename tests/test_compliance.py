@@ -64,11 +64,11 @@ def test_detector_flags_hard_rule_escape() -> None:
     event = {
         "tool_name": "Bash",
         "session_id": "x",
-        "tool_input": {"command": "gh pr create --title x"},
+        "tool_input": {"command": "gh repo delete x/y"},
     }
     assert compliance.record_post_tool(event) == 1
     rec = compliance.read_events()[-1]
-    assert rec["rule_id"] == "gh-pr-create-merge"
+    assert rec["rule_id"] == "gh-repo-delete"
     assert rec["outcome"] == "escaped"  # the block-path let a hard rule through
     assert rec["severity"] == "hard"
 
@@ -116,7 +116,7 @@ def test_guard_check_logs_policy_deny_but_not_gate_deny() -> None:
 
 def test_post_tool_hook_runs_the_detector(tmp_path: object) -> None:
     event = json.dumps(
-        {"tool_name": "Bash", "session_id": "h", "tool_input": {"command": "gh pr merge 1"}}
+        {"tool_name": "Bash", "session_id": "h", "tool_input": {"command": "gh repo delete a/b"}}
     )
     hooks.run_hook("PostToolUse", tmp_path, stdin=io.StringIO(event))  # type: ignore[arg-type]
-    assert compliance.read_events()[-1]["rule_id"] == "gh-pr-create-merge"
+    assert compliance.read_events()[-1]["rule_id"] == "gh-repo-delete"

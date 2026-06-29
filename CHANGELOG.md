@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.6.0] - 2026-06-28
+
+### Changed
+
+- **Forge policy reversed — GitHub is now authoritative; Codeberg is a live mirror.** The guard's
+  four forge deny-rules — `gh-pr-create-merge`, `gh-api-pr-create`, `github-https-push`, and
+  `github-push-discretionary` — are removed from `SEED_RULES`. PRs, merges, and pushes to
+  CryptoJones-owned GitHub repos are now allowed (previously hard-blocked, or gated behind
+  `OMI_PUSH_GITHUB=1`, under the old Codeberg-authoritative policy). The six destructive /
+  privilege-escalation safety rules (`gh-repo-delete`, `gh-api-repo-delete`, `curl-api-repo-delete`,
+  `gh-auth-setup-git`, `sudo-use-fleet-sudo`, `privesc-alternatives`) are unchanged. Rationale:
+  Codeberg's 100-repo account cap demoted it to a mirror; GitHub natively hosts Dependabot, CodeQL,
+  and push secret-scanning, and Dependabot / GitHub-only PRs had no merge path under the old guard.
+
 ## [3.5.4] - 2026-06-28
 
 ### Fixed
