@@ -14,6 +14,7 @@ entire eof-guard/hang class of the old obsidian-mcp (issue #49).
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import sys
 from pathlib import Path
@@ -59,6 +60,32 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     store = OmiStore(omi_dir, node_id=node_id)
 
     mcp = FastMCP(SERVER_NAME, instructions=_INSTRUCTIONS)
+
+    # The five graph tools each rebuilt the whole [[wikilink]] graph from disk
+    # (a full-vault read+parse) on every call. Cache it, invalidated by a cheap
+    # signature over the note files' (count, total size, newest mtime) — so a
+    # burst of graph queries costs one parse, and any write busts the cache.
+    graph_cache: dict[str, object] = {}
+
+    def _vault_signature() -> tuple[int, int, int]:
+        count = size = mtime = 0
+        with contextlib.suppress(OSError):
+            for p in store.omi_dir.glob("*.md"):
+                try:
+                    st = p.stat()
+                except OSError:
+                    continue
+                count += 1
+                size += st.st_size
+                mtime = max(mtime, st.st_mtime_ns)
+        return (count, size, mtime)
+
+    def graph_for() -> graph.Graph:
+        sig = _vault_signature()
+        if graph_cache.get("sig") != sig:
+            graph_cache["sig"] = sig
+            graph_cache["graph"] = graph.build_graph(store.omi_dir)
+        return graph_cache["graph"]  # type: ignore[return-value]
 
     @mcp.tool(
         name="read-note",
@@ -204,7 +231,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     def graph_neighbors(
         name: str, depth: int = 1, direction: str = "both"
     ) -> list[dict[str, object]]:
-        g = graph.build_graph(store.omi_dir)
+        g = graph_for()
         return [
             {"filename": filename, "distance": distance}
             for filename, distance in graph.neighbors(
@@ -220,7 +247,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         ),
     )
     def graph_path(source: str, target: str) -> dict[str, object]:
-        g = graph.build_graph(store.omi_dir)
+        g = graph_for()
         return {"path": graph.shortest_path(g, source, target)}
 
     @mcp.tool(
@@ -230,7 +257,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         ),
     )
     def graph_orphans() -> list[str]:
-        return graph.orphans(graph.build_graph(store.omi_dir))
+        return graph.orphans(graph_for())
 
     @mcp.tool(
         name="graph-dangling",
@@ -239,7 +266,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         ),
     )
     def graph_dangling() -> list[dict[str, str]]:
-        g = graph.build_graph(store.omi_dir)
+        g = graph_for()
         return [{"source": src, "target": target} for src, target in graph.dangling_links(g)]
 
     @mcp.tool(
@@ -247,7 +274,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         description="Whole-graph counts: notes, links, orphans, and dangling links.",
     )
     def graph_stats() -> dict[str, int]:
-        return graph.stats(graph.build_graph(store.omi_dir))
+        return graph.stats(graph_for())
 
     return mcp
 

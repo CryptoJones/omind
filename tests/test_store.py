@@ -776,6 +776,31 @@ def test_non_utf8_note_does_not_break_listing(store: OmiStore) -> None:
     assert store.search("fine")  # search still works
 
 
+def test_list_notes_is_threadsafe_under_concurrency(store: OmiStore) -> None:
+    """The web app runs list_notes() on FastAPI's threadpool; concurrent calls
+    must not raise 'dictionary changed size during iteration' (#130)."""
+    import threading
+
+    for i in range(40):
+        store.create_note(NoteFields(title=f"Note {i:02d}", summary="s"))
+    errors: list[Exception] = []
+
+    def hammer() -> None:
+        try:
+            for _ in range(60):
+                store.list_notes()
+                store.list_notes(include_disabled=True)
+        except Exception as exc:  # noqa: BLE001 — the point is to catch the race
+            errors.append(exc)
+
+    threads = [threading.Thread(target=hammer) for _ in range(8)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert not errors, errors[:3]
+
+
 def test_disable_ignores_disabled_bullet_in_details(mesh_store: OmiStore) -> None:
     """A '- Disabled: true' line in Details must not fool disable/parse (Metadata-scoped)."""
     name = mesh_store.create_note(
