@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.2] - 2026-07-01
+
+### Fixed
+
+- **Codex setup now fully bootstraps OMI memory and trusts omind-owned hooks.**
+  `omind setup --agent codex` now installs the `SessionStart` OMI priming hook,
+  writes a managed global `~/.codex/AGENTS.md` pointer back to OMI, and persists
+  Codex `[hooks.state]` trust hashes for the omind-owned guard and priming hooks.
+  The trust hash is computed per machine from the exact hook definition (including
+  the local `omind` path), with known-vector tests to catch upstream Codex hash
+  changes before a release ships.
+
 ## [3.7.1] - 2026-07-01
 
 ### Fixed

@@ -20,6 +20,7 @@ entry it owns, refuse to overwrite a file it cannot parse.
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.resources
 import json
 import os
@@ -147,9 +148,26 @@ def codex_config_path() -> Path:
     return codex_config_dir() / "config.toml"
 
 
+def codex_agents_path() -> Path:
+    """Codex's global instructions file."""
+    return codex_config_dir() / "AGENTS.md"
+
+
 #: Substring identifying omind's own Codex guard hook command, so a re-run finds
 #: and replaces only our entry (and never duplicates) inside the user's hooks.json.
 CODEX_GUARD_MARKER = "guard adapter --harness codex"
+CODEX_BOOTSTRAP_START = "<!-- omind:codex-bootstrap:start -->"
+CODEX_BOOTSTRAP_END = "<!-- omind:codex-bootstrap:end -->"
+CODEX_HOOK_EVENT_STATE_KEYS = {
+    "PreToolUse": "pre_tool_use",
+    "PermissionRequest": "permission_request",
+    "PostToolUse": "post_tool_use",
+    "PreCompact": "pre_compact",
+    "PostCompact": "post_compact",
+    "SessionStart": "session_start",
+    "SubagentStart": "subagent_start",
+    "SubagentStop": "subagent_stop",
+}
 CODEX_HOOK_EVENTS = (
     "PreToolUse",
     "PermissionRequest",
@@ -160,6 +178,15 @@ CODEX_HOOK_EVENTS = (
     "SubagentStart",
     "SubagentStop",
 )
+
+
+def _codex_omind_hook(event: str, hook: dict[str, Any]) -> bool:
+    command = str(hook.get("command", ""))
+    if event in {"PreToolUse", "PermissionRequest"}:
+        return CODEX_GUARD_MARKER in command
+    if event == "SessionStart":
+        return HOOK_MARKER in command
+    return False
 
 
 def gemini_config_dir() -> Path:
@@ -933,7 +960,7 @@ class OpenCodeProvisioner(AgentProvisioner):
 
 
 class CodexProvisioner(AgentProvisioner):
-    """Wire OpenAI Codex CLI into both the OMI guard and the ``omi`` MCP server.
+    """Wire OpenAI Codex CLI into OMI memory, guard hooks, and the ``omi`` MCP server.
 
     Codex (>= 0.117) adopted Claude-style ``PreToolUse`` / ``PermissionRequest``
     command hooks under the top-level ``hooks`` key in ``~/.codex/hooks.json``
@@ -944,6 +971,10 @@ class CodexProvisioner(AgentProvisioner):
     ``permissionDecision: deny`` / ``decision.behavior: deny`` shape. Codex's
     trust model records hooks by hash and SKIPS untrusted ones, so the user must
     review + trust the hook once via ``/hooks`` — that step can't be scripted.
+
+    omind also mounts ``omind hook SessionStart`` so Codex gets the same OMI
+    priming content as Claude Code. A managed global ``AGENTS.md`` block points
+    fresh Codex sessions at OMI even before the hook is trusted.
 
     Separately, the ``omi`` MCP server (the actual note tools — search-vault,
     create-note, etc.) is registered into ``~/.codex/config.toml`` under
@@ -957,9 +988,8 @@ class CodexProvisioner(AgentProvisioner):
     AGENT_LABEL = "Codex CLI"
     INSTALL_HINT = "Install Codex CLI (`npm i -g @openai/codex`, or the snap), then re-run."
     DONE_MESSAGE = (
-        "Done. In Codex run `/hooks` and TRUST the omind guard hook — Codex skips "
-        "untrusted hooks until reviewed (requires Codex >= 0.117). Restart Codex to "
-        "load the OMI memory tools registered in config.toml."
+        "Done. Restart Codex to load the OMI memory tools, trusted omind hooks, "
+        "and the global AGENTS.md bootstrap."
     )
 
     def agent_root(self) -> Path:
@@ -967,7 +997,10 @@ class CodexProvisioner(AgentProvisioner):
 
     def integrate(self) -> None:
         self.install_guard()
+        self.install_priming()
         self.register_mcp()
+        self.install_hook_trust()
+        self.install_bootstrap()
 
     def _guard_hook_group(self) -> dict[str, Any]:
         """One Claude-schema matcher group running the omind codex adapter on all
@@ -1042,6 +1075,33 @@ class CodexProvisioner(AgentProvisioner):
         else:
             self.log(f"  OMI guard hooks already installed in {path}")
 
+    def install_priming(self) -> None:
+        """Merge omind's ``SessionStart`` priming hook into Codex's hooks file,
+        replacing only omind's own prior entry and preserving user hooks."""
+        path = codex_hooks_path()
+        data, hooks_cfg = self._read_hooks_file()
+        command = self._omind_hook_command("SessionStart")
+        desired = {"hooks": [{"type": "command", "command": command, "timeout": 15}]}
+
+        groups = hooks_cfg.get("SessionStart")
+        existing = groups if isinstance(groups, list) else []
+        kept = [
+            g
+            for g in existing
+            if not (isinstance(g, dict) and HOOK_MARKER in json.dumps(g))
+        ]
+        merged = kept + [desired]
+        if merged == existing and not self.config.force:
+            self.log(f"  OMI priming hook already installed in {path}")
+            return
+
+        hooks_cfg["SessionStart"] = merged
+        data["hooks"] = hooks_cfg
+        self._record(f"install OMI priming hook (SessionStart) in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+
     def _guard_wired(self) -> bool:
         try:
             _root, hooks_cfg = self._read_hooks_file()
@@ -1060,11 +1120,24 @@ class CodexProvisioner(AgentProvisioner):
             return
         if self._guard_wired():
             self.log(f"  verified: OMI guard wired into Codex ({codex_hooks_path()})")
-            self.log("  NEXT: run `/hooks` in Codex and TRUST the omind hook.")
         else:
             self.log(
                 "  NOTE: could not confirm the OMI guard in Codex's hooks.json; "
                 "re-run with --force."
+            )
+        if self._priming_wired():
+            self.log(f"  verified: OMI priming wired into Codex ({codex_hooks_path()})")
+        else:
+            self.log(
+                "  NOTE: could not confirm OMI SessionStart priming in Codex's "
+                "hooks.json; re-run with --force."
+            )
+        if self._hook_trust_installed():
+            self.log(f"  verified: omind Codex hooks trusted in {codex_config_path()}")
+        else:
+            self.log(
+                "  NOTE: could not confirm persisted trust for omind Codex hooks; "
+                "re-run with --force or use `/hooks`."
             )
         if self.registered_mcp_entry() == self.desired_mcp_entry():
             self.log(f"  verified: MCP server '{self.config.server_name}' wired into Codex "
@@ -1074,6 +1147,198 @@ class CodexProvisioner(AgentProvisioner):
                 "  NOTE: could not confirm the MCP server in Codex's config.toml; "
                 "re-run with --force."
             )
+        if self.bootstrap_installed():
+            self.log(f"  verified: OMI bootstrap pointer installed in {codex_agents_path()}")
+        else:
+            self.log(
+                "  NOTE: could not confirm the OMI bootstrap pointer in Codex's "
+                "AGENTS.md; re-run with --force."
+            )
+
+    # -- global AGENTS.md bootstrap ----------------------------------------
+
+    def _priming_wired(self) -> bool:
+        try:
+            _root, hooks_cfg = self._read_hooks_file()
+        except ProvisionError:
+            return False
+        return any(
+            isinstance(g, dict) and HOOK_MARKER in json.dumps(g)
+            for g in (hooks_cfg.get("SessionStart") or [])
+        )
+
+    # -- persisted hook trust ----------------------------------------------
+
+    @staticmethod
+    def hook_trust_hash(event: str, group: dict[str, Any]) -> str:
+        """Return Codex's current trusted_hash for one matcher group.
+
+        This mirrors Codex's `version_for_toml` canonical JSON hash over the
+        event name plus matcher group. It intentionally normalizes command hook
+        defaults that Codex's serde layer contributes (`async = false`) so the
+        hash matches what Codex records through `/hooks`.
+        """
+        event_name = CODEX_HOOK_EVENT_STATE_KEYS[event]
+        identity: dict[str, Any] = {"event_name": event_name}
+        matcher = group.get("matcher")
+        if matcher is not None:
+            identity["matcher"] = matcher
+
+        hooks: list[dict[str, Any]] = []
+        for raw in group.get("hooks") or []:
+            if not isinstance(raw, dict):
+                continue
+            hook_type = raw.get("type")
+            if hook_type == "command":
+                item: dict[str, Any] = {
+                    "async": bool(raw.get("async", False)),
+                    "command": raw.get("command", ""),
+                    "type": "command",
+                }
+                if raw.get("timeout") is not None:
+                    item["timeout"] = raw["timeout"]
+                if raw.get("commandWindows") is not None:
+                    item["commandWindows"] = raw["commandWindows"]
+                if raw.get("command_windows") is not None:
+                    item["commandWindows"] = raw["command_windows"]
+                if raw.get("statusMessage") is not None:
+                    item["statusMessage"] = raw["statusMessage"]
+                hooks.append(item)
+            elif hook_type in {"prompt", "agent"}:
+                hooks.append({"type": hook_type})
+        identity["hooks"] = hooks
+
+        encoded = json.dumps(identity, sort_keys=True, separators=(",", ":")).encode()
+        return "sha256:" + hashlib.sha256(encoded).hexdigest()
+
+    @staticmethod
+    def hook_state_key(event: str, group_index: int, hook_index: int) -> str:
+        event_name = CODEX_HOOK_EVENT_STATE_KEYS[event]
+        return f"{codex_hooks_path()}:{event_name}:{group_index}:{hook_index}"
+
+    def omind_hook_trust_entries(self) -> dict[str, str]:
+        try:
+            _root, hooks_cfg = self._read_hooks_file()
+        except ProvisionError:
+            return {}
+        entries: dict[str, str] = {}
+        for event in ("PreToolUse", "PermissionRequest", "SessionStart"):
+            groups = hooks_cfg.get(event)
+            if not isinstance(groups, list):
+                continue
+            for group_index, group in enumerate(groups):
+                if not isinstance(group, dict):
+                    continue
+                hooks = group.get("hooks")
+                if not isinstance(hooks, list):
+                    continue
+                if not any(isinstance(h, dict) and _codex_omind_hook(event, h) for h in hooks):
+                    continue
+                trusted_hash = self.hook_trust_hash(event, group)
+                for hook_index, hook in enumerate(hooks):
+                    if isinstance(hook, dict) and _codex_omind_hook(event, hook):
+                        entries[self.hook_state_key(event, group_index, hook_index)] = trusted_hash
+        return entries
+
+    def _hook_trust_installed(self) -> bool:
+        try:
+            doc = self._read_toml_config()
+        except ProvisionError:
+            return False
+        hooks = doc.get("hooks")
+        state = hooks.get("state") if isinstance(hooks, dict) else None
+        if not isinstance(state, dict):
+            return False
+        for key, trusted_hash in self.omind_hook_trust_entries().items():
+            entry = state.get(key)
+            if not isinstance(entry, dict) or entry.get("trusted_hash") != trusted_hash:
+                return False
+        return True
+
+    def install_hook_trust(self) -> None:
+        """Persist trust for omind-owned Codex hooks in ``config.toml``.
+
+        This writes only the entries whose hook command is owned by omind. The
+        hash is computed from the exact hook definition on this machine, so path
+        differences across hosts are handled at install time.
+        """
+        desired = self.omind_hook_trust_entries()
+        if not desired:
+            return
+
+        path = codex_config_path()
+        doc = self._read_toml_config()
+        hooks = doc.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = tomlkit.table()
+            doc["hooks"] = hooks
+        state = hooks.get("state")
+        if not isinstance(state, dict):
+            state = tomlkit.table()
+            hooks["state"] = state
+
+        changed = False
+        for key, trusted_hash in desired.items():
+            entry = state.get(key)
+            if isinstance(entry, dict) and entry.get("trusted_hash") == trusted_hash:
+                continue
+            new_entry = tomlkit.table()
+            new_entry["trusted_hash"] = trusted_hash
+            state[key] = new_entry
+            changed = True
+
+        if not changed and not self.config.force:
+            self.log(f"  omind Codex hooks already trusted in {path}")
+            return
+
+        self._record(f"persist trust for omind Codex hooks in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+
+    def bootstrap_content(self) -> str:
+        return seeds.CODEX_AGENTS_BOOTSTRAP_TEMPLATE.format(
+            vault=self.config.vault,
+            folder=self.config.folder,
+            omi_dir=self.config.omi_dir,
+        )
+
+    def bootstrap_installed(self) -> bool:
+        path = codex_agents_path()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return CODEX_BOOTSTRAP_START in text and CODEX_BOOTSTRAP_END in text
+
+    def install_bootstrap(self) -> None:
+        """Install/update the managed OMI bootstrap block in Codex's global
+        ``AGENTS.md`` while preserving user-authored text before and after it."""
+        path = codex_agents_path()
+        desired = self.bootstrap_content().rstrip() + "\n"
+        try:
+            current = path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError as exc:
+            raise ProvisionError(f"could not read {path}: {exc}") from exc
+
+        start = current.find(CODEX_BOOTSTRAP_START)
+        end = current.find(CODEX_BOOTSTRAP_END)
+        if start >= 0 and end >= start:
+            end += len(CODEX_BOOTSTRAP_END)
+            updated = current[:start].rstrip() + "\n\n" + desired + current[end:].lstrip()
+        elif current.strip():
+            updated = current.rstrip() + "\n\n" + desired
+        else:
+            updated = "# Global Codex Instructions\n\n" + desired
+
+        if updated == current and not self.config.force:
+            self.log(f"  OMI bootstrap pointer already installed in {path}")
+            return
+
+        self._record(f"install OMI bootstrap pointer in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(updated, encoding="utf-8")
 
     # -- MCP registration (config.toml, TOML — see class docstring) ---------
 
@@ -1365,9 +1630,8 @@ def diagnose_opencode(config: SetupConfig) -> list[CheckResult]:
 
 
 def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
-    """Codex has no memory skill (Codex reads the omi MCP tools directly), so this
-    checks the hooks.json guard wiring AND the config.toml MCP registration —
-    the two independent pieces :class:`CodexProvisioner` installs."""
+    """Codex reads the omi MCP tools directly, with OMI priming from hooks.json
+    and the global AGENTS.md bootstrap."""
     prov = CodexProvisioner(config=config, log=lambda _msg: None)
     results = _diagnose_tools(prov.REQUIRED_TOOLS)
     root = codex_config_dir()
@@ -1383,7 +1647,7 @@ def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
             CheckResult(
                 "codex_guard",
                 "ok",
-                f"OMI guard wired into {codex_hooks_path()} (run `/hooks` in Codex to trust it)",
+                f"OMI guard wired into {codex_hooks_path()}",
             )
         )
     else:
@@ -1392,6 +1656,57 @@ def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
                 "codex_guard",
                 "fail",
                 "OMI guard not in Codex hooks.json (run `omind setup --agent codex`)",
+            )
+        )
+    if prov._priming_wired():
+        results.append(
+            CheckResult(
+                "codex_priming",
+                "ok",
+                f"OMI SessionStart priming wired into {codex_hooks_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "codex_priming",
+                "fail",
+                "OMI SessionStart priming not in Codex hooks.json "
+                "(run `omind setup --agent codex`)",
+            )
+        )
+    if prov.bootstrap_installed():
+        results.append(
+            CheckResult(
+                "codex_bootstrap",
+                "ok",
+                f"OMI bootstrap pointer installed in {codex_agents_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "codex_bootstrap",
+                "fail",
+                f"OMI bootstrap pointer missing from {codex_agents_path()} "
+                "(run `omind setup --agent codex`)",
+            )
+        )
+    if prov._hook_trust_installed():
+        results.append(
+            CheckResult(
+                "codex_hook_trust",
+                "ok",
+                f"persisted trust for omind Codex hooks in {codex_config_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "codex_hook_trust",
+                "fail",
+                "persisted trust for omind Codex hooks missing "
+                "(run `omind setup --agent codex`)",
             )
         )
     name = config.server_name
