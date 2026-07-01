@@ -21,12 +21,18 @@ jobs:
       matrix:
         os: [ubuntu-latest]
         python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
-        # Windows is a supported platform (filelock shim, .cmd-shim
-        # resolution); exercise the oldest and newest Python there.
+        # Windows and macOS are supported deploy platforms (filelock shim /
+        # .cmd-shim resolution on Windows; BSD userland, case-insensitive FS and
+        # the ~/.local/bin PATH behavior on macOS). Exercise the oldest and
+        # newest Python on each so platform-specific breakage can't ship green.
         include:
           - os: windows-latest
             python-version: "3.10"
           - os: windows-latest
+            python-version: "3.14"
+          - os: macos-latest
+            python-version: "3.10"
+          - os: macos-latest
             python-version: "3.14"
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -41,6 +47,61 @@ jobs:
       - run: mypy src
       - run: pip-audit
       - run: pytest -v --cov=omind --cov-report=term-missing
+
+  wheel:
+    # CI otherwise only installs editable (`pip install -e`), so hatchling's
+    # wheel file-selection is never exercised — a change that drops the hook
+    # .sh/.js scripts or the web/static assets from the package would ship green
+    # and crash `importlib.resources` on installed nodes. Build the real wheel,
+    # install it non-editable, and assert the packaged data files are present.
+    name: Wheel build + install smoke test
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest]
+    steps:
+      - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6.3.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -U pip build
+      - name: Build the wheel
+        run: python -m build --wheel
+      - name: Install the built wheel (not editable)
+        run: pip install dist/*.whl
+      - name: Smoke test the CLI and the packaged data files
+        run: |
+          omind --version
+          python - <<'PY'
+          from importlib.resources import files
+
+          root = files("omind")
+
+          def res(*parts):
+              p = root
+              for part in parts:
+                  p = p / part
+              return p
+
+          required = [
+              ("omi-guard.sh",),
+              ("omi-guard-hermes.sh",),
+              ("omi-gate-reset.sh",),
+              ("secret-output-guard.sh",),
+              ("git-fresh-base.sh",),
+              ("fleet-sudo.sh",),
+              ("omi-guard.opencode.js",),
+              ("_omi_enforce.py",),
+              ("web", "static", "app.js"),
+              ("web", "static", "graph.js"),
+          ]
+          missing = ["/".join(parts) for parts in required if not res(*parts).is_file()]
+          fonts = [f for f in res("web", "static", "vendor", "fonts").iterdir()]
+          assert not missing, f"wheel is missing packaged data files: {missing}"
+          assert fonts, "wheel is missing web/static/vendor/fonts"
+          print(f"OK: {len(required)} data files + {len(fonts)} fonts present in the wheel")
+          PY
 
   secrets:
     name: Secret scan (gitleaks, full history)
