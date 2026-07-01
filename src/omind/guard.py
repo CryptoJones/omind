@@ -462,6 +462,15 @@ _GLOBAL_AUTH_RE = re.compile(
     r")\b",
     re.IGNORECASE,
 )
+_GLOBAL_MUTATING_BASH_RE = re.compile(
+    r"(?:^|[;&|\n(]\s*)(?:"
+    r"chmod|chown|cp|dd|ed|ex|install|mv|rm|tee|touch|truncate|"
+    r"sed\b[^;&|\n]*\s-i\b|perl\b[^;&|\n]*\s-i\b|"
+    r"python3?\b[^;&|\n]*(?:write_text|write_bytes|open\([^;&|\n]*[\"']a|"
+    r"open\([^;&|\n]*[\"']w)|"
+    r"node\b[^;&|\n]*(?:writeFile|appendFile)"
+    r")\b|>|>>"
+)
 
 
 def _opt_in_satisfied(opt_in: str, command: str) -> bool:
@@ -551,7 +560,11 @@ def _is_global_config_mutation(action: dict[str, Any]) -> bool:
     haystack = " ".join(
         part for part in (str(action.get("command") or ""), _action_path(action)) if part
     ).replace("\\", "/")
-    return bool(_GLOBAL_CONFIG_RE.search(haystack))
+    if not _GLOBAL_CONFIG_RE.search(haystack):
+        return False
+    if tool in _WRITE_TOOLS:
+        return True
+    return bool(_GLOBAL_MUTATING_BASH_RE.search(str(action.get("command") or "")))
 
 
 def _turn_has_explicit_global_auth(session: str) -> bool:

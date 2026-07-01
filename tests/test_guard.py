@@ -199,6 +199,32 @@ def test_global_config_mutation_requires_explicit_turn_authorization() -> None:
     guard.clear_gate("global")
 
 
+def test_global_config_read_only_shell_commands_are_not_mutations() -> None:
+    hook_path = Path.home() / ".claude" / "hooks" / "omi-guard.sh"
+
+    guard.begin_turn("global-read", "Can you inspect the hook?")
+    guard.mark_consulted("global-read")
+    allowed = guard.decide(
+        {
+            "tool": "Bash",
+            "command": f"stat {hook_path}",
+            "session": "global-read",
+        }
+    )
+    assert allowed.allow
+
+    blocked = guard.decide(
+        {
+            "tool": "Bash",
+            "command": f"chmod +x {hook_path}",
+            "session": "global-read",
+        }
+    )
+    assert not blocked.allow
+    assert blocked.rule_id == "global-config-explicit-auth"
+    guard.clear_gate("global-read")
+
+
 def test_clear_gate_reaps_legacy_tmp_sentinels(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

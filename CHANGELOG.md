@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.4] - 2026-07-01
+
+### Fixed
+- Allow read-only shell inspection of global agent config and hook paths while
+  still requiring explicit current-turn authorization for shell mutations.
+
 ## [3.7.3] - 2026-07-01
 
 ### Fixed
