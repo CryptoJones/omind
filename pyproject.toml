@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "3.6.0"
+version = "3.7.0"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -35,6 +35,7 @@ dependencies = [
     "uvicorn[standard]>=0.29",
     "pyyaml>=6.0",
     "mcp>=1.10",
+    "tomlkit>=0.12",
 ]
 
 [project.optional-dependencies]

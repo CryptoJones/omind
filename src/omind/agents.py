@@ -28,6 +28,8 @@ import sys
 from pathlib import Path
 from typing import Any, ClassVar
 
+import tomlkit
+import tomlkit.exceptions
 import yaml
 
 from omind import paths, seeds
@@ -137,6 +139,12 @@ def codex_config_dir() -> Path:
 def codex_hooks_path() -> Path:
     """Codex's lifecycle-hooks file (same event schema as Claude Code hooks)."""
     return codex_config_dir() / "hooks.json"
+
+
+def codex_config_path() -> Path:
+    """Codex CLI's own config file (TOML, unlike every other agent's JSON/YAML).
+    The ``[mcp_servers.<name>]`` tables that ``codex mcp add`` writes live here."""
+    return codex_config_dir() / "config.toml"
 
 
 #: Substring identifying omind's own Codex guard hook command, so a re-run finds
@@ -915,7 +923,7 @@ class OpenCodeProvisioner(AgentProvisioner):
 
 
 class CodexProvisioner(AgentProvisioner):
-    """Wire the OMI guard into OpenAI Codex CLI via its lifecycle hooks.
+    """Wire OpenAI Codex CLI into both the OMI guard and the ``omi`` MCP server.
 
     Codex (>= 0.117) adopted the Claude-Code hook schema: ``PreToolUse`` /
     ``PermissionRequest`` command hooks loaded from ``~/.codex/hooks.json`` (the
@@ -923,27 +931,33 @@ class CodexProvisioner(AgentProvisioner):
     needed). omind mounts ``omind guard adapter --harness codex`` on BOTH events
     (PreToolUse blocks at the tool call; PermissionRequest is the approval-path
     backstop); on a hard-rule deny the adapter emits Codex's
-    ``permissionDecision: deny`` / ``decision.behavior: deny`` shape.
+    ``permissionDecision: deny`` / ``decision.behavior: deny`` shape. Codex's
+    trust model records hooks by hash and SKIPS untrusted ones, so the user must
+    review + trust the hook once via ``/hooks`` — that step can't be scripted.
 
-    Guard-only: Codex MCP-memory registration is a separate concern (``codex mcp
-    add`` / ``config.toml`` ``[mcp_servers]``) and is intentionally not bundled
-    here. Codex's trust model records hooks by hash and SKIPS untrusted ones, so
-    the user must review + trust the hook once via ``/hooks``.
+    Separately, the ``omi`` MCP server (the actual note tools — search-vault,
+    create-note, etc.) is registered into ``~/.codex/config.toml`` under
+    ``[mcp_servers.omi]`` — the same table ``codex mcp add`` writes. Unlike
+    every other agent config omind touches, ``config.toml`` is TOML, so this
+    uses :mod:`tomlkit` (round-trip parsing) instead of the JSON
+    ``_read_settings``/``write_text(json.dumps(...))`` idiom, to avoid
+    clobbering the user's other TOML tables, comments, and formatting.
     """
 
     AGENT_LABEL = "Codex CLI"
     INSTALL_HINT = "Install Codex CLI (`npm i -g @openai/codex`, or the snap), then re-run."
     DONE_MESSAGE = (
         "Done. In Codex run `/hooks` and TRUST the omind guard hook — Codex skips "
-        "untrusted hooks until reviewed. Requires Codex >= 0.117 (PreToolUse hooks)."
+        "untrusted hooks until reviewed (requires Codex >= 0.117). Restart Codex to "
+        "load the OMI memory tools registered in config.toml."
     )
 
     def agent_root(self) -> Path:
         return codex_config_dir()
 
     def integrate(self) -> None:
-        # Guard-only wiring (no MCP/skill/priming — see the class docstring).
         self.install_guard()
+        self.register_mcp()
 
     def _guard_hook_group(self) -> dict[str, Any]:
         """One Claude-schema matcher group running the omind codex adapter on all
@@ -1013,6 +1027,77 @@ class CodexProvisioner(AgentProvisioner):
                 "  NOTE: could not confirm the OMI guard in Codex's hooks.json; "
                 "re-run with --force."
             )
+        if self.registered_mcp_entry() == self.desired_mcp_entry():
+            self.log(f"  verified: MCP server '{self.config.server_name}' wired into Codex "
+                      f"({codex_config_path()})")
+        else:
+            self.log(
+                "  NOTE: could not confirm the MCP server in Codex's config.toml; "
+                "re-run with --force."
+            )
+
+    # -- MCP registration (config.toml, TOML — see class docstring) ---------
+
+    def _read_toml_config(self) -> tomlkit.TOMLDocument:
+        """Load config.toml via tomlkit; raise rather than clobber bad/foreign TOML."""
+        path = codex_config_path()
+        if not path.is_file():
+            return tomlkit.document()
+        try:
+            return tomlkit.parse(path.read_text(encoding="utf-8"))
+        except tomlkit.exceptions.ParseError as exc:
+            raise ProvisionError(
+                f"{path} is not valid TOML ({exc}); refusing to overwrite. "
+                "Fix or remove it and re-run."
+            ) from exc
+
+    def desired_mcp_entry(self) -> dict[str, Any]:
+        omind = shutil.which("omind") or "omind"
+        return {
+            "command": omind,
+            "args": ["node", "--vault", str(self.config.vault), "--folder", self.config.folder],
+        }
+
+    def registered_mcp_entry(self) -> dict[str, Any] | None:
+        try:
+            doc = self._read_toml_config()
+        except ProvisionError:
+            return None
+        servers = doc.get("mcp_servers")
+        entry = servers.get(self.config.server_name) if isinstance(servers, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        return {"command": entry.get("command"), "args": list(entry.get("args") or [])}
+
+    def register_mcp(self) -> None:
+        """Idempotently merge ``[mcp_servers.omi]`` into ``~/.codex/config.toml``,
+        replacing only that table so the rest of the user's config.toml (other
+        tables, comments, formatting) survives untouched."""
+        path = codex_config_path()
+        doc = self._read_toml_config()
+        desired = self.desired_mcp_entry()
+        if self.registered_mcp_entry() == desired and not self.config.force:
+            self.log(
+                f"  MCP server '{self.config.server_name}' already points at "
+                f"{self.config.omi_dir}"
+            )
+            return
+        servers = doc.get("mcp_servers")
+        if not isinstance(servers, dict):
+            servers = tomlkit.table()
+            doc["mcp_servers"] = servers
+        elif self.config.server_name != LEGACY_SERVER_NAME and LEGACY_SERVER_NAME in servers:
+            del servers[LEGACY_SERVER_NAME]
+        entry = tomlkit.table()
+        entry["command"] = desired["command"]
+        entry["args"] = desired["args"]
+        servers[self.config.server_name] = entry
+        self._record(
+            f"register MCP server '{self.config.server_name}' in {path} -> {self.config.omi_dir}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(tomlkit.dumps(doc), encoding="utf-8")
 
 
 # -- MCP-only targets (register the omi server, no guard / skill / priming) -----
@@ -1241,8 +1326,9 @@ def diagnose_opencode(config: SetupConfig) -> list[CheckResult]:
 
 
 def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
-    """Codex is guard-only (no MCP/skill), so its doctor checks the hooks.json
-    guard wiring rather than the MCP-registration path the others share."""
+    """Codex has no memory skill (Codex reads the omi MCP tools directly), so this
+    checks the hooks.json guard wiring AND the config.toml MCP registration —
+    the two independent pieces :class:`CodexProvisioner` installs."""
     prov = CodexProvisioner(config=config, log=lambda _msg: None)
     results = _diagnose_tools(prov.REQUIRED_TOOLS)
     root = codex_config_dir()
@@ -1268,6 +1354,30 @@ def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
                 "fail",
                 "OMI guard not in Codex hooks.json (run `omind setup --agent codex`)",
             )
+        )
+    name = config.server_name
+    entry = prov.registered_mcp_entry()
+    if entry is None:
+        results.append(
+            CheckResult(
+                "codex_mcp_registration",
+                "fail",
+                f"MCP server '{name}' not in Codex's config.toml "
+                f"(run `omind setup --agent codex`)",
+            )
+        )
+    elif entry != prov.desired_mcp_entry():
+        results.append(
+            CheckResult(
+                "codex_mcp_registration",
+                "warn",
+                f"MCP server '{name}' in Codex's config.toml differs from the "
+                f"expected wiring (run `omind setup --agent codex`)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult("codex_mcp_registration", "ok", f"MCP server '{name}' -> {config.omi_dir}")
         )
     return results
 

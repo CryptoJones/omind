@@ -7,6 +7,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.0] - 2026-07-01
+
+### Added
+
+- **Codex CLI now gets the `omi` MCP server registered, not just the guard (#114).**
+  `omind setup --agent codex` merges `[mcp_servers.omi]` into `~/.codex/config.toml`
+  (the same table `codex mcp add` writes), so Codex CLI can call the OMI memory
+  tools (search-vault, create-note, etc.) directly instead of only having the
+  guard's block/deny behavior. `config.toml` is TOML, unlike every other agent
+  config omind touches, so the merge uses `tomlkit` for round-trip-safe editing —
+  idempotent, preserves unrelated tables/comments/formatting, refuses to overwrite
+  unparseable TOML. `omind doctor --agent codex` now reports `codex_mcp_registration`
+  alongside the existing `codex_guard` check.
+
 ## [3.6.0] - 2026-06-28
 
 ### Changed

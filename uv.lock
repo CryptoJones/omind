@@ -2364,12 +2364,13 @@ wheels = [
 
 [[package]]
 name = "omind"
-version = "3.6.0"
+version = "3.7.0"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
     { name = "mcp" },
     { name = "pyyaml" },
+    { name = "tomlkit" },
     { name = "uvicorn", extra = ["standard"] },
 ]
 
@@ -2407,6 +2408,7 @@ requires-dist = [
     { name = "pyyaml", specifier = ">=6.0" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.4" },
     { name = "runpod", marker = "extra == 'e2e'", specifier = ">=1.7" },
+    { name = "tomlkit", specifier = ">=0.12" },
     { name = "types-pyyaml", marker = "extra == 'dev'" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.29" },
 ]

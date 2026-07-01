@@ -348,10 +348,17 @@ across harnesses, not just Claude Code: Hermes via its `pre_tool_call` hook,
 OpenCode via a `tool.execute.before` plugin, and **Codex CLI** (>= 0.117) via its
 Claude-schema `PreToolUse`/`PermissionRequest` command hooks in
 `~/.codex/hooks.json` — so a rule learned under one agent blocks under all of
-them. Codex wiring is **guard-only** (its MCP-memory registration is separate),
-and Codex's trust model means you must run `/hooks` in Codex once and **trust**
+them. Codex's trust model means you must run `/hooks` in Codex once and **trust**
 the omind hook before it takes effect. `omind guard selftest` replays a canned
 deny through every harness's renderer to confirm the wiring without a live agent.
+
+Codex also gets the `omi` MCP server registered — under `[mcp_servers.omi]` in
+`~/.codex/config.toml`, the same table `codex mcp add` writes. Unlike every
+other agent config omind touches, `config.toml` is **TOML**, so this merge is
+done with `tomlkit` (round-trip parsing) instead of the JSON idiom the rest
+share; only the `mcp_servers.omi` table is ever touched, and a `config.toml`
+that doesn't parse is never overwritten. Codex has no memory skill (it reads
+the MCP tools directly) and no session-start priming yet.
 
 `omind setup --agent <name>` adapts to where each agent keeps its config. The
 three **memory-backing** agents — Hermes, OpenClaw, and OpenCode — get the full
@@ -375,11 +382,12 @@ treatment:
    the same `omind hook` payload (recent-memory index + latest session state)
    Claude Code injects through its `SessionStart` hook.
 
-**Codex CLI** and the **Gemini CLI** are wired **guard-only** — just the hard-block
-hooks described above (`~/.codex/hooks.json` for Codex; the `BeforeTool` hook under
-`hooks` in `~/.gemini/settings.json` for Gemini); their MCP-memory registration,
-skill, and priming are a separate follow-up. **OpenCode** priming is likewise not
-wired yet (its MCP server and skill are). The cross-harness **guard** reaches Claude
+The **Gemini CLI** is wired **guard-only** — just the hard-block hook described
+above (the `BeforeTool` hook under `hooks` in `~/.gemini/settings.json`); its
+MCP-memory registration, skill, and priming are a separate follow-up. **Codex
+CLI** gets both the guard hook and MCP-memory registration (see above), but no
+skill or priming yet. **OpenCode** priming is likewise not wired yet (its MCP
+server and skill are). The cross-harness **guard** reaches Claude
 Code, Hermes, OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
 **detect-only** — its POST `/hooks/agent` gateway receives the guard verdict but
 deny-enforcement is unverified against a live gateway, so the verdict is advisory
