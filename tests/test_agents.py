@@ -471,8 +471,10 @@ def test_codex_setup_installs_guard_hooks(tmp_path: Path) -> None:
     run_setup_for(config, log=_quiet)
 
     data = json.loads(agents.codex_hooks_path().read_text(encoding="utf-8"))
+    assert set(data) == {"hooks"}
+    hooks = data["hooks"]
     for event in ("PreToolUse", "PermissionRequest"):
-        groups = data[event]
+        groups = hooks[event]
         assert len(groups) == 1
         handler = groups[0]["hooks"][0]
         assert handler["type"] == "command"
@@ -485,7 +487,13 @@ def test_codex_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> N
     hooks_path.write_text(
         json.dumps(
             {
+                "hooks": {
+                    "PostToolUse": [
+                        {"hooks": [{"type": "command", "command": "user-posttool"}]}
+                    ]
+                },
                 "PreToolUse": [{"hooks": [{"type": "command", "command": "my-own-hook"}]}],
+                "PostCompact": [{"hooks": [{"type": "command", "command": "user-compact"}]}],
                 "SessionStart": [{"hooks": [{"type": "command", "command": "user-start"}]}],
             }
         ),
@@ -495,14 +503,24 @@ def test_codex_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> N
     run_setup_for(config, log=_quiet)
 
     data = json.loads(hooks_path.read_text(encoding="utf-8"))
-    pre_cmds = [g["hooks"][0]["command"] for g in data["PreToolUse"]]
+    hooks = data["hooks"]
+    pre_cmds = [g["hooks"][0]["command"] for g in hooks["PreToolUse"]]
     assert "my-own-hook" in pre_cmds  # user's own PreToolUse hook preserved
     assert any("--harness codex" in c for c in pre_cmds)  # omind appended
-    assert data["SessionStart"][0]["hooks"][0]["command"] == "user-start"  # other events untouched
+    assert hooks["PostToolUse"][0]["hooks"][0]["command"] == "user-posttool"
+    assert hooks["SessionStart"][0]["hooks"][0]["command"] == "user-start"  # other events untouched
+    assert hooks["PostCompact"][0]["hooks"][0]["command"] == "user-compact"
+    assert "PreToolUse" not in data  # migrated to Codex's root `hooks` schema
+    assert "PostToolUse" not in data
+    assert "SessionStart" not in data
+    assert "PostCompact" not in data
 
     run_setup_for(config, log=_quiet)  # second run must not duplicate
     data2 = json.loads(hooks_path.read_text(encoding="utf-8"))
-    omind_groups = [g for g in data2["PreToolUse"] if "--harness codex" in g["hooks"][0]["command"]]
+    omind_groups = [
+        g for g in data2["hooks"]["PreToolUse"]
+        if "--harness codex" in g["hooks"][0]["command"]
+    ]
     assert len(omind_groups) == 1
 
 
