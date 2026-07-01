@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- Pin dependency upper bounds and install the fleet by release tag ([#131](https://github.com/CryptoJones/omind/issues/131)): runtime deps are capped below the next major (`fastapi<1.0`, `mcp<2.0`, …) so a breaking upstream major can't land fleet-wide overnight through `uv tool install` (which ignores `uv.lock`), and `scripts/bootstrap.sh` now installs the latest published release tag by default instead of the moving `main` HEAD (override with `--ref`/`$OMIND_REF`).
+
 ### Fixed
 - Expire purge tombstones after a TTL ([#127](https://github.com/CryptoJones/omind/issues/127)): a note re-created with a previously-purged filename is no longer silently deleted fleet-wide forever. New tombstones carry a timestamp and stop deleting after `TOMBSTONE_TTL_DAYS` (90); every node converges on the same expiry under the union merge, and expired lines are garbage-collected. Legacy undated tombstones stay permanent (they can't be safely dated under `merge=union`).
 - Scope the autonomous-loop guard to one owner session ([#128](https://github.com/CryptoJones/omind/issues/128)): arming a `/loop` no longer refuses stops for every other concurrent session on the machine, and a concurrent session's work no longer resets the owner's no-work backstop counter. The owner is set from `omind loop arm --session` / `$CLAUDE_SESSION_ID`, or claimed by the first session to hit a Stop.
