@@ -85,9 +85,15 @@ class Activity:
 
 def _parse_ts(value: Any) -> datetime | None:
     try:
-        return datetime.fromisoformat(str(value))
+        dt = datetime.fromisoformat(str(value))
     except (ValueError, TypeError):
         return None
+    # The rest of the module works in NAIVE local time; a tz-aware log line (a
+    # foreign writer, a hand edit) would raise "can't compare offset-naive and
+    # offset-aware" mid-timer. Normalize to naive local.
+    if dt.tzinfo is not None:
+        dt = dt.astimezone().replace(tzinfo=None)
+    return dt
 
 
 def _journal_actions(omi_dir: Path | str, day: datetime, cutoff: datetime, now: datetime) -> list[
@@ -96,17 +102,24 @@ def _journal_actions(omi_dir: Path | str, day: datetime, cutoff: datetime, now: 
     """Action bullets from ``day``'s journal whose time falls in ``(cutoff, now]``."""
     path = hooks.journal_dir(omi_dir) / hooks.journal_name(day)
     try:
-        text = path.read_text(encoding="utf-8")
+        text = path.read_text(encoding="utf-8", errors="replace")
     except OSError:
         return []
+    # Bullets carry only HH:MM. Floor the cutoff to the minute for the comparison
+    # so an action in the cutoff's own minute (journaled AFTER the previous run
+    # already fired) is not silently dropped from EVERY window forever.
+    cutoff_minute = cutoff.replace(second=0, microsecond=0)
     out: list[dict[str, str]] = []
     for line in text.splitlines():
         match = _BULLET_RE.match(line.strip())
         if not match:
             continue
         hour, minute, rest = int(match.group(1)), int(match.group(2)), match.group(3)
-        when = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
-        if when < cutoff or when > now:
+        try:
+            when = day.replace(hour=hour, minute=minute, second=0, microsecond=0)
+        except ValueError:
+            continue  # a hand-edited bullet like "27:70 ..." must not crash the timer
+        if when < cutoff_minute or when > now:
             continue
         tokens = rest.split()
         event = tokens[0] if tokens else ""
@@ -124,7 +137,9 @@ def gather_activity(omi_dir: Path | str, cutoff: datetime, now: datetime) -> Act
     if cutoff.date() < now.date():
         actions = _journal_actions(omi_dir, now - timedelta(days=1), cutoff, now) + actions
     guard = [
-        e for e in compliance.read_events() if (ts := _parse_ts(e.get("ts"))) and ts >= cutoff
+        e
+        for e in compliance.read_events()
+        if (ts := _parse_ts(e.get("ts"))) and cutoff <= ts <= now
     ]
     return Activity(actions=actions, guard_events=guard)
 
@@ -145,9 +160,18 @@ def _llm_narrative(activity: Activity, since: str) -> str | None:
     )
     try:
         result = subprocess.run(
-            [claude, "-p", prompt], capture_output=True, text=True, timeout=_LLM_TIMEOUT
+            [claude, "-p", prompt],
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+            errors="replace",
+            timeout=_LLM_TIMEOUT,
         )
     except (subprocess.TimeoutExpired, OSError):
+        return None
+    # A non-zero exit means claude printed a diagnostic, not a summary — don't
+    # adopt an error message as the day's narrative.
+    if result.returncode != 0:
         return None
     text = (result.stdout or "").strip()
     return text or None
@@ -247,9 +271,19 @@ def install_timer(
     ``every`` (e.g. ``15m``). ``Type=oneshot`` with no dependents, so a failing
     checkpoint never blocks anything."""
     secs = int(parse_since(every).total_seconds())
+    if secs < 60:
+        raise ValueError(f"--every must be at least 60s to avoid a tight timer loop: {every!r}")
     unit_dir = systemd_user_dir()
     unit_dir.mkdir(parents=True, exist_ok=True)
-    omind = shutil.which("omind") or "omind"
+    # systemd requires an ABSOLUTE path in ExecStart; a bare "omind" fallback
+    # produced a unit that fires and fails every interval while the install
+    # reported success (a cron job silently failing forever). Fail loudly here.
+    omind = shutil.which("omind")
+    if not omind:
+        raise FileNotFoundError(
+            "omind is not on PATH — cannot write an absolute systemd ExecStart. "
+            "Install omind so `which omind` resolves, then re-run."
+        )
     service = (
         "[Unit]\n"
         "Description=omind activity checkpoint\n"

@@ -97,7 +97,11 @@ def read_events(limit: int | None = None) -> list[dict[str, Any]]:
     """Parse the compliance log into records, newest last. Skips bad lines;
     never raises. ``limit`` keeps only the most recent N records."""
     try:
-        lines = compliance_log_path().read_text(encoding="utf-8").splitlines()
+        # errors="replace": a single torn multibyte sequence (a short os.write
+        # under ENOSPC) is a UnicodeDecodeError (a ValueError, NOT an OSError), so
+        # strict decoding made read_events raise forever and took down the
+        # checkpoint timer / doctor / corpus export until the log was hand-repaired.
+        lines = compliance_log_path().read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
     events: list[dict[str, Any]] = []

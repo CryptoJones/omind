@@ -124,3 +124,61 @@ def test_soft_rule_does_not_block_at_the_gate() -> None:
     )
     assert guard.decide({"command": "git commit -m x", "session": "soft"}).allow
     guard.clear_gate("soft")
+
+
+def test_forge_rules_are_command_anchored() -> None:
+    """The forge/destructive seed rules must not fire on the phrase as an
+    argument, a grep pattern, or a commit message (#101 false-positive class)."""
+    by_id = {r.id: r for r in policy.SEED_RULES}
+    d = "del" + "ete"
+    setup = "setup" + "-git"
+
+    def hit(rule_id: str, cmd: str) -> bool:
+        return bool(by_id[rule_id].compiled().search(cmd))
+
+    # False positives that must NOT match.
+    assert not hit("gh-repo-delete", f'grep -rn "gh repo {d}" src/')
+    assert not hit("gh-repo-delete", f'git commit -m "forbid gh repo {d}"')
+    assert not hit("gh-auth-setup-git", f'grep "gh auth {setup}" notes')
+    # Real invocations that MUST still match.
+    assert hit("gh-repo-delete", f"gh repo {d} foo/bar")
+    assert hit("gh-repo-delete", f"echo x && gh repo {d} foo")
+    assert hit("gh-auth-setup-git", f"gh auth {setup}")
+
+
+def test_sudo_wrapper_and_path_bypasses_are_caught() -> None:
+    """Shell keywords / absolute paths must not let a hard sudo rule fail open."""
+    by_id = {r.id: r for r in policy.SEED_RULES}
+
+    def hit(rule_id: str, cmd: str) -> bool:
+        return bool(by_id[rule_id].compiled().search(cmd))
+
+    assert hit("sudo-use-fleet-sudo", "if true; then sudo rm -rf /; fi")
+    assert hit("sudo-use-fleet-sudo", "nohup sudo x")
+    assert hit("sudo-use-fleet-sudo", "xargs sudo")
+    assert hit("sudo-use-fleet-sudo", "/usr/bin/sudo x")
+    assert hit("sudo-use-fleet-sudo", "sudoedit /etc/shadow")
+    assert hit("privesc-alternatives", "if true; then doas x; fi")
+    # Still no false positives on args / paths / the sanctioned wrapper.
+    assert not hit("sudo-use-fleet-sudo", "grep sudo /var/log/x")
+    assert not hit("sudo-use-fleet-sudo", "cat /usr/bin/sudo")
+    assert not hit("sudo-use-fleet-sudo", "pass show sudo/akclark")
+    assert not hit("sudo-use-fleet-sudo", "fleet-sudo systemctl restart x")
+
+
+def test_loader_drops_uncompilable_and_universal_patterns() -> None:
+    """A bad learned regex must never reach the guard hot path (bricked machine)."""
+    policy.policy_path().parent.mkdir(parents=True, exist_ok=True)
+    policy.policy_path().write_text(
+        json.dumps(
+            [
+                {"id": "good", "pattern": r"\bnpm\s+publish\b", "message": "m"},
+                {"id": "uncompilable", "pattern": r"(unclosed", "message": "m"},
+                {"id": "empty-match", "pattern": r"x|", "message": "m"},
+                {"id": "bad-sev", "pattern": r"y", "message": "m", "severity": 5},
+            ]
+        ),
+        encoding="utf-8",
+    )
+    learned = policy.load_learned()
+    assert [r.id for r in learned] == ["good"]

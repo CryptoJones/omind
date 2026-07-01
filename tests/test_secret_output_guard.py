@@ -96,3 +96,26 @@ def test_allows_token_in_curl_header(tmp_path: Path) -> None:
 
 def test_audited_override_allows(tmp_path: Path) -> None:
     assert _run(_hook(tmp_path), "OMI_SECRET_OK=1 pass show github/token | head") == 0
+
+
+def test_blocks_pass_show_with_stderr_redirect_piped(tmp_path: Path) -> None:
+    """CRITICAL: `2>/dev/null` redirects stderr; stdout still leaks to the transcript."""
+    assert _run(_hook(tmp_path), "pass show github/token 2>/dev/null | head") == 2
+    assert _run(_hook(tmp_path), "pass show github/token 2>/dev/null") == 2
+
+
+def test_word_boundary_avoids_bypass_false_positive(tmp_path: Path) -> None:
+    """`pass` inside another word / a grep pattern must not false-block."""
+    assert _run(_hook(tmp_path), "curl --noproxy '' https://bypass.example/x") == 0
+    assert _run(_hook(tmp_path), 'grep -r "pass tests/unit" .') == 0
+    assert _run(_hook(tmp_path), 'git commit -m "make the pass show up"') == 0
+
+
+def test_forged_override_in_string_does_not_bypass(tmp_path: Path) -> None:
+    """OMI_SECRET_OK=1 inside a quoted string must not disable the guard."""
+    assert _run(_hook(tmp_path), 'echo "set OMI_SECRET_OK=1 first" && pass show x | head') == 2
+
+
+def test_allows_multiline_captured_read(tmp_path: Path) -> None:
+    """A multi-line `TOK=$(\\n pass show x \\n)` capture is safe, not a leak."""
+    assert _run(_hook(tmp_path), "TOK=$(\n  pass show github/token\n)\necho done") == 0

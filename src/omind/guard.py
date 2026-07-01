@@ -416,7 +416,9 @@ def clear_all_gates() -> None:
     cannot know the live session id, so a single-session clear would miss it).
     Also reaps the legacy ``/tmp`` sentinels. Never raises."""
     state = paths.state_dir()
-    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*", "git-fresh-*"):
+    # ``turn-*`` holds the captured raw prompt; it was never reaped, so those
+    # files accumulated unboundedly (and leaked prompt text) across sessions.
+    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*", "git-fresh-*", "turn-*"):
         try:
             stale = list(state.glob(pattern))
         except OSError:
@@ -446,25 +448,56 @@ _READ_REVIEW_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "find", "rg"})
 _REPO_TEST_RE = re.compile(
     r"(?:^|[;&|\n(]\s*)(?:uv|pytest|python|tox|nox|hatch|npm|pnpm|yarn|cargo|go|make)\b"
 )
-_GIT_FRESH_ONLY_RE = re.compile(
-    r"^\s*git\s+(?:fetch\b[^;&|\n]*|pull\b[^;&|\n]*(?:--ff-only|--rebase)[^;&|\n]*)\s*$"
+# Optional leading git global options (``-C <dir>``, ``-c key=val``) so a
+# freshness command run with an explicit repo dir — ``git -C <repo> fetch`` — is
+# still recognised as freshness (it previously required a bare ``git fetch``).
+_GIT_GLOBAL_OPTS = r"(?:-C[ \t]+\S+[ \t]+|-c[ \t]+\S+[ \t]+)*"
+# One git subcommand that ESTABLISHES freshness (a fetch, or an ff-only/rebase
+# pull). ``[^|>&;\n]*`` keeps the whole subcommand free of pipes/redirects/chains
+# so a piped write (``git fetch | tee x``) is never mistaken for a pure fetch.
+_GIT_FRESH_SUB_RE = re.compile(
+    rf"^git[ \t]+{_GIT_GLOBAL_OPTS}"
+    r"(?:fetch(?:[ \t][^|>&;\n]*)?|pull[^|>&;\n]*(?:--ff-only|--rebase)[^|>&;\n]*)$"
 )
-_GIT_STATUS_ONLY_RE = re.compile(r"^\s*git\s+(?:status|rev-parse|branch|remote)\b[^;&|\n]*$")
-_GLOBAL_CONFIG_RE = re.compile(
-    r"(?:^|[\s'\"=:/])(?:~?/)?(?:"
-    r"\.codex/(?:AGENTS\.md|hooks\.json|config\.toml)|"
-    r"\.claude/(?:settings\.json|hooks/[^ \t\n'\";]+)|"
-    r"\.hermes/(?:config\.yaml|hooks/[^ \t\n'\";]+|AGENTS\.md)|"
-    r"\.config/opencode/(?:opencode\.json|plugin/omi-guard\.js)|"
-    r"\.gemini/settings\.json|"
-    r"\.openclaw/(?:openclaw\.json|omind/MEMORY\.md)"
-    r")"
+# A read-only git subcommand (inspection). Same no-pipe/redirect constraint.
+_GIT_READONLY_SUB_RE = re.compile(
+    rf"^git[ \t]+{_GIT_GLOBAL_OPTS}"
+    r"(?:status|rev-parse|branch|remote|log|show|diff|for-each-ref|symbolic-ref|"
+    r"describe|config[ \t]+--get)(?:[ \t][^|>&;\n]*)?$"
 )
+# GLOBAL (home-anchored) agent config files/dirs. A project-local
+# ``<repo>/.claude/settings.json`` is ordinary version-controlled config an
+# agent edits routinely and must NOT trip the global-mutation gate — hence the
+# resolve-against-$HOME check in :func:`_is_global_config_path`, not a text regex
+# that couldn't tell ``~/.claude`` from ``<repo>/.claude``.
+_GLOBAL_CONFIG_FILES = frozenset(
+    {
+        ".codex/AGENTS.md",
+        ".codex/hooks.json",
+        ".codex/config.toml",
+        ".claude/settings.json",
+        ".hermes/config.yaml",
+        ".hermes/AGENTS.md",
+        ".config/opencode/opencode.json",
+        ".config/opencode/plugin/omi-guard.js",
+        ".gemini/settings.json",
+        ".openclaw/openclaw.json",
+        ".openclaw/omind/MEMORY.md",
+    }
+)
+_GLOBAL_CONFIG_DIRS = (".claude/hooks/", ".hermes/hooks/")
 _GLOBAL_AUTH_RE = re.compile(
-    r"\b(?:please\s+)?(?:"
-    r"make|modify|edit|write|install|update|change|patch|apply|do it|go ahead|"
-    r"proceed|send it"
+    r"\b(?:"
+    r"make|modify|edit|write|install|update|change|patch|apply|fix|add|create|"
+    r"remove|delete|configure|enable|disable|wire|register|provision|rename|"
+    r"set\s*up|set|do it|go ahead|proceed|send it"
     r")\b",
+    re.IGNORECASE,
+)
+# Negation immediately before an auth verb — "don't change anything", "no need to
+# update" — must NOT read as authorization.
+_AUTH_NEGATION_RE = re.compile(
+    r"\b(?:don'?t|do\s+not|never|without|no\s+need\s+to|avoid|instead\s+of)\s*$",
     re.IGNORECASE,
 )
 _STRONG_ACTION_AUTH_RE = re.compile(
@@ -474,9 +507,14 @@ _STRONG_ACTION_AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 _CAPABILITY_QUESTION_RE = re.compile(
-    r"^\s*(?:hey[, ]+|please[, ]+)?(?:can|could|would|will)\s+you\b",
+    r"^\s*(?:\w+[,:]\s+)?(?:hey[, ]+|please[, ]+)?(?:can|could|would|will)\s+you\b",
     re.IGNORECASE,
 )
+# A REAL output redirect to a file: ``> f`` / ``>> f`` — but NOT ``2>&1`` (fd
+# dup), NOT ``2>/dev/null``, and NOT ``->`` / ``=>`` (arrows in code/strings).
+# Distinguishing these is what stops ``pytest 2>&1 | tail`` from being read as a
+# file-writing "side effect" and false-blocking a read-only capability question.
+_FILE_REDIRECT_RE = re.compile(r"(?<![-=<>&\d])>>?[ \t]*(?!&)(?!/dev/null\b)[^\s&|>]")
 _GLOBAL_MUTATING_BASH_RE = re.compile(
     r"(?:^|[;&|\n(]\s*)(?:"
     r"chmod|chown|cp|dd|ed|ex|install|mv|rm|tee|touch|truncate|"
@@ -484,7 +522,7 @@ _GLOBAL_MUTATING_BASH_RE = re.compile(
     r"python3?\b[^;&|\n]*(?:write_text|write_bytes|open\([^;&|\n]*[\"']a|"
     r"open\([^;&|\n]*[\"']w)|"
     r"node\b[^;&|\n]*(?:writeFile|appendFile)"
-    r")\b|>|>>"
+    r")\b"
 )
 _SHELL_SIDE_EFFECT_RE = re.compile(
     r"(?:^|[;&|\n(]\s*)(?:"
@@ -495,8 +533,77 @@ _SHELL_SIDE_EFFECT_RE = re.compile(
     r"kubectl\s+(?:apply|delete|rollout\s+restart|scale)|"
     r"docker\s+(?:compose\s+)?(?:up|down|restart|rm)|"
     r"chmod|chown|cp|dd|install|mv|rm|tee|touch|truncate"
-    r")\b|>|>>"
+    r")\b"
 )
+
+
+def _split_simple_commands(command: str) -> list[str]:
+    """Split a shell command into its ``&&`` / ``||`` / ``;`` / newline parts."""
+    return [c.strip() for c in re.split(r"&&|\|\||;|\n", command) if c.strip()]
+
+
+def _is_freshness_command(command: str) -> bool:
+    """True when the command is composed ONLY of safe git read/fetch subcommands
+    and includes at least one fetch / ff-pull — so it establishes freshness and
+    is itself harmless. Accepts ``git -C <repo> fetch --all --prune`` and
+    compound forms like ``git fetch --all --prune && git status -sb`` (the exact
+    remediation the block message tells the agent to run). A part that is NOT a
+    safe git read (``git fetch && pytest``, ``git fetch | tee x``) disqualifies
+    the whole command, so it can never grant freshness to a piggybacked action."""
+    parts = _split_simple_commands(command)
+    if not parts:
+        return False
+    fresh = False
+    for part in parts:
+        if _GIT_FRESH_SUB_RE.match(part):
+            fresh = True
+        elif not _GIT_READONLY_SUB_RE.match(part):
+            return False
+    return fresh
+
+
+def _is_readonly_git_command(command: str) -> bool:
+    """True when every part of the command is a safe git read/fetch (so it needs
+    no note-read / freshness of its own)."""
+    parts = _split_simple_commands(command)
+    return bool(parts) and all(
+        _GIT_FRESH_SUB_RE.match(p) or _GIT_READONLY_SUB_RE.match(p) for p in parts
+    )
+
+
+def _is_global_config_path(raw: str) -> bool:
+    """True only for a GLOBAL (home-anchored) agent config file — never a
+    project-local ``<repo>/.claude/…`` even when the repo lives under $HOME."""
+    try:
+        p = Path(raw).expanduser()
+        if not p.is_absolute():
+            p = Path.cwd() / p
+    except (OSError, RuntimeError):
+        return False
+    candidates = {p}
+    with contextlib.suppress(OSError):
+        candidates.add(p.resolve())
+    homes = {Path.home()}
+    with contextlib.suppress(OSError):
+        homes.add(Path.home().resolve())
+    for cand in candidates:
+        for home in homes:
+            try:
+                rel = cand.relative_to(home).as_posix()
+            except ValueError:
+                continue
+            if rel in _GLOBAL_CONFIG_FILES or any(rel.startswith(d) for d in _GLOBAL_CONFIG_DIRS):
+                return True
+    return False
+
+
+def _command_targets_global_config(command: str) -> bool:
+    """True when a shell command references a global config path via ``~/`` or the
+    absolute home dir (a project-relative path in the command does not count)."""
+    haystack = command.replace("\\", "/")
+    home = str(Path.home())
+    targets = [*_GLOBAL_CONFIG_FILES, *_GLOBAL_CONFIG_DIRS]
+    return any(f"~/{t}" in haystack or f"{home}/{t}" in haystack for t in targets)
 
 
 def _opt_in_satisfied(opt_in: str, command: str) -> bool:
@@ -513,8 +620,14 @@ def _opt_in_satisfied(opt_in: str, command: str) -> bool:
     multi-line script (``…\n  OMI_PUSH_GITHUB=1 git push …``) is legitimate and must
     be recognised — omitting ``\\n`` from the separator class wrongly rejected it
     (3.0.2). A plain space is NOT a separator, so a mid-line ``echo OMI_SUDO_OK=1``
-    still doesn't count."""
-    pattern = r"(?:^|[;&|\n]|\benv)\s*" + re.escape(opt_in) + r"(?=\s|$)"
+    still doesn't count.
+
+    The optional ``env `` prefix must ITSELF be at command position — otherwise
+    ``echo "use env OMI_SUDO_OK=1" && sudo …`` forged the opt-in from inside a
+    string (the ``\\benv``-anywhere bug) and skipped a hard rule."""
+    pattern = (
+        r"(?:^|[;&|\n])[ \t]*(?:env[ \t]+)?" + re.escape(opt_in) + r"(?=\s|$)"
+    )
     return re.search(pattern, command) is not None
 
 
@@ -561,7 +674,7 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
     if tool in _WRITE_TOOLS or tool in _READ_REVIEW_TOOLS:
         return True
     if tool == "Bash":
-        if _GIT_FRESH_ONLY_RE.match(command) or _GIT_STATUS_ONLY_RE.match(command):
+        if _is_readonly_git_command(command):
             return False
         if re.search(
             r"(?:^|[;&|\n(]\s*)git\s+(?:add|commit|push|merge|rebase|checkout|switch)\b",
@@ -581,16 +694,18 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
 
 def _is_global_config_mutation(action: dict[str, Any]) -> bool:
     tool = str(action.get("tool") or "")
-    if tool not in _WRITE_TOOLS and tool != "Bash":
-        return False
-    haystack = " ".join(
-        part for part in (str(action.get("command") or ""), _action_path(action)) if part
-    ).replace("\\", "/")
-    if not _GLOBAL_CONFIG_RE.search(haystack):
-        return False
+    command = str(action.get("command") or "")
     if tool in _WRITE_TOOLS:
-        return True
-    return bool(_GLOBAL_MUTATING_BASH_RE.search(str(action.get("command") or "")))
+        # A write tool targets exactly one file — resolve it and gate only a
+        # GLOBAL (home-anchored) config, not a project-local <repo>/.claude/….
+        return _is_global_config_path(_action_path(action))
+    if tool != "Bash":
+        return False
+    # Bash: require a home-anchored global-config path in the command AND a
+    # mutating verb or a real file redirect (a plain read is not a mutation).
+    if not _command_targets_global_config(command):
+        return False
+    return bool(_GLOBAL_MUTATING_BASH_RE.search(command) or _FILE_REDIRECT_RE.search(command))
 
 
 def _turn_authorization_text(action: dict[str, Any], session: str) -> str:
@@ -613,11 +728,21 @@ def _is_capability_question(text: str) -> bool:
     return bool(_CAPABILITY_QUESTION_RE.search(text))
 
 
+def _has_global_auth(text: str) -> bool:
+    """True when the turn text contains an authorizing verb that is NOT negated
+    just before it — so "don't change anything" / "no need to update" do not read
+    as authorization, while the expanded verb set ("fix"/"add"/"create"/...) does."""
+    for m in _GLOBAL_AUTH_RE.finditer(text):
+        if not _AUTH_NEGATION_RE.search(text[: m.start()]):
+            return True
+    return False
+
+
 def _turn_has_explicit_global_auth(action: dict[str, Any], session: str) -> bool:
     text = _turn_authorization_text(action, session)
     if _is_capability_question(text):
         return _has_strong_action_auth(text)
-    return bool(_GLOBAL_AUTH_RE.search(text))
+    return _has_global_auth(text)
 
 
 def _is_side_effect_action(action: dict[str, Any]) -> bool:
@@ -628,7 +753,7 @@ def _is_side_effect_action(action: dict[str, Any]) -> bool:
         return True
     command = str(action.get("command") or "")
     if tool == "Bash" or command:
-        return bool(_SHELL_SIDE_EFFECT_RE.search(command))
+        return bool(_SHELL_SIDE_EFFECT_RE.search(command) or _FILE_REDIRECT_RE.search(command))
     return False
 
 
@@ -668,7 +793,14 @@ def decide(action: dict[str, Any]) -> Verdict:
     for rule in policy.load_policy():
         if rule.severity != policy.SEVERITY_HARD:
             continue
-        if not rule.compiled().search(command):
+        # A single malformed rule must never brick the guard on EVERY tool call:
+        # a pattern that fails to compile / errors mid-match is skipped, not
+        # raised. (Learned rules are also validated at load; this is the belt to
+        # that suspenders, covering a bad seed rule or a catastrophic pattern.)
+        try:
+            if not rule.compiled().search(command):
+                continue
+        except re.error:
             continue
         if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
             continue
@@ -678,7 +810,7 @@ def decide(action: dict[str, Any]) -> Verdict:
             rule_id=rule.id,
         )
 
-    if repo is not None and _GIT_FRESH_ONLY_RE.match(command):
+    if repo is not None and _is_freshness_command(command):
         _record_git_freshness(session, repo, command)
         return Verdict(allow=True)
 

@@ -147,7 +147,10 @@ def check_for_update(*, force: bool = False, timeout: float = _HTTP_TIMEOUT) -> 
     treated as "unknown / up to date". ``force=True`` bypasses the cache.
     """
     current = __version__
-    if os.environ.get(_DISABLE_ENV):
+    # The env var disables the PASSIVE nudge (privacy); an explicit
+    # `omind self-update` (force=True) must still be able to check, or the
+    # documented opt-out silently breaks self-update with a misleading "offline".
+    if os.environ.get(_DISABLE_ENV) and not force:
         return UpdateStatus(current, None)
     if not force:
         fresh, latest = _read_cache(_cache_path())
@@ -211,7 +214,10 @@ def self_update(
     *, check_only: bool = False, force: bool = False, log: Callable[[str], object] = print
 ) -> int:
     """``omind self-update``: report, then (unless ``--check``) reinstall the latest tag."""
-    status = check_for_update(force=True)  # an explicit update always re-checks
+    # A user-invoked update gets a generous network timeout, not the 2s nudge
+    # budget (which times out on a slow-but-working link and falsely reports
+    # "could not reach GitHub").
+    status = check_for_update(force=True, timeout=15.0)
     log(f"installed: omind {status.current}")
     if status.latest is None:
         log("could not reach GitHub (offline, rate-limited, or no releases yet).")
@@ -236,7 +242,13 @@ def self_update(
         return 1
     log(f"updating: {' '.join(cmd)}")
     try:
-        result = subprocess.run(cmd, check=False)  # streams to the user's terminal
+        # A watchdog timeout so a hung `uv tool install git+…` (a stalled clone,
+        # a dead network) can't wedge the update pass forever when run from
+        # fleet automation.
+        result = subprocess.run(cmd, check=False, timeout=600)  # streams to terminal
+    except subprocess.TimeoutExpired:
+        log("update timed out after 600s (network stall?) — try again.")
+        return 1
     except (OSError, subprocess.SubprocessError) as exc:
         log(f"update failed to launch: {exc}")
         return 1

@@ -764,6 +764,88 @@ def test_widened_destructive_rules_close_red_team_gaps() -> None:
     guard.clear_gate("b1")
 
 
+def test_freshness_accepts_dash_c_and_compound_read_forms() -> None:
+    """#449: `git -C <repo> fetch` and `git fetch && git status` establish freshness."""
+    guard.record_consult("fresh2", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    repo = guard._repo_root_for_action({"tool": "Bash", "command": "git status"})
+    assert repo is not None
+    for cmd in (
+        f"git -C {repo} fetch --all --prune",
+        "git fetch --all --prune && git status -sb",
+    ):
+        guard.clear_gate("fresh2")
+        guard.record_consult("fresh2", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+        v = guard.decide({"tool": "Bash", "command": cmd, "session": "fresh2"})
+        assert v.allow, cmd
+    # A fetch chained with a non-read command is NOT a pure freshness command,
+    # so it must not establish freshness (a piggybacked write can't ride in).
+    assert guard._is_freshness_command("git fetch --all --prune")
+    assert guard._is_freshness_command("git -C /r fetch && git status")
+    assert not guard._is_freshness_command("git fetch --all && rm -rf build")
+    assert not guard._is_freshness_command("git fetch | tee /etc/x")
+    guard.clear_gate("fresh2")
+
+
+def test_stderr_redirect_is_not_a_side_effect_under_a_capability_question() -> None:
+    """#498: `pytest 2>&1 | tail` must not be read as a file-writing side effect."""
+    guard.mark_consulted("redir")
+    v = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "pytest -q 2>&1 | tail",
+            "prompt": "Could you check why the tests fail?",
+            "session": "redir",
+        }
+    )
+    # Not blocked as an unauthorized capability side-effect (it may still need the
+    # repo note/freshness, but never `capability-question-explicit-auth`).
+    assert v.rule_id != "capability-question-explicit-auth"
+    guard.clear_gate("redir")
+
+
+def test_project_local_dotclaude_is_not_a_global_config_mutation(tmp_path: Path) -> None:
+    """#453: editing <repo>/.claude/settings.json is project config, not global."""
+    project = tmp_path / "myrepo" / ".claude"
+    project.mkdir(parents=True)
+    assert not guard._is_global_config_path(str(project / "settings.json"))
+    # The real home-anchored global still is.
+    assert guard._is_global_config_path(str(Path.home() / ".claude" / "settings.json"))
+
+
+def test_bad_learned_rule_does_not_brick_the_guard() -> None:
+    """#668: a malformed regex reaching decide() must be skipped, not crash it."""
+    from omind import policy
+
+    # A rule object whose compiled() raises (bypassing the loader's validation).
+    class _BadRule(policy.Rule):
+        def compiled(self):  # type: ignore[override]
+            raise __import__("re").error("boom")
+
+    bad = _BadRule(id="bad", pattern="x", message="m", severity=policy.SEVERITY_HARD)
+    import unittest.mock as mock
+
+    guard.mark_consulted("brick")
+    with mock.patch.object(policy, "load_policy", return_value=[bad]):
+        # Must not raise; the bad rule is skipped and the action is decided.
+        v = guard.decide({"tool": "Bash", "command": "echo hi", "session": "brick"})
+    assert v.allow
+    guard.clear_gate("brick")
+
+
+def test_opt_in_env_prefix_must_be_at_command_position() -> None:
+    """#517: `env TOKEN` forged inside a string must not satisfy the opt-in."""
+    assert guard._opt_in_satisfied("OMI_SUDO_OK=1", "OMI_SUDO_OK=1 sudo x")
+    assert guard._opt_in_satisfied("OMI_SUDO_OK=1", "env OMI_SUDO_OK=1 sudo x")
+    assert not guard._opt_in_satisfied("OMI_SUDO_OK=1", 'echo "use env OMI_SUDO_OK=1" && sudo x')
+
+
+def test_negated_verb_is_not_global_authorization() -> None:
+    """#463: 'don't change anything' must not authorize a global-config mutation."""
+    assert guard._has_global_auth("please update the global config")
+    assert guard._has_global_auth("fix the hook please")  # expanded verb set
+    assert not guard._has_global_auth("don't change anything yet")
+
+
 def test_guard_status_flags_agent_writable_config(capsys: pytest.CaptureFixture[str]) -> None:
     """#B2: status surfaces the kill-shot surface when the guard's own config is
     writable by the agent (here, under the test's isolated HOME)."""

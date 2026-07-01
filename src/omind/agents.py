@@ -435,9 +435,8 @@ class HermesProvisioner(AgentProvisioner):
         )
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                encoding="utf-8",
+            paths.atomic_write_text(
+                path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
             )
 
     def install_priming(self) -> None:
@@ -476,9 +475,8 @@ class HermesProvisioner(AgentProvisioner):
             self._record(f"install OMI priming hook (pre_llm_call) in {path}")
             if not self.config.dry_run:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
-                    yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                    encoding="utf-8",
+                paths.atomic_write_text(
+                    path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
                 )
         else:
             self.log(f"  OMI priming hook already installed in {path}")
@@ -548,9 +546,8 @@ class HermesProvisioner(AgentProvisioner):
             self._record(f"install OMI guard hook (pre_tool_call) in {path}")
             if not self.config.dry_run:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(
-                    yaml.safe_dump(data, sort_keys=False, allow_unicode=True),
-                    encoding="utf-8",
+                paths.atomic_write_text(
+                    path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
                 )
         else:
             self.log(f"  OMI guard hook already installed in {path}")
@@ -597,8 +594,8 @@ class HermesProvisioner(AgentProvisioner):
         self._record(f"pre-approve OMI {event} hook in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(
-                json.dumps(data, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+            paths.atomic_write_text(
+                path, json.dumps(data, indent=2, sort_keys=True) + "\n"
             )
 
 
@@ -658,7 +655,7 @@ class OpenClawProvisioner(AgentProvisioner):
         )
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def install_priming(self) -> None:
         """Wire OpenClaw to read OMI first each session.
@@ -712,7 +709,7 @@ class OpenClawProvisioner(AgentProvisioner):
         self._record(f"register OMI bootstrap priming (bootstrap-extra-files) in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def integrate(self) -> None:
         super().integrate()
@@ -751,7 +748,7 @@ class OpenClawProvisioner(AgentProvisioner):
             self._record(f"register OMI guard gateway hook (detect-only) in {path}")
             if not self.config.dry_run:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
         else:
             self.log(f"  OMI guard gateway hook already installed in {path}")
 
@@ -839,7 +836,7 @@ class GeminiProvisioner(AgentProvisioner):
             self._record(f"install OMI guard hook (BeforeTool) in {path}")
             if not self.config.dry_run:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
         else:
             self.log(f"  OMI guard hook already installed in {path}")
 
@@ -930,7 +927,7 @@ class OpenCodeProvisioner(AgentProvisioner):
         )
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def integrate(self) -> None:
         super().integrate()
@@ -1071,7 +1068,7 @@ class CodexProvisioner(AgentProvisioner):
             )
             if not self.config.dry_run:
                 path.parent.mkdir(parents=True, exist_ok=True)
-                path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+                paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
         else:
             self.log(f"  OMI guard hooks already installed in {path}")
 
@@ -1100,7 +1097,7 @@ class CodexProvisioner(AgentProvisioner):
         self._record(f"install OMI priming hook (SessionStart) in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def _guard_wired(self) -> bool:
         try:
@@ -1294,7 +1291,7 @@ class CodexProvisioner(AgentProvisioner):
         self._record(f"persist trust for omind Codex hooks in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+            paths.atomic_write_text(path, tomlkit.dumps(doc))
 
     def bootstrap_content(self) -> str:
         return seeds.CODEX_AGENTS_BOOTSTRAP_TEMPLATE.format(
@@ -1338,7 +1335,7 @@ class CodexProvisioner(AgentProvisioner):
         self._record(f"install OMI bootstrap pointer in {path}")
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(updated, encoding="utf-8")
+            paths.atomic_write_text(path, updated)
 
     # -- MCP registration (config.toml, TOML — see class docstring) ---------
 
@@ -1401,7 +1398,7 @@ class CodexProvisioner(AgentProvisioner):
         )
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(tomlkit.dumps(doc), encoding="utf-8")
+            paths.atomic_write_text(path, tomlkit.dumps(doc))
 
 
 # -- MCP-only targets (register the omi server, no guard / skill / priming) -----
@@ -1471,7 +1468,7 @@ class McpOnlyProvisioner(AgentProvisioner):
         )
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def integrate(self) -> None:
         # MCP registration only — no skill / priming / guard for these targets.

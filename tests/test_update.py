@@ -160,7 +160,7 @@ def test_self_update_runs_installer(monkeypatch: pytest.MonkeyPatch) -> None:
     class _Result:
         returncode = 0
 
-    def fake_run(cmd: list[str], check: bool) -> _Result:
+    def fake_run(cmd: list[str], check: bool, timeout: float | None = None) -> _Result:
         ran["cmd"] = cmd
         return _Result()
 

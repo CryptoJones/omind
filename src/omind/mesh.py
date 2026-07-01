@@ -58,10 +58,21 @@ Journal/*.md merge=union
 .omi-tombstones merge=union
 """
 
-#: Never replicate the lock or torn temp files.
+#: Never replicate the lock, torn temp files, or Obsidian's volatile per-machine
+#: app state. ``.obsidian/workspace*.json`` (and the caches) are rewritten
+#: constantly and DIFFERENTLY on every machine; with ``git add -A`` committing
+#: them and no merge driver, two nodes with Obsidian open produce a genuine text
+#: conflict that aborts the WHOLE peer merge every cycle — silently stopping
+#: replication. Ignoring them is what keeps the mesh converging.
 GITIGNORE = """\
 .omi.lock
 .tmp-*
+.obsidian/workspace.json
+.obsidian/workspace-mobile.json
+.obsidian/workspace
+.obsidian/cache
+.obsidian/.DS_Store
+.trash/
 """
 
 _NODE_ID_RE = re.compile(r"[^A-Za-z0-9._-]+")
@@ -73,9 +84,20 @@ def git(
     check: bool = True,
     timeout: float = GIT_TIMEOUT,
 ) -> subprocess.CompletedProcess[str]:
-    """Run git against the OMI repo, output captured, failures as MeshError."""
+    """Run git against the OMI repo, output captured, failures as MeshError.
+
+    Network calls run with ``GIT_TERMINAL_PROMPT=0`` and ssh ``BatchMode`` so an
+    unknown host key / credential prompt fails fast instead of hanging until the
+    timeout on every sync tick (the churning-seed-IP scenario).
+    """
+    env = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
+    env.setdefault("GIT_SSH_COMMAND", "ssh -oBatchMode=yes")
     return run_command(
-        ["git", "-C", str(omi_dir), *args], error=MeshError, check=check, timeout=timeout
+        ["git", "-C", str(omi_dir), *args],
+        error=MeshError,
+        check=check,
+        timeout=timeout,
+        env=env,
     )
 
 
@@ -560,7 +582,7 @@ def _write_sync_state(omi_dir: Path, report: SyncReport) -> None:
             "conflicts": report.conflicts,
             "ok": report.ok,
         }
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        _atomic_write(path, json.dumps(payload, indent=2) + "\n")
     except OSError:
         pass  # advisory state for doctor; never fail a sync over it
 
@@ -647,10 +669,20 @@ def sync(
         report.conflicts = conflict_scan(omi_dir)
 
     for ps in merged_peers:
-        push = git(omi_dir, "push", ps.name, f"HEAD:refs/omind/{node_id}", check=False)
-        ps.pushed = push.returncode == 0
+        # A push can TIME OUT (a hung/blackholed peer); run_command raises on
+        # TimeoutExpired even with check=False. Catch it per-peer so one slow peer
+        # records its error and the loop still pushes the rest AND writes sync
+        # state — previously the MeshError escaped, skipping every later peer and
+        # leaving the state file stale.
+        try:
+            push = git(omi_dir, "push", ps.name, f"HEAD:refs/omind/{node_id}", check=False)
+            ps.pushed = push.returncode == 0
+            if not ps.pushed:
+                ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
+        except MeshError as exc:
+            ps.pushed = False
+            ps.error = f"push: {_first_line(str(exc)) or 'timed out'}"
         if not ps.pushed:
-            ps.error = f"push: {_first_line(push.stderr or push.stdout)}"
             log(f"peer {ps.name}: {ps.error}")
     _write_sync_state(omi_dir, report)
     for note_name in report.conflicts:
@@ -935,6 +967,17 @@ def diagnose_mesh(config: Any) -> list[Any]:
             )
         )
 
+    state = read_sync_state(omi)
+    # Per-peer errors recorded by the last sync (fetch/merge/push failures). Doctor
+    # previously reported every fetched peer "ok" no matter how divergent and never
+    # read these, so a peer that conflict-aborts or is rejected every cycle looked
+    # healthy while the fleet silently diverged.
+    peer_errors: dict[str, str] = {}
+    if state is not None:
+        for entry in state.get("peers", []) or []:
+            if isinstance(entry, dict) and entry.get("error"):
+                peer_errors[str(entry.get("name") or "")] = str(entry.get("error"))
+
     peer_map = peers(omi)
     if not peer_map:
         results.append(
@@ -943,13 +986,24 @@ def diagnose_mesh(config: Any) -> list[Any]:
             )
         )
     for name in sorted(peer_map):
+        if name in peer_errors:
+            results.append(
+                CheckResult(
+                    f"mesh_peer:{name}",
+                    "fail",
+                    f"peer {name}: last sync FAILED — {peer_errors[name]}",
+                )
+            )
+            continue
         ref = f"refs/remotes/{name}/main"
         if git(omi, "rev-parse", "--verify", ref, check=False).returncode != 0:
             results.append(
                 CheckResult(f"mesh_peer:{name}", "warn", f"peer {name}: never fetched")
             )
             continue
-        counts = git(omi, "rev-list", "--left-right", "--count", f"HEAD...{ref}").stdout.split()
+        counts = git(
+            omi, "rev-list", "--left-right", "--count", f"HEAD...{ref}", check=False
+        ).stdout.split()
         ahead, behind = (counts + ["0", "0"])[:2]
         results.append(
             CheckResult(
@@ -959,7 +1013,6 @@ def diagnose_mesh(config: Any) -> list[Any]:
             )
         )
 
-    state = read_sync_state(omi)
     interval = cfg.interval_seconds if cfg else 300
     if state is None:
         results.append(

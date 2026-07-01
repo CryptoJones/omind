@@ -37,6 +37,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
+from omind import paths
 from omind.notes import upsert_note
 from omind.paths import INDEX_FILENAME
 from omind.proc import DEFAULT_TIMEOUT, run_command
@@ -119,7 +120,7 @@ def load_config() -> BackupConfig | None:
     if not path.is_file():
         return None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        data = json.loads(path.read_text(encoding="utf-8", errors="replace"))
     except json.JSONDecodeError as exc:
         raise BackupError(
             f"{path} is not valid JSON ({exc}); fix or remove it and re-run "
@@ -127,18 +128,25 @@ def load_config() -> BackupConfig | None:
         ) from exc
     if not isinstance(data, dict) or not isinstance(data.get("repo"), str) or not data["repo"]:
         return None
+    # A hand-edited/corrupt non-numeric consecutive_failures must not crash the
+    # loader with a raw ValueError — treat it as 0.
+    try:
+        failures = int(data.get("consecutive_failures") or 0)
+    except (TypeError, ValueError):
+        failures = 0
     return BackupConfig(
         repo=data["repo"],
-        consecutive_failures=int(data.get("consecutive_failures") or 0),
+        consecutive_failures=failures,
         last_success=data.get("last_success") or None,
         last_snapshot=data.get("last_snapshot") or None,
     )
 
 
 def save_config(config: BackupConfig) -> None:
-    path = config_path()
-    path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_text(json.dumps(asdict(config), indent=2) + "\n", encoding="utf-8")
+    # Atomic write: a torn backup.json makes load_config raise, which disables
+    # backups AND the failure counter (run_backup dies in _require_config before
+    # it can record anything) — the escalation machinery needs the file that broke.
+    paths.atomic_write_text(config_path(), json.dumps(asdict(config), indent=2) + "\n")
 
 
 # -- subprocess plumbing --------------------------------------------------------

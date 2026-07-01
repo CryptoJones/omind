@@ -223,7 +223,13 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
     elif o_rev is None or t_rev is None:
         ours_wins = t_rev is None  # a stamped edit beats an unstamped one
     else:
-        ours_wins = o_rev.sort_key() > t_rev.sort_key()
+        ok, tk = o_rev.sort_key(), t_rev.sort_key()
+        # Equal rev identity with differing content (reachable when an unstamped
+        # mutation re-uses a rev — e.g. an index-description migration on a node
+        # whose config failed to load) must NOT resolve by side, or merge(A,B)
+        # and merge(B,A) diverge and the mesh never converges. Fall back to the
+        # symmetric content tiebreak used for unversioned edits.
+        ours_wins = None if ok == tk else ok > tk
 
     def scalar(name: str) -> str | bool:
         b, o, t = getattr(base, name), getattr(ours, name), getattr(theirs, name)
@@ -235,7 +241,7 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
             return o  # type: ignore[no-any-return]
         if ours_wins is None:
             winner = max(o, t)
-            messages.append(f"{name}: concurrent unversioned edits; kept {winner!r}")
+            messages.append(f"{name}: concurrent edits at equal/absent rev; kept {winner!r}")
             return winner  # type: ignore[no-any-return]
         messages.append(f"{name}: last-writer-wins by rev")
         return o if ours_wins else t  # type: ignore[no-any-return]
@@ -263,6 +269,10 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         connections=_union3(base.connections, ours.connections, theirs.connections),
         action_items=_merge_actions(base.action_items, ours.action_items, theirs.action_items),
         references=_union3(base.references, ours.references, theirs.references),
+        # YAML frontmatter and lead prose are hand-curated content the driver
+        # must never eat; carry them through with the same symmetric LWW rule.
+        frontmatter=str(scalar("frontmatter")),
+        lead=str(scalar("lead")),
         rev=merged_rev,
         disabled=bool(scalar("disabled")),
     )

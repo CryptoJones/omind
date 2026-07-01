@@ -21,6 +21,7 @@ exercised by the test-suite against each harness's event shape.
 
 from __future__ import annotations
 
+import json
 import sys
 from pathlib import Path
 from typing import Any, TextIO
@@ -41,6 +42,32 @@ def _first_str(data: dict[str, Any], keys: tuple[str, ...]) -> str:
     return ""
 
 
+def _derive_command(event: dict[str, Any], tool_input: dict[str, Any]) -> str:
+    """Best-effort command text from a harness event.
+
+    Accepts the common argv-as-list shape (``"args": ["repo", "delete", "a/b"]``)
+    and an ``input``/``args`` object, not just a plain string — otherwise the
+    guard saw an empty command and no hard rule could match the real payload.
+    """
+    for source in (event.get("command"), tool_input.get("command")):
+        if isinstance(source, str) and source:
+            return source
+    for container in (event, tool_input):
+        for key in ("args", "input"):
+            val = container.get(key)
+            if isinstance(val, str) and val:
+                return val
+            if isinstance(val, list):
+                joined = " ".join(str(x) for x in val if x is not None).strip()
+                if joined:
+                    return joined
+            if isinstance(val, dict):
+                inner = _first_str(val, ("command", "cmd"))
+                if inner:
+                    return inner
+    return ""
+
+
 def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
     """Map a harness pre-action event into the guard's action schema.
 
@@ -52,11 +79,7 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
     tool = _first_str(event, ("tool", "tool_name", "name"))
     tool_input = event.get("tool_input")
     tool_input = tool_input if isinstance(tool_input, dict) else {}
-    command = (
-        _first_str(event, ("command",))
-        or _first_str(tool_input, ("command",))
-        or _first_str(event, ("args", "input"))
-    )
+    command = _derive_command(event, tool_input)
     file_path = _first_str(tool_input, ("file_path", "path")) or _first_str(
         event, ("file_path", "path")
     )
@@ -89,10 +112,33 @@ def run_adapter(
     from omind import harness as harness_mod
 
     src = stream if stream is not None else sys.stdin
-    event = guard._load(src)
+    spec = harness_mod.spec_for(harness)
+    try:
+        if src.isatty():  # a by-hand invocation with no piped event: nothing to guard
+            return 0
+    except (AttributeError, ValueError, OSError):
+        pass
+    raw = src.read()
+    if not raw.strip():
+        return 0  # no event (the shell adapter also allows empty input)
+    try:
+        event = json.loads(raw)
+        if not isinstance(event, dict):
+            raise ValueError("event is not a JSON object")
+    except (ValueError, TypeError):
+        # A mangled/truncated event in an enforcement component must FAIL CLOSED:
+        # a destructive command must never be waved through because its event
+        # didn't parse. Emit the harness's block verdict.
+        blocked = guard.Verdict(
+            allow=False,
+            reason="omi-guard: unparseable guard event — blocking (fail-closed)",
+            rule_id="adapter-parse-error",
+        )
+        return harness_mod.render_decision(
+            blocked, spec.block_format, sys.stdout, sys.stderr, event=""
+        )
     action = normalize_action(event)
     verdict = guard.check_action(action)
-    spec = harness_mod.spec_for(harness)
     # Codex's deny shape depends on which hook fired (PreToolUse vs
     # PermissionRequest); pass the event name through (ignored by other harnesses).
     return harness_mod.render_decision(

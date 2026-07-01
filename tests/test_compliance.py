@@ -120,3 +120,13 @@ def test_post_tool_hook_runs_the_detector(tmp_path: object) -> None:
     )
     hooks.run_hook("PostToolUse", tmp_path, stdin=io.StringIO(event))  # type: ignore[arg-type]
     assert compliance.read_events()[-1]["rule_id"] == "gh-repo-delete"
+
+
+def test_read_events_survives_a_torn_non_utf8_line() -> None:
+    """A single bad byte in the log must not crash every consumer forever."""
+    path = compliance.compliance_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    good = json.dumps({"rule_id": "ok", "outcome": "observed"})
+    path.write_bytes(good.encode() + b"\n\xff\xfe torn\n" + good.encode() + b"\n")
+    events = compliance.read_events()  # must not raise
+    assert [e.get("rule_id") for e in events] == ["ok", "ok"]

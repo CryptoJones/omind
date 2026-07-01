@@ -7,6 +7,80 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.6] - 2026-07-01
+
+Hardening release from an adversarial code review — data-integrity, guard
+false-positives, enforcement fail-open holes, and crash/availability fixes. No
+API breaks; `NoteFields` gains backward-compatible `frontmatter`/`lead` fields.
+
+### Fixed
+
+- **Note data loss:** the parse/render round-trip no longer drops YAML
+  frontmatter (Obsidian Properties) or lead prose before the first `##`; section
+  splitting is now fence-aware so a `##` inside a code block is body text, not a
+  new section. Applies to the local edit path and the mesh merge driver.
+- **Mesh convergence:** equal-rev/different-content now resolves by a symmetric
+  content tiebreak, so `merge(A,B)` == `merge(B,A)` and the fleet converges
+  instead of ping-ponging; the index-description migration stamps a rev on mesh
+  nodes so it no longer creates equal-rev divergence.
+- **Mesh replication stalls silently:** `.obsidian/workspace.json` (and friends)
+  are now gitignored so their per-machine churn can't abort every peer merge;
+  `omind doctor` surfaces recorded per-peer sync errors instead of always
+  reporting "ok"; a push timeout records the error and continues to the next
+  peer (and still writes sync state) instead of aborting the whole pass; network
+  git runs with `GIT_TERMINAL_PROMPT=0` + ssh `BatchMode` so a prompt can't hang.
+- **One bad byte no longer downs the vault:** all note/index/log reads decode
+  with `errors="replace"` (and strip a BOM), and `search`/`backlinks` skip a note
+  deleted mid-scan — a single non-UTF-8 note can't break listing/search/writes.
+- **Guard false-positive interruptions:**
+  - Freshness now recognizes `git -C <repo> fetch` and compound read forms
+    (`git fetch && git status`) — the exact remediation the block message tells
+    you to run — instead of only a bare `git fetch`.
+  - Forge/destructive seed rules (`gh repo delete`, `gh auth setup-git`, …) are
+    command-anchored, so a grep pattern or commit message no longer blocks.
+  - A bare `>` (as in `pytest 2>&1`) is no longer treated as a file-writing side
+    effect; only real stdout redirects count.
+  - The global-config-mutation gate resolves the path against `$HOME`, so a
+    project-local `<repo>/.claude/settings.json` is not treated as global config.
+  - Global-authorization detection is negation-aware ("don't change" no longer
+    authorizes) and covers more imperatives (fix/add/create/…).
+- **Guard crash-hardening:** a learned rule whose regex fails to compile or
+  matches the empty string is rejected at load and skipped at match time, so one
+  bad rule can no longer brick every tool call on the machine. The command-
+  position anchor now covers shell keywords/wrappers (`then`, `exec`, `xargs`,
+  absolute paths) and `sudoedit`, closing sudo-rule bypasses.
+- **Enforcement fail-open holes:** the guard adapter fails **closed** on an
+  unparseable event and accepts array-shaped `args`; a contentless
+  `list-notes`/`graph-*` call no longer clears the gate or auto-scores relevant;
+  the secret-output guard no longer treats `pass show X 2>/dev/null | head` as
+  safe (a real leak) and no longer false-blocks `pass` inside another word / a
+  grep pattern; the turn-reset clears pending-intent and git-freshness (freshness
+  is per-turn again, not per-session).
+- **Cron/timer safety:** `checkpoint run` degrades cleanly instead of raising a
+  traceback into the timer; `install-timer` writes an absolute `ExecStart` (or
+  fails loudly) instead of a silently-broken unit; a malformed journal bullet or
+  tz-aware log timestamp no longer crashes a checkpoint, and boundary-minute
+  actions are no longer dropped from every window.
+- **Self-update:** `OMIND_NO_UPDATE_CHECK` no longer disables an explicit
+  `omind self-update`; the install subprocess and the version check have
+  timeouts sized for a user-invoked update.
+- **`omind lint` false failures:** a dated note series (daily Worklogs) is no
+  longer flagged as near-duplicates; links to archived or `Journal/`-subfolder
+  notes and `[[wikilinks]]` quoted in code fences are no longer broken-link
+  errors — so `lint --strict` passes on a healthy vault.
+- **Config/hook write corruption:** every managed settings/config/hook/backup
+  write is now atomic (temp file + `os.replace` + directory fsync) so a crash
+  mid-write can't brick a harness config or the guard hook; store atomic writes
+  fsync the directory too.
+- **Filenames:** the reserved-name check is case-insensitive (so a note titled
+  "Index" can't destroy `index.md` on a case-insensitive filesystem); dot-prefixed
+  and over-long titles raise a clean `NoteError` instead of creating an invisible
+  note or an `ENAMETOOLONG` crash; `create_note` closes a concurrent-create race.
+- **Enforcement migrate hook:** no longer deletes a memory file on a fuzzy
+  filename match or a missing `name:` slug — it migrates (with a timeout and
+  permission-safe unlinks) before deleting, and leaves the file if migration
+  fails.
+
 ## [3.7.5] - 2026-07-01
 
 ### Changed

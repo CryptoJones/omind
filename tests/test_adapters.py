@@ -42,9 +42,27 @@ def test_normalize_other_harness_shapes() -> None:
     assert adapters.normalize_action({"args": "rm -rf /"})["command"] == "rm -rf /"
 
 
+def test_normalize_accepts_array_shaped_args() -> None:
+    """A list argv must reach the guard as a command, not be dropped to ''."""
+    action = adapters.normalize_action(
+        {"tool": "shell", "args": ["gh", "repo", "delete", "a/b"], "session": "z"}
+    )
+    assert action["command"] == "gh repo delete a/b"
+    inner = adapters.normalize_action({"tool": "shell", "input": {"command": "rm -rf /"}})
+    assert inner["command"] == "rm -rf /"
+
+
 def test_run_adapter_hard_block_denies_any_harness() -> None:
     event = io.StringIO(json.dumps({"tool": "shell", "command": "gh pr create", "session": "a1"}))
     assert adapters.run_adapter(event) == 2  # hard rule fires without a consult too
+
+
+def test_run_adapter_fails_closed_on_unparseable_event() -> None:
+    """A mangled event in an enforcement component must block, not wave through."""
+    assert adapters.run_adapter(io.StringIO("{not valid json")) == 2
+    assert adapters.run_adapter(io.StringIO("[1, 2, 3]")) == 2  # not an object
+    # A genuinely empty stream is not an error — nothing to guard.
+    assert adapters.run_adapter(io.StringIO("   ")) == 0
 
 
 def test_run_adapter_consult_clears_then_gate_allows() -> None:

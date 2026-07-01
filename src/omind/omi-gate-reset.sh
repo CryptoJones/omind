@@ -9,6 +9,9 @@
 # dir, the same location guard.py uses. Never raises.
 
 set -u
+# Default HOME so `set -u` can't crash the reset (which would leave the gate
+# cleared from the previous turn); mirrors omi-guard.sh.
+HOME="${HOME:-/tmp}"
 input="$(cat 2>/dev/null)"
 command -v jq >/dev/null 2>&1 || exit 0
 sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
@@ -18,6 +21,11 @@ rm -f "$STATE/gate-$sid" 2>/dev/null
 # Reset the verifier's per-turn re-close counter (its anti-wedge cap is measured
 # per turn; guard.py reads reclose-<sid>). Best-effort.
 rm -f "$STATE/reclose-$sid" 2>/dev/null
+# Clear the per-turn pending-intent and the git-freshness record too, matching
+# guard.begin_turn(). Omitting these made the "same-turn freshness check"
+# actually per-SESSION — one fetch at 9am satisfied a 6pm commit (a fail-open of
+# the freshness control) — and left stale pending intent feeding the verifier.
+rm -f "$STATE/pending-$sid.txt" "$STATE/git-fresh-$sid.json" 2>/dev/null
 # Capture this turn's task so the verifier/retrieval can judge consult relevance
 # (guard.py reads turn-<sid>.txt). Best-effort; empty prompt is fine.
 mkdir -p "$STATE" 2>/dev/null

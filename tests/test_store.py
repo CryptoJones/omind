@@ -716,3 +716,71 @@ def test_listing_cache_tracks_writes_and_deletes(store: OmiStore) -> None:
     ]
     store.purge_note(a)
     assert {s.title for s in store.list_notes()} == {"Cached B"}
+
+
+def test_yaml_frontmatter_survives_edit(store: OmiStore) -> None:
+    """Obsidian Properties (a leading --- YAML block) must not be dropped on edit."""
+    raw = (
+        "---\ntags: [alpha, beta]\naliases:\n  - Foo\n---\n"
+        "# Kept Note\n\nlead prose before the first section.\n\n"
+        "## Summary\ns\n\n## Details\nd\n"
+    )
+    name = store.write_note("Kept Note.md", raw)
+    store.update_note(name, NoteFields(title="Kept Note", summary="new summary"))
+    after = store.read_note(name)
+    assert "tags: [alpha, beta]" in after
+    assert "aliases:" in after
+    assert "lead prose before the first section." in after
+    assert "new summary" in after
+
+
+def test_fenced_h2_is_not_treated_as_a_section(store: OmiStore) -> None:
+    """A ## line inside a fenced code block is body text, not a section boundary."""
+    details = "Example:\n\n```md\n## Not A Heading\nbody\n```\n\nreal details."
+    name = store.create_note(NoteFields(title="Fenced", details=details))
+    fields = store.read_fields(name)
+    assert "Not A Heading" not in fields.extras
+    assert "## Not A Heading" in fields.details
+
+
+def test_reserved_check_is_case_insensitive(store: OmiStore) -> None:
+    """On a case-insensitive filesystem 'Index' == index.md; reject it everywhere."""
+    for title in ("Index", "INDEX", "Memory template"):
+        with pytest.raises(NoteError):
+            store.create_note(NoteFields(title=title))
+
+
+def test_dot_prefixed_title_is_rejected(store: OmiStore) -> None:
+    """A dotfile note would be invisible to listing/search/index — refuse it."""
+    name = store.create_note(NoteFields(title=".NET migration notes", summary="s"))
+    assert not name.startswith(".")
+    assert name in {s.filename for s in store.list_notes()}
+    with pytest.raises(NoteError):
+        store.write_note(".hidden.md", "# x\n")
+
+
+def test_overlong_title_raises_noteerror_not_oserror(store: OmiStore) -> None:
+    """A 300-char title must produce a clean NoteError, not ENAMETOOLONG."""
+    name = store.create_note(NoteFields(title="x" * 300, summary="s"))
+    assert len(name.encode("utf-8")) <= 200
+    assert (store.omi_dir / name).is_file()
+
+
+def test_non_utf8_note_does_not_break_listing(store: OmiStore) -> None:
+    """One note with a stray non-UTF-8 byte must not take down list/search."""
+    store.create_note(NoteFields(title="Good", summary="fine"))
+    bad = store.omi_dir / "Bad.md"
+    bad.write_bytes(b"# Bad\n\n## Summary\n\xff\xfe not utf8\n")
+    titles = {s.title for s in store.list_notes()}
+    assert "Good" in titles and "Bad" in titles
+    assert store.search("fine")  # search still works
+
+
+def test_disable_ignores_disabled_bullet_in_details(mesh_store: OmiStore) -> None:
+    """A '- Disabled: true' line in Details must not fool disable/parse (Metadata-scoped)."""
+    name = mesh_store.create_note(
+        NoteFields(title="Doc", details="Config keys:\n- Disabled: true")
+    )
+    assert not mesh_store.read_fields(name).disabled
+    mesh_store.disable_note(name)
+    assert mesh_store.read_fields(name).disabled

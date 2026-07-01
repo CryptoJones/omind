@@ -13,6 +13,11 @@
 # (no decision emitted = Hermes allows), so a broken hook never wedges the agent.
 
 set -u
+# An unset HOME would trip `set -u` at the STATE expansion below and crash the
+# hook (no decision emitted = Hermes allows = the guard silently disabled).
+# Default it so the guard can't be turned off by a missing HOME (mirrors
+# omi-guard.sh).
+HOME="${HOME:-/tmp}"
 OMIND='__OMIND_BIN__'
 OMI_DIR='__OMI_DIR__'
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omind"
