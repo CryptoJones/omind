@@ -32,14 +32,25 @@ set -u
 
 input="$(cat 2>/dev/null)"
 [ -z "$input" ] && exit 0
-command -v jq >/dev/null 2>&1 || exit 0   # omi-guard fails-closed for Bash separately
+# jq parses the event; without it this specific guard can't read the command.
+# NOTE: the omind policy has no secret-output rules, so no-jq means NO
+# secret-output protection here (the general omi-guard's fail-closed-for-Bash
+# path does not cover this leak class). Install jq.
+command -v jq >/dev/null 2>&1 || exit 0
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // empty' 2>/dev/null)"
 [ -z "$cmd" ] && exit 0
 
-# explicit, audited override
-printf '%s' "$cmd" | grep -q 'OMI_SECRET_OK=1' && exit 0
+# Explicit, audited override — must be a REAL leading assignment (start or after
+# a shell separator, optionally via `env`), not a substring forged in a comment
+# or a quoted string (which would silently disable the guard).
+printf '%s' "$cmd" | grep -Eq '(^|[;&|])[[:space:]]*(env[[:space:]]+)?OMI_SECRET_OK=1([[:space:]]|$)' && exit 0
 
-READ='pass[[:space:]]+show([[:space:]]|$)|pass[[:space:]]+[A-Za-z0-9_.@-]+/|gh[[:space:]]+auth[[:space:]]+token([[:space:]]|$)'
+# Anchor `pass`/`gh` to COMMAND POSITION — start, or after a shell separator
+# (`;` `&` `|` `(`), past any leading `VAR=val` / `env` — so `grep "pass tests/"`,
+# a commit message, and "bypass proxy/" no longer false-positive, while a real
+# `pass show`, `; pass work/x`, or `env FOO=1 pass show` still matches.
+BND='(^|[;&|(])[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:];&|]*[[:space:]]+|env[[:space:]]+)*'
+READ="${BND}pass[[:space:]]+show([[:space:]]|\$)|${BND}pass[[:space:]]+[A-Za-z0-9_.@-]+/|${BND}gh[[:space:]]+auth[[:space:]]+token([[:space:]]|\$)"
 
 block() {
   {
@@ -53,7 +64,7 @@ block() {
 }
 
 # 1) A literal credential pasted into the command text.
-if printf '%s' "$cmd" | grep -Eq '(gh[pousr]|ghu)_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+if printf '%s' "$cmd" | grep -Eq 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
   block "the command text contains a literal credential/token."
 fi
 
@@ -68,12 +79,22 @@ if printf '%s' "$cmd" | grep -Eq '\b(echo|printf|print|cat|tee|head|tail|xxd|od|
   block "a secret read is piped into a command that prints to stdout."
 fi
 
-# 3) A bare / piped secret-read that is not captured and not redirected.
-#    Strip command substitutions; whatever read remains runs to the shell stdout.
-bare="$(printf '%s' "$cmd" | sed -E 's/\$\([^)]*\)//g; s/`[^`]*`//g')"
+# 3) A bare / piped secret-read that is not captured and not safely redirected.
+#    Flatten newlines first so a multi-line `TOK=$(\n pass show x\n)` capture is
+#    stripped (line-based sed missed it and false-blocked the captured read),
+#    then strip command substitutions; whatever read remains runs to shell stdout.
+flat="$(printf '%s' "$cmd" | tr '\n' ' ')"
+bare="$(printf '%s' "$flat" | sed -E 's/\$\([^)]*\)//g; s/`[^`]*`//g')"
 if printf '%s' "$bare" | grep -Eq "$READ"; then
-  if printf '%s' "$bare" | grep -Eq '>[[:space:]]*/dev/null|>>?[[:space:]]*[^|&[:space:]]'; then
-    : # redirected off the transcript (to /dev/null or a file) — allow
+  if printf '%s' "$bare" | grep -Eq '\|'; then
+    # The read's stdout is piped into another command -> transcript. Not safe,
+    # even with a `2>/dev/null` stderr redirect (the exact `pass show X 2>/dev/null
+    # | head` leak that a bare `>`-means-redirected check waved through).
+    block "a secret read is piped to another command; its value reaches the transcript."
+  elif printf '%s' "$bare" | grep -Eq '(^|[^0-9])(1?>|&>)[[:space:]]*([^|&[:space:]]|/dev/null)'; then
+    # STDOUT redirected off the transcript (to a file or /dev/null) — allow. A
+    # bare `2>...` only redirects STDERR, so it does NOT count here.
+    :
   else
     block "a secret read (pass show / pass <path> / gh auth token) prints to stdout."
   fi

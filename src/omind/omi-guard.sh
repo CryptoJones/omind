@@ -62,8 +62,16 @@ SENT="$STATE/gate-$sid"
 # turn's consults + relevance verdicts as JSON in this same file, and a second
 # consult in the turn must not wipe the first.
 case "$tool" in
+  # Navigation/listing tools (list-notes, list-tags, graph-*, backlinks) surface
+  # no note CONTENT, so — like re-reading index.md — they must NOT clear the gate
+  # (that was a verifier-proof gate-dodge). Allow them through without consulting.
+  mcp__omi__list-notes | mcp__omi__list-tags | mcp__omi__graph-* | mcp__omi__backlinks)
+    exit 0 ;;
   mcp__omi__*)
     target="$(printf '%s' "$input" | jq -r '.tool_input.name // .tool_input.query // .tool_input.q // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null)"
+    # An empty target means a contentless call (nothing to consult); allow it but
+    # do not clear the gate.
+    [ -z "$target" ] && exit 0
     jq -nc --arg t "$tool" --arg s "$sid" --arg target "$target" \
       '{tool:$t, command:"", session:$s, is_omi_consult:true, consult_target:$target}' 2>/dev/null \
       | "$OMIND" guard check >/dev/null 2>&1

@@ -32,11 +32,14 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from omind.paths import RESERVED_FILENAMES
-from omind.store import _WIKILINK_RE, NoteFields, parse_note
+from omind.store import _FENCE_RE, _WIKILINK_RE, NoteFields, parse_note
 
 #: Titles overlapping at/above this Jaccard score are flagged as near-duplicates.
 _NEAR_DUP = 0.6
 _TOKEN_RE = re.compile(r"[a-z0-9]+")
+#: A date / week / bare number in a title — the distinguishing part of a periodic
+#: note series ("Worklog 2026-06-29" vs "…-30"), which must NOT read as a dupe.
+_DATE_RE = re.compile(r"\d{4}-w?\d{1,2}(?:-\d{1,2})?|\bw?\d+\b", re.IGNORECASE)
 #: Title tokens too generic to anchor a duplicate match on.
 _STOP = frozenset(
     {"the", "and", "for", "with", "note", "omi", "memory", "cj", "cryptojones"}
@@ -62,11 +65,32 @@ def _link_target(raw: str) -> str:
     return raw.split("|", 1)[0].split("#", 1)[0].strip()
 
 
+def _strip_code(text: str) -> str:
+    """Blank out fenced code blocks and inline code so a ``[[wikilink]]`` quoted
+    in a code example isn't mistaken for a real link (a false broken-link error)."""
+    out: list[str] = []
+    in_fence = False
+    fence_ch = ""
+    for line in text.splitlines():
+        fence = _FENCE_RE.match(line.lstrip())
+        if fence:
+            ch = fence.group(1)[0]
+            if not in_fence:
+                in_fence, fence_ch = True, ch
+            elif ch == fence_ch:
+                in_fence = False
+            continue
+        out.append("" if in_fence else re.sub(r"`[^`]*`", "", line))
+    return "\n".join(out)
+
+
 def _outbound(text: str) -> set[str]:
     """Link targets named by the note body, original-case (deduped, blanks
     dropped). Resolution against :data:`known` is case-insensitive; the original
-    case is kept so a broken-link report shows the link as the author wrote it."""
-    return {t for t in (_link_target(m) for m in _WIKILINK_RE.findall(text)) if t}
+    case is kept so a broken-link report shows the link as the author wrote it.
+    Links inside code fences/inline code are ignored."""
+    body = _strip_code(text)
+    return {t for t in (_link_target(m) for m in _WIKILINK_RE.findall(body)) if t}
 
 
 def _title_tokens(title: str) -> frozenset[str]:
@@ -79,6 +103,18 @@ def _jaccard(a: frozenset[str], b: frozenset[str]) -> float:
     return len(a & b) / len(a | b)
 
 
+def _is_periodic_series(title_a: str, title_b: str) -> bool:
+    """True when two titles are identical except for a date / week / number — a
+    periodic note series (Worklog/journal/rollup), not a duplicated memory. Such
+    notes ``omind checkpoint`` creates one of per day, so without this every pair
+    scored 100% similar and lint --strict failed on a healthy vault."""
+    stem_a = _DATE_RE.sub(" ", title_a.lower()).split()
+    stem_b = _DATE_RE.sub(" ", title_b.lower()).split()
+    dates_a = _DATE_RE.findall(title_a.lower())
+    dates_b = _DATE_RE.findall(title_b.lower())
+    return stem_a == stem_b and bool(dates_a or dates_b) and dates_a != dates_b
+
+
 @dataclass
 class _Note:
     path: Path
@@ -87,12 +123,22 @@ class _Note:
     ids: frozenset[str]  # stem + title, lowercased — how others link to this note
 
 
-def _load(omi_dir: Path | str) -> list[_Note]:
-    """Parse every live (non-disabled, non-reserved) note once."""
+def _note_ids(path: Path, fields: NoteFields) -> set[str]:
+    ids = {path.stem.strip().lower()}
+    if fields.title.strip():
+        ids.add(fields.title.strip().lower())
+    return ids
+
+
+def _load(omi_dir: Path | str) -> tuple[list[_Note], set[str]]:
+    """Parse the top-level live notes to lint, plus the set of ALL valid link
+    targets in the vault tree — including archived (soft-deleted) notes and notes
+    under ``Journal/`` — so a link to one of those is not a false broken-link."""
     omi = Path(omi_dir)
     notes: list[_Note] = []
+    known_extra: set[str] = set()
     if not omi.is_dir():
-        return notes
+        return notes, known_extra
     for path in sorted(omi.glob("*.md")):
         if path.name in RESERVED_FILENAMES or path.name.startswith("."):
             continue
@@ -101,21 +147,34 @@ def _load(omi_dir: Path | str) -> list[_Note]:
         except OSError:
             continue
         fields = parse_note(text)
+        ids = _note_ids(path, fields)
         if fields.disabled:
+            # Archived notes are restorable and remain valid link targets, but are
+            # not linted as sources (a normal delete only archives — every link to
+            # the archived note would otherwise become an error and flip --strict).
+            known_extra |= ids
             continue
-        ids = {path.stem.strip().lower()}
-        if fields.title.strip():
-            ids.add(fields.title.strip().lower())
         notes.append(_Note(path, fields, _outbound(text), frozenset(ids)))
-    return notes
+    # Notes in subfolders (Journal/, Journal/Archive/) are legitimate link
+    # targets too, though they are auto-generated and not linted as sources.
+    for path in sorted(omi.rglob("*.md")):
+        if path.parent == omi or path.name.startswith("."):
+            continue
+        try:
+            fields = parse_note(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        known_extra |= _note_ids(path, fields)
+    return notes, known_extra
 
 
 def lint_vault(omi_dir: Path | str) -> list[LintIssue]:
     """Every problem found in the vault, ordered error → warn → info then by note."""
-    notes = _load(omi_dir)
-    # Every identifier any note can be linked by (+ reserved stems, which are
-    # legitimate link targets even though they're skipped as notes).
+    notes, known_extra = _load(omi_dir)
+    # Every identifier any note can be linked by (+ reserved stems, archived
+    # notes, and subfolder notes, which are legitimate link targets).
     known = {stem for path in RESERVED_FILENAMES for stem in (Path(path).stem.lower(),)}
+    known |= known_extra
     for n in notes:
         known |= n.ids
     linked: set[str] = set()  # ids that at least one OTHER note links to
@@ -141,15 +200,19 @@ def lint_vault(omi_dir: Path | str) -> list[LintIssue]:
             )
 
     # Near-duplicate titles — each unordered pair reported once.
-    toks = [(_title_tokens(n.fields.title or n.path.stem), n) for n in notes]
+    toks = [(_title_tokens(n.fields.title or n.path.stem), n.fields.title or n.path.stem, n)
+            for n in notes]
     for i in range(len(toks)):
         for j in range(i + 1, len(toks)):
+            if _jaccard(toks[i][0], toks[j][0]) < _NEAR_DUP:
+                continue
+            if _is_periodic_series(toks[i][1], toks[j][1]):
+                continue  # "Worklog 2026-06-29" vs "…-30": a dated series, not a dupe
             score = _jaccard(toks[i][0], toks[j][0])
-            if score >= _NEAR_DUP:
-                a, b = sorted((toks[i][1].path.name, toks[j][1].path.name))
-                issues.append(
-                    LintIssue("near-duplicate", "info", f"{a} | {b}", f"titles {score:.0%} similar")
-                )
+            a, b = sorted((toks[i][2].path.name, toks[j][2].path.name))
+            issues.append(
+                LintIssue("near-duplicate", "info", f"{a} | {b}", f"titles {score:.0%} similar")
+            )
 
     rank = {"error": 0, "warn": 1, "info": 2}
     issues.sort(key=lambda x: (rank.get(x.severity, 9), x.kind, x.note))

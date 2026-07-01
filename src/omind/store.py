@@ -54,7 +54,9 @@ def _atomic_write(path: Path, text: str) -> None:
     """Write ``text`` to ``path`` atomically: same-dir temp file + ``os.replace``.
 
     On POSIX ``os.replace`` is an atomic rename, so a concurrent reader sees
-    either the old file or the new one in full — never a half-written file.
+    either the old file or the new one in full — never a half-written file. The
+    parent directory is fsynced after the rename so the rename itself is durable
+    across a power loss, not just the file's data blocks.
     """
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
@@ -65,13 +67,46 @@ def _atomic_write(path: Path, text: str) -> None:
             fh.flush()
             os.fsync(fh.fileno())
         os.replace(tmp, path)
+        _fsync_dir(directory)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
 
+
+def _fsync_dir(directory: Path) -> None:
+    """Best-effort fsync of a directory so a rename into it is durable.
+
+    Silently skipped where the platform can't open a directory fd (Windows).
+    """
+    with contextlib.suppress(OSError, AttributeError):
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
+
+
+def _read_text(path: Path) -> str:
+    """Read a note/index file tolerantly.
+
+    Uses ``utf-8-sig`` so a leading BOM (Windows Notepad) is stripped rather
+    than glued to the ``# Title`` line, and ``errors="replace"`` so a single
+    note with a stray non-UTF-8 byte (an external editor, a mesh sync) can never
+    raise ``UnicodeDecodeError`` and take down listing/search/writes vault-wide.
+    """
+    return path.read_text(encoding="utf-8-sig", errors="replace")
+
 # \w is Unicode-aware for str patterns, so non-Latin tags (e.g. #память) round-trip.
 _TAG_RE = re.compile(r"#(\w[\w/-]*)")
+# Section-splitting primitives. Heading detection is fence-aware (see
+# :func:`_scan_note`) so a ``##`` inside a fenced code block is body text.
+_FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
+_H1_RE = re.compile(r"^#\s+(.*)$")
+_H2_RE = re.compile(r"^##\s+(.*)$")
+# Longest filename we will create. Well under the common 255-*byte* limit so a
+# long LLM-generated title raises a clean NoteError instead of ENAMETOOLONG.
+_MAX_FILENAME_BYTES = 200
 _WIKILINK_RE = re.compile(r"\[\[([^\]]+)\]\]")
 _ACTION_RE = re.compile(r"^\s*-\s*\[([ xX])\]\s?(.*)$")
 _BULLET_RE = re.compile(r"^\s*-\s+(.*)$")
@@ -87,6 +122,14 @@ _DISABLED_LINE_RE = re.compile(r"^\s*-\s*Disabled:\s*true\s*$", re.IGNORECASE)
 # Per-day journal notes written by omind.hooks; auto-recorded noise that would
 # otherwise crowd hand-curated memories out of the capped index list.
 _JOURNAL_NOTE_RE = re.compile(rf"^{re.escape(JOURNAL_PREFIX)} .*\.md$")
+# Case-folded reserved set: on a case-insensitive filesystem (APFS/NTFS) a note
+# titled "Index" resolves to the same file as the generated index.md, so the
+# reserved check must be case-insensitive or that write destroys index.md.
+_RESERVED_LOWER = frozenset(r.lower() for r in RESERVED_FILENAMES)
+
+
+def _is_reserved(name: str) -> bool:
+    return name.lower() in _RESERVED_LOWER
 
 
 class NoteError(Exception):
@@ -125,6 +168,12 @@ class NoteFields:
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
+    # Verbatim content outside the template body, preserved across edits and
+    # merges so hand-curated context is never silently dropped: ``frontmatter``
+    # is the leading YAML ``---`` block (Obsidian Properties) / any pre-title
+    # text; ``lead`` is prose between the ``# Title`` and the first ``##``.
+    frontmatter: str = ""
+    lead: str = ""
     # Non-template ``## Heading`` sections (anything outside TEMPLATE_SECTIONS).
     # Captured on parse and re-emitted on render so a note carrying its own
     # H2 headings inside a field body round-trips instead of being silently
@@ -163,6 +212,8 @@ class NoteFields:
                 str(h): [str(line) for line in (lines or [])]
                 for h, lines in (data.get("extras") or {}).items()
             },
+            frontmatter=str(data.get("frontmatter", "")),
+            lead=str(data.get("lead", "")),
             rev=str(data.get("rev", "")).strip(),
             disabled=bool(data.get("disabled")),
         )
@@ -207,36 +258,92 @@ def _strip_blank_edges(lines: list[str]) -> list[str]:
     return lines[start:end]
 
 
+def _scan_note(md: str) -> tuple[str, str, str, dict[str, list[str]]]:
+    """Scan a note into ``(frontmatter, title, lead, {heading: body lines})``.
+
+    ``frontmatter`` is the verbatim text before the ``# Title`` line — a leading
+    YAML ``---`` block (Obsidian Properties) plus any stray pre-title lines.
+    ``lead`` is the verbatim prose between the ``# Title`` and the first ``##``
+    heading. Both were previously discarded, silently destroying hand-curated
+    content on every edit; they are captured here and re-emitted by
+    :func:`render_fields`.
+
+    Heading detection is fence-aware: a ``#``/``##`` line inside a ```` ``` ````
+    or ``~~~`` code fence is body content, not a heading, so a note that quotes
+    Markdown in a fenced block round-trips instead of being torn apart.
+    """
+    lines = md.splitlines()
+    n = len(lines)
+    i = 0
+    frontmatter: list[str] = []
+    # Leading YAML frontmatter block: consume --- ... --- verbatim so a YAML
+    # comment line (``# foo``) inside it is never mistaken for the title.
+    if i < n and lines[i].strip() == "---":
+        j = i + 1
+        while j < n and lines[j].strip() != "---":
+            j += 1
+        if j < n:  # closing --- found
+            frontmatter = lines[i : j + 1]
+            i = j + 1
+
+    title = ""
+    seen_title = False
+    lead: list[str] = []
+    sections: dict[str, list[str]] = {}
+    current: str | None = None
+    in_fence = False
+    fence_ch = ""
+    while i < n:
+        line = lines[i]
+        i += 1
+        fence = _FENCE_RE.match(line.lstrip())
+        if fence:
+            ch = fence.group(1)[0]
+            if not in_fence:
+                in_fence, fence_ch = True, ch
+            elif ch == fence_ch:
+                in_fence = False
+            # fence lines are body content — fall through to the append below
+        elif not in_fence:
+            if not seen_title and (h1 := _H1_RE.match(line)):
+                title = h1.group(1).strip()
+                seen_title = True
+                continue
+            if h2 := _H2_RE.match(line):
+                current = h2.group(1).strip()
+                sections.setdefault(current, [])
+                continue
+        if current is not None:
+            sections[current].append(line)
+        elif seen_title:
+            lead.append(line)
+        else:
+            frontmatter.append(line)
+
+    return (
+        "\n".join(frontmatter).strip("\n"),
+        title,
+        "\n".join(_strip_blank_edges(lead)),
+        sections,
+    )
+
+
 def split_sections(md: str) -> tuple[str, dict[str, list[str]]]:
     """Split a note into ``(title, {heading: body lines})``.
 
     THE ``## heading`` splitter: :func:`parse_note` and the mesh merge
     driver's extra-section pass (:mod:`omind.merge`) must agree on what
     counts as a section heading, or template-owned content gets classified
-    as "extra" and duplicated into every merged note.
+    as "extra" and duplicated into every merged note. Fence-aware via
+    :func:`_scan_note`.
     """
-    title = ""
-    sections: dict[str, list[str]] = {}
-    current: str | None = None
-    seen_title = False
-    for line in md.splitlines():
-        if not seen_title and line.startswith("# "):
-            title = line[2:].strip()
-            seen_title = True
-            continue
-        heading = re.match(r"^##\s+(.*)$", line)
-        if heading:
-            current = heading.group(1).strip()
-            sections.setdefault(current, [])
-            continue
-        if current is not None:
-            sections[current].append(line)
+    _, title, _, sections = _scan_note(md)
     return title, sections
 
 
 def parse_note(md: str) -> NoteFields:
     """Parse a note's Markdown into structured fields (best effort)."""
-    title, sections = split_sections(md)
+    frontmatter, title, lead, sections = _scan_note(md)
 
     def body(name: str) -> str:
         return "\n".join(sections.get(name, [])).strip()
@@ -293,6 +400,8 @@ def parse_note(md: str) -> NoteFields:
         action_items=action_items,
         references=references,
         extras=extras,
+        frontmatter=frontmatter,
+        lead=lead,
         rev=rev,
         disabled=disabled,
     )
@@ -300,7 +409,17 @@ def parse_note(md: str) -> NoteFields:
 
 def render_fields(f: NoteFields) -> str:
     """Render structured fields back into template-shaped Markdown."""
-    out: list[str] = [f"# {f.title}".rstrip(), ""]
+    out: list[str] = []
+    # Preserved verbatim content: YAML frontmatter above the title, then the
+    # title, then any lead prose before the first section.
+    if f.frontmatter.strip():
+        out.append(f.frontmatter.strip("\n"))
+        out.append("")
+    out.append(f"# {f.title}".rstrip())
+    if f.lead.strip():
+        out.append("")
+        out.append(f.lead.strip("\n"))
+    out.append("")
 
     out.append("## Metadata")
     out.append(f"- Created: {f.created or today()}".rstrip())
@@ -357,9 +476,17 @@ def _split_field_headings(body: str) -> tuple[str, dict[str, list[str]]]:
     pre: list[str] = []
     sections: dict[str, list[str]] = {}
     current: str | None = None
+    in_fence = False
+    fence_ch = ""
     for line in body.splitlines():
-        m = re.match(r"^##\s+(.*)$", line)
-        if m:
+        fence = _FENCE_RE.match(line.lstrip())
+        if fence:
+            ch = fence.group(1)[0]
+            if not in_fence:
+                in_fence, fence_ch = True, ch
+            elif ch == fence_ch:
+                in_fence = False
+        elif not in_fence and (m := _H2_RE.match(line)):
             current = m.group(1).strip()
             sections.setdefault(current, [])
             continue
@@ -416,29 +543,36 @@ def _metadata_line_edit(md: str, pattern: re.Pattern[str], replacement: str | No
     """Set/replace/remove one ``## Metadata`` bullet, leaving the rest untouched.
 
     Surgical line edit (like :func:`_with_summary`) so hand-curated notes keep
-    sections the template doesn't know about. Replaces the first line matching
-    ``pattern`` with ``replacement`` (or removes it when ``replacement`` is
-    None); when absent, inserts at the end of the ``## Metadata`` section, or
-    appends a fresh section when the note has none.
+    sections the template doesn't know about. The match is scoped to the
+    ``## Metadata`` section — a stray ``- Disabled: true`` bullet in a Details
+    body (documenting omind itself, say) must not be mistaken for the real
+    metadata flag, which silently made ``disable_note`` a no-op. Replaces the
+    first matching Metadata line with ``replacement`` (or removes it when
+    ``replacement`` is None); when absent, inserts at the end of the Metadata
+    section, or appends a fresh section when the note has none.
     """
     lines = md.splitlines()
-    for i, line in enumerate(lines):
-        if pattern.match(line):
+    meta_start = next(
+        (i for i, line in enumerate(lines) if _METADATA_HEADING_RE.match(line)), None
+    )
+    if meta_start is None:
+        return md if replacement is None else md.rstrip() + f"\n\n## Metadata\n{replacement}\n"
+    # Metadata section spans (meta_start, meta_end) up to the next ``## `` heading.
+    meta_end = len(lines)
+    for i in range(meta_start + 1, len(lines)):
+        if lines[i].startswith("## "):
+            meta_end = i
+            break
+    for i in range(meta_start + 1, meta_end):
+        if pattern.match(lines[i]):
             rest = lines[i + 1 :]
             middle = [replacement] if replacement is not None else []
             return "\n".join([*lines[:i], *middle, *rest]).rstrip() + "\n"
     if replacement is None:
         return md
-    meta_start = next(
-        (i for i, line in enumerate(lines) if _METADATA_HEADING_RE.match(line)), None
-    )
-    if meta_start is None:
-        return md.rstrip() + f"\n\n## Metadata\n{replacement}\n"
-    # End of the Metadata section = last non-blank line before the next heading.
+    # Insert after the last non-blank line of the Metadata section.
     end = meta_start
-    for i in range(meta_start + 1, len(lines)):
-        if lines[i].startswith("#"):
-            break
+    for i in range(meta_start + 1, meta_end):
         if lines[i].strip():
             end = i
     return "\n".join([*lines[: end + 1], replacement, *lines[end + 1 :]]).rstrip() + "\n"
@@ -544,7 +678,7 @@ class OmiStore:
         """Generated files are not notes: a note titled 'index' would overwrite
         index.md, and the next regeneration would adopt the note body as the
         hand-written index intro — permanently."""
-        if path.name in RESERVED_FILENAMES:
+        if _is_reserved(path.name):
             raise NoteError(f"{path.name!r} is a reserved file, not a note; pick another title")
 
     def safe_name(self, name: str) -> Path:
@@ -564,8 +698,15 @@ class OmiStore:
         base = Path(name).name
         if base != name:
             raise NoteError(f"unsafe note name: {name!r}")
+        # A leading dot makes the file a dotfile: _note_paths / list / search /
+        # index all skip it, so the note would save "successfully" yet be
+        # unrecallable. Reject it rather than silently black-hole the memory.
+        if base.startswith("."):
+            raise NoteError(f"note name may not start with a dot: {name!r}")
         if not base.endswith(".md"):
             base += ".md"
+        if len(base.encode("utf-8")) > _MAX_FILENAME_BYTES:
+            raise NoteError(f"note name is too long ({len(base.encode('utf-8'))} bytes): {name!r}")
         target = (self.omi_dir / base).resolve()
         if target.parent != self.omi_dir.resolve():
             raise NoteError(f"note name escapes the OMI directory: {name!r}")
@@ -574,6 +715,16 @@ class OmiStore:
     def filename_for_title(self, title: str) -> str:
         cleaned = _ILLEGAL_FILENAME_CHARS.sub(" ", title).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
+        # Strip leading dots so a title like ".NET notes" doesn't become an
+        # invisible dotfile (see safe_name).
+        cleaned = cleaned.lstrip(". ").strip()
+        if not cleaned:
+            raise NoteError("title produces an empty filename")
+        # Truncate on a char boundary so the encoded filename stays under the
+        # OS byte limit (leaving room for the ".md" suffix).
+        budget = _MAX_FILENAME_BYTES - len(".md")
+        while len(cleaned.encode("utf-8")) > budget:
+            cleaned = cleaned[:-1].rstrip()
         if not cleaned:
             raise NoteError("title produces an empty filename")
         return f"{cleaned}.md"
@@ -585,13 +736,13 @@ class OmiStore:
         if not self.omi_dir.is_dir():
             return
         for path in self.omi_dir.glob("*.md"):
-            if path.name in RESERVED_FILENAMES or path.name.startswith("."):
+            if _is_reserved(path.name) or path.name.startswith("."):
                 continue
             yield path
 
     def _summarize(self, path: Path, text: str | None = None) -> NoteSummary:
         if text is None:
-            text = path.read_text(encoding="utf-8")
+            text = _read_text(path)
         return self._summarize_fields(path, parse_note(text))
 
     def _cached_summary(self, path: Path) -> NoteSummary | None:
@@ -651,7 +802,10 @@ class OmiStore:
         tag_needle = _clean_tag(tag).lower() if tag else ""
         results: list[NoteSummary] = []
         for path in self._note_paths():
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = _read_text(path)
+            except OSError:
+                continue  # note deleted mid-scan (concurrent write/purge) — skip it
             fields = parse_note(text)
             if fields.disabled and not include_disabled:
                 continue
@@ -703,7 +857,7 @@ class OmiStore:
         target = self.safe_name(name)
         if not target.is_file():
             raise NoteNotFoundError(f"note not found: {name!r}")
-        target_text = target.read_text(encoding="utf-8")
+        target_text = _read_text(target)
         stem = target.name[:-3] if target.name.endswith(".md") else target.name
         identifiers = {stem.strip().lower()}
         title = parse_note(target_text).title.strip().lower()
@@ -714,7 +868,10 @@ class OmiStore:
         for path in self._note_paths():
             if path.resolve() == target.resolve():
                 continue
-            text = path.read_text(encoding="utf-8")
+            try:
+                text = _read_text(path)
+            except OSError:
+                continue  # note deleted mid-scan — skip it rather than 500
             # Obsidian link forms: [[Note]], [[Note|alias]], [[Note#heading]] —
             # only the part before | or # names the target note.
             link_targets = {
@@ -732,7 +889,7 @@ class OmiStore:
         path = self.safe_name(name)
         if not path.is_file():
             raise NoteNotFoundError(f"note not found: {name!r}")
-        return path.read_text(encoding="utf-8")
+        return _read_text(path)
 
     def read_fields(self, name: str) -> NoteFields:
         return parse_note(self.read_note(name))
@@ -763,10 +920,23 @@ class OmiStore:
 
     # -- writes -------------------------------------------------------------
 
-    def write_note(self, name: str, content: str, expected_version: str | None = None) -> str:
+    def write_note(
+        self,
+        name: str,
+        content: str,
+        expected_version: str | None = None,
+        *,
+        must_create: bool = False,
+    ) -> str:
         path = self.safe_name(name)
         self._reject_reserved(path)
         with self.write_lock():
+            # ``must_create`` closes the create-note TOCTOU: two sessions saving
+            # the same brand-new title both passed a pre-lock exists() check and
+            # the second silently overwrote the first. The check now happens
+            # inside the lock.
+            if must_create and path.exists():
+                raise NoteError(f"a note named {path.name!r} already exists")
             # Re-check the optimistic-concurrency token *inside* the lock so the
             # check-then-write is atomic against another process's save. A
             # missing file is a mismatch too (note_version returns ""): a stale
@@ -778,7 +948,7 @@ class OmiStore:
                         f"note {name!r} changed on disk (expected {expected_version!r}, "
                         f"found {current!r})"
                     )
-            if self.node_id is not None and path.name not in RESERVED_FILENAMES:
+            if self.node_id is not None and not _is_reserved(path.name):
                 content = self._stamped(path, content)
             _atomic_write(path, content)
             self._write_index()
@@ -811,8 +981,8 @@ class OmiStore:
                         f"note {name!r} changed on disk (expected {expected_version!r}, "
                         f"found {current!r})"
                     )
-            content = transform(path.read_text(encoding="utf-8"))
-            if self.node_id is not None and path.name not in RESERVED_FILENAMES:
+            content = transform(_read_text(path))
+            if self.node_id is not None and not _is_reserved(path.name):
                 content = self._stamped(path, content)
             _atomic_write(path, content)
             self._write_index()
@@ -830,7 +1000,7 @@ class OmiStore:
             return content
         current: Rev | None = None
         if path.is_file():
-            current = Rev.parse(parse_note(path.read_text(encoding="utf-8")).rev)
+            current = Rev.parse(parse_note(_read_text(path)).rev)
         incoming = Rev.parse(parse_note(content).rev)
         if incoming is not None and (current is None or incoming.newer_than(current)):
             current = incoming
@@ -842,11 +1012,10 @@ class OmiStore:
         if not fields.created:
             fields.created = today()
         filename = self.filename_for_title(fields.title)
-        path = self.safe_name(filename)
-        if path.exists():
-            raise NoteError(f"a note named {filename!r} already exists")
         _hoist_field_headings(fields)  # canonicalize ## H2-in-body -> extras
-        return self.write_note(filename, render_fields(fields))
+        # Existence is re-checked under the write lock (must_create) to close the
+        # concurrent-create race, not here.
+        return self.write_note(filename, render_fields(fields), must_create=True)
 
     def update_note(
         self, name: str, fields: NoteFields, expected_version: str | None = None
@@ -866,9 +1035,14 @@ class OmiStore:
                 fields.created = current.created
             # Callers that don't carry extras (a partial edit-note, an MCP/CLI
             # upsert built from flat fields) must not drop the note's existing
-            # non-template sections. Inherit them like rev/created above.
+            # non-template sections, frontmatter, or lead prose. Inherit them
+            # like rev/created above.
             if not fields.extras:
                 fields.extras = current.extras
+            if not fields.frontmatter:
+                fields.frontmatter = current.frontmatter
+            if not fields.lead:
+                fields.lead = current.lead
             # A multi-section body supplied through `details` (the only such
             # field the MCP/CLI API exposes) carries ## H2s that read back as
             # extras. Hoist them now so they REPLACE the same-named inherited
@@ -893,7 +1067,7 @@ class OmiStore:
     def disable_note(self, name: str) -> str:
         """Soft-delete: set ``Disabled: true``; hidden from listings, restorable."""
         path = self.safe_name(name)
-        if path.name in RESERVED_FILENAMES:
+        if _is_reserved(path.name):
             raise NoteError(f"refusing to disable reserved file: {path.name}")
         return self._mutate_note(name, lambda md: _with_disabled(md, True))
 
@@ -904,7 +1078,7 @@ class OmiStore:
     def purge_note(self, name: str) -> None:
         """Hard-delete a note file. In a mesh, only `omind mesh purge` may use this."""
         path = self.safe_name(name)
-        if path.name in RESERVED_FILENAMES:
+        if _is_reserved(path.name):
             raise NoteError(f"refusing to delete reserved file: {path.name}")
         if not path.is_file():
             raise NoteNotFoundError(f"note not found: {name!r}")
@@ -944,7 +1118,7 @@ class OmiStore:
         :meth:`_migrate_index_descriptions` before the list is regenerated.
         """
         index_path = self.omi_dir / INDEX_FILENAME
-        existing = index_path.read_text(encoding="utf-8") if index_path.is_file() else ""
+        existing = _read_text(index_path) if index_path.is_file() else ""
         self._migrate_index_descriptions(existing)
         if INDEX_RECENT_HEADING in existing:
             intro = existing.split(INDEX_RECENT_HEADING, 1)[0].rstrip()
@@ -985,9 +1159,16 @@ class OmiStore:
                 path = self.safe_name(entry.group(1).strip())
             except NoteError:
                 continue
-            if path.name in RESERVED_FILENAMES or not path.is_file():
+            if _is_reserved(path.name) or not path.is_file():
                 continue
-            text = path.read_text(encoding="utf-8")
+            text = _read_text(path)
             if parse_note(text).summary.strip():
                 continue
-            _atomic_write(path, _with_summary(text, description))
+            migrated = _with_summary(text, description)
+            # On a mesh node, stamp the next rev so this content change is
+            # ordered like any other write. Writing new content under the old
+            # rev produced equal-rev/different-content across peers — the
+            # precondition for a non-convergent merge (see omind.merge).
+            if self.node_id is not None:
+                migrated = self._stamped(path, migrated)
+            _atomic_write(path, migrated)

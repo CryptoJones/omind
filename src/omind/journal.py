@@ -109,7 +109,7 @@ def migrate_journals(omi_dir: Path | str) -> list[str]:
         for stray in find_stray_journals(store.omi_dir):
             target = target_dir / stray.name
             if target.is_file():
-                bullets = action_bullets(stray.read_text(encoding="utf-8"))
+                bullets = action_bullets(stray.read_text(encoding="utf-8", errors="replace"))
                 if bullets:
                     with target.open("a", encoding="utf-8") as fh:
                         fh.write("\n".join(bullets) + "\n")
@@ -260,7 +260,7 @@ def rollup_journals(
                         archived_dated.append((day, path))
             stats = JournalStats()
             for _, path in [*archived_dated, *dated_paths]:
-                _tally(path.read_text(encoding="utf-8"), stats)
+                _tally(path.read_text(encoding="utf-8", errors="replace"), stats)
             days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
             filename = rollup_name(wk)
             _atomic_write(directory / filename, render_rollup(wk, days, stats))

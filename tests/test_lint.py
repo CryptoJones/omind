@@ -133,3 +133,50 @@ def test_clean_format_report_on_empty_vault(tmp_path: Path) -> None:
     omi = _omi(tmp_path)
     assert lint.lint_vault(omi) == []
     assert "no issues" in lint.format_report([], omi_dir=omi)
+
+
+def test_dated_series_is_not_a_near_duplicate(tmp_path: Path) -> None:
+    """A daily Worklog series must not be flagged as duplicate memories."""
+    omi = _omi(tmp_path)
+    for day in ("2026-06-28", "2026-06-29", "2026-06-30"):
+        _write(omi, f"Worklog {day}.md", f"# Worklog {day}\n\n- [[Worklog 2026-06-28]]\n")
+    dupes = [i for i in lint.lint_vault(omi) if i.kind == "near-duplicate"]
+    assert dupes == []
+
+
+def test_link_to_archived_note_is_not_broken(tmp_path: Path) -> None:
+    """A link to a soft-deleted (archived) note is valid, not a broken-link error."""
+    omi = _omi(tmp_path)
+    _write(omi, "Live.md", "# Live\n\n- [[Archived Note]]\n")
+    _write(
+        omi,
+        "Archived Note.md",
+        "# Archived Note\n\n## Metadata\n- Disabled: true\n",
+    )
+    broken = [i for i in lint.lint_vault(omi) if i.kind == "broken-link"]
+    assert broken == []
+
+
+def test_link_into_journal_subfolder_is_not_broken(tmp_path: Path) -> None:
+    """A wikilink to a Journal/ rollup note must resolve, not error."""
+    omi = _omi(tmp_path)
+    _write(omi, "Ref.md", "# Ref\n\n- [[Session Journal Rollup 2026-W26]]\n")
+    (omi / "Journal").mkdir()
+    (omi / "Journal" / "Session Journal Rollup 2026-W26.md").write_text(
+        "# Session Journal Rollup 2026-W26\n", encoding="utf-8"
+    )
+    broken = [i for i in lint.lint_vault(omi) if i.kind == "broken-link"]
+    assert broken == []
+
+
+def test_wikilink_inside_code_fence_is_not_a_link(tmp_path: Path) -> None:
+    """A [[wikilink]] quoted in a fenced code block is documentation, not a link."""
+    omi = _omi(tmp_path)
+    _write(
+        omi,
+        "Docs.md",
+        "# Docs\n\n## Details\nExample:\n\n```\nUse [[Some Note]] to link.\n```\n\n"
+        "## Connections\n- [[Docs]]\n",
+    )
+    broken = [i for i in lint.lint_vault(omi) if i.kind == "broken-link"]
+    assert broken == []

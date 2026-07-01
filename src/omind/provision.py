@@ -121,7 +121,7 @@ def write_provision_manifest() -> None:
     with contextlib.suppress(OSError):
         _guard_test_isolation(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(payload, indent=2) + "\n", encoding="utf-8")
+        paths.atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
 
 
 def read_provision_manifest() -> dict[str, Any]:
@@ -352,7 +352,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            paths.atomic_write_text(path, content)
 
     def _write_managed(self, path: Path, content: str) -> None:
         """Write a Managed-by-omind file, refreshing it whenever its content drifts.
@@ -375,7 +375,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(content, encoding="utf-8")
+            paths.atomic_write_text(path, content)
 
     # -- steps --------------------------------------------------------------
 
@@ -718,7 +718,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def ensure_guard_hook_installed(self) -> None:
         """Idempotently register the PreToolUse(Bash) guard hooks.
@@ -771,7 +771,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def _remove_legacy_omi_guard(self) -> None:
         """Delete the retired hand-rolled ``omi-git-guard.sh`` prototype if present,
@@ -912,7 +912,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            path.write_text(json.dumps(data, indent=2) + "\n", encoding="utf-8")
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def verify(self) -> None:
         if self.config.dry_run:

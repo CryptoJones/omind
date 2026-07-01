@@ -42,17 +42,30 @@ TIER_GITHUB_PUSH = "github_push"
 TIER_SUDO = "sudo"
 TIER_LEARNED = "learned"
 
+#: Shell wrapper/keyword tokens that transparently precede the real command, so
+#: the anchored token is still in command position after them:
+#: ``if/while … ; then sudo …``, ``exec sudo …``, ``nohup sudo …``,
+#: ``xargs sudo …``, ``time sudo …``. Without these, ``if true; then sudo rm``
+#: sailed past the sudo hard rule (a fail-open of a hard control).
+_CMD_WRAPPERS = r"then|do|else|elif|exec|nohup|command|time|builtin|xargs"
+
 #: Prefix that anchors a ``match="command"`` pattern to COMMAND POSITION: the
 #: command start, or immediately after a shell separator (``;`` ``&`` ``|``
 #: NEWLINE ``(`` backtick — single chars suffice since ``&&`` / ``||`` / ``$(``
 #: all END in a char in the class), skipping any leading ``VAR=val`` environment
-#: assignments. This is how a token like ``sudo`` is matched only when it is the
-#: command being run — not when it appears as a grep arg, a path segment, a
+#: assignments and shell wrapper keywords (:data:`_CMD_WRAPPERS`), and an
+#: optional absolute/relative path to the binary (``/usr/bin/sudo``,
+#: ``./x/sudo``). This is how a token like ``sudo`` is matched only when it is
+#: the command being run — not when it appears as a grep arg, a path segment, a
 #: filename, a commit message, or a ``pass show sudo/...`` value (the #98/#108
 #: false-positive class). It mirrors the leading-assignment idea already proven
 #: in ``guard._opt_in_satisfied``. Use ``[ \t]`` (not ``\s``) so the
 #: assignment-skip never crosses a newline into another command.
-_CMD_POSITION = r"(?:^|[\n;&|`(])[ \t]*(?:\w+=\S*[ \t]+)*"
+_CMD_POSITION = (
+    r"(?:^|[\n;&|`(])[ \t]*"
+    r"(?:(?:\w+=\S*|" + _CMD_WRAPPERS + r")[ \t]+)*"
+    r"(?:[./][^\s;&|`()]*/)?"
+)
 
 
 @dataclass
@@ -101,7 +114,11 @@ class Rule:
 SEED_RULES: tuple[Rule, ...] = (
     Rule(
         id="gh-auth-setup-git",
-        pattern=r"\bgh\s+auth\s+setup-git\b",
+        # match="command" (#101): anchor to command position so `grep -rn "gh
+        # auth setup-git"`, a commit message, or a heredoc writing this rule no
+        # longer false-block — routine when working on omind itself.
+        pattern=r"gh\s+auth\s+setup-git\b",
+        match="command",
         message=(
             "never 'gh auth setup-git'. GitHub auth = the gh-YOLO PAT from pass via "
             "a one-shot (per-command) credential helper. Read OMI: github-auth-ssh."
@@ -109,7 +126,8 @@ SEED_RULES: tuple[Rule, ...] = (
     ),
     Rule(
         id="gh-repo-delete",
-        pattern=r"\bgh\s+repo\s+delete\b",
+        pattern=r"gh\s+repo\s+delete\b",
+        match="command",
         message=(
             "never delete a repo from a hook-reachable command. Typed-name "
             "confirmation only. Read OMI: Operational Rules - Git Repos and Secrets."
@@ -121,7 +139,9 @@ SEED_RULES: tuple[Rule, ...] = (
         # `gh api repos/o/r -X DELETE` (path before method) is caught as well as
         # `gh api -X DELETE repos/o/r`. Both lookaheads stay within one simple
         # command (no pipe/;/&), so an unrelated later command can't trip it.
+        # Command-anchored (#101) so the phrase in a grep/commit message is safe.
         pattern=r"gh\s+api(?=[^|;&]*(?:-X\s*|--method\s*)DELETE)(?=[^|;&]*repos/)",
+        match="command",
         message=(
             "never DELETE a repo via the API. Typed-name confirmation only. "
             "Read OMI: Operational Rules - Git Repos and Secrets."
@@ -136,6 +156,7 @@ SEED_RULES: tuple[Rule, ...] = (
             r"curl(?=[^|;&]*(?:-X\s*|--request\s*)DELETE)"
             r"(?=[^|;&]*api\.github\.com/repos/)"
         ),
+        match="command",
         message=(
             "never DELETE a GitHub repo/resource via the raw API. Use the reviewed "
             "path; typed-name confirmation only. Read OMI: Operational Rules - Git "
@@ -151,7 +172,7 @@ SEED_RULES: tuple[Rule, ...] = (
         # `sudo …`, `; sudo …`, `a && sudo …`, `a | sudo …`, `$(sudo …)`, and
         # `FOO=1 sudo …` still block. `fleet-sudo` never matches (it is not a
         # command-position `sudo` token), so no lookbehind is needed.
-        pattern=r"sudo\b",
+        pattern=r"sudo(?:edit)?\b",
         match="command",
         message=(
             "raw sudo is blocked — run `fleet-sudo <cmd>` instead (it reads the "
@@ -203,15 +224,35 @@ def seed_policy_path() -> Path:
 def _rule_from_dict(data: dict[str, object]) -> Rule | None:
     """Build a Rule from on-disk data, dropping unknown keys. ``None`` if it
     lacks the required ``id``/``pattern``/``message`` (a corrupt entry is skipped,
-    never fatal)."""
+    never fatal).
+
+    A learned/hand-edited rule whose ``pattern`` does not compile — or matches
+    the empty string (a trailing ``|``) — would crash or hard-block the guard on
+    EVERY tool call (a bricked machine). It is dropped here so a bad table can
+    never reach the guard hot path. A wrong-typed ``severity`` (a JSON number)
+    that would silently demote a hard rule to non-blocking is likewise rejected.
+    """
     kwargs = {k: v for k, v in data.items() if k in _RULE_FIELDS}
     required = ("id", "pattern", "message")
     if not all(isinstance(kwargs.get(k), str) and kwargs.get(k) for k in required):
         return None
+    # Optional string fields must be strings if present (a JSON number for
+    # ``severity`` would demote a hard rule; a bad ``match`` mode would confuse
+    # the anchor logic).
+    for key in ("severity", "tier", "match", "source", "created"):
+        if key in kwargs and not isinstance(kwargs[key], str):
+            return None
     try:
-        return Rule(**kwargs)  # type: ignore[arg-type]
+        rule = Rule(**kwargs)  # type: ignore[arg-type]
     except (TypeError, ValueError):
         return None
+    try:
+        compiled = rule.compiled()
+    except re.error:
+        return None
+    if compiled.search(""):  # matches everything → would block every action
+        return None
+    return rule
 
 
 def _rule_to_dict(rule: Rule) -> dict[str, object]:

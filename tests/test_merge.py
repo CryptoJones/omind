@@ -103,6 +103,27 @@ def test_result_rev_is_max_of_sides() -> None:
     assert merge_fields(base, note("2@b"), note("4@a")).fields.rev == "4@a"
 
 
+def test_equal_rev_different_content_is_symmetric() -> None:
+    """Equal rev identity with differing content must converge (not resolve by side)."""
+    base = note("1@a", summary="base")
+    one = note("5@a", summary="apple")
+    two = note("5@a", summary="zebra")  # same rev identity, different content
+    a = merge_fields(base, one, two)
+    b = merge_fields(base, two, one)
+    assert a.fields.summary == b.fields.summary  # converges regardless of side
+    assert a.fields.summary == "zebra"  # symmetric max() tiebreak
+
+
+def test_merge_preserves_frontmatter_and_lead() -> None:
+    """A YAML frontmatter block and lead prose must survive a merge, not vanish."""
+    base = "---\ntags: [x]\n---\n# N\n\nlead text.\n\n## Summary\ns\n\n## Details\nd\n"
+    ours = "---\ntags: [x]\n---\n# N\n\nlead text.\n\n## Summary\ns2\n\n## Details\nd\n"
+    theirs = base
+    merged, _clean, _msgs = merge_note_texts(base, ours, theirs)
+    assert "tags: [x]" in merged
+    assert "lead text." in merged
+
+
 # -- list union ------------------------------------------------------------------
 
 

@@ -199,11 +199,19 @@ def consult_target(event: dict[str, Any], omi_dir: Path | str) -> tuple[str, str
     ti = ti if isinstance(ti, dict) else {}
     if tool.startswith("mcp__omi__"):
         if "search" in tool:
-            return ("search", str(ti.get("query") or ""))
+            query = str(ti.get("query") or "").strip()
+            # An empty search query carries no content to judge relevance against,
+            # so it is not a real consult — treating it as one let a contentless
+            # call clear the gate and always score "relevant".
+            return ("search", query) if query else None
         target = str(
             ti.get("filename") or ti.get("name") or ti.get("note") or ti.get("query") or ""
-        )
-        return ("read", target)
+        ).strip()
+        # A contentless navigation/listing call (list-notes, list-tags, graph-*)
+        # has no note target — like re-reading index.md, it is the gate-dodge, not
+        # a consult of relevant memory. Don't let it clear the gate or auto-score
+        # relevant on empty text (verify.py:192).
+        return ("read", target) if target else None
     if tool == "Read":
         fp = str(ti.get("file_path") or "")
         # The vault's table-of-contents (index.md), the recent-memories MEMORY.md

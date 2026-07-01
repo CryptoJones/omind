@@ -839,12 +839,27 @@ def _run_checkpoint(args: argparse.Namespace) -> int:
 
     omi_dir = (args.vault / args.folder).expanduser()
     if args.action == "install-timer":
-        checkpoint.install_timer(args.every, args.vault, args.folder)
+        try:
+            checkpoint.install_timer(args.every, args.vault, args.folder)
+        except (ValueError, FileNotFoundError, OSError) as exc:
+            print(f"error: could not install timer: {exc}", file=sys.stderr)
+            return 1
         return 0
     if args.action == "uninstall-timer":
-        checkpoint.uninstall_timer()
+        try:
+            checkpoint.uninstall_timer()
+        except OSError as exc:
+            print(f"error: could not uninstall timer: {exc}", file=sys.stderr)
+            return 1
         return 0
-    action, filename = checkpoint.write_checkpoint(omi_dir, since=args.since, llm=args.llm)
+    # `checkpoint run` fires from a systemd timer. Its contract is "never raises
+    # into a timer" — a vault/store error here must be a clean non-zero exit with
+    # a message, not an unhandled traceback every interval.
+    try:
+        action, filename = checkpoint.write_checkpoint(omi_dir, since=args.since, llm=args.llm)
+    except Exception as exc:  # noqa: BLE001 — a timer must degrade, never crash-loop
+        print(f"error: checkpoint failed: {exc}", file=sys.stderr)
+        return 1
     print(f"{action} {filename}")
     return 0
 
