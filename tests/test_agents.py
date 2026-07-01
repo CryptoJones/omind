@@ -479,6 +479,47 @@ def test_codex_setup_installs_guard_hooks(tmp_path: Path) -> None:
         handler = groups[0]["hooks"][0]
         assert handler["type"] == "command"
         assert "guard adapter --harness codex" in handler["command"]
+    session = hooks["SessionStart"][0]["hooks"][0]
+    assert session["type"] == "command"
+    assert " hook SessionStart " in f" {session['command']} "
+    assert str(config.vault) in session["command"]
+
+
+def test_codex_hook_trust_hash_matches_known_codex_vector() -> None:
+    group = {
+        "hooks": [
+            {
+                "type": "command",
+                "command": (
+                    "/home/hermes/Source/repos/omind/.venv/bin/omind "
+                    "guard adapter --harness codex"
+                ),
+                "timeout": 30,
+            }
+        ]
+    }
+    assert agents.CodexProvisioner.hook_trust_hash("PreToolUse", group) == (
+        "sha256:475551fc6960269e3a9d811f187ee729b576e5ff256c255bb445177933bbc8ec"
+    )
+    assert agents.CodexProvisioner.hook_trust_hash("PermissionRequest", group) == (
+        "sha256:773fc6ffd5d503817a882b3cfcd5b0e0a600f8ad9a3f2b49d2e3666c19ea0948"
+    )
+
+
+def test_codex_setup_persists_trust_for_omind_hooks(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    doc = tomlkit.parse(agents.codex_config_path().read_text(encoding="utf-8"))
+    state = doc["hooks"]["state"]  # type: ignore[index]
+    entries = agents.CodexProvisioner(config, log=_quiet).omind_hook_trust_entries()
+    assert len(entries) == 3
+    for key, trusted_hash in entries.items():
+        assert state[key]["trusted_hash"] == trusted_hash  # type: ignore[index]
+
+    actions = run_setup_for(config, log=_quiet)
+    assert not any("persist trust for omind Codex hooks" in a for a in actions)
 
 
 def test_codex_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> None:
@@ -508,7 +549,9 @@ def test_codex_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> N
     assert "my-own-hook" in pre_cmds  # user's own PreToolUse hook preserved
     assert any("--harness codex" in c for c in pre_cmds)  # omind appended
     assert hooks["PostToolUse"][0]["hooks"][0]["command"] == "user-posttool"
-    assert hooks["SessionStart"][0]["hooks"][0]["command"] == "user-start"  # other events untouched
+    start_cmds = [g["hooks"][0]["command"] for g in hooks["SessionStart"]]
+    assert "user-start" in start_cmds  # user hook preserved
+    assert any(" hook SessionStart " in f" {c} " for c in start_cmds)  # omind appended
     assert hooks["PostCompact"][0]["hooks"][0]["command"] == "user-compact"
     assert "PreToolUse" not in data  # migrated to Codex's root `hooks` schema
     assert "PostToolUse" not in data
@@ -522,6 +565,44 @@ def test_codex_guard_preserves_user_hooks_and_is_idempotent(tmp_path: Path) -> N
         if "--harness codex" in g["hooks"][0]["command"]
     ]
     assert len(omind_groups) == 1
+    priming_groups = [
+        g for g in data2["hooks"]["SessionStart"]
+        if " hook SessionStart " in f" {g['hooks'][0]['command']} "
+    ]
+    assert len(priming_groups) == 1
+
+
+def test_codex_setup_installs_global_agents_bootstrap(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    text = agents.codex_agents_path().read_text(encoding="utf-8")
+    assert agents.CODEX_BOOTSTRAP_START in text
+    assert agents.CODEX_BOOTSTRAP_END in text
+    assert "This section is managed by `omind setup --agent codex`" in text
+    assert str(config.omi_dir) in text
+    assert "Voice and Persona - Dix and Shelly" in text
+
+
+def test_codex_global_agents_bootstrap_preserves_user_text_and_is_idempotent(
+    tmp_path: Path,
+) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    agents.codex_agents_path().write_text(
+        "# Global Codex Instructions\n\nUser custom rule.\n",
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    first = agents.codex_agents_path().read_text(encoding="utf-8")
+    assert "User custom rule." in first
+    assert first.count(agents.CODEX_BOOTSTRAP_START) == 1
+
+    actions = run_setup_for(config, log=_quiet)
+    assert agents.codex_agents_path().read_text(encoding="utf-8") == first
+    assert not any("install OMI bootstrap pointer" in a for a in actions)
 
 
 def test_diagnose_codex_reports_guard_state(tmp_path: Path) -> None:
@@ -533,6 +614,9 @@ def test_diagnose_codex_reports_guard_state(tmp_path: Path) -> None:
     run_setup_for(config, log=_quiet)
     after = {r.key: r for r in agents.diagnose_codex(config)}
     assert after["codex_guard"].level == "ok"
+    assert after["codex_priming"].level == "ok"
+    assert after["codex_bootstrap"].level == "ok"
+    assert after["codex_hook_trust"].level == "ok"
     assert after["codex_root"].level == "ok"
 
 
@@ -596,6 +680,9 @@ def test_diagnose_codex_reports_mcp_registration_state(tmp_path: Path) -> None:
     after = {r.key: r for r in agents.diagnose_codex(config)}
     assert after["codex_mcp_registration"].level == "ok"
     assert after["codex_guard"].level == "ok"  # both pieces wired by one `setup`
+    assert after["codex_priming"].level == "ok"
+    assert after["codex_bootstrap"].level == "ok"
+    assert after["codex_hook_trust"].level == "ok"
 
 
 # -- #88: OpenClaw detect-only guard ------------------------------------------
