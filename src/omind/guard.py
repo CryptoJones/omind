@@ -67,6 +67,10 @@ GLOBAL_MUTATION_MESSAGE = (
     "global config/hook/bootstrap mutation requires explicit user authorization in the "
     "current turn; answer questions first instead of inferring permission."
 )
+CAPABILITY_SIDE_EFFECT_MESSAGE = (
+    "side-effect actions require explicit imperative authorization; answer capability "
+    "questions like `can you ...?` without acting until the user says to proceed."
+)
 
 
 @dataclass(frozen=True)
@@ -458,8 +462,19 @@ _GLOBAL_CONFIG_RE = re.compile(
 )
 _GLOBAL_AUTH_RE = re.compile(
     r"\b(?:please\s+)?(?:"
-    r"make|modify|edit|write|install|update|change|patch|apply|do it|go ahead|proceed"
+    r"make|modify|edit|write|install|update|change|patch|apply|do it|go ahead|"
+    r"proceed|send it"
     r")\b",
+    re.IGNORECASE,
+)
+_STRONG_ACTION_AUTH_RE = re.compile(
+    r"\b(?:do it|go ahead|proceed|send it|approved|authorized|"
+    r"you have (?:my )?(?:permission|authorization)|"
+    r"i give you (?:explicit )?(?:permission|authorization))\b",
+    re.IGNORECASE,
+)
+_CAPABILITY_QUESTION_RE = re.compile(
+    r"^\s*(?:hey[, ]+|please[, ]+)?(?:can|could|would|will)\s+you\b",
     re.IGNORECASE,
 )
 _GLOBAL_MUTATING_BASH_RE = re.compile(
@@ -469,6 +484,17 @@ _GLOBAL_MUTATING_BASH_RE = re.compile(
     r"python3?\b[^;&|\n]*(?:write_text|write_bytes|open\([^;&|\n]*[\"']a|"
     r"open\([^;&|\n]*[\"']w)|"
     r"node\b[^;&|\n]*(?:writeFile|appendFile)"
+    r")\b|>|>>"
+)
+_SHELL_SIDE_EFFECT_RE = re.compile(
+    r"(?:^|[;&|\n(]\s*)(?:"
+    r"gh\s+(?:issue\s+create|pr\s+(?:create|merge)|release\s+create)|"
+    r"git\s+(?:add|commit|push|merge|rebase|checkout|switch|tag)|"
+    r"systemctl\s+(?:restart|reload|stop|start)|"
+    r"service\s+\S+\s+(?:restart|reload|stop|start)|"
+    r"kubectl\s+(?:apply|delete|rollout\s+restart|scale)|"
+    r"docker\s+(?:compose\s+)?(?:up|down|restart|rm)|"
+    r"chmod|chown|cp|dd|install|mv|rm|tee|touch|truncate"
     r")\b|>|>>"
 )
 
@@ -567,8 +593,52 @@ def _is_global_config_mutation(action: dict[str, Any]) -> bool:
     return bool(_GLOBAL_MUTATING_BASH_RE.search(str(action.get("command") or "")))
 
 
-def _turn_has_explicit_global_auth(session: str) -> bool:
-    return bool(_GLOBAL_AUTH_RE.search(turn_task(session)))
+def _turn_authorization_text(action: dict[str, Any], session: str) -> str:
+    parts = []
+    for key in ("prompt", "user_prompt", "current_prompt", "turn_prompt"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            parts.append(value.strip())
+    task = turn_task(session)
+    if task:
+        parts.append(task)
+    return "\n".join(parts)
+
+
+def _has_strong_action_auth(text: str) -> bool:
+    return bool(_STRONG_ACTION_AUTH_RE.search(text))
+
+
+def _is_capability_question(text: str) -> bool:
+    return bool(_CAPABILITY_QUESTION_RE.search(text))
+
+
+def _turn_has_explicit_global_auth(action: dict[str, Any], session: str) -> bool:
+    text = _turn_authorization_text(action, session)
+    if _is_capability_question(text):
+        return _has_strong_action_auth(text)
+    return bool(_GLOBAL_AUTH_RE.search(text))
+
+
+def _is_side_effect_action(action: dict[str, Any]) -> bool:
+    tool = str(action.get("tool") or "")
+    if tool in _WRITE_TOOLS:
+        return True
+    if _is_global_config_mutation(action):
+        return True
+    command = str(action.get("command") or "")
+    if tool == "Bash" or command:
+        return bool(_SHELL_SIDE_EFFECT_RE.search(command))
+    return False
+
+
+def _is_unauthorized_capability_side_effect(action: dict[str, Any], session: str) -> bool:
+    text = _turn_authorization_text(action, session)
+    return (
+        _is_capability_question(text)
+        and not _has_strong_action_auth(text)
+        and _is_side_effect_action(action)
+    )
 
 
 def decide(action: dict[str, Any]) -> Verdict:
@@ -619,6 +689,14 @@ def decide(action: dict[str, Any]) -> Verdict:
     if str(action.get("tool") or "") in _GATE_EXEMPT_TOOLS:
         return Verdict(allow=True)
 
+    if _is_unauthorized_capability_side_effect(action, session):
+        record_pending(session, command or _action_path(action))
+        return Verdict(
+            allow=False,
+            reason=f"omi-guard (hard): {CAPABILITY_SIDE_EFFECT_MESSAGE}",
+            rule_id="capability-question-explicit-auth",
+        )
+
     # 2.6) Operator pause (`omind guard pause --for ...`): a time-boxed fast window
     # that skips the consult-gate + verifier for mission-critical speed / token
     # savings. ONLY the gate — the HARD destructive blocks above already ran, so a
@@ -627,7 +705,9 @@ def decide(action: dict[str, Any]) -> Verdict:
     if gate_paused():
         return Verdict(allow=True)
 
-    if _is_global_config_mutation(action) and not _turn_has_explicit_global_auth(session):
+    if _is_global_config_mutation(action) and not _turn_has_explicit_global_auth(
+        action, session
+    ):
         return Verdict(
             allow=False,
             reason=f"omi-guard (hard): {GLOBAL_MUTATION_MESSAGE}",

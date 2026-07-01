@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.5] - 2026-07-01
+
+### Changed
+- Treat `send it` as explicit current-turn authorization for guarded global
+  config/hook/bootstrap mutations.
+
+### Fixed
+- Allow explicit global config/hook/bootstrap authorization to come from the
+  current action payload when the captured turn-task file is missing or stale.
+- Block side-effect tool calls prompted only by capability questions such as
+  `Can you ...?` unless the current turn includes explicit imperative
+  authorization.
+
 ## [3.7.4] - 2026-07-01
 
 ### Fixed
