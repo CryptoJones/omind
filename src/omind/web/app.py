@@ -18,6 +18,7 @@ from typing import TypeVar
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
+from starlette.middleware.trustedhost import TrustedHostMiddleware
 
 from omind import graph as graph_mod
 from omind.store import (
@@ -62,9 +63,22 @@ class RawUpdate(BaseModel):
     content: str
 
 
-def create_app(omi_dir: Path | str) -> FastAPI:
+#: Host headers accepted by default (a localhost bind). ``testserver`` is
+#: Starlette's TestClient host.
+DEFAULT_ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]", "testserver"]
+
+
+def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> FastAPI:
     store = OmiStore(omi_dir)
     app = FastAPI(title="omind", description="OMI memory web UI")
+    # DNS-rebinding defence: this JSON API is destructive and unauthenticated
+    # (single-user, bound to localhost). A Host allowlist rejects requests whose
+    # Host header isn't expected, so a malicious page the user visits can't rebind
+    # its hostname to 127.0.0.1 and drive the API. ``["*"]`` (chosen by the CLI for
+    # a deliberate all-interfaces bind) disables the check.
+    app.add_middleware(
+        TrustedHostMiddleware, allowed_hosts=allowed_hosts or DEFAULT_ALLOWED_HOSTS
+    )
 
     @app.get("/api/notes")
     def list_notes(include_disabled: bool = False) -> list[dict[str, object]]:
@@ -155,4 +169,6 @@ def get_app() -> FastAPI:
     omi_dir = os.environ.get("OMIND_OMI_DIR")
     if not omi_dir:
         raise RuntimeError("OMIND_OMI_DIR is not set; launch via `omind serve`.")
-    return create_app(omi_dir)
+    hosts_env = os.environ.get("OMIND_ALLOWED_HOSTS")
+    allowed = [h for h in hosts_env.split(",") if h] if hosts_env else None
+    return create_app(omi_dir, allowed_hosts=allowed)

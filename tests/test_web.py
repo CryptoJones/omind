@@ -31,6 +31,22 @@ def test_list_empty(client: TestClient) -> None:
     assert client.get("/api/notes").json() == []
 
 
+def test_foreign_host_header_is_rejected(omi_dir: Path) -> None:
+    """DNS-rebinding defence: a Host not on the allowlist gets 400 (#125)."""
+    with TestClient(create_app(omi_dir)) as c:
+        # The default allowlist accepts the TestClient's "testserver" host.
+        assert c.get("/api/notes").status_code == 200
+        # A rebound attacker hostname is rejected before reaching the API.
+        assert c.get("/api/notes", headers={"host": "evil.attacker.example"}).status_code == 400
+
+
+def test_explicit_allowed_host_is_accepted(omi_dir: Path) -> None:
+    """A host the operator bound to (passed via allowed_hosts) is accepted."""
+    app = create_app(omi_dir, allowed_hosts=["testserver", "omind.lan"])
+    with TestClient(app) as c:
+        assert c.get("/api/notes", headers={"host": "omind.lan"}).status_code == 200
+
+
 def test_full_crud_cycle(client: TestClient, omi_dir: Path) -> None:
     payload = {
         "title": "Web Note",

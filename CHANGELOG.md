@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Security
+- Sanitize rendered note HTML and add a Host allowlist to the web UI ([#125](https://github.com/CryptoJones/omind/issues/125)): note markdown (authored by agents, synced from mesh peers — untrusted) is now run through DOMPurify before it reaches `innerHTML`, closing a stored-XSS vector where a prompt-injected note could execute JS against the CRUD API when opened. The API also gets a `TrustedHostMiddleware` Host allowlist (localhost by default) as a DNS-rebinding defence, and `omind serve` warns when binding to a non-localhost / all-interfaces address.
+
 ### Fixed
 - Graph view no longer freezes the tab or leaks loops ([#129](https://github.com/CryptoJones/omind/issues/129)): the synchronous pre-settle is bounded by a work budget (a large vault no longer triggers "page unresponsive" before first paint), the O(n²) all-pairs repulsion is skipped above a node threshold so frames stay cheap at scale, and `destroy()` now removes the leaked `window` mouseup listener. The web app also tracks and tears down the graph's render loop when the pane switches away, instead of discarding the handle and leaking a `requestAnimationFrame` loop per open.
 - Web UI no longer 500s under its own poll ([#130](https://github.com/CryptoJones/omind/issues/130)): `OmiStore`'s summary cache is guarded by a lock, so concurrent `list_notes()` calls from FastAPI's threadpool can't hit "dictionary changed size during iteration". The MCP server also caches the `[[wikilink]]` graph build (invalidated by a cheap vault signature), so a burst of graph-tool queries costs one full-vault parse instead of one per tool.
