@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Scope the autonomous-loop guard to one owner session ([#128](https://github.com/CryptoJones/omind/issues/128)): arming a `/loop` no longer refuses stops for every other concurrent session on the machine, and a concurrent session's work no longer resets the owner's no-work backstop counter. The owner is set from `omind loop arm --session` / `$CLAUDE_SESSION_ID`, or claimed by the first session to hit a Stop.
+
 ## [3.7.6] - 2026-07-01
 
 Hardening release from an adversarial code review — data-integrity, guard

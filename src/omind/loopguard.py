@@ -22,6 +22,11 @@ Safety (a runaway no-stop hook is dangerous, so it is bounded three ways):
   auto-disarms and ALLOWS the stop (the agent is genuinely wedged) — logged.
 * **An expiry self-clears.** Arming carries an expiry so a forgotten flag can't
   trap a future, unrelated session.
+* **The loop is owned by one session.** The armed state records an *owner*
+  session (from ``omind loop arm --session`` / ``$CLAUDE_SESSION_ID``, or claimed
+  by the first session to hit a Stop). A DIFFERENT concurrent session is never
+  refused and its ``PostToolUse`` never resets the owner's counter — arming one
+  ``/loop`` can no longer trap every other session on the machine.
 
 Like the rest of :mod:`omind.hooks`, every entry point swallows errors and fails
 **open** — to *allowing* the stop. A broken guard must never trap the agent.
@@ -61,6 +66,11 @@ def _now(now: datetime | None) -> datetime:
     return now if now is not None else datetime.now(timezone.utc)
 
 
+def _clean_session(session: object) -> str | None:
+    cleaned = "".join(c for c in str(session or "") if c.isalnum() or c in "._-")
+    return cleaned or None
+
+
 def _load() -> dict[str, Any]:
     try:
         return json.loads(_path().read_text(encoding="utf-8"))  # type: ignore[no-any-return]
@@ -84,9 +94,15 @@ def arm(
     reason: str | None = None,
     max_blocks: int = DEFAULT_MAX_BLOCKS,
     hours: float = DEFAULT_HOURS,
+    session: object | None = None,
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Arm the guard: refuse stops until disarmed (or the expiry/backstop fires)."""
+    """Arm the guard: refuse stops until disarmed (or the expiry/backstop fires).
+
+    ``session`` is the loop's owner — only that session is refused. When unknown
+    (a plain operator ``omind loop arm``) it is claimed by the first session to
+    hit a Stop, so a global arm still can't trap every concurrent session.
+    """
     t = _now(now)
     expires = t + timedelta(hours=hours) if hours and hours > 0 else None
     state: dict[str, Any] = {
@@ -96,6 +112,7 @@ def arm(
         "expires_at": expires.isoformat() if expires else None,
         "blocks": 0,
         "max_blocks": max_blocks,
+        "owner": _clean_session(session),
     }
     _save(state)
     return state
@@ -128,24 +145,42 @@ def is_armed(now: datetime | None = None) -> bool:
     return True
 
 
-def reset() -> None:
+def reset(session: object | None = None) -> None:
     """Reset the consecutive-block counter — called when real work happens
-    (``PostToolUse``), so relentless work never trips the no-work backstop."""
+    (``PostToolUse``), so relentless work never trips the no-work backstop. Only
+    the OWNER session's work resets the counter; a concurrent session's work must
+    not, or it would keep the backstop from ever firing for a wedged owner."""
     state = _load()
-    if state.get("armed") and state.get("blocks"):
-        state["blocks"] = 0
-        _save(state)
+    if not state.get("armed") or not state.get("blocks"):
+        return
+    owner = state.get("owner")
+    sess = _clean_session(session)
+    if owner is not None and sess is not None and sess != owner:
+        return
+    state["blocks"] = 0
+    _save(state)
 
 
-def register_block(now: datetime | None = None) -> tuple[bool, str]:
+def register_block(session: object | None = None, now: datetime | None = None) -> tuple[bool, str]:
     """Account for a stop attempt while armed.
 
     Returns ``(True, directive)`` to REFUSE the stop, or ``(False, note)`` to
-    ALLOW it (not armed, expired, or the no-work backstop tripped → auto-disarm).
+    ALLOW it (not armed, expired, a DIFFERENT session than the loop's owner, or
+    the no-work backstop tripped → auto-disarm).
     """
     if not is_armed(now):
         return (False, "")
     state = _load()
+    sess = _clean_session(session)
+    owner = state.get("owner")
+    if sess is not None:
+        if owner is None:
+            # First session to hit a Stop under a global arm claims the loop.
+            owner = sess
+            state["owner"] = sess
+        elif sess != owner:
+            # A different, concurrent session — never trap it.
+            return (False, "")
     blocks = int(state.get("blocks", 0)) + 1
     max_blocks = int(state.get("max_blocks", DEFAULT_MAX_BLOCKS))
     if blocks > max_blocks:
@@ -170,4 +205,5 @@ def status(now: datetime | None = None) -> dict[str, Any]:
         "expires_at": state.get("expires_at"),
         "blocks": state.get("blocks", 0),
         "max_blocks": state.get("max_blocks", DEFAULT_MAX_BLOCKS),
+        "owner": state.get("owner"),
     }

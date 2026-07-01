@@ -95,6 +95,37 @@ def test_stop_hook_silent_when_disarmed(tmp_path: Path) -> None:
     assert out.getvalue() == ""  # no block emitted → the stop is allowed
 
 
+def test_owner_session_is_refused_but_a_concurrent_session_is_not() -> None:
+    """Arming for one session must not trap a different concurrent session (#128)."""
+    loopguard.arm(session="owner-sess")
+    # The owner's stop is refused.
+    assert loopguard.register_block(session="owner-sess")[0] is True
+    # A different, concurrent session is never trapped.
+    assert loopguard.register_block(session="other-sess") == (False, "")
+
+
+def test_global_arm_is_claimed_by_first_stopping_session() -> None:
+    """A plain `omind loop arm` (no session) is claimed by the first Stop, so
+    later concurrent sessions aren't trapped."""
+    loopguard.arm()  # owner unset
+    assert loopguard.status()["owner"] is None
+    assert loopguard.register_block(session="a")[0] is True  # a claims it
+    assert loopguard.status()["owner"] == "a"
+    assert loopguard.register_block(session="b") == (False, "")  # b not trapped
+
+
+def test_concurrent_session_work_does_not_reset_owner_counter() -> None:
+    """A different session's PostToolUse must not zero the owner's spin counter."""
+    loopguard.arm(session="owner", max_blocks=5)
+    loopguard.register_block(session="owner")
+    loopguard.register_block(session="owner")
+    assert loopguard.status()["blocks"] == 2
+    loopguard.reset(session="other")  # unrelated session's work
+    assert loopguard.status()["blocks"] == 2  # unchanged
+    loopguard.reset(session="owner")  # the owner's work
+    assert loopguard.status()["blocks"] == 0
+
+
 def test_posttooluse_resets_the_counter(tmp_path: Path) -> None:
     loopguard.arm(max_blocks=5)
     loopguard.register_block()
