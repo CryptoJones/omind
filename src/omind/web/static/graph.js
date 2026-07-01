@@ -95,18 +95,24 @@
     const sy = (y) => y * scale + oy;
 
     // --- force simulation --------------------------------------------------
+    // Above this node count the O(n^2) all-pairs repulsion is skipped (springs +
+    // gravity still lay it out) so a large vault doesn't cost seconds per frame.
+    const REPEL_LIMIT = 1800;
+    const repel = nodes.length <= REPEL_LIMIT;
     let alpha = 1;
     function step() {
       const REST = 64, KREP = 3000, KSPR = 0.045, GRAV = 0.03, VCAP = 30;
       for (let i = 0; i < nodes.length; i++) {
         const a = nodes[i];
-        for (let j = i + 1; j < nodes.length; j++) {
-          const b = nodes[j];
-          let dx = a.x - b.x, dy = a.y - b.y;
-          let d2 = dx * dx + dy * dy || 0.01;
-          const f = (KREP / d2) * alpha;
-          const d = Math.sqrt(d2); dx /= d; dy /= d;
-          a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
+        if (repel) {
+          for (let j = i + 1; j < nodes.length; j++) {
+            const b = nodes[j];
+            let dx = a.x - b.x, dy = a.y - b.y;
+            let d2 = dx * dx + dy * dy || 0.01;
+            const f = (KREP / d2) * alpha;
+            const d = Math.sqrt(d2); dx /= d; dy /= d;
+            a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
+          }
         }
         a.vx -= a.x * GRAV * alpha; a.vy -= a.y * GRAV * alpha;
       }
@@ -214,11 +220,12 @@
       const node = pick(e.clientX, e.clientY);
       drag = { node, px: e.clientX, py: e.clientY }; moved = false;
     });
-    window.addEventListener("mouseup", (e) => {
+    const onMouseUp = (e) => {
       if (drag && !moved && drag.node >= 0 && opts.openNote) opts.openNote(nodes[drag.node].id);
       if (drag && drag.node >= 0) nodes[drag.node].pinned = false;
       drag = null;
-    });
+    };
+    window.addEventListener("mouseup", onMouseUp);
     canvas.addEventListener("wheel", (e) => {
       e.preventDefault();
       const r = canvas.getBoundingClientRect();
@@ -238,14 +245,29 @@
     // the nodes actually end up (otherwise they drift out of frame after fit).
     requestAnimationFrame(() => {
       resize();
+      // Bound the SYNCHRONOUS pre-settle by a work budget: step() is O(n^2), so
+      // a large graph would freeze the tab ("page unresponsive") before first
+      // paint. Big graphs get few synchronous iterations; the async loop below
+      // finishes settling without blocking.
+      const budget = 2_000_000;
+      const maxIters = Math.max(
+        1, Math.min(600, Math.floor(budget / (nodes.length * nodes.length + 1)))
+      );
       let guard = 0;
-      while (alpha > 0.02 && guard++ < 600) step();
+      while (alpha > 0.02 && guard++ < maxIters) step();
       fit();
       draw();   // paint the settled layout immediately, before the rAF loop
       loop();
     });
 
-    return { destroy() { cancelAnimationFrame(raf); ro.disconnect(); mo.disconnect(); } };
+    return {
+      destroy() {
+        cancelAnimationFrame(raf);
+        ro.disconnect();
+        mo.disconnect();
+        window.removeEventListener("mouseup", onMouseUp);  // was leaked per render
+      },
+    };
   }
 
   window.OmindGraph = { render };

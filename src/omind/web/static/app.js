@@ -13,7 +13,20 @@ const state = {
   lang: "en",
   showArchived: false, // include soft-deleted (Disabled: true) notes in the list
   mesh: false, // server-reported: DELETE archives (restorable) instead of removing
+  graphActive: false, // the graph view is the current content pane
 };
+
+// The current graph view's teardown handle (OmindGraph.render resolves to it).
+// Kept so we can destroy its rAF draw loop + observers + window listener when the
+// content pane switches away — otherwise every graph open leaked one live loop.
+let graphHandle = null;
+function teardownGraph() {
+  state.graphActive = false;
+  if (graphHandle) {
+    try { graphHandle.destroy(); } catch (_) {}
+    graphHandle = null;
+  }
+}
 
 // ---- i18n -----------------------------------------------------------------
 
@@ -345,6 +358,7 @@ function renderSidebar() {
 // ---- Main pane ------------------------------------------------------------
 
 function renderEmpty() {
+  teardownGraph();
   state.mode = "empty";
   state.current = null;
   renderSidebar();
@@ -359,6 +373,7 @@ function renderEmpty() {
 }
 
 async function openNote(name) {
+  teardownGraph();
   try {
     const data = await api("GET", `/api/notes/${encodeURIComponent(name)}`);
     state.current = name;
@@ -569,6 +584,7 @@ function openEdit(data) {
 }
 
 function openNew() {
+  teardownGraph();
   state.mode = "new";
   state.current = null;
   renderSidebar();
@@ -693,19 +709,25 @@ $("#new-btn").addEventListener("click", openNew);
 
 // ---- Graph view -------------------------------------------------------------
 
-function openGraph() {
+async function openGraph() {
   if (!window.OmindGraph) return;
+  teardownGraph(); // destroy any previous graph before rendering a new one
   state.current = null;
+  state.graphActive = true;
   try { history.replaceState(null, "", "#graph"); } catch (_) {}
   renderSidebar();
   const btn = $("#graph-btn");
   btn.classList.add("active");
-  window.OmindGraph.render(contentEl, {
+  const handle = await window.OmindGraph.render(contentEl, {
     openNote: (filename) => {
       btn.classList.remove("active");
       openNote(filename);
     },
   });
+  // If the user navigated away while the graph was loading, destroy it now;
+  // otherwise keep the handle so the next navigation can tear it down.
+  if (state.graphActive) graphHandle = handle;
+  else { try { handle.destroy(); } catch (_) {} }
 }
 $("#graph-btn").addEventListener("click", openGraph);
 
