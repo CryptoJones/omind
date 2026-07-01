@@ -331,6 +331,47 @@ def test_purge_propagates_via_tombstone(pair: tuple[Path, str, Path, str]) -> No
     assert _tracked_notes(a) == _tracked_notes(b)
 
 
+def test_expired_tombstone_stops_deleting_and_is_gc_d(tmp_path: Path) -> None:
+    """A tombstone past its TTL must not delete a re-created note, and is GC'd (#127)."""
+    from datetime import datetime, timedelta, timezone
+
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    store.create_note(NoteFields(title="Reborn", summary="fresh content"))
+    tomb = omi / mesh.TOMBSTONES_FILENAME
+    old = (datetime.now(timezone.utc) - timedelta(days=mesh.TOMBSTONE_TTL_DAYS + 1)).isoformat()
+    tomb.write_text(f"{old}\tReborn.md\n", encoding="utf-8")
+    with store.write_lock():
+        mesh._apply_tombstones(omi, store)
+    assert (omi / "Reborn.md").exists()  # expired tombstone did NOT delete the note
+    assert "Reborn.md" not in tomb.read_text(encoding="utf-8")  # and was GC'd
+
+
+def test_recent_tombstone_still_deletes(tmp_path: Path) -> None:
+    """A dated tombstone within the TTL still applies."""
+    from datetime import datetime, timezone
+
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    store.create_note(NoteFields(title="Doomed", summary="s"))
+    tomb = omi / mesh.TOMBSTONES_FILENAME
+    tomb.write_text(f"{datetime.now(timezone.utc).isoformat()}\tDoomed.md\n", encoding="utf-8")
+    with store.write_lock():
+        mesh._apply_tombstones(omi, store)
+    assert not (omi / "Doomed.md").exists()
+
+
+def test_legacy_bare_tombstone_stays_permanent(tmp_path: Path) -> None:
+    """An undated legacy tombstone keeps deleting (can't be safely dated under union-merge)."""
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    store.create_note(NoteFields(title="Old", summary="s"))
+    (omi / mesh.TOMBSTONES_FILENAME).write_text("Old.md\n", encoding="utf-8")
+    with store.write_lock():
+        mesh._apply_tombstones(omi, store)
+    assert not (omi / "Old.md").exists()
+
+
 def test_unreachable_peer_is_skipped_not_fatal(pair: tuple[Path, str, Path, str]) -> None:
     a, id_a, _b, _ = pair
     mesh.add_peer(a, "ghost", str(Path(a).parent / "no-such-repo"))
