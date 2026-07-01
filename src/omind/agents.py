@@ -150,6 +150,16 @@ def codex_config_path() -> Path:
 #: Substring identifying omind's own Codex guard hook command, so a re-run finds
 #: and replaces only our entry (and never duplicates) inside the user's hooks.json.
 CODEX_GUARD_MARKER = "guard adapter --harness codex"
+CODEX_HOOK_EVENTS = (
+    "PreToolUse",
+    "PermissionRequest",
+    "PostToolUse",
+    "PreCompact",
+    "PostCompact",
+    "SessionStart",
+    "SubagentStart",
+    "SubagentStop",
+)
 
 
 def gemini_config_dir() -> Path:
@@ -925,10 +935,10 @@ class OpenCodeProvisioner(AgentProvisioner):
 class CodexProvisioner(AgentProvisioner):
     """Wire OpenAI Codex CLI into both the OMI guard and the ``omi`` MCP server.
 
-    Codex (>= 0.117) adopted the Claude-Code hook schema: ``PreToolUse`` /
-    ``PermissionRequest`` command hooks loaded from ``~/.codex/hooks.json`` (the
-    ``hooks`` feature is stable and on by default — no ``config.toml`` change
-    needed). omind mounts ``omind guard adapter --harness codex`` on BOTH events
+    Codex (>= 0.117) adopted Claude-style ``PreToolUse`` / ``PermissionRequest``
+    command hooks under the top-level ``hooks`` key in ``~/.codex/hooks.json``
+    (the ``hooks`` feature is stable and on by default — no ``config.toml``
+    change needed). omind mounts ``omind guard adapter --harness codex`` on BOTH events
     (PreToolUse blocks at the tool call; PermissionRequest is the approval-path
     backstop); on a hard-rule deny the adapter emits Codex's
     ``permissionDecision: deny`` / ``decision.behavior: deny`` shape. Codex's
@@ -973,16 +983,38 @@ class CodexProvisioner(AgentProvisioner):
             ]
         }
 
+    def _read_hooks_file(self) -> tuple[dict[str, Any], dict[str, Any]]:
+        """Return ``(root, hooks)`` for Codex's current hooks file.
+
+        omind 3.7.0 briefly wrote Claude's event map at the file root. Codex
+        rejects that shape with "unknown field `PreToolUse`, expected `hooks`".
+        Read both forms so setup can migrate affected installs without losing
+        user-authored hook groups.
+        """
+        root = self._read_settings(codex_hooks_path())
+        raw_hooks = root.get("hooks")
+        hooks = raw_hooks if isinstance(raw_hooks, dict) else {}
+        for event in CODEX_HOOK_EVENTS:
+            if event not in root:
+                continue
+            legacy = root[event]
+            current = hooks.get(event)
+            if current is None:
+                hooks[event] = legacy
+            elif isinstance(current, list) and isinstance(legacy, list):
+                hooks[event] = current + [g for g in legacy if g not in current]
+        return root, hooks
+
     def install_guard(self) -> None:
         """Merge omind's guard hook into ``~/.codex/hooks.json`` for ``PreToolUse``
         and ``PermissionRequest``, replacing only our own entry (by
         :data:`CODEX_GUARD_MARKER`) so user-authored hooks are preserved."""
         path = codex_hooks_path()
-        data = self._read_settings(path)
+        data, hooks_cfg = self._read_hooks_file()
         desired = self._guard_hook_group()
         changed = False
         for event in ("PreToolUse", "PermissionRequest"):
-            groups = data.get(event)
+            groups = hooks_cfg.get(event)
             existing = groups if isinstance(groups, list) else []
             kept = [
                 g
@@ -991,8 +1023,15 @@ class CodexProvisioner(AgentProvisioner):
             ]
             merged = kept + [desired]
             if merged != existing:
-                data[event] = merged
+                hooks_cfg[event] = merged
                 changed = True
+        for event in CODEX_HOOK_EVENTS:
+            if event in data:
+                del data[event]
+                changed = True
+        if data.get("hooks") != hooks_cfg:
+            data["hooks"] = hooks_cfg
+            changed = True
         if changed or self.config.force:
             self._record(
                 f"install OMI guard hooks (PreToolUse + PermissionRequest) in {path}"
@@ -1005,13 +1044,13 @@ class CodexProvisioner(AgentProvisioner):
 
     def _guard_wired(self) -> bool:
         try:
-            data = self._read_settings(codex_hooks_path())
+            _root, hooks_cfg = self._read_hooks_file()
         except ProvisionError:
             return False
         return all(
             any(
                 isinstance(g, dict) and CODEX_GUARD_MARKER in json.dumps(g)
-                for g in (data.get(event) or [])
+                for g in (hooks_cfg.get(event) or [])
             )
             for event in ("PreToolUse", "PermissionRequest")
         )
