@@ -8,6 +8,7 @@ import json
 from pathlib import Path
 
 import pytest
+import tomlkit
 import yaml
 
 from omind import agents, paths, provision, seeds
@@ -526,6 +527,57 @@ def test_codex_provisioner_honors_codex_home(
     assert agents.codex_config_dir() == home
     run_setup_for(_config(tmp_path, "codex"), log=_quiet)
     assert (home / "hooks.json").is_file()
+
+
+def test_codex_setup_registers_mcp_server(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    doc = tomlkit.parse(agents.codex_config_path().read_text(encoding="utf-8"))
+    omi = doc["mcp_servers"]["omi"]  # type: ignore[index]
+    assert "node" in omi["args"] and str(config.vault) in omi["args"]
+    assert "--folder" in omi["args"] and "OMI" in omi["args"]
+
+
+def test_codex_mcp_preserves_user_toml_and_is_idempotent(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    config_path = agents.codex_config_path()
+    config_path.write_text(
+        '# my own settings\n[projects."/home/hermes"]\ntrust_level = "trusted"\n',
+        encoding="utf-8",
+    )
+    config = _config(tmp_path, "codex")
+    run_setup_for(config, log=_quiet)
+
+    doc = tomlkit.parse(config_path.read_text(encoding="utf-8"))
+    assert doc["projects"]["/home/hermes"]["trust_level"] == "trusted"  # user table preserved
+    assert "my own settings" in config_path.read_text(encoding="utf-8")  # comment preserved
+    assert doc["mcp_servers"]["omi"]["command"]  # type: ignore[index]
+
+    first = config_path.read_text(encoding="utf-8")
+    actions = run_setup_for(config, log=_quiet)  # second run must be a no-op
+    assert config_path.read_text(encoding="utf-8") == first
+    assert not any("register MCP server" in a for a in actions)
+
+
+def test_codex_mcp_refuses_corrupt_toml(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    agents.codex_config_path().write_text("not [ valid toml", encoding="utf-8")
+    with pytest.raises(ProvisionError, match="not valid TOML"):
+        run_setup_for(_config(tmp_path, "codex"), log=_quiet)
+
+
+def test_diagnose_codex_reports_mcp_registration_state(tmp_path: Path) -> None:
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    config = _config(tmp_path, "codex")
+    before = {r.key: r for r in agents.diagnose_codex(config)}
+    assert before["codex_mcp_registration"].level == "fail"  # not wired yet
+
+    run_setup_for(config, log=_quiet)
+    after = {r.key: r for r in agents.diagnose_codex(config)}
+    assert after["codex_mcp_registration"].level == "ok"
+    assert after["codex_guard"].level == "ok"  # both pieces wired by one `setup`
 
 
 # -- #88: OpenClaw detect-only guard ------------------------------------------
