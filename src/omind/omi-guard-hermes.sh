@@ -29,7 +29,13 @@ SENT="$STATE/gate-$sid"
 # Consulting OMI clears the per-turn gate (always allowed — the clear-path).
 # `touch` (not truncate) so the PostToolUse verifier's JSON survives the turn.
 case "$tool" in
-  mcp__omi__*) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+  mcp__omi__*)
+    target="$(printf '%s' "$input" | jq -r '.tool_input.name // .tool_input.query // .tool_input.q // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null)"
+    jq -nc --arg t "$tool" --arg s "$sid" --arg target "$target" \
+      '{tool:$t, command:"", session:$s, is_omi_consult:true, consult_target:$target}' 2>/dev/null \
+      | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR" >/dev/null 2>&1
+    exit 0
+    ;;
   # Tool-schema loading is never gated: deferred OMI MCP tools become callable
   # only via ToolSearch, so gating it deadlocks the turn (no consult possible).
   # Allow it through WITHOUT clearing the gate — loading a schema is not a consult.
@@ -48,7 +54,12 @@ if [ "$tool" = "Read" ] || [ "$tool" = "read_file" ]; then
       # with paths.NON_CONSULT_FILENAMES.)
       case "${fp##*/}" in
         index.md|MEMORY.md|"Memory Template.md") exit 0 ;;
-        *) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+        *)
+          jq -nc --arg s "$sid" --arg target "$fp" \
+            '{tool:"Read", command:"", session:$s, is_omi_consult:true, consult_target:$target, consult_kind:"read", file_path:$target}' 2>/dev/null \
+            | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR" >/dev/null 2>&1
+          exit 0
+          ;;
       esac
       ;;
   esac

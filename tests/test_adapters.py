@@ -16,7 +16,15 @@ def test_normalize_claude_shape() -> None:
     action = adapters.normalize_action(
         {"tool_name": "Bash", "tool_input": {"command": "ls"}, "session_id": "s"}
     )
-    assert action == {"tool": "Bash", "command": "ls", "session": "s", "is_omi_consult": False}
+    assert action == {
+        "tool": "Bash",
+        "command": "ls",
+        "session": "s",
+        "is_omi_consult": False,
+        "file_path": "",
+        "consult_target": "",
+        "consult_kind": "search",
+    }
 
 
 def test_normalize_other_harness_shapes() -> None:
@@ -24,8 +32,11 @@ def test_normalize_other_harness_shapes() -> None:
     action = adapters.normalize_action({"tool": "shell", "command": "gh pr create", "session": "h"})
     assert action["command"] == "gh pr create" and action["session"] == "h"
     # An mcp__omi__ tool is recognized as a consult regardless of harness.
-    consult = adapters.normalize_action({"name": "mcp__omi__search-vault", "session": "h"})
+    consult = adapters.normalize_action(
+        {"name": "mcp__omi__read-note", "tool_input": {"name": "Operational Rules"}, "session": "h"}
+    )
     assert consult["is_omi_consult"] is True
+    assert consult["consult_target"] == "Operational Rules"
     # `args` is accepted as the command when no command/tool_input is present.
     assert adapters.normalize_action({"args": "rm -rf /"})["command"] == "rm -rf /"
 

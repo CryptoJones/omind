@@ -278,5 +278,17 @@ correct to "Claude" or "Codex".
 If OMI and the user's explicit current instruction conflict, the current
 instruction wins for that turn. If OMI is unavailable, proceed from this
 bootstrap and say that OMI could not be read.
+
+Repo and global-config work has extra hard requirements:
+
+- Before reviewing, editing, testing, committing, pushing, or releasing any git
+  repo, read `Operational Rules - Git Repos and Secrets` from OMI in addition to
+  any project note.
+- Before touching repo code, run `git status --short --branch` and a freshness
+  command (`git fetch --all --prune` or `git pull --ff-only`), then resolve the
+  current branch/base state.
+- Do not infer permission to edit installed global agent config, hooks, bootstrap
+  files, or JUMPSTART-style instructions from a question. Answer the question
+  first; change those files only after explicit current-turn authorization.
 <!-- omind:codex-bootstrap:end -->
 """

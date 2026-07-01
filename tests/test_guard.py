@@ -27,6 +27,13 @@ _HOOK_TESTABLE = (
 )
 
 
+def _satisfy_repo_preconditions(session: str) -> None:
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    repo = guard._repo_root_for_action({"tool": "Bash", "command": "git status"})
+    assert repo is not None
+    guard._record_git_freshness(session, repo, "git fetch --all --prune")
+
+
 def test_omi_consult_is_allowed_and_sets_the_per_turn_sentinel() -> None:
     guard.clear_gate("s1")
     assert guard.decide({"is_omi_consult": True, "session": "s1"}).allow
@@ -63,7 +70,7 @@ def test_full_destructive_set_is_blocked() -> None:
 
 
 def test_codeberg_push_is_allowed_after_consult() -> None:
-    guard.mark_consulted("s5")
+    _satisfy_repo_preconditions("s5")
     cmd = "git push git@codeberg.org:CryptoJones/omind.git main"
     assert guard.decide({"command": cmd, "session": "s5"}).allow
     guard.clear_gate("s5")
@@ -140,6 +147,56 @@ def test_run_guard_check_and_reset_exit_codes() -> None:
     assert ok == 0
     assert guard.run_guard("reset", io.StringIO(json.dumps({"session": "s6"}))) == 0
     assert not guard.consulted_this_turn("s6")
+
+
+def test_repo_work_requires_git_rules_note_and_freshness_check() -> None:
+    guard.clear_gate("repo")
+    blocked = guard.decide({"tool": "Bash", "command": "pytest", "session": "repo"})
+    assert not blocked.allow
+    assert blocked.rule_id == "repo-work-read-git-rules"
+
+    guard.record_consult("repo", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    blocked = guard.decide({"tool": "Bash", "command": "pytest", "session": "repo"})
+    assert not blocked.allow
+    assert blocked.rule_id == "repo-work-fresh-base"
+
+    compound = guard.decide(
+        {"tool": "Bash", "command": "git fetch --all --prune && pytest", "session": "repo"}
+    )
+    assert not compound.allow
+    assert compound.rule_id == "repo-work-fresh-base"
+
+    fresh = guard.decide(
+        {"tool": "Bash", "command": "git fetch --all --prune", "session": "repo"}
+    )
+    assert fresh.allow
+    assert guard.decide({"tool": "Bash", "command": "pytest", "session": "repo"}).allow
+    guard.clear_gate("repo")
+
+
+def test_global_config_mutation_requires_explicit_turn_authorization() -> None:
+    guard.begin_turn("global", "Can you fix both?")
+    blocked = guard.decide(
+        {
+            "tool": "Write",
+            "file_path": str(Path.home() / ".codex" / "AGENTS.md"),
+            "session": "global",
+        }
+    )
+    assert not blocked.allow
+    assert blocked.rule_id == "global-config-explicit-auth"
+
+    guard.begin_turn("global", "Please update the global Codex AGENTS bootstrap.")
+    allowed = guard.decide(
+        {
+            "tool": "Write",
+            "file_path": str(Path.home() / ".codex" / "AGENTS.md"),
+            "session": "global",
+        }
+    )
+    assert not allowed.allow
+    assert allowed.rule_id == "omi-gate"
+    guard.clear_gate("global")
 
 
 def test_clear_gate_reaps_legacy_tmp_sentinels(
@@ -391,7 +448,7 @@ def test_pause_engagement_is_logged_for_audit() -> None:
 def test_opt_in_must_be_a_real_leading_assignment_not_a_substring() -> None:
     """#2: the opt-in token only bypasses a hard rule when it is a genuine leading
     env assignment — forging it in a comment or a string must NOT skip the deny."""
-    guard.mark_consulted("optf")
+    _satisfy_repo_preconditions("optf")
     # forged in a trailing comment -> not a real assignment -> still denied
     assert not guard.decide({"command": "sudo reboot   # OMI_SUDO_OK=1", "session": "optf"}).allow
     # forged inside a string arg -> still denied
@@ -482,6 +539,45 @@ def _fake_omind(tmp_path: Path, exit_code: int) -> Path:
     return fake
 
 
+def _fake_consult_omind(tmp_path: Path) -> Path:
+    fake = tmp_path / "fake-consult-omind"
+    fake.write_text(
+        f"""#!{sys.executable}
+import json
+import os
+import pathlib
+import sys
+
+data = json.loads(sys.stdin.read() or "{{}}")
+if sys.argv[1:3] == ["guard", "check"] and data.get("is_omi_consult"):
+    sid = "".join(ch for ch in str(data.get("session") or "nosid") if ch.isalnum() or ch in "._-")
+    if os.environ.get("XDG_STATE_HOME"):
+        base = pathlib.Path(os.environ["XDG_STATE_HOME"])
+    else:
+        base = pathlib.Path.home() / ".local" / "state"
+    state = base / "omind"
+    state.mkdir(parents=True, exist_ok=True)
+    payload = {{
+        "consults": [
+            {{
+                "kind": data.get("consult_kind", "consult"),
+                "target": data.get("consult_target", ""),
+                "relevant": None,
+            }}
+        ]
+    }}
+    (state / f"gate-{{sid or 'nosid'}}").write_text(
+        json.dumps(payload),
+        encoding="utf-8",
+    )
+sys.exit(0)
+""",
+        encoding="utf-8",
+    )
+    fake.chmod(0o755)
+    return fake
+
+
 @pytest.mark.skipif(not _NOJQ_TESTABLE, reason="needs posix bash + coreutils")
 def test_hook_routes_through_adapter_when_jq_missing(tmp_path: Path) -> None:
     """#107: without jq the hook must NOT wedge — it routes the raw event through
@@ -536,9 +632,8 @@ def _read_event(omi: Path, name: str, sid: str) -> dict[str, object]:
 def test_hook_index_read_does_not_clear_the_gate_but_real_note_does(tmp_path: Path) -> None:
     """The index.md gate-dodge: a Read of the vault TOC / MEMORY.md / template
     under the OMI folder is ALLOWED but must NOT clear the per-turn gate, while a
-    Read of a real content note still does. The core binary is never invoked on a
-    Read, so a nonexistent path is fine here."""
-    hook = _render_hook(tmp_path, "/nonexistent/omind")
+    Read of a real content note still does."""
+    hook = _render_hook(tmp_path, str(_fake_consult_omind(tmp_path)))
     omi = tmp_path / "OMI"  # matches __OMI_DIR__ substituted by _render_hook
     for scaffold in ("index.md", "MEMORY.md", "Memory Template.md"):
         guard.clear_gate("hidx")
