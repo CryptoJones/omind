@@ -24,6 +24,7 @@ command -v jq >/dev/null 2>&1 || exit 0
 tool="$(printf '%s' "$input" | jq -r '.tool_name // .tool // empty' 2>/dev/null)"
 sid="$(printf '%s' "$input" | jq -r '.session_id // .session // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
 [ -z "$sid" ] && sid="nosid"
+prompt="$(printf '%s' "$input" | jq -r '.prompt // .user_prompt // .current_prompt // .turn_prompt // empty' 2>/dev/null)"
 SENT="$STATE/gate-$sid"
 
 # Consulting OMI clears the per-turn gate (always allowed — the clear-path).
@@ -69,7 +70,7 @@ fi
 # github-push opt-in, per-turn gate). A shell command may live in tool_input or
 # extra depending on the tool.
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // .extra.command // .command // empty' 2>/dev/null)"
-jq -nc --arg t "$tool" --arg c "$cmd" --arg s "$sid" \
-  '{tool:$t, command:$c, session:$s, is_omi_consult:false}' 2>/dev/null \
+jq -nc --arg t "$tool" --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" \
+  '{tool:$t, command:$c, session:$s, prompt:$prompt, is_omi_consult:false}' 2>/dev/null \
   | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR"
 exit 0

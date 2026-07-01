@@ -184,7 +184,7 @@ def test_global_config_mutation_requires_explicit_turn_authorization() -> None:
         }
     )
     assert not blocked.allow
-    assert blocked.rule_id == "global-config-explicit-auth"
+    assert blocked.rule_id == "capability-question-explicit-auth"
 
     guard.begin_turn("global", "Please update the global Codex AGENTS bootstrap.")
     allowed = guard.decide(
@@ -195,8 +195,65 @@ def test_global_config_mutation_requires_explicit_turn_authorization() -> None:
         }
     )
     assert not allowed.allow
-    assert allowed.rule_id == "omi-gate"
+    assert allowed.rule_id not in {
+        "capability-question-explicit-auth",
+        "global-config-explicit-auth",
+    }
+
+    guard.begin_turn("global", "Send it.")
+    send_it = guard.decide(
+        {
+            "tool": "Write",
+            "file_path": str(Path.home() / ".codex" / "AGENTS.md"),
+            "session": "global",
+        }
+    )
+    assert not send_it.allow
+    assert send_it.rule_id not in {
+        "capability-question-explicit-auth",
+        "global-config-explicit-auth",
+    }
     guard.clear_gate("global")
+
+
+def test_global_config_auth_can_come_from_action_prompt() -> None:
+    hook_path = Path.home() / ".claude" / "hooks" / "omi-guard.sh"
+    verdict = guard.decide(
+        {
+            "tool": "Bash",
+            "command": f"chmod 600 {hook_path}",
+            "prompt": "I give you explicit permission to make the change.",
+            "session": "global-prompt",
+        }
+    )
+    assert not verdict.allow
+    assert verdict.rule_id == "omi-gate"
+    guard.clear_gate("global-prompt")
+
+
+def test_capability_question_blocks_side_effect_without_explicit_auth() -> None:
+    blocked = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh issue create --title x",
+            "prompt": "Can you make an issue for that?",
+            "session": "capq",
+        }
+    )
+    assert not blocked.allow
+    assert blocked.rule_id == "capability-question-explicit-auth"
+
+    allowed = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh issue create --title x",
+            "prompt": "Can you make an issue for that? Send it.",
+            "session": "capq",
+        }
+    )
+    assert not allowed.allow
+    assert allowed.rule_id == "omi-gate"
+    guard.clear_gate("capq")
 
 
 def test_global_config_read_only_shell_commands_are_not_mutations() -> None:
@@ -221,7 +278,7 @@ def test_global_config_read_only_shell_commands_are_not_mutations() -> None:
         }
     )
     assert not blocked.allow
-    assert blocked.rule_id == "global-config-explicit-auth"
+    assert blocked.rule_id == "capability-question-explicit-auth"
     guard.clear_gate("global-read")
 
 

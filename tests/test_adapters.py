@@ -22,6 +22,7 @@ def test_normalize_claude_shape() -> None:
         "session": "s",
         "is_omi_consult": False,
         "file_path": "",
+        "prompt": "",
         "consult_target": "",
         "consult_kind": "search",
     }
@@ -193,3 +194,15 @@ def test_run_adapter_openclaw_detect_only(capsys: pytest.CaptureFixture[str]) ->
     assert code == 0  # detect-only: the verdict is advisory, never aborts
     body = json.loads(out)
     assert body["allow"] is False and body["rule_id"]  # the deny is still reported
+
+
+def test_normalize_preserves_prompt_context() -> None:
+    action = adapters.normalize_action(
+        {
+            "tool_name": "Bash",
+            "tool_input": {"command": "echo hi"},
+            "session_id": "cxp",
+            "prompt": "I give you explicit permission to make the change.",
+        }
+    )
+    assert action["prompt"] == "I give you explicit permission to make the change."
