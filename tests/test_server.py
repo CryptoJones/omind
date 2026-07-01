@@ -171,6 +171,29 @@ def test_graph_tools(server: FastMCP) -> None:
     assert call(server, "graph-stats", {})["notes"] == 4
 
 
+def test_graph_build_is_cached_and_busted_by_a_write(omi_dir: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
+    """The 5 graph tools reuse one cached build; a write busts the cache (#130)."""
+    from omind import graph as graph_mod
+
+    calls = {"n": 0}
+    real = graph_mod.build_graph
+
+    def counting(omi: Path) -> Any:
+        calls["n"] += 1
+        return real(omi)
+
+    monkeypatch.setattr(graph_mod, "build_graph", counting)
+    server = build_server(omi_dir, node_id="testnode-abc123")
+    call(server, "create-note", {"title": "A", "connections": ["B"]})
+    call(server, "graph-stats", {})
+    call(server, "graph-orphans", {})
+    call(server, "graph-dangling", {})
+    assert calls["n"] == 1  # three graph queries, one build (cached)
+    call(server, "create-note", {"title": "B"})  # a write changes the vault
+    call(server, "graph-stats", {})
+    assert calls["n"] == 2  # cache busted, rebuilt once
+
+
 def test_graph_neighbors_unknown_note_is_a_tool_error(server: FastMCP) -> None:
     with pytest.raises(ToolError, match="not found"):
         call(server, "graph-neighbors", {"name": "Nope"})

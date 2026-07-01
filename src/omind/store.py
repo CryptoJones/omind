@@ -17,6 +17,7 @@ import hashlib
 import os
 import re
 import tempfile
+import threading
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field
 from datetime import date
@@ -619,6 +620,11 @@ class OmiStore:
         self._node_id_resolved = node_id is not None
         # Listing cache: filename -> ((st_mtime_ns, st_size), NoteSummary).
         self._summary_cache: dict[str, tuple[tuple[int, int], NoteSummary]] = {}
+        # Guards the summary cache. The store was written for a single-threaded
+        # MCP loop, but the web app runs sync endpoints on FastAPI's threadpool,
+        # so concurrent list_notes() calls mutated the cache while another thread
+        # iterated it -> "dictionary changed size during iteration" 500s.
+        self._cache_lock = threading.Lock()
 
     @property
     def node_id(self) -> str | None:
@@ -760,11 +766,13 @@ class OmiStore:
         except OSError:
             return None
         key = (st.st_mtime_ns, st.st_size)
-        hit = self._summary_cache.get(path.name)
+        with self._cache_lock:
+            hit = self._summary_cache.get(path.name)
         if hit is not None and hit[0] == key:
             return hit[1]
-        summary = self._summarize(path)
-        self._summary_cache[path.name] = (key, summary)
+        summary = self._summarize(path)  # file I/O outside the lock
+        with self._cache_lock:
+            self._summary_cache[path.name] = (key, summary)
         return summary
 
     def _summarize_fields(self, path: Path, fields: NoteFields) -> NoteSummary:
@@ -788,9 +796,11 @@ class OmiStore:
             seen.add(p.name)
             if include_disabled or not s.disabled:
                 summaries.append(s)
-        # Drop cache entries for notes that no longer exist on disk.
-        for stale in [name for name in self._summary_cache if name not in seen]:
-            del self._summary_cache[stale]
+        # Drop cache entries for notes that no longer exist on disk. Under the
+        # lock so a concurrent _cached_summary insert can't race the iteration.
+        with self._cache_lock:
+            for stale in [name for name in self._summary_cache if name not in seen]:
+                del self._summary_cache[stale]
         summaries.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return summaries
 
