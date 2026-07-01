@@ -550,7 +550,7 @@ def _is_global_config_mutation(action: dict[str, Any]) -> bool:
         return False
     haystack = " ".join(
         part for part in (str(action.get("command") or ""), _action_path(action)) if part
-    )
+    ).replace("\\", "/")
     return bool(_GLOBAL_CONFIG_RE.search(haystack))
 
 
