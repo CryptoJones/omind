@@ -348,17 +348,46 @@ across harnesses, not just Claude Code: Hermes via its `pre_tool_call` hook,
 OpenCode via a `tool.execute.before` plugin, and **Codex CLI** (>= 0.117) via its
 Claude-schema `PreToolUse`/`PermissionRequest` command hooks in
 `~/.codex/hooks.json` — so a rule learned under one agent blocks under all of
-them. Codex's trust model means you must run `/hooks` in Codex once and **trust**
-the omind hook before it takes effect. `omind guard selftest` replays a canned
-deny through every harness's renderer to confirm the wiring without a live agent.
+them. `omind setup --agent codex` also persists Codex `[hooks.state]` trust for
+the omind-owned hook definitions it just wrote, so a fresh Codex session can run
+the guard and OMI priming hooks without a manual `/hooks` approval pass. The hash
+is computed from the exact hook definition on that machine, including the local
+`omind` executable path; if you later edit the hook by hand, re-run setup or use
+Codex's `/hooks` UI to review the changed definition. `omind guard selftest`
+replays a canned deny through every harness's renderer to confirm the wiring
+without a live agent.
 
 Codex also gets the `omi` MCP server registered — under `[mcp_servers.omi]` in
 `~/.codex/config.toml`, the same table `codex mcp add` writes. Unlike every
 other agent config omind touches, `config.toml` is **TOML**, so this merge is
 done with `tomlkit` (round-trip parsing) instead of the JSON idiom the rest
 share; only the `mcp_servers.omi` table is ever touched, and a `config.toml`
-that doesn't parse is never overwritten. Codex has no memory skill (it reads
-the MCP tools directly) and no session-start priming yet.
+that doesn't parse is never overwritten. Codex has no memory skill because it
+reads the MCP tools directly.
+
+For Codex, one command installs the whole integration:
+
+```bash
+omind setup --agent codex --vault "$HOME/Documents/Obsidian Vault"
+```
+
+That command idempotently:
+
+1. Registers the `omi` MCP server in `~/.codex/config.toml`.
+2. Installs the OMI guard on `PreToolUse` and `PermissionRequest` in
+   `~/.codex/hooks.json`.
+3. Installs `SessionStart` OMI priming, using the same recent-memory context
+   Claude Code receives.
+4. Writes a managed global `~/.codex/AGENTS.md` bootstrap pointer that tells
+   fresh Codex sessions to read OMI first.
+5. Persists Codex hook trust for those omind-owned hook groups under
+   `[hooks.state]` in `~/.codex/config.toml`.
+
+Then restart Codex and verify:
+
+```bash
+omind doctor --agent codex --vault "$HOME/Documents/Obsidian Vault"
+```
 
 `omind setup --agent <name>` adapts to where each agent keeps its config. The
 three **memory-backing** agents — Hermes, OpenClaw, and OpenCode — get the full
@@ -385,10 +414,11 @@ treatment:
 The **Gemini CLI** is wired **guard-only** — just the hard-block hook described
 above (the `BeforeTool` hook under `hooks` in `~/.gemini/settings.json`); its
 MCP-memory registration, skill, and priming are a separate follow-up. **Codex
-CLI** gets both the guard hook and MCP-memory registration (see above), but no
-skill or priming yet. **OpenCode** priming is likewise not wired yet (its MCP
-server and skill are). The cross-harness **guard** reaches Claude
-Code, Hermes, OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
+CLI** gets guard, MCP-memory registration, SessionStart priming, and the global
+AGENTS bootstrap pointer (see above), but no memory skill because it uses the
+MCP tools directly. **OpenCode** priming is likewise not wired yet (its MCP
+server and skill are). The cross-harness **guard** reaches Claude Code, Hermes,
+OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
 **detect-only** — its POST `/hooks/agent` gateway receives the guard verdict but
 deny-enforcement is unverified against a live gateway, so the verdict is advisory
 until hard-block is proven.
