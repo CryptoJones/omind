@@ -30,12 +30,16 @@ classifiers = [
     "Programming Language :: Python :: 3.14",
     "Topic :: Utilities",
 ]
+# Upper-bounded at the next major (#131): fleet installs go through
+# `uv tool install git+…`, which resolves fresh from PyPI and ignores uv.lock, so
+# a breaking upstream major (an mcp 2.0, a fastapi 1.0 rewrite) would land on
+# every node at the next self-update overnight without these caps.
 dependencies = [
-    "fastapi>=0.110",
-    "uvicorn[standard]>=0.29",
-    "pyyaml>=6.0",
-    "mcp>=1.10",
-    "tomlkit>=0.12",
+    "fastapi>=0.110,<1.0",
+    "uvicorn[standard]>=0.29,<1.0",
+    "pyyaml>=6.0,<7.0",
+    "mcp>=1.10,<2.0",
+    "tomlkit>=0.12,<1.0",
 ]
 
 [project.optional-dependencies]
@@ -46,8 +50,8 @@ e2e = [
 # model2vec is numpy-only (no torch/onnxruntime) so this stays light; everything in
 # omind.embed FAILS OPEN to the keyword path when this extra is not installed.
 embed = [
-    "model2vec>=0.3",
-    "numpy>=1.24",
+    "model2vec>=0.3,<1.0",
+    "numpy>=1.24,<3.0",
 ]
 dev = [
     "pytest>=8.0",
