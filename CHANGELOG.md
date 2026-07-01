@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.3] - 2026-07-01
+
+### Fixed
+
+- **Repo work now requires the git operational OMI note plus a fresh-base check.**
+  The guard no longer treats an arbitrary OMI consult as enough before repo review,
+  edits, tests, commits, pushes, or releases. In a git repo, repo-sensitive actions
+  require reading `Operational Rules - Git Repos and Secrets` during the turn and
+  running a same-turn `git fetch --all --prune` or `git pull --ff-only` freshness
+  command first.
+- **Global config/hook/bootstrap writes now require explicit current-turn user
+  authorization.** The guard blocks installed agent config/hook/bootstrap mutation
+  when the user asked a question rather than clearly authorizing the change.
+- **Codex AGENTS bootstrap now spells out the repo freshness and global-config
+  authorization rules.** `omind setup --agent codex` updates the managed block so
+  fresh Codex sessions see the rule before acting.
+
 ## [3.7.2] - 2026-07-01
 
 ### Fixed

@@ -54,6 +54,19 @@ GATE_MESSAGE = (
     "(an OMI search or read), then retry. One consult clears the rest of the "
     "turn. This is NOT a prompt to open the credential/auth notes."
 )
+GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
+GIT_RULES_MESSAGE = (
+    "repo work requires reading OMI note `Operational Rules - Git Repos and Secrets` "
+    "this turn; a generic project-memory consult is not enough."
+)
+GIT_FRESHNESS_MESSAGE = (
+    "repo work requires a same-turn freshness check before review/edit/test/commit/push: "
+    "run `git fetch --all --prune` or `git pull --ff-only`, then inspect branch status."
+)
+GLOBAL_MUTATION_MESSAGE = (
+    "global config/hook/bootstrap mutation requires explicit user authorization in the "
+    "current turn; answer questions first instead of inferring permission."
+)
 
 
 @dataclass(frozen=True)
@@ -99,6 +112,7 @@ def begin_turn(session: str, task: str) -> None:
     (the bash turn-start hook clears the same counter file)."""
     _clear_reclose(session)
     _clear_pending(session)
+    _clear_git_freshness(session)
     with contextlib.suppress(OSError):
         path = _turn_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -120,6 +134,10 @@ def _pending_path(session: str) -> Path:
     recent activity are both still cold (the previous thread), clears instead of
     burning re-closes. A sibling of the turn-task path; reset at turn start."""
     return paths.state_dir() / f"pending-{_safe_sid(session)}.txt"
+
+
+def _git_fresh_path(session: str) -> Path:
+    return paths.state_dir() / f"git-fresh-{_safe_sid(session)}.json"
 
 
 def record_pending(session: str, text: str) -> None:
@@ -145,6 +163,29 @@ def pending_intent(session: str) -> str:
 def _clear_pending(session: str) -> None:
     with contextlib.suppress(OSError):
         _pending_path(session).unlink()
+
+
+def _record_git_freshness(session: str, repo: Path, command: str) -> None:
+    if not session:
+        return
+    with contextlib.suppress(OSError):
+        path = _git_fresh_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        payload = {"repo": str(repo), "command": command, "ts": int(time.time())}
+        path.write_text(json.dumps(payload), encoding="utf-8")
+
+
+def _git_fresh_for_repo(session: str, repo: Path) -> bool:
+    try:
+        data = json.loads(_git_fresh_path(session).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    return isinstance(data, dict) and data.get("repo") == str(repo)
+
+
+def _clear_git_freshness(session: str) -> None:
+    with contextlib.suppress(OSError):
+        _git_fresh_path(session).unlink()
 
 
 def _read_sentinel(session: str) -> dict[str, Any]:
@@ -371,7 +412,7 @@ def clear_all_gates() -> None:
     cannot know the live session id, so a single-session clear would miss it).
     Also reaps the legacy ``/tmp`` sentinels. Never raises."""
     state = paths.state_dir()
-    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*"):
+    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*", "git-fresh-*"):
         try:
             stale = list(state.glob(pattern))
         except OSError:
@@ -387,6 +428,40 @@ def clear_all_gates() -> None:
 #: to clear the gate is to consult OMI, but where the OMI tools are deferred the
 #: consult needs the very schema this tool loads.
 _GATE_EXEMPT_TOOLS = frozenset({"ToolSearch"})
+_WRITE_TOOLS = frozenset(
+    {
+        "Edit",
+        "MultiEdit",
+        "Write",
+        "NotebookEdit",
+        "apply_patch",
+        "functions.apply_patch",
+    }
+)
+_READ_REVIEW_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "find", "rg"})
+_REPO_TEST_RE = re.compile(
+    r"(?:^|[;&|\n(]\s*)(?:uv|pytest|python|tox|nox|hatch|npm|pnpm|yarn|cargo|go|make)\b"
+)
+_GIT_FRESH_ONLY_RE = re.compile(
+    r"^\s*git\s+(?:fetch\b[^;&|\n]*|pull\b[^;&|\n]*(?:--ff-only|--rebase)[^;&|\n]*)\s*$"
+)
+_GIT_STATUS_ONLY_RE = re.compile(r"^\s*git\s+(?:status|rev-parse|branch|remote)\b[^;&|\n]*$")
+_GLOBAL_CONFIG_RE = re.compile(
+    r"(?:^|[\s'\"=:/])(?:~?/)?(?:"
+    r"\.codex/(?:AGENTS\.md|hooks\.json|config\.toml)|"
+    r"\.claude/(?:settings\.json|hooks/[^ \t\n'\";]+)|"
+    r"\.hermes/(?:config\.yaml|hooks/[^ \t\n'\";]+|AGENTS\.md)|"
+    r"\.config/opencode/(?:opencode\.json|plugin/omi-guard\.js)|"
+    r"\.gemini/settings\.json|"
+    r"\.openclaw/(?:openclaw\.json|omind/MEMORY\.md)"
+    r")"
+)
+_GLOBAL_AUTH_RE = re.compile(
+    r"\b(?:please\s+)?(?:"
+    r"make|modify|edit|write|install|update|change|patch|apply|do it|go ahead|proceed"
+    r")\b",
+    re.IGNORECASE,
+)
 
 
 def _opt_in_satisfied(opt_in: str, command: str) -> bool:
@@ -408,10 +483,86 @@ def _opt_in_satisfied(opt_in: str, command: str) -> bool:
     return re.search(pattern, command) is not None
 
 
+def _action_path(action: dict[str, Any]) -> str:
+    for key in ("file_path", "path"):
+        value = action.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return ""
+
+
+def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
+    candidates: list[Path] = []
+    raw_path = _action_path(action)
+    if raw_path:
+        p = Path(raw_path).expanduser()
+        candidates.append(p if p.is_dir() else p.parent)
+    else:
+        candidates.append(Path.cwd())
+    for candidate in candidates:
+        try:
+            cur = candidate.resolve()
+        except OSError:
+            cur = candidate.absolute()
+        for parent in (cur, *cur.parents):
+            if (parent / ".git").exists():
+                return parent
+    return None
+
+
+def _has_consulted_git_rules(session: str) -> bool:
+    needle = GIT_RULES_NOTE.lower()
+    for consult in consults(session):
+        target = str(consult.get("target") or "").lower()
+        if needle in target:
+            return True
+    return False
+
+
+def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
+    tool = str(action.get("tool") or "")
+    command = str(action.get("command") or "")
+    path = _action_path(action)
+    if tool in _WRITE_TOOLS or tool in _READ_REVIEW_TOOLS:
+        return True
+    if tool == "Bash":
+        if _GIT_FRESH_ONLY_RE.match(command) or _GIT_STATUS_ONLY_RE.match(command):
+            return False
+        if re.search(
+            r"(?:^|[;&|\n(]\s*)git\s+(?:add|commit|push|merge|rebase|checkout|switch)\b",
+            command,
+        ):
+            return True
+        if re.search(r"(?:^|[;&|\n(]\s*)gh\s+(?:pr|release|repo)\b", command):
+            return True
+        if _REPO_TEST_RE.search(command):
+            return True
+        if re.search(r"(?:^|[;&|\n(]\s*)(?:sed|perl|python|python3|node|ruby)\b", command) and (
+            " -i" in command or "write_text" in command or "Path(" in command
+        ):
+            return True
+    return bool(path)
+
+
+def _is_global_config_mutation(action: dict[str, Any]) -> bool:
+    tool = str(action.get("tool") or "")
+    if tool not in _WRITE_TOOLS and tool != "Bash":
+        return False
+    haystack = " ".join(
+        part for part in (str(action.get("command") or ""), _action_path(action)) if part
+    )
+    return bool(_GLOBAL_CONFIG_RE.search(haystack))
+
+
+def _turn_has_explicit_global_auth(session: str) -> bool:
+    return bool(_GLOBAL_AUTH_RE.search(turn_task(session)))
+
+
 def decide(action: dict[str, Any]) -> Verdict:
     """The harness-agnostic policy. See the module docstring for the schema."""
     session = str(action.get("session") or "")
     command = str(action.get("command") or "")
+    repo = _repo_root_for_action(action)
 
     # 1) Consulting OMI sets the per-turn sentinel and is always allowed. When
     # the adapter knows what was consulted, record it (with target) so the
@@ -444,6 +595,10 @@ def decide(action: dict[str, Any]) -> Verdict:
             rule_id=rule.id,
         )
 
+    if repo is not None and _GIT_FRESH_ONLY_RE.match(command):
+        _record_git_freshness(session, repo, command)
+        return Verdict(allow=True)
+
     # 2.5) Tool-schema loading (e.g. ToolSearch) is never gated. It already
     # passed the hard blocks above; skip the gate WITHOUT satisfying it (loading
     # a schema is not a consult), so a deferred OMI tool can be loaded and then
@@ -458,6 +613,29 @@ def decide(action: dict[str, Any]) -> Verdict:
     # auto-expires (see :func:`pause_remaining`); engaging it is logged for audit.
     if gate_paused():
         return Verdict(allow=True)
+
+    if _is_global_config_mutation(action) and not _turn_has_explicit_global_auth(session):
+        return Verdict(
+            allow=False,
+            reason=f"omi-guard (hard): {GLOBAL_MUTATION_MESSAGE}",
+            rule_id="global-config-explicit-auth",
+        )
+
+    if repo is not None and _is_repo_sensitive_action(action):
+        if not _has_consulted_git_rules(session):
+            record_pending(session, command or _action_path(action))
+            return Verdict(
+                allow=False,
+                reason=f"omi-guard (hard): {GIT_RULES_MESSAGE}",
+                rule_id="repo-work-read-git-rules",
+            )
+        if not _git_fresh_for_repo(session, repo):
+            record_pending(session, command or _action_path(action))
+            return Verdict(
+                allow=False,
+                reason=f"omi-guard (hard): {GIT_FRESHNESS_MESSAGE}",
+                rule_id="repo-work-fresh-base",
+            )
 
     # 3) The gate — block until OMI was consulted this turn.
     if consulted_this_turn(session):

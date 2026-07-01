@@ -57,13 +57,23 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
         or _first_str(tool_input, ("command",))
         or _first_str(event, ("args", "input"))
     )
+    file_path = _first_str(tool_input, ("file_path", "path")) or _first_str(
+        event, ("file_path", "path")
+    )
     session = _first_str(event, ("session", "session_id"))
     is_consult = tool.startswith(_OMI_CONSULT_PREFIXES) or bool(event.get("is_omi_consult"))
+    consult_target = (
+        _first_str(tool_input, ("name", "query", "q", "file_path", "path", "pattern"))
+        or _first_str(event, ("consult_target",))
+    )
     return {
         "tool": tool,
         "command": command,
         "session": session,
         "is_omi_consult": is_consult,
+        "file_path": file_path,
+        "consult_target": consult_target,
+        "consult_kind": "read" if "read" in tool.lower() else "search",
     }
 
 

@@ -463,11 +463,12 @@ def test_consult_off_topic_to_both_task_and_activity_still_irrelevant(
 
 def test_gate_block_records_pending_intent_and_turn_start_clears_it() -> None:
     guard.begin_turn("pi", "some task")
-    # Not consulted yet: the gate blocks a (benign) Bash action and records its command.
+    # Not consulted yet: repo-sensitive work blocks before the generic gate and
+    # still records pending intent for the relevance verifier.
     verdict = guard.decide(
         {"tool": "Bash", "command": "cargo test -p scylla-merge", "session": "pi"}
     )
-    assert not verdict.allow and verdict.rule_id == "omi-gate"
+    assert not verdict.allow and verdict.rule_id == "repo-work-read-git-rules"
     assert guard.pending_intent("pi") == "cargo test -p scylla-merge"
     guard.begin_turn("pi", "next turn")  # turn start resets the per-turn pending intent
     assert guard.pending_intent("pi") == ""

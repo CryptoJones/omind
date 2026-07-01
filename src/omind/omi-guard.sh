@@ -61,7 +61,13 @@ SENT="$STATE/gate-$sid"
 # turn's consults + relevance verdicts as JSON in this same file, and a second
 # consult in the turn must not wipe the first.
 case "$tool" in
-  mcp__omi__*) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+  mcp__omi__*)
+    target="$(printf '%s' "$input" | jq -r '.tool_input.name // .tool_input.query // .tool_input.q // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null)"
+    jq -nc --arg t "$tool" --arg s "$sid" --arg target "$target" \
+      '{tool:$t, command:"", session:$s, is_omi_consult:true, consult_target:$target}' 2>/dev/null \
+      | "$OMIND" guard check >/dev/null 2>&1
+    exit 0
+    ;;
   # Tool-schema loading is never gated: deferred OMI MCP tools become callable
   # only via ToolSearch, so gating it deadlocks the turn (no consult possible).
   # Allow it through WITHOUT clearing the gate — loading a schema is not a consult.
@@ -80,7 +86,12 @@ if [ "$tool" = "Read" ]; then
       # with paths.NON_CONSULT_FILENAMES.)
       case "${fp##*/}" in
         index.md|MEMORY.md|"Memory Template.md") exit 0 ;;
-        *) mkdir -p "$STATE" 2>/dev/null; touch "$SENT" 2>/dev/null; exit 0 ;;
+        *)
+          jq -nc --arg s "$sid" --arg target "$fp" \
+            '{tool:"Read", command:"", session:$s, is_omi_consult:true, consult_target:$target, consult_kind:"read", file_path:$target}' 2>/dev/null \
+            | "$OMIND" guard check >/dev/null 2>&1
+          exit 0
+          ;;
       esac
       ;;
   esac
@@ -121,11 +132,17 @@ if [ -f "$PAUSE" ]; then
   if [ -n "$exp" ] && [ -n "$now" ] && [ "$exp" -gt "$now" ] 2>/dev/null; then exit 0; fi
 fi
 
-# All other tools: the per-turn gate. The common post-consult case is a pure
-# bash existence check (no subprocess). Only the first BLOCKED action of a turn
-# pays one subprocess to name the notes relevant to this turn's task (Phase 3.2),
-# falling back to the static message if omind can't be reached.
-[ -e "$SENT" ] && exit 0
+# All other tools: delegate to the core so repo/global-config preconditions can
+# inspect file paths. This is slower than the old sentinel-only fast path, but the
+# policy now needs more context than "has OMI been consulted".
+fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // .file_path // .path // empty' 2>/dev/null)"
+jq -nc --arg t "$tool" --arg s "$sid" --arg fp "$fp" \
+  '{tool:$t, command:"", session:$s, is_omi_consult:false, file_path:$fp}' 2>/dev/null \
+  | "$OMIND" guard check
+rc=$?
+case "$rc" in
+  0 | 2) exit "$rc" ;;
+esac
 if msg="$(printf '%s' "$input" | "$OMIND" guard suggest --omi-dir "$OMI_DIR" 2>/dev/null)" \
    && [ -n "$msg" ]; then
   printf '%s\n' "$msg" >&2

@@ -583,6 +583,9 @@ def test_codex_setup_installs_global_agents_bootstrap(tmp_path: Path) -> None:
     assert "This section is managed by `omind setup --agent codex`" in text
     assert str(config.omi_dir) in text
     assert "Voice and Persona - Dix and Shelly" in text
+    assert "Operational Rules - Git Repos and Secrets" in text
+    assert "git fetch --all --prune" in text
+    assert "Do not infer permission to edit installed global agent config" in text
 
 
 def test_codex_global_agents_bootstrap_preserves_user_text_and_is_idempotent(
