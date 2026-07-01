@@ -7,18 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.7] - 2026-07-01
+
+The follow-up batch to 3.7.6: the deferred findings from the 2026-07-01
+adversarial code review (tracked as #125–#131).
+
 ### Security
 - Sanitize rendered note HTML and add a Host allowlist to the web UI ([#125](https://github.com/CryptoJones/omind/issues/125)): note markdown (authored by agents, synced from mesh peers — untrusted) is now run through DOMPurify before it reaches `innerHTML`, closing a stored-XSS vector where a prompt-injected note could execute JS against the CRUD API when opened. The API also gets a `TrustedHostMiddleware` Host allowlist (localhost by default) as a DNS-rebinding defence, and `omind serve` warns when binding to a non-localhost / all-interfaces address.
-
-### Fixed
-- Graph view no longer freezes the tab or leaks loops ([#129](https://github.com/CryptoJones/omind/issues/129)): the synchronous pre-settle is bounded by a work budget (a large vault no longer triggers "page unresponsive" before first paint), the O(n²) all-pairs repulsion is skipped above a node threshold so frames stay cheap at scale, and `destroy()` now removes the leaked `window` mouseup listener. The web app also tracks and tears down the graph's render loop when the pane switches away, instead of discarding the handle and leaking a `requestAnimationFrame` loop per open.
-- Web UI no longer 500s under its own poll ([#130](https://github.com/CryptoJones/omind/issues/130)): `OmiStore`'s summary cache is guarded by a lock, so concurrent `list_notes()` calls from FastAPI's threadpool can't hit "dictionary changed size during iteration". The MCP server also caches the `[[wikilink]]` graph build (invalidated by a cheap vault signature), so a burst of graph-tool queries costs one full-vault parse instead of one per tool.
 
 ### Changed
 - CI now tests on macOS and builds + smoke-tests the wheel ([#126](https://github.com/CryptoJones/omind/issues/126)): a `macos-latest` matrix leg (oldest + newest Python) so BSD-userland / case-insensitive-FS / PATH breakage can't ship green, and a `wheel` job that builds the real wheel, installs it non-editable, and asserts the packaged hook scripts and `web/static` assets are present (the editable install never exercised the wheel's file-selection).
 - Pin dependency upper bounds and install the fleet by release tag ([#131](https://github.com/CryptoJones/omind/issues/131)): runtime deps are capped below the next major (`fastapi<1.0`, `mcp<2.0`, …) so a breaking upstream major can't land fleet-wide overnight through `uv tool install` (which ignores `uv.lock`), and `scripts/bootstrap.sh` now installs the latest published release tag by default instead of the moving `main` HEAD (override with `--ref`/`$OMIND_REF`).
 
 ### Fixed
+- Graph view no longer freezes the tab or leaks loops ([#129](https://github.com/CryptoJones/omind/issues/129)): the synchronous pre-settle is bounded by a work budget (a large vault no longer triggers "page unresponsive" before first paint), the O(n²) all-pairs repulsion is skipped above a node threshold so frames stay cheap at scale, and `destroy()` now removes the leaked `window` mouseup listener. The web app also tracks and tears down the graph's render loop when the pane switches away, instead of discarding the handle and leaking a `requestAnimationFrame` loop per open.
+- Web UI no longer 500s under its own poll ([#130](https://github.com/CryptoJones/omind/issues/130)): `OmiStore`'s summary cache is guarded by a lock, so concurrent `list_notes()` calls from FastAPI's threadpool can't hit "dictionary changed size during iteration". The MCP server also caches the `[[wikilink]]` graph build (invalidated by a cheap vault signature), so a burst of graph-tool queries costs one full-vault parse instead of one per tool.
 - Expire purge tombstones after a TTL ([#127](https://github.com/CryptoJones/omind/issues/127)): a note re-created with a previously-purged filename is no longer silently deleted fleet-wide forever. New tombstones carry a timestamp and stop deleting after `TOMBSTONE_TTL_DAYS` (90); every node converges on the same expiry under the union merge, and expired lines are garbage-collected. Legacy undated tombstones stay permanent (they can't be safely dated under `merge=union`).
 - Scope the autonomous-loop guard to one owner session ([#128](https://github.com/CryptoJones/omind/issues/128)): arming a `/loop` no longer refuses stops for every other concurrent session on the machine, and a concurrent session's work no longer resets the owner's no-work backstop counter. The owner is set from `omind loop arm --session` / `$CLAUDE_SESSION_ID`, or claimed by the first session to hit a Stop.
 
