@@ -442,6 +442,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=loopguard.DEFAULT_HOURS,
         help="auto-expire the armed flag after this many hours (0 = never)",
     )
+    loop.add_argument(
+        "--session",
+        default=None,
+        help="the loop's owner session id (only this session is refused; "
+        "defaults to $CLAUDE_SESSION_ID). Prevents trapping concurrent sessions.",
+    )
 
     guard = sub.add_parser(
         "guard",
@@ -969,10 +975,15 @@ def _run_hook(args: argparse.Namespace) -> int:
 def _run_loop(args: argparse.Namespace) -> int:
     """Operator switch for the autonomous-loop guard (arm/disarm/status)."""
     if args.action == "arm":
-        st = loopguard.arm(reason=args.reason, max_blocks=args.max_blocks, hours=args.hours)
+        session = args.session or os.environ.get("CLAUDE_SESSION_ID")
+        st = loopguard.arm(
+            reason=args.reason, max_blocks=args.max_blocks, hours=args.hours, session=session
+        )
         exp = st["expires_at"] or "never"
+        owner = st.get("owner") or "first session to stop (unclaimed)"
         print(
             f"loop guard ARMED — the Stop hook will refuse to stop until `omind loop disarm`.\n"
+            f"  owner: {owner}\n"
             f"  backstop: auto-disarm after {st['max_blocks']} consecutive stops with no work; "
             f"expires {exp}."
         )

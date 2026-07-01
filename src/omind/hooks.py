@@ -513,7 +513,7 @@ def run_hook(
             # open to allowing the stop on any error (a broken guard must never trap).
             from omind import loopguard
 
-            blocked, reason = loopguard.register_block()
+            blocked, reason = loopguard.register_block(session=event.get("session_id"))
             if blocked:
                 sink = stdout if stdout is not None else sys.stdout
                 sink.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
@@ -522,7 +522,7 @@ def run_hook(
             # Real work happened: reset the loop guard's no-work spin counter.
             from omind import loopguard
 
-            loopguard.reset()
+            loopguard.reset(session=event.get("session_id"))
             # Layer E: scan the command that actually ran against the policy and
             # record any rule match into the compliance log (the learning corpus).
             from omind import compliance, verify
