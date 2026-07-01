@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 ### Changed
+- CI now tests on macOS and builds + smoke-tests the wheel ([#126](https://github.com/CryptoJones/omind/issues/126)): a `macos-latest` matrix leg (oldest + newest Python) so BSD-userland / case-insensitive-FS / PATH breakage can't ship green, and a `wheel` job that builds the real wheel, installs it non-editable, and asserts the packaged hook scripts and `web/static` assets are present (the editable install never exercised the wheel's file-selection).
 - Pin dependency upper bounds and install the fleet by release tag ([#131](https://github.com/CryptoJones/omind/issues/131)): runtime deps are capped below the next major (`fastapi<1.0`, `mcp<2.0`, …) so a breaking upstream major can't land fleet-wide overnight through `uv tool install` (which ignores `uv.lock`), and `scripts/bootstrap.sh` now installs the latest published release tag by default instead of the moving `main` HEAD (override with `--ref`/`$OMIND_REF`).
 
 ### Fixed
