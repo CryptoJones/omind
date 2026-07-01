@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.7.1] - 2026-07-01
+
+### Fixed
+
+- **Codex hook installs now use Codex's root `hooks` object.** `omind setup --agent
+  codex` writes `~/.codex/hooks.json` as `{"hooks": {...}}`, matching current Codex
+  CLI parsing. It also migrates the brief 3.7.0-era Claude-style root event map
+  (`PreToolUse`, `PermissionRequest`, etc.) into the new object while preserving
+  user-authored hook groups and remaining idempotent.
+
 ## [3.7.0] - 2026-07-01
 
 ### Added
