@@ -27,7 +27,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
@@ -544,19 +544,64 @@ def _inbox_refs(omi_dir: Path, node_id: str) -> list[str]:
     return [r for r in out.splitlines() if r.strip() and r != f"refs/omind/{node_id}"]
 
 
-def _apply_tombstones(omi_dir: Path, store: OmiStore) -> None:
-    """Unlink any note a purge tombstone names. Caller holds the write lock."""
+#: How long a purge tombstone keeps deleting a re-created note before it expires.
+#: Generous so a node offline for a long stretch still applies the deletion, but
+#: finite so re-creating a note with a previously-purged filename (#127) is not
+#: silently deleted forever. Expiry is by the per-line timestamp, so every node
+#: converges on the same decision under the union merge.
+TOMBSTONE_TTL_DAYS = 90
+
+
+def _parse_tombstone(line: str) -> tuple[datetime | None, str]:
+    """``(timestamp|None, filename)`` for a tombstone line.
+
+    New lines are ``<iso-8601>\\t<filename>``; a legacy bare ``<filename>`` (no
+    timestamp) has no expiry — it can't be safely dated under the ``merge=union``
+    driver (a peer would re-add the old line), so it stays permanent as before.
+    """
+    line = line.strip()
+    if not line:
+        return None, ""
+    if "\t" in line:
+        ts_raw, name = line.split("\t", 1)
+        try:
+            return datetime.fromisoformat(ts_raw.strip()), name.strip()
+        except ValueError:
+            return None, name.strip()
+    return None, line
+
+
+def _as_utc(dt: datetime) -> datetime:
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+
+
+def _apply_tombstones(omi_dir: Path, store: OmiStore, now: datetime | None = None) -> None:
+    """Unlink any note a live purge tombstone names, and GC expired tombstones.
+    Caller holds the write lock."""
     tomb = omi_dir / TOMBSTONES_FILENAME
     if not tomb.is_file():
         return
-    for line in tomb.read_text(encoding="utf-8").splitlines():
-        name = line.strip()
+    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=TOMBSTONE_TTL_DAYS)
+    kept: list[str] = []
+    changed = False
+    for raw in tomb.read_text(encoding="utf-8").splitlines():
+        ts, name = _parse_tombstone(raw)
         if not name:
+            changed = changed or bool(raw.strip())
             continue
+        # An expired dated tombstone no longer deletes (so a re-created note
+        # survives) and is dropped to bound the file. Under union-merge a lagging
+        # peer may re-add the line, but it stays expired, so this converges.
+        if ts is not None and _as_utc(ts) < cutoff:
+            changed = True
+            continue
+        kept.append(raw.rstrip("\n"))
         target = omi_dir / name
         # Tombstones name plain note files only; never follow odd paths.
         if target.parent == omi_dir and target.is_file() and target.suffix == ".md":
             target.unlink()
+    if changed:
+        _atomic_write(tomb, ("\n".join(kept) + "\n") if kept else "")
 
 
 def conflict_scan(omi_dir: Path) -> list[str]:
@@ -722,10 +767,15 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
     with store.write_lock():
         tomb = omi_dir / TOMBSTONES_FILENAME
         existing = tomb.read_text(encoding="utf-8").splitlines() if tomb.is_file() else []
-        if target.name not in existing:
+        already = any(_parse_tombstone(line)[1] == target.name for line in existing)
+        if not already:
+            # Dated so the tombstone expires (TOMBSTONE_TTL_DAYS) and a note
+            # re-created with this filename later is not silently deleted (#127).
+            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            new_line = f"{stamp}\t{target.name}"
             # Atomic: a torn tombstone file would un-purge every prior purge
             # mesh-wide once the truncation merged out to the peers.
-            _atomic_write(tomb, "\n".join([*existing, target.name]) + "\n")
+            _atomic_write(tomb, "\n".join([*existing, new_line]) + "\n")
         if target.is_file():
             target.unlink()
         store.update_index_locked()
