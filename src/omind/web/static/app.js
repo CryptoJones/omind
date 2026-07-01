@@ -294,7 +294,14 @@ function renderMarkdown(md) {
     /(^|[\s(])#([\p{L}\p{N}_][\p{L}\p{N}_/-]*)/gu,
     (_, pre, tag) => `${pre}<span class="hash-tag" data-tag="${escapeHtml(tag)}">#${escapeHtml(tag)}</span>`,
   );
-  return marked.parse(src, { gfm: true, breaks: false });
+  const html = marked.parse(src, { gfm: true, breaks: false });
+  // Notes are authored by agents and synced from mesh peers — untrusted. Sanitize
+  // the rendered HTML before it reaches innerHTML so a prompt-injected note (e.g.
+  // <img src=x onerror=...>, a javascript: link) can't run with same-origin access
+  // to the CRUD API. DOMPurify keeps our wikilink/tag <a>/<span> (class + data-*
+  // are allowed) and strips scripts/handlers/dangerous URLs. If the vendor script
+  // failed to load, fall back to escaping everything rather than trusting it.
+  return window.DOMPurify ? window.DOMPurify.sanitize(html) : escapeHtml(html);
 }
 
 // ---- Sidebar --------------------------------------------------------------

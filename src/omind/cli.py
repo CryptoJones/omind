@@ -696,14 +696,44 @@ def _run_mesh(args: argparse.Namespace) -> int:
     return 0
 
 
+def _serve_allowed_hosts(host: str) -> list[str]:
+    """The Host-header allowlist for a bind host, warning on non-localhost.
+
+    A deliberate all-interfaces bind (0.0.0.0 / ::) disables the Host check
+    (``["*"]``) since the operator opted into remote access; a specific remote
+    host is added to the localhost allowlist so it works while other hostnames
+    (a DNS-rebinding attacker's) stay blocked.
+    """
+    from omind.web.app import DEFAULT_ALLOWED_HOSTS
+
+    localhost = {"127.0.0.1", "localhost", "::1", "[::1]"}
+    if host in {"0.0.0.0", "::", ""}:
+        print(
+            "  WARNING: binding to all interfaces — the web API is UNAUTHENTICATED and "
+            "Host-header protection is disabled. Prefer --host 127.0.0.1.",
+            file=sys.stderr,
+        )
+        return ["*"]
+    if host in localhost:
+        return list(DEFAULT_ALLOWED_HOSTS)
+    print(
+        f"  WARNING: binding to {host} — the web API is unauthenticated; only expose it "
+        "on a trusted network.",
+        file=sys.stderr,
+    )
+    return [*DEFAULT_ALLOWED_HOSTS, host]
+
+
 def _run_serve(args: argparse.Namespace) -> int:
     import uvicorn
 
     omi_dir = (args.vault / args.folder).expanduser()
+    allowed = _serve_allowed_hosts(args.host)
     print(f"omind serve -> {omi_dir}")
     print(f"open http://{args.host}:{args.port}")
     if args.reload:
         os.environ["OMIND_OMI_DIR"] = str(omi_dir)
+        os.environ["OMIND_ALLOWED_HOSTS"] = ",".join(allowed)
         uvicorn.run(
             "omind.web.app:get_app",
             factory=True,
@@ -714,7 +744,7 @@ def _run_serve(args: argparse.Namespace) -> int:
     else:
         from omind.web.app import create_app
 
-        uvicorn.run(create_app(omi_dir), host=args.host, port=args.port)
+        uvicorn.run(create_app(omi_dir, allowed_hosts=allowed), host=args.host, port=args.port)
     return 0
 
 
