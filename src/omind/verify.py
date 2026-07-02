@@ -111,6 +111,17 @@ def _always_relevant(target: str) -> bool:
     return False
 
 
+def _guard_demanded(session: str, target: str) -> bool:
+    """True when the consult target is the note a guard block message DEMANDED
+    this turn (e.g. the git-rules note before repo work). Obeying the guard is
+    relevant by definition — the deny log showed 16 re-closes over reads of the
+    exact note the guard itself required (#148). The marker only exists after
+    such a block, so a ritual read on a turn where nothing demanded it is still
+    judged normally."""
+    demanded = guard.demanded_note(session)
+    return bool(demanded) and demanded.lower() in target.lower()
+
+
 def _activity_limit() -> int:
     try:
         return max(0, int(os.environ.get(_ACTIVITY_LIMIT_ENV) or _DEFAULT_ACTIVITY_LIMIT))
@@ -198,6 +209,13 @@ def consult_target(event: dict[str, Any], omi_dir: Path | str) -> tuple[str, str
     ti = event.get("tool_input")
     ti = ti if isinstance(ti, dict) else {}
     if tool.startswith("mcp__omi__"):
+        # A vault WRITE (create/edit/delete/restore) is an act, not a consult of
+        # memory — scoring one for relevance produced off-topic denials over
+        # ordinary note maintenance (#148). Writes are ordinary gated actions;
+        # they neither clear the gate nor get judged. Keep in sync with the
+        # PreToolUse adapters.
+        if any(w in tool for w in ("create", "edit", "delete", "restore")):
+            return None
         if "search" in tool:
             query = str(ti.get("query") or "").strip()
             # An empty search query carries no content to judge relevance against,
@@ -298,6 +316,27 @@ def _signal_score(signal: str, text: str) -> float:
     return max(keyword, semantic) if semantic is not None else keyword
 
 
+def _judge_scored(task: str, activity: str, text: str, pending: str = "") -> tuple[bool, float]:
+    """:func:`judge_with_activity` plus the deterministic score it decided on,
+    so the off-topic log can carry WHAT the consult was judged against (#148) —
+    without it, a sampling pass cannot adjudicate false positives after the fact."""
+    if not text or (not task and not activity and not pending):
+        return True, 0.0  # can't judge without a signal -> fail open (relevant)
+    high = _threshold(_HIGH_ENV, _HIGH)
+    low = _threshold(_LOW_ENV, _LOW)
+    score = max(
+        _signal_score(task, text),
+        _signal_score(activity, text),
+        _signal_score(pending, text),
+    )
+    if score >= high:
+        return True, score
+    if score <= low:
+        return False, score
+    verdict = _ask_model(task or activity or pending, text)
+    return (True if verdict is None else verdict), score
+
+
 def judge_with_activity(task: str, activity: str, text: str, pending: str = "") -> bool:
     """Relevance verdict blending the captured task, the agent's recent activity
     (issue #95), and the action the consult-gate just BLOCKED (issue #96): a consult
@@ -311,21 +350,7 @@ def judge_with_activity(task: str, activity: str, text: str, pending: str = "") 
     blocked command is normalized away first (#97). Only the REACTIVE order (attempt →
     blocked → consult) records a pending; a proactive consult at a transition has none
     to lean on, so prefer attempting the new work first at a transition."""
-    if not text or (not task and not activity and not pending):
-        return True  # can't judge without a signal -> fail open (relevant)
-    high = _threshold(_HIGH_ENV, _HIGH)
-    low = _threshold(_LOW_ENV, _LOW)
-    score = max(
-        _signal_score(task, text),
-        _signal_score(activity, text),
-        _signal_score(pending, text),
-    )
-    if score >= high:
-        return True
-    if score <= low:
-        return False
-    verdict = _ask_model(task or activity or pending, text)
-    return True if verdict is None else verdict
+    return _judge_scored(task, activity, text, pending)[0]
 
 
 def judge(task: str, text: str) -> bool:
@@ -394,9 +419,8 @@ def verify_consult(
     activity = recent_activity(session, omi_dir, now=now)
     # #96/#97: the gate-blocked action (path noise stripped) — the agent's freshest intent.
     pending = retrieve.normalize_intent(guard.pending_intent(session))
-    relevant = _always_relevant(target) or judge_with_activity(
-        task, activity, _consult_text(kind, target, omi_dir), pending
-    )
+    judged, score = _judge_scored(task, activity, _consult_text(kind, target, omi_dir), pending)
+    relevant = _always_relevant(target) or _guard_demanded(session, target) or judged
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:
         guard.reset_offtopic(session)  # #98: honest work breaks the off-topic streak
@@ -410,6 +434,12 @@ def verify_consult(
         rule_id=OFF_TOPIC_RULE,
         severity="soft",
         outcome="irrelevant",
+        # What the consult was judged against (#148): without this, a sampling
+        # pass over the deny log cannot tell a false positive from a real dodge.
+        detail=(
+            f"score={score:.3f} task={task[:120]!r} "
+            f"activity={activity[:120]!r} pending={pending[:120]!r}"
+        ),
         now=now,
     )
     _nudge(task, omi_dir, out if out is not None else sys.stderr)
@@ -481,6 +511,8 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
     score = max(task_score, activity_score, pending_score, semantic_score)
     if _always_relevant(target):
         band, verdict = "always-relevant (allowlist)", True
+    elif _guard_demanded(session, target):
+        band, verdict = "guard-demanded note (obedience)", True
     elif (not task and not activity and not pending) or not text:
         band, verdict = "fail-open (no task/text)", True
     elif score >= high:

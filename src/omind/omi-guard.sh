@@ -67,6 +67,14 @@ case "$tool" in
   # (that was a verifier-proof gate-dodge). Allow them through without consulting.
   mcp__omi__list-notes | mcp__omi__list-tags | mcp__omi__graph-* | mcp__omi__backlinks)
     exit 0 ;;
+  # Vault WRITES (create/edit/delete/restore) are acts, not consults of memory —
+  # they used to clear the gate here and then get relevance-scored (and denied)
+  # by the verifier (#148). Fall through to the generic delegation below, so
+  # they're gated like any ordinary action: an edit follows a read-note anyway
+  # (the version token), and a create follows a search (the dedup step), so the
+  # turn's consult already exists in an honest flow.
+  mcp__omi__create-note | mcp__omi__edit-note | mcp__omi__delete-note | mcp__omi__restore-note)
+    : ;;
   mcp__omi__*)
     target="$(printf '%s' "$input" | jq -r '.tool_input.name // .tool_input.query // .tool_input.q // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null)"
     # An empty target means a contentless call (nothing to consult); allow it but

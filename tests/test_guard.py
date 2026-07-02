@@ -929,6 +929,58 @@ def test_freshness_marker_holds_multiple_repos_and_reads_legacy_shape(tmp_path: 
     assert not guard._git_fresh_for_repo("multi", repo_b)
 
 
+def test_repo_block_records_the_demanded_note_and_turn_start_clears_it(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#148: the git-rules block names the note it demands (so the verifier can
+    credit the obeying read as relevant); begin_turn clears the marker."""
+    repo = _mk_repo(tmp_path, "r")
+    monkeypatch.chdir(repo)
+    guard.begin_turn("dmd0", "some task")
+    guard.mark_consulted("dmd0")
+    blocked = guard.decide({"tool": "Bash", "command": "pytest", "session": "dmd0"})
+    assert blocked.rule_id == "repo-work-read-git-rules"
+    assert guard.demanded_note("dmd0") == guard.GIT_RULES_NOTE
+    guard.begin_turn("dmd0", "next turn")
+    assert guard.demanded_note("dmd0") == ""
+
+
+def test_bash_adapters_treat_vault_writes_as_ordinary_actions() -> None:
+    """#148: create/edit/delete/restore-note must not be consult-marked in either
+    bash adapter (they fall through to the generic gated delegation), and the
+    turn reset must clear the demanded-note marker like the other per-turn files."""
+    files = importlib.resources.files("omind")
+    writes = (
+        "mcp__omi__create-note | mcp__omi__edit-note | "
+        "mcp__omi__delete-note | mcp__omi__restore-note"
+    )
+    for name in ("omi-guard.sh", "omi-guard-hermes.sh"):
+        sh = files.joinpath(name).read_text(encoding="utf-8")
+        assert writes in sh, f"{name} must not treat vault writes as consults"
+    reset = files.joinpath("omi-gate-reset.sh").read_text(encoding="utf-8")
+    assert "demanded-$sid.txt" in reset
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_gates_vault_writes_but_not_reads(tmp_path: Path) -> None:
+    """#148 end-to-end at the hook: a vault WRITE delegates to the core as an
+    ordinary action (a core deny reaches the host), while a read-note consult
+    stays the always-allowed clear-path."""
+    hook = _render_hook(tmp_path, str(_fake_omind(tmp_path, 2)))
+    write_event = {
+        "tool_name": "mcp__omi__edit-note",
+        "session_id": "h",
+        "tool_input": {"name": "Some Note"},
+    }
+    read_event = {
+        "tool_name": "mcp__omi__read-note",
+        "session_id": "h",
+        "tool_input": {"name": "Some Note"},
+    }
+    assert _run_hook(hook, write_event) == 2  # gated like any ordinary action
+    assert _run_hook(hook, read_event) == 0  # the consult clear-path, unchanged
+
+
 def test_inert_commands_skip_the_consult_gate_without_satisfying_it() -> None:
     """#147: a provably-inert inspection command runs unconsulted; nothing can
     piggyback on one, and it does NOT clear the gate for what follows."""

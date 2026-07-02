@@ -230,6 +230,80 @@ def test_verify_require_caps_recloses_so_it_cannot_deadlock(
     assert compliance.read_events()[-1]["rule_id"] == verify.NO_RELEVANT_FLOOR_RULE
 
 
+def test_vault_writes_are_not_consults(tmp_path: Path) -> None:
+    """#148: create/edit/delete/restore-note are acts, not consults — never
+    classified, never relevance-scored, never able to clear or re-close the gate."""
+    omi = _omi(tmp_path)
+    for tool in (
+        "mcp__omi__create-note",
+        "mcp__omi__edit-note",
+        "mcp__omi__delete-note",
+        "mcp__omi__restore-note",
+    ):
+        event = {"tool_name": tool, "session_id": "w1", "tool_input": {"name": "Some Note"}}
+        assert verify.consult_target(event, omi) is None, tool
+        assert verify.verify_consult(event, omi) is None, tool
+    assert guard.consults("w1") == []  # nothing recorded by any write
+    # search/read stay consults (the control)
+    assert verify.consult_target(
+        {"tool_name": "mcp__omi__read-note", "tool_input": {"name": "Some Note"}}, omi
+    ) == ("read", "Some Note")
+
+
+def test_guard_demanded_note_consult_is_relevant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#148: reading the note a guard block itself demanded is obedience, not
+    gaming — relevant even at zero task overlap. Without the marker the same
+    read is judged normally (control); turn start clears the marker."""
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    omi = _omi(tmp_path)
+    note = omi / f"{guard.GIT_RULES_NOTE}.md"
+    note.write_text("# Rules\n\nbranch pr nebraska codeberg token\n", encoding="utf-8")
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    guard.begin_turn("dmd", "bake a banana smoothie")  # disjoint from the note
+    guard.mark_consulted("dmd")
+    blocked = guard.decide({"tool": "Edit", "file_path": str(repo / "x.py"), "session": "dmd"})
+    assert blocked.rule_id == "repo-work-read-git-rules"
+    assert guard.demanded_note("dmd") == guard.GIT_RULES_NOTE
+    event = {
+        "tool_name": "mcp__omi__read-note",
+        "session_id": "dmd",
+        "tool_input": {"name": guard.GIT_RULES_NOTE},
+    }
+    assert verify.verify_consult(event, omi, require=True, out=io.StringIO()) == "relevant"
+    assert guard.consults("dmd")[-1]["relevant"] is True
+    # Control: a fresh turn (marker cleared) judges the same read on its merits.
+    guard.begin_turn("dmd", "bake a banana smoothie")
+    assert guard.demanded_note("dmd") == ""
+    guard.mark_consulted("dmd")
+    assert verify.verify_consult(event, omi, require=False, out=io.StringIO()) == "irrelevant"
+
+
+def test_offtopic_log_carries_judgement_detail(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#148: an off-topic event records the score and the signals it was judged
+    against, so a sampling pass can adjudicate false positives after the fact."""
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    omi = _omi(tmp_path)
+    note = omi / "Smoothie.md"
+    note.write_text("# Smoothie\n\nbanana mango ice recipe\n", encoding="utf-8")
+    guard.begin_turn("dt1", "how to codeberg release push")
+    guard.mark_consulted("dt1")
+    verify.verify_consult(
+        {"tool_name": "Read", "session_id": "dt1", "tool_input": {"file_path": str(note)}},
+        omi,
+        require=False,
+        out=io.StringIO(),
+    )
+    event = compliance.read_events()[-1]
+    assert event["rule_id"] == verify.OFF_TOPIC_RULE
+    assert "score=" in event["detail"]
+    assert "codeberg release push" in event["detail"]  # the task it was judged against
+
+
 def test_verify_consult_ignores_non_consult_events(tmp_path: Path) -> None:
     omi = _omi(tmp_path)
     assert verify.verify_consult(

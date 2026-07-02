@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.4] - 2026-07-02
+
+### Fixed
+- **Verifier: reading the note a guard block demanded is no longer punished** (#148): the deny-log sampling under #147 found 16 cases where the guard blocked repo work demanding `Operational Rules - Git Repos and Secrets` be read, the agent obeyed, and the verifier scored that read off-topic and re-closed the gate. The guard now records the demanded note (per-turn marker, cleared at turn start by both `begin_turn` and the bash reset), and the verifier treats a consult of it as relevant by definition. A ritual read on a turn where nothing demanded it is still judged normally.
+- **Verifier: vault writes are no longer scored as consults** (#148): `create-note`/`edit-note`/`delete-note`/`restore-note` used to clear the consult-gate at PreToolUse and then get relevance-scored (and denied — 17 events) at PostToolUse. Writes are acts, not consults: the Claude and Hermes adapters now gate them like any ordinary action, and the verifier never classifies them. The Hermes adapter also gains the navigation-tool exclusion (`list-notes`/`list-tags`/`graph-*`/`backlinks`) the Claude adapter already had.
+
+### Changed
+- **Off-topic denials are now auditable** (#148): the `off-topic-consult` violation record carries a `detail` field with the deterministic relevance score and the (truncated) task/activity/pending signals the consult was judged against — without it, the 437-deny log could not distinguish verifier false positives from real gate-dodges. `compliance.log_event` gained an optional `detail` parameter (written only when non-empty; existing readers unaffected). Verifier thresholds remain untouched pending a sampling pass over the enriched log.
+
 ## [3.8.3] - 2026-07-02
 
 ### Fixed

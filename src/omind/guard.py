@@ -121,6 +121,7 @@ def begin_turn(session: str, task: str) -> None:
     _clear_reclose(session)
     _clear_pending(session)
     _clear_git_freshness(session)
+    _clear_demanded(session)
     with contextlib.suppress(OSError):
         path = _turn_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -146,6 +147,37 @@ def _pending_path(session: str) -> Path:
 
 def _git_fresh_path(session: str) -> Path:
     return paths.state_dir() / f"git-fresh-{_safe_sid(session)}.json"
+
+
+def _demanded_path(session: str) -> Path:
+    """The note a guard block message DEMANDED this turn (e.g. the git-rules
+    note). The verifier treats a consult of it as obedience, not gaming — the
+    deny log showed the verifier re-closing the gate over reads of the very
+    note the guard itself required (#148). Reset at turn start."""
+    return paths.state_dir() / f"demanded-{_safe_sid(session)}.txt"
+
+
+def record_demanded_note(session: str, note: str) -> None:
+    """Record the note a guard block just demanded (best-effort, never raises)."""
+    if not session or not note:
+        return
+    with contextlib.suppress(OSError):
+        path = _demanded_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(note, encoding="utf-8")
+
+
+def demanded_note(session: str) -> str:
+    """The note a guard block demanded this turn, or ``""``. Never raises."""
+    try:
+        return _demanded_path(session).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _clear_demanded(session: str) -> None:
+    with contextlib.suppress(OSError):
+        _demanded_path(session).unlink()
 
 
 def record_pending(session: str, text: str) -> None:
@@ -946,6 +978,9 @@ def decide(action: dict[str, Any]) -> Verdict:
     if repo is not None and _is_repo_sensitive_action(action):
         if not _has_consulted_git_rules(session):
             record_pending(session, command or _action_path(action))
+            # Name the demanded note so the verifier credits the obeying read
+            # as relevant instead of re-closing the gate over it (#148).
+            record_demanded_note(session, GIT_RULES_NOTE)
             return Verdict(
                 allow=False,
                 reason=f"omi-guard (hard): {GIT_RULES_MESSAGE}",

@@ -60,9 +60,15 @@ def log_event(
     rule_id: str = "",
     severity: str = "",
     outcome: str = "",
+    detail: str = "",
     now: datetime | None = None,
 ) -> None:
     """Append one record to the compliance log. Never raises.
+
+    ``detail`` carries optional context an after-the-fact audit needs (e.g. the
+    verifier's score + the signals an off-topic consult was judged against,
+    #148); it is only written when non-empty, so existing readers see the same
+    schema they always did.
 
     Uses ``O_APPEND`` + an advisory ``flock`` so concurrent hook processes
     serialize without interleaving a half-written line (same discipline as the
@@ -78,6 +84,8 @@ def log_event(
         "severity": severity,
         "outcome": outcome,
     }
+    if detail:
+        record["detail"] = _truncate(detail)
     try:
         path = compliance_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)

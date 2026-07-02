@@ -35,6 +35,15 @@ SENT="$STATE/gate-$sid"
 # Consulting OMI clears the per-turn gate (always allowed — the clear-path).
 # `touch` (not truncate) so the PostToolUse verifier's JSON survives the turn.
 case "$tool" in
+  # Navigation/listing tools surface no note CONTENT — allow without consulting
+  # (keep in sync with omi-guard.sh).
+  mcp__omi__list-notes | mcp__omi__list-tags | mcp__omi__graph-* | mcp__omi__backlinks)
+    exit 0 ;;
+  # Vault WRITES are acts, not consults (#148) — fall through to the generic
+  # delegation below so they are gated like any ordinary action (keep in sync
+  # with omi-guard.sh).
+  mcp__omi__create-note | mcp__omi__edit-note | mcp__omi__delete-note | mcp__omi__restore-note)
+    : ;;
   mcp__omi__*)
     target="$(printf '%s' "$input" | jq -r '.tool_input.name // .tool_input.query // .tool_input.q // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null)"
     jq -nc --arg t "$tool" --arg s "$sid" --arg target "$target" \
