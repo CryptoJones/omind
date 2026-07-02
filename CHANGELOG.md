@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.3] - 2026-07-02
+
+### Fixed
+- **Guard: `git -C <dir>` is now honored for freshness *attribution*, not just recognition** (#147): `git -C <repo> fetch` records freshness for the `-C` target repo instead of the shell's cwd repo, so cross-repo work is satisfiable from a cwd-pinned session. The same parsing tightens the check side — `git -C <repo> commit` now checks the target repo's freshness, not the cwd's. Scoped to commands whose first token is literally `git` (`make -C`/`tar -C` are never misread); relative and repeated `-C` resolve with git's own cumulative semantics; any parse trouble falls back to cwd (fail-open, never a crash).
+- **Guard: `git -C <repo> commit/push/...` is now classified as repo work at all** (#147, found while verifying the above end-to-end): the write-verb and side-effect regexes required the verb immediately after `git`, so any `-C`/`-c` form sailed past the rules-note, freshness, and capability-side-effect checks entirely.
+- **Guard: the per-turn freshness marker is now a set of repos** (#147): fetching repo B no longer evicts repo A's same-turn freshness, so a turn that legitimately touches two repos doesn't ping-pong between re-fetches. The pre-3.8.3 single-slot marker payload is still read (mid-upgrade sessions).
+
+### Changed
+- **Guard: a tight allowlist of provably-inert inspection commands skips the consult-gate** (#147): a bare `pwd`, `whoami`, `id`, `date` (read forms), `uname`, `hostname` (bare), `which`/`command -v`, `git --version`, `true`/`false` no longer requires an OMI consult — no filesystem, repo, network, or side-effect surface, so no consult could inform them. Any shell metacharacter (chain, pipe, redirect, substitution, glob) disqualifies the command, `echo` is excluded by design (arbitrary arguments), and the exemption does not satisfy the gate — the turn's first real action still requires its consult. Deliberately unchanged: bare `git pull` still does not establish freshness (an auto-allowed silent merge commit stays off the table), and the off-topic verifier thresholds are untouched pending a sampling pass over the deny log.
+
 ## [3.8.2] - 2026-07-02
 
 ### Docs

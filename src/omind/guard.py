@@ -27,7 +27,9 @@ Decision order:
      command opts in with ``OMI_PUSH_GITHUB=1`` (a deliberate Codeberg mirror).
      ``soft`` rules never block here — the detector (Layer E) records them.
   3. THE GATE — block until OMI was consulted this turn; ``omind guard reset``
-     (the harness's turn-start hook) clears the sentinel.
+     (the harness's turn-start hook) clears the sentinel. Provably-inert
+     inspection commands (a bare ``pwd``/``whoami``/...) skip the gate without
+     satisfying it (#147).
 
 The policy lives in data, but the seed rules live in code, so the hard blocks
 are always enforceable here on the raw command even on a blank machine — they
@@ -40,6 +42,7 @@ import contextlib
 import json
 import os
 import re
+import shlex
 import sys
 import tempfile
 import time
@@ -61,7 +64,8 @@ GIT_RULES_MESSAGE = (
 )
 GIT_FRESHNESS_MESSAGE = (
     "repo work requires a same-turn freshness check before review/edit/test/commit/push: "
-    "run `git fetch --all --prune` or `git pull --ff-only`, then inspect branch status."
+    "run `git fetch --all --prune` or `git pull --ff-only`, then inspect branch status. "
+    "For a repo outside the cwd, `git -C <repo> fetch --all --prune` freshens that repo."
 )
 GLOBAL_MUTATION_MESSAGE = (
     "global config/hook/bootstrap mutation requires explicit user authorization in the "
@@ -169,22 +173,43 @@ def _clear_pending(session: str) -> None:
         _pending_path(session).unlink()
 
 
+def _fresh_repos(session: str) -> dict[str, int]:
+    """The repos freshened this turn (``{repo: ts}``). Reads both the current
+    set-shaped payload and the pre-3.8.3 single-slot ``{"repo": ...}`` shape (a
+    mid-upgrade session may still carry one). Never raises."""
+    try:
+        data = json.loads(_git_fresh_path(session).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    if not isinstance(data, dict):
+        return {}
+    repos = data.get("repos")
+    if isinstance(repos, dict):
+        return {str(k): int(v) for k, v in repos.items() if isinstance(v, (int, float))}
+    legacy = data.get("repo")
+    if isinstance(legacy, str) and legacy:
+        ts = data.get("ts")
+        return {legacy: int(ts) if isinstance(ts, (int, float)) else 0}
+    return {}
+
+
 def _record_git_freshness(session: str, repo: Path, command: str) -> None:
+    # A SET of repos, not a single slot (#147): a cross-repo turn fetches A and
+    # B, and the second fetch must not evict the first — otherwise the turn
+    # ping-pongs between re-fetches. Cleared on turn reset like before.
     if not session:
         return
-    with contextlib.suppress(OSError):
+    with contextlib.suppress(OSError, ValueError):
         path = _git_fresh_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
-        payload = {"repo": str(repo), "command": command, "ts": int(time.time())}
+        repos = _fresh_repos(session)
+        repos[str(repo)] = int(time.time())
+        payload = {"repos": repos, "command": command}
         path.write_text(json.dumps(payload), encoding="utf-8")
 
 
 def _git_fresh_for_repo(session: str, repo: Path) -> bool:
-    try:
-        data = json.loads(_git_fresh_path(session).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return False
-    return isinstance(data, dict) and data.get("repo") == str(repo)
+    return str(repo) in _fresh_repos(session)
 
 
 def _clear_git_freshness(session: str) -> None:
@@ -525,9 +550,9 @@ _GLOBAL_MUTATING_BASH_RE = re.compile(
     r")\b"
 )
 _SHELL_SIDE_EFFECT_RE = re.compile(
-    r"(?:^|[;&|\n(]\s*)(?:"
-    r"gh\s+(?:issue\s+create|pr\s+(?:create|merge)|release\s+create)|"
-    r"git\s+(?:add|commit|push|merge|rebase|checkout|switch|tag)|"
+    rf"(?:^|[;&|\n(]\s*)(?:"
+    rf"gh\s+(?:issue\s+create|pr\s+(?:create|merge)|release\s+create)|"
+    rf"git\s+{_GIT_GLOBAL_OPTS}(?:add|commit|push|merge|rebase|checkout|switch|tag)|"
     r"systemctl\s+(?:restart|reload|stop|start)|"
     r"service\s+\S+\s+(?:restart|reload|stop|start)|"
     r"kubectl\s+(?:apply|delete|rollout\s+restart|scale)|"
@@ -535,6 +560,36 @@ _SHELL_SIDE_EFFECT_RE = re.compile(
     r"chmod|chown|cp|dd|install|mv|rm|tee|touch|truncate"
     r")\b"
 )
+
+
+# Provably-inert inspection commands, exempt from the consult-gate (#147): no
+# filesystem read/write, no repo, no network, no side effect — a memory consult
+# could not inform them, so gating them is pure ceremony. Deliberately tiny:
+# `cat`/`ls`/`grep`/`find` READ files (repo files included) and stay gated;
+# `echo` is excluded because its arguments are arbitrary; `date` only in its
+# read forms (`date -s` sets the clock) and `hostname` only bare (an argument
+# renames the host).
+_INERT_BASH_RE = re.compile(
+    r"^(?:pwd|whoami|hostname|true|false|"
+    r"id(?:[ \t]+-[A-Za-z]+)*(?:[ \t]+[A-Za-z0-9._-]+)?|"
+    r"date(?:[ \t]+\+\S+)?|"
+    r"uname(?:[ \t]+-[A-Za-z]+)*|"
+    r"which[ \t]+[A-Za-z0-9._+-]+|"
+    r"command[ \t]+-v[ \t]+[A-Za-z0-9._+-]+|"
+    r"git[ \t]+--version"
+    r")$"
+)
+
+
+def _is_inert_command(command: str) -> bool:
+    """True only for a single bare inert command. ANY shell metacharacter —
+    chain, pipe, redirect, substitution, glob — disqualifies the whole string,
+    so an inert command can never carry a passenger (`pwd && rm x`,
+    `which $(cmd)`)."""
+    command = command.strip()
+    if re.search(r"[|&;<>`$\\\n(){}\[\]*?~=]", command):
+        return False
+    return bool(_INERT_BASH_RE.match(command))
 
 
 def _split_simple_commands(command: str) -> list[str]:
@@ -639,6 +694,36 @@ def _action_path(action: dict[str, Any]) -> str:
     return ""
 
 
+def _git_dash_c_path(command: str) -> Path | None:
+    """The cumulative ``-C <dir>`` target of the command's first simple command,
+    when that command is ``git`` — the repo a ``git -C <dir> …`` actually acts
+    on. Scoped to a literal leading ``git`` token so ``make -C``/``tar -C`` are
+    never misread. Repeated ``-C`` chains relative to the previous one (git's
+    own semantics); a relative result resolves against cwd in the caller. Any
+    parse trouble returns ``None`` (fall back to cwd) — never raises."""
+    try:
+        parts = _split_simple_commands(command)
+        if not parts:
+            return None
+        tokens = shlex.split(parts[0])
+    except ValueError:
+        return None
+    if not tokens or tokens[0] != "git":
+        return None
+    target: Path | None = None
+    i = 1
+    while i < len(tokens) - 1:
+        if tokens[i] == "-C":
+            step = Path(tokens[i + 1]).expanduser()
+            target = step if target is None or step.is_absolute() else target / step
+            i += 2
+        elif tokens[i] == "-c":
+            i += 2
+        else:
+            break
+    return target
+
+
 def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
     candidates: list[Path] = []
     raw_path = _action_path(action)
@@ -646,6 +731,14 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
         p = Path(raw_path).expanduser()
         candidates.append(p if p.is_dir() else p.parent)
     else:
+        # A Bash action carries no file path, so the repo was previously always
+        # the shell's cwd — which misattributed `git -C <other-repo> fetch` (and
+        # `git -C <other-repo> commit`) to the cwd repo (#147). Honor `-C` for
+        # git commands; a `-C` that lands outside any repo falls through to cwd.
+        with contextlib.suppress(Exception):
+            dash_c = _git_dash_c_path(str(action.get("command") or ""))
+            if dash_c is not None:
+                candidates.append(dash_c)
         candidates.append(Path.cwd())
     for candidate in candidates:
         try:
@@ -676,8 +769,12 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
     if tool == "Bash":
         if _is_readonly_git_command(command):
             return False
+        # Tolerate the ``-C <dir>``/``-c k=v`` global opts before the verb —
+        # without this, ``git -C <repo> commit`` was never classified as repo
+        # work at all and sailed past the rules-note + freshness checks (#147).
         if re.search(
-            r"(?:^|[;&|\n(]\s*)git\s+(?:add|commit|push|merge|rebase|checkout|switch)\b",
+            rf"(?:^|[;&|\n(]\s*)git[ \t]+{_GIT_GLOBAL_OPTS}"
+            r"(?:add|commit|push|merge|rebase|checkout|switch)\b",
             command,
         ):
             return True
@@ -861,6 +958,13 @@ def decide(action: dict[str, Any]) -> Verdict:
                 reason=f"omi-guard (hard): {GIT_FRESHNESS_MESSAGE}",
                 rule_id="repo-work-fresh-base",
             )
+
+    # 2.7) Provably-inert inspection commands (bare `pwd`, `whoami`, ...) skip
+    # the consult-gate (#147): they can't touch a repo, a file, the network, or
+    # any state, so no consult could inform them. They deliberately do NOT set
+    # the sentinel — the first real action still requires its consult.
+    if command and _is_inert_command(command):
+        return Verdict(allow=True)
 
     # 3) The gate — block until OMI was consulted this turn.
     if consulted_this_turn(session):

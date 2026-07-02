@@ -812,6 +812,159 @@ def test_project_local_dotclaude_is_not_a_global_config_mutation(tmp_path: Path)
     assert guard._is_global_config_path(str(Path.home() / ".claude" / "settings.json"))
 
 
+def _mk_repo(tmp_path: Path, name: str) -> Path:
+    """A minimal repo-shaped dir (`.git` present) — the root walk needs no real git."""
+    repo = tmp_path / name
+    (repo / ".git").mkdir(parents=True)
+    return repo.resolve()
+
+
+def test_dash_c_fetch_attributes_freshness_to_the_target_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#147: `git -C <B> fetch` from an A-rooted cwd freshens B — not the cwd repo."""
+    repo_a = _mk_repo(tmp_path, "a")
+    repo_b = _mk_repo(tmp_path, "b")
+    monkeypatch.chdir(repo_a)
+    guard.clear_gate("dashc")
+    guard.record_consult("dashc", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    fetch = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo_b} fetch --all --prune", "session": "dashc"}
+    )
+    assert fetch.allow
+    assert str(repo_b) in guard._fresh_repos("dashc")
+    assert str(repo_a) not in guard._fresh_repos("dashc")
+    # An edit in B (repo resolved from the FILE path) now passes the freshness check...
+    edit = guard.decide({"tool": "Edit", "file_path": str(repo_b / "x.py"), "session": "dashc"})
+    assert edit.allow, edit.reason
+    # ...while A — never fetched — is still stale.
+    stale = guard.decide({"tool": "Edit", "file_path": str(repo_a / "x.py"), "session": "dashc"})
+    assert not stale.allow
+    assert stale.rule_id == "repo-work-fresh-base"
+    guard.clear_gate("dashc")
+
+
+def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#147: relative/repeated `-C` resolve like git's own; anything unparseable
+    (or non-git `-C` like make/tar) attributes to the cwd repo, never crashes."""
+    repo_a = _mk_repo(tmp_path, "a")
+    repo_b = _mk_repo(tmp_path, "b")
+    monkeypatch.chdir(repo_a)
+    # A `-C` target that is itself no repo attributes to its ENCLOSING repo when
+    # one exists (that is where git would run — e.g. a stray /tmp/.git above
+    # pytest's tmp dir), and only falls back to the cwd repo when there is none.
+    plain = tmp_path / "plain"
+    plain.mkdir()
+    enclosing = next((p for p in (plain, *plain.parents) if (p / ".git").exists()), None)
+    for command, expected in [
+        (f"git -C {repo_b} fetch", repo_b),  # absolute
+        ("git -C ../b fetch", repo_b),  # relative to cwd
+        (f"git -C {tmp_path} -C b fetch", repo_b),  # repeated -C chains cumulatively
+        (f"git -c user.name=x -C {repo_b} fetch", repo_b),  # -c skipped, -C honored
+        (f"git -C {plain} fetch", enclosing or repo_a),  # -C at a non-repo
+        ('git -C "unclosed fetch', repo_a),  # unbalanced quote -> cwd, no crash
+        (f"make -C {repo_b} test", repo_a),  # not git: -C untrusted
+        (f"tar -C {repo_b} -xf x.tar", repo_a),
+        ("git fetch --all --prune", repo_a),  # no -C -> cwd, as before
+    ]:
+        got = guard._repo_root_for_action({"tool": "Bash", "command": command})
+        assert got == expected, command
+    # Record and check sides resolve the SAME string for the same repo (#147) —
+    # the marker is an exact string match, so this equality is load-bearing.
+    fetch_side = guard._repo_root_for_action(
+        {"tool": "Bash", "command": f"git -C {repo_b} fetch"}
+    )
+    commit_side = guard._repo_root_for_action(
+        {"tool": "Bash", "command": f"git -C {repo_b} commit -m x"}
+    )
+    assert str(fetch_side) == str(commit_side) == str(repo_b)
+
+
+def test_dash_c_git_writes_are_classified_and_checked_against_the_target(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#147: `git -C <B> commit` is repo work (the old verb regex required the
+    verb right after `git`, so a `-C` form bypassed the checks entirely) and is
+    checked against B's freshness, not the cwd's."""
+    repo_a = _mk_repo(tmp_path, "a")
+    repo_b = _mk_repo(tmp_path, "b")
+    monkeypatch.chdir(repo_a)
+    assert guard._is_repo_sensitive_action(
+        {"tool": "Bash", "command": f"git -C {repo_b} commit -m x"}
+    )
+    assert guard._is_side_effect_action(
+        {"tool": "Bash", "command": f"git -C {repo_b} push codeberg main"}
+    )
+    guard.clear_gate("dashcw")
+    guard.record_consult("dashcw", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    guard._record_git_freshness("dashcw", repo_a, "git fetch --all --prune")
+    stale = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo_b} commit -m x", "session": "dashcw"}
+    )
+    assert not stale.allow
+    assert stale.rule_id == "repo-work-fresh-base"
+    guard._record_git_freshness("dashcw", repo_b, f"git -C {repo_b} fetch")
+    fresh = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo_b} commit -m x", "session": "dashcw"}
+    )
+    assert fresh.allow, fresh.reason
+    guard.clear_gate("dashcw")
+
+
+def test_freshness_marker_holds_multiple_repos_and_reads_legacy_shape(tmp_path: Path) -> None:
+    """#147: fetching B must not evict A's freshness within the turn; the
+    pre-3.8.3 single-slot payload still reads (mid-upgrade session)."""
+    repo_a = _mk_repo(tmp_path, "a")
+    repo_b = _mk_repo(tmp_path, "b")
+    guard._record_git_freshness("multi", repo_a, "git fetch --all --prune")
+    guard._record_git_freshness("multi", repo_b, f"git -C {repo_b} fetch")
+    assert guard._git_fresh_for_repo("multi", repo_a)
+    assert guard._git_fresh_for_repo("multi", repo_b)
+    guard._git_fresh_path("multi").write_text(
+        json.dumps({"repo": str(repo_a), "command": "git fetch", "ts": 1}), encoding="utf-8"
+    )
+    assert guard._git_fresh_for_repo("multi", repo_a)
+    assert not guard._git_fresh_for_repo("multi", repo_b)
+
+
+def test_inert_commands_skip_the_consult_gate_without_satisfying_it() -> None:
+    """#147: a provably-inert inspection command runs unconsulted; nothing can
+    piggyback on one, and it does NOT clear the gate for what follows."""
+    guard.clear_gate("inert")
+    for cmd in (
+        "pwd",
+        "whoami",
+        "id",
+        "id -u",
+        "date",
+        "date +%s",
+        "uname -a",
+        "hostname",
+        "which git",
+        "command -v jq",
+        "git --version",
+        "true",
+        "false",
+    ):
+        assert guard.decide({"tool": "Bash", "command": cmd, "session": "inert"}).allow, cmd
+    # The exemption does not set the sentinel: a real action still needs a consult.
+    assert not guard.decide({"tool": "Bash", "command": "ls", "session": "inert"}).allow
+    for cmd in (
+        "pwd && rm -rf build",  # no passengers
+        "pwd > /tmp/x",  # no redirects
+        "which $(rm x)",  # no substitution
+        "date -s 12:00",  # sets the clock: only read forms are inert
+        "hostname evil",  # renames the host: bare form only
+        "echo hi",  # arbitrary arguments: excluded by design
+        "cat /etc/hostname",  # reads a file: stays gated
+        "uname -a; curl example.com",  # no chains
+    ):
+        assert not guard.decide({"tool": "Bash", "command": cmd, "session": "inert"}).allow, cmd
+    guard.clear_gate("inert")
+
+
 def test_bad_learned_rule_does_not_brick_the_guard() -> None:
     """#668: a malformed regex reaching decide() must be skipped, not crash it."""
     from omind import policy
