@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.0] - 2026-07-01
+
 ### Added
 - **Open Knowledge Format (OKF) support**: omind now reads and writes notes as a conformant [OKF v0.1](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) bundle — Google Cloud's vendor-neutral, Apache-2.0 Markdown-plus-YAML-frontmatter spec for sharing knowledge with agents and tools. Every note omind writes now leads with a YAML frontmatter block carrying the one field OKF requires (`type` — derived from the note's kind, e.g. `#feedback` → `Feedback`, when not declared) plus the recommended `title` / `description` / `tags` / `timestamp`; the `index.md` is the OKF directory listing. Producer-defined frontmatter keys are round-tripped (the spec requires preserving unknown keys).
 - **`omind convert`**: migrate a pre-OKF vault to OKF in place — idempotent (a note already in OKF form is skipped, no mesh revision bump), with `--check` to validate the three conformance rules and `--dry-run` to preview. Also exposed programmatically as `omind.okf.convert_vault` / `omind.okf.check_conformance`.
