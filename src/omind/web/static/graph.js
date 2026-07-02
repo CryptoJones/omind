@@ -10,14 +10,14 @@
   const cssVar = (name, fallback) =>
     (getComputedStyle(document.documentElement).getPropertyValue(name) || fallback).trim();
 
-  // Degree -> color tier (accent = hubs, link = mid, faint = leaf, red = orphan).
-  function paletteFor(deg, theme) {
-    if (deg === 0) return "#ff5d5d";
-    if (deg >= 8) return theme.accent;
-    if (deg >= 4) return theme.link;
-    if (deg >= 2) return theme.soft;
-    return theme.faint;
-  }
+  const esc = (s) =>
+    String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+
+  // Categorical colours for OKF `type` — vivid enough to read on the dark canvas.
+  // Distinct types present get a stable colour by sorted order; node SIZE still
+  // encodes degree, so colour is free to carry the note's kind.
+  const TYPE_PALETTE = ["#7d9bff", "#5fd0bf", "#f78fb3", "#9ae66e", "#ffd166",
+                        "#c792ea", "#ff8b5d", "#4fc3f7", "#e6e6e6", "#b0bec5"];
 
   async function render(container, opts) {
     opts = opts || {};
@@ -27,7 +27,7 @@
     const index = new Map();
     const nodes = data.nodes.map((n, i) => {
       index.set(n.id, i);
-      return { id: n.id, title: n.title || n.id.replace(/\.md$/i, ""), deg: 0,
+      return { id: n.id, title: n.title || n.id.replace(/\.md$/i, ""), type: n.type || "", deg: 0,
                x: Math.cos(i) * 240 + (i % 7) * 13, y: Math.sin(i) * 240 + (i % 5) * 11,
                vx: 0, vy: 0, pinned: false };
     });
@@ -41,15 +41,18 @@
     const neighbors = nodes.map(() => new Set());
     for (const [a, b] of edges) { neighbors[a].add(b); neighbors[b].add(a); }
 
+    // OKF type -> colour: one stable colour per distinct type present.
+    const presentTypes = [...new Set(nodes.map((n) => n.type).filter(Boolean))].sort();
+    const typeColor = new Map(presentTypes.map((t, i) => [t, TYPE_PALETTE[i % TYPE_PALETTE.length]]));
+    const colorFor = (n) => typeColor.get(n.type) || cssVar("--text-faint", "#626c7d");
+
     // --- canvas + chrome ---------------------------------------------------
     container.innerHTML =
       '<div class="graph-wrap">' +
       '  <div class="graph-bar">' +
       '    <span class="graph-stat">' + nodes.length + " notes · " + edges.length + " links</span>" +
       '    <span class="graph-legend">' +
-      '      <i style="background:' + cssVar("--accent", "#7d9bff") + '"></i>hub' +
-      '      <i style="background:' + cssVar("--link", "#5fd0bf") + '"></i>linked' +
-      '      <i style="background:#ff5d5d"></i>orphan' +
+      presentTypes.map((t) => '<i style="background:' + typeColor.get(t) + '"></i>' + esc(t)).join("") +
       "    </span>" +
       '    <button type="button" class="graph-reset btn">reset view</button>' +
       "  </div>" +
@@ -158,7 +161,7 @@
         const n = nodes[i];
         const dim = hover !== -1 && hover !== i && !neighbors[hover].has(i);
         ctx.globalAlpha = dim ? 0.25 : 1;
-        ctx.fillStyle = paletteFor(n.deg, theme);
+        ctx.fillStyle = colorFor(n);
         ctx.beginPath();
         ctx.arc(sx(n.x), sy(n.y), radius(n) * (i === hover ? 1.5 : 1), 0, 6.2832);
         ctx.fill();

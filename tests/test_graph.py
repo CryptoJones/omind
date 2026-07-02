@@ -128,3 +128,27 @@ def test_empty_vault_is_an_empty_graph(tmp_path: Path) -> None:
     g = graph.build_graph(tmp_path / "OMI")  # directory does not exist
     assert g.nodes == {}
     assert graph.stats(g) == {"notes": 0, "links": 0, "orphans": 0, "dangling": 0}
+
+
+def test_build_graph_carries_okf_type(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Fb", summary="s", tags=["feedback"]))
+    store.create_note(NoteFields(title="Plain", summary="s"))  # untagged
+    g = graph.build_graph(store.omi_dir)
+    assert g.nodes["Fb.md"].okf_type == "Feedback"  # derived from #feedback
+    assert g.nodes["Plain.md"].okf_type == "Memory"  # default when unmapped
+
+
+def test_to_json_includes_type(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Ref", summary="s", tags=["reference"]))
+    data = graph.to_json(graph.build_graph(store.omi_dir))
+    nodes = data["nodes"]
+    assert isinstance(nodes, list)
+    node = next(n for n in nodes if n["id"] == "Ref.md")
+    assert node["type"] == "Reference"
+
+
+def test_to_dot_fills_nodes_by_type(store: OmiStore) -> None:
+    store.create_note(NoteFields(title="Ref", summary="s", tags=["reference"]))
+    dot = graph.to_dot(graph.build_graph(store.omi_dir))
+    assert "style=filled" in dot
+    assert graph.TYPE_FILL["Reference"] in dot  # Reference nodes carry their fill

@@ -283,7 +283,12 @@ function noteByName(name) {
 
 // Turn [[wikilinks]] and #tags into markup, then render markdown.
 function renderMarkdown(md) {
-  let src = md.replace(/\[\[([^\]]+)\]\]/g, (_, name) => {
+  // Strip a leading YAML frontmatter block (--- … ---): it is the note's OKF
+  // metadata (type/title/tags/…), surfaced in the structured header above — not
+  // body prose. Without this, marked renders the `---` as an <hr> and the
+  // frontmatter keys as a run of stray text at the top of every note.
+  const body = md.replace(/^---[ \t]*\r?\n[\s\S]*?\r?\n---[ \t]*\r?\n?/, "");
+  let src = body.replace(/\[\[([^\]]+)\]\]/g, (_, name) => {
     const target = name.trim();
     const exists = !!noteByName(target);
     const cls = exists ? "wikilink" : "wikilink missing";

@@ -25,7 +25,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from omind.paths import RESERVED_FILENAMES
-from omind.store import _WIKILINK_RE, parse_note
+from omind.store import _WIKILINK_RE, derive_okf_type, parse_note
 
 
 def _link_target(raw: str) -> str:
@@ -40,6 +40,7 @@ class GraphNode:
 
     filename: str  # "Foo.md"
     title: str
+    okf_type: str = ""  # the note's OKF ``type`` — for grouping/colouring the graph
     out: set[str] = field(default_factory=set)  # filenames this note links to
     inn: set[str] = field(default_factory=set)  # filenames that link to this note
 
@@ -71,7 +72,7 @@ def build_graph(omi_dir: Path | str) -> Graph:
     omi = Path(omi_dir)
     # (filename, title, raw outbound targets) for each live note, plus an index
     # from every linkable identifier (stem + title, lowercased) to its filename.
-    parsed: list[tuple[str, str, set[str]]] = []
+    parsed: list[tuple[str, str, str, set[str]]] = []
     id_to_file: dict[str, str] = {}
     if omi.is_dir():
         for path in sorted(omi.glob("*.md")):
@@ -85,15 +86,21 @@ def build_graph(omi_dir: Path | str) -> Graph:
             if fields.disabled:
                 continue
             title = fields.title.strip()
+            # The note's OKF type, deriving it from tags when undeclared — the
+            # same rule render_fields uses — so every node carries a non-empty type.
+            okf_type = fields.okf_type.strip() or derive_okf_type(fields.tags)
             targets = {t for t in (_link_target(m) for m in _WIKILINK_RE.findall(text)) if t}
-            parsed.append((path.name, title, targets))
+            parsed.append((path.name, title, okf_type, targets))
             id_to_file[path.stem.strip().lower()] = path.name
             if title:
                 id_to_file[title.lower()] = path.name
 
-    nodes = {fn: GraphNode(filename=fn, title=title) for fn, title, _ in parsed}
+    nodes = {
+        fn: GraphNode(filename=fn, title=title, okf_type=okf_type)
+        for fn, title, okf_type, _ in parsed
+    }
     dangling: list[tuple[str, str]] = []
-    for src, _title, targets in parsed:
+    for src, _title, _type, targets in parsed:
         for target in sorted(targets):
             dest = id_to_file.get(target.lower())
             if dest is None:
@@ -189,7 +196,12 @@ def to_json(graph: Graph) -> dict[str, object]:
     """A JSON-serialisable view of the whole graph (nodes, edges, dangling)."""
     return {
         "nodes": [
-            {"id": node.filename, "title": node.title, "out": sorted(node.out)}
+            {
+                "id": node.filename,
+                "title": node.title,
+                "type": node.okf_type,
+                "out": sorted(node.out),
+            }
             for node in sorted(graph.nodes.values(), key=lambda n: n.filename.lower())
         ],
         "edges": sorted(
@@ -204,12 +216,30 @@ def _dot_quote(text: str) -> str:
     return '"' + text.replace("\\", "\\\\").replace('"', '\\"') + '"'
 
 
+#: Pale fill per OKF ``type`` for the DOT/SVG export (and a hint for the web
+#: legend). Unknown/producer-defined types fall back to :data:`_DEFAULT_TYPE_FILL`.
+TYPE_FILL = {
+    "User": "#dbeafe",
+    "Feedback": "#fce7f3",
+    "Project": "#dcfce7",
+    "Reference": "#fef9c3",
+    "Memory": "#e5e7eb",
+    "Playbook": "#ede9fe",
+    "Reference Card": "#ffedd5",
+}
+_DEFAULT_TYPE_FILL = "#f3f4f6"
+
+
 def to_dot(graph: Graph) -> str:
-    """The graph as Graphviz DOT (``dot -Tsvg``-renderable)."""
-    lines = ["digraph omi {", "  rankdir=LR;", "  node [shape=box];"]
+    """The graph as Graphviz DOT (``dot -Tsvg``-renderable), filled by OKF type."""
+    lines = ["digraph omi {", "  rankdir=LR;", "  node [shape=box, style=filled];"]
     for node in sorted(graph.nodes.values(), key=lambda n: n.filename.lower()):
         label = node.title or node.filename[:-3]
-        lines.append(f"  {_dot_quote(node.filename)} [label={_dot_quote(label)}];")
+        fill = TYPE_FILL.get(node.okf_type, _DEFAULT_TYPE_FILL)
+        lines.append(
+            f"  {_dot_quote(node.filename)} "
+            f"[label={_dot_quote(label)}, fillcolor={_dot_quote(fill)}];"
+        )
     for src in sorted(graph.nodes):
         for dst in sorted(graph.nodes[src].out):
             lines.append(f"  {_dot_quote(src)} -> {_dot_quote(dst)};")
