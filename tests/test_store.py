@@ -46,7 +46,13 @@ def test_render_parse_round_trip() -> None:
         ],
         references=["Source: somewhere", "https://example.com"],
     )
-    parsed = parse_note(render_fields(fields))
+    rendered = render_fields(fields)
+    parsed = parse_note(rendered)
+    # Rendering now generates an OKF frontmatter projection and derives a
+    # ``type`` when absent, so normalize those two generated fields; every other
+    # structured field must survive the round-trip exactly.
+    fields.okf_type = parsed.okf_type
+    fields.frontmatter = parsed.frontmatter
     assert parsed == fields
 
 
@@ -728,7 +734,10 @@ def test_yaml_frontmatter_survives_edit(store: OmiStore) -> None:
     name = store.write_note("Kept Note.md", raw)
     store.update_note(name, NoteFields(title="Kept Note", summary="new summary"))
     after = store.read_note(name)
-    assert "tags: [alpha, beta]" in after
+    reparsed = parse_note(after)
+    # Tags authored in frontmatter survive the edit (now block-style YAML,
+    # mirrored into ## Metadata); the unrelated Obsidian property is preserved.
+    assert set(reparsed.tags) >= {"alpha", "beta"}
     assert "aliases:" in after
     assert "lead prose before the first section." in after
     assert "new summary" in after

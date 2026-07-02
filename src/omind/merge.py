@@ -273,6 +273,7 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         # must never eat; carry them through with the same symmetric LWW rule.
         frontmatter=str(scalar("frontmatter")),
         lead=str(scalar("lead")),
+        okf_type=str(scalar("okf_type")),
         rev=merged_rev,
         disabled=bool(scalar("disabled")),
     )

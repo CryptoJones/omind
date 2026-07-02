@@ -120,7 +120,7 @@ def test_merge_preserves_frontmatter_and_lead() -> None:
     ours = "---\ntags: [x]\n---\n# N\n\nlead text.\n\n## Summary\ns2\n\n## Details\nd\n"
     theirs = base
     merged, _clean, _msgs = merge_note_texts(base, ours, theirs)
-    assert "tags: [x]" in merged
+    assert "#x" in merged  # frontmatter tag survives the merge (block-style YAML + ## Metadata)
     assert "lead text." in merged
 
 

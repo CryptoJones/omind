@@ -270,6 +270,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_vault_args(reindex)
 
+    convert = sub.add_parser(
+        "convert",
+        help="migrate an OMI vault to the Open Knowledge Format (OKF): give every "
+        "note YAML frontmatter with a 'type' (idempotent, in place)",
+    )
+    convert.add_argument(
+        "--dry-run",
+        action="store_true",
+        help="report what would change without writing any note",
+    )
+    convert.add_argument(
+        "--check",
+        action="store_true",
+        help="only check OKF conformance and report; make no changes",
+    )
+    _add_vault_args(convert)
+
     note = sub.add_parser(
         "note",
         help="safely create or update one OMI note through OmiStore (the single-writer path)",
@@ -788,6 +805,24 @@ def _run_reindex(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_convert(args: argparse.Namespace) -> int:
+    from omind import okf
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    if args.check:
+        report = okf.check_conformance(omi_dir)
+    else:
+        result = okf.convert_vault(omi_dir, dry_run=args.dry_run)
+        verb = "would convert" if args.dry_run else "converted"
+        print(f"{verb} {result.converted} note(s); {result.unchanged} already in OKF form")
+        report = result.report
+    for problem in report.problems:
+        print(f"  [x] {problem.filename}: {problem.problem}")
+    tail = "all conformant" if report.ok else f"{len(report.problems)} non-conformant"
+    print(f"OKF v0.1 conformance: {report.conformant}/{report.concepts} concept notes — {tail}")
+    return 0 if report.ok else 1
+
+
 def _run_search(args: argparse.Namespace) -> int:
     from omind.store import OmiStore
 
@@ -1074,6 +1109,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_checkpoint(args)
     if args.command == "reindex":
         return _run_reindex(args)
+    if args.command == "convert":
+        return _run_convert(args)
     if args.command == "note":
         return _run_note(args)
     if args.command == "rollup":

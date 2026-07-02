@@ -24,6 +24,8 @@ from datetime import date
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from omind import filelock
 from omind.clock import Rev, next_rev
 from omind.paths import (
@@ -180,6 +182,11 @@ class NoteFields:
     # H2 headings inside a field body round-trips instead of being silently
     # dropped by the edit path. The mesh merge driver preserves these too.
     extras: dict[str, list[str]] = field(default_factory=dict)
+    # OKF (Open Knowledge Format, v0.1) concept type — the single field OKF
+    # requires in a note's YAML frontmatter. Empty on un-migrated notes; when
+    # absent it is derived (see :func:`derive_okf_type`) at render time so every
+    # note omind writes carries a non-empty ``type`` and is OKF-conformant.
+    okf_type: str = ""
     # Mesh fields (docs/mesh.md). Empty/False on legacy notes, and rendered
     # only when set, so a non-mesh note round-trips byte-identical.
     rev: str = ""
@@ -215,6 +222,7 @@ class NoteFields:
             },
             frontmatter=str(data.get("frontmatter", "")),
             lead=str(data.get("lead", "")),
+            okf_type=str(data.get("okf_type", "")).strip(),
             rev=str(data.get("rev", "")).strip(),
             disabled=bool(data.get("disabled")),
         )
@@ -257,6 +265,90 @@ def _strip_blank_edges(lines: list[str]) -> list[str]:
     while end > start and not lines[end - 1].strip():
         end -= 1
     return lines[start:end]
+
+
+# --- OKF (Open Knowledge Format) frontmatter -------------------------------------
+# omind conforms to OKF v0.1: every note is a markdown file whose leading YAML
+# frontmatter block carries at least a non-empty ``type``. We manage this small
+# set of standard OKF keys from the structured NoteFields and preserve any OTHER
+# frontmatter key verbatim on round-trip (the spec requires consumers to keep
+# unknown keys). Spec: GoogleCloudPlatform/knowledge-catalog okf/SPEC.md.
+_OKF_STANDARD_KEYS = frozenset({"type", "title", "description", "tags", "timestamp"})
+
+#: A memory's kind is carried as a tag (#feedback, #reference, …); map those to a
+#: descriptive OKF ``type``. Anything unmapped falls back to ``Memory`` so the one
+#: required OKF field is never empty.
+_TYPE_BY_TAG = {
+    "user": "User",
+    "feedback": "Feedback",
+    "project": "Project",
+    "reference": "Reference",
+}
+_DEFAULT_OKF_TYPE = "Memory"
+
+
+def derive_okf_type(tags: list[str]) -> str:
+    """Best-effort OKF ``type`` for a note that never declared one."""
+    for t in tags:
+        name = _TYPE_BY_TAG.get(_clean_tag(t).lower())
+        if name:
+            return name
+    return _DEFAULT_OKF_TYPE
+
+
+def parse_frontmatter(block: str) -> dict[str, Any]:
+    """Parse a verbatim leading ``---`` YAML frontmatter block into a dict.
+
+    Deliberately tolerant (OKF consumers MUST NOT choke on odd frontmatter): an
+    absent, empty, non-mapping, or malformed block yields ``{}``.
+    """
+    lines = block.strip().splitlines()
+    if lines and lines[0].strip() == "---":
+        lines = lines[1:]
+        if lines and lines[-1].strip() == "---":
+            lines = lines[:-1]
+    text = "\n".join(lines).strip()
+    if not text:
+        return {}
+    try:
+        data = yaml.safe_load(text)
+    except yaml.YAMLError:
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _one_line(text: str) -> str:
+    """First non-empty line of ``text``, whitespace-collapsed (for OKF ``description``)."""
+    for line in text.splitlines():
+        collapsed = " ".join(line.split())
+        if collapsed:
+            return collapsed
+    return ""
+
+
+def build_okf_frontmatter(f: NoteFields) -> str:
+    """Render a note's OKF-conformant YAML frontmatter block.
+
+    The standard OKF keys (type/title/description/tags/timestamp) are
+    regenerated from the structured fields; every other key already present in
+    the note's frontmatter is preserved (round-tripped) so hand-authored or
+    producer-defined properties survive edits.
+    """
+    preserved = parse_frontmatter(f.frontmatter)
+    data: dict[str, Any] = {"type": f.okf_type.strip() or derive_okf_type(f.tags)}
+    if f.title.strip():
+        data["title"] = f.title.strip()
+    if desc := _one_line(f.summary):
+        data["description"] = desc
+    if clean_tags := [_clean_tag(t) for t in f.tags if _clean_tag(t)]:
+        data["tags"] = clean_tags
+    if timestamp := (f.created or today()).strip():
+        data["timestamp"] = timestamp
+    for key, value in preserved.items():
+        if key not in _OKF_STANDARD_KEYS and key not in data:
+            data[key] = value
+    body = yaml.safe_dump(data, sort_keys=False, allow_unicode=True).strip("\n")
+    return f"---\n{body}\n---"
 
 
 def _scan_note(md: str) -> tuple[str, str, str, dict[str, list[str]]]:
@@ -367,6 +459,18 @@ def parse_note(md: str) -> NoteFields:
         elif _DISABLED_LINE_RE.match(line):
             disabled = True
 
+    # OKF frontmatter: the fallback source for shared fields (## Metadata wins
+    # when present — it's what both current and un-upgraded omind write) and the
+    # sole source for the OKF ``type``.
+    fm = parse_frontmatter(frontmatter)
+    okf_type = str(fm.get("type", "") or "").strip()
+    if not title and fm.get("title"):
+        title = str(fm["title"]).strip()
+    if not created and fm.get("timestamp"):
+        created = str(fm["timestamp"]).strip()
+    if not tags and isinstance(fm.get("tags"), list):
+        tags = [_clean_tag(t) for t in fm["tags"] if _clean_tag(t)]
+
     connections = _WIKILINK_RE.findall("\n".join(sections.get("Connections", [])))
 
     action_items: list[ActionItem] = []
@@ -403,6 +507,7 @@ def parse_note(md: str) -> NoteFields:
         extras=extras,
         frontmatter=frontmatter,
         lead=lead,
+        okf_type=okf_type,
         rev=rev,
         disabled=disabled,
     )
@@ -411,11 +516,14 @@ def parse_note(md: str) -> NoteFields:
 def render_fields(f: NoteFields) -> str:
     """Render structured fields back into template-shaped Markdown."""
     out: list[str] = []
-    # Preserved verbatim content: YAML frontmatter above the title, then the
-    # title, then any lead prose before the first section.
-    if f.frontmatter.strip():
-        out.append(f.frontmatter.strip("\n"))
-        out.append("")
+    # OKF (Open Knowledge Format) frontmatter — regenerated from the structured
+    # fields (plus any preserved producer keys) so every note omind writes leads
+    # with a parseable YAML block carrying a non-empty ``type``. Replaces the old
+    # verbatim passthrough; unknown keys are still round-tripped (see
+    # :func:`build_okf_frontmatter`). The ``## Metadata`` section below is kept so
+    # un-upgraded fleet peers keep reading created/tags/rev unchanged.
+    out.append(build_okf_frontmatter(f))
+    out.append("")
     out.append(f"# {f.title}".rstrip())
     if f.lead.strip():
         out.append("")
@@ -1053,6 +1161,14 @@ class OmiStore:
                 fields.frontmatter = current.frontmatter
             if not fields.lead:
                 fields.lead = current.lead
+            # Tags and the OKF ``type`` are inherited the same way, so a partial
+            # edit (e.g. title/summary only, or an Obsidian-Properties note whose
+            # tags live in frontmatter) never silently clears a note's tags or
+            # resets its OKF type to the derived default.
+            if not fields.tags:
+                fields.tags = current.tags
+            if not fields.okf_type:
+                fields.okf_type = current.okf_type
             # A multi-section body supplied through `details` (the only such
             # field the MCP/CLI API exposes) carries ## H2s that read back as
             # extras. Hoist them now so they REPLACE the same-named inherited

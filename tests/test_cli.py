@@ -136,7 +136,8 @@ def test_note_creates_then_updates(tmp_path: Path, capsys: pytest.CaptureFixture
     assert capsys.readouterr().out.strip() == "created Attention Insight.md"
 
     note = (tmp_path / "OMI" / "Attention Insight.md").read_text(encoding="utf-8")
-    assert note.startswith("# Attention Insight")
+    assert note.startswith("---\n") and "\ntype:" in note  # OKF frontmatter w/ required type
+    assert "# Attention Insight" in note
     assert "## Summary\ngist" in note
     assert "#thesis" in note and "first body" in note
     assert "[[Attention Insight]]" in (tmp_path / "OMI" / "index.md").read_text(encoding="utf-8")

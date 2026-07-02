@@ -7,6 +7,7 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 [![Codeberg](https://img.shields.io/badge/Codeberg-CryptoJones%2Fomind-2185D0?logo=codeberg&logoColor=white)](https://codeberg.org/CryptoJones/omind)
 [![GitHub](https://img.shields.io/badge/GitHub-CryptoJones%2Fomind-181717?logo=github&logoColor=white)](https://github.com/CryptoJones/omind)
 [![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Open Knowledge Format](https://img.shields.io/badge/format-OKF%20v0.1-4285F4?logo=googlecloud&logoColor=white)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 [![Version](https://img.shields.io/github/v/tag/CryptoJones/omind?label=version&color=orange)](https://github.com/CryptoJones/omind/tags)
 
 > Mirrored on both [GitHub](https://github.com/CryptoJones/omind) and
@@ -205,16 +206,35 @@ every snapshot; losing it with the disk makes the backups unreadable.
 ## How memory is stored
 
 OMI is just a folder of plain Markdown notes — one note per memory, fully
-human-editable (open the folder as an Obsidian vault). Each note has a stable
-shape so tools and the merge driver can read and write individual fields without
-stepping on each other:
+human-editable (open the folder as an Obsidian vault). It is also a conformant
+**[Open Knowledge Format](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
+bundle** (see below). Each note has a stable shape so tools and the merge driver
+can read and write individual fields without stepping on each other:
 
+- a **YAML frontmatter block** — the note's OKF metadata: the required `type`
+  plus `title`, `description`, `tags`, and `timestamp`;
 - a `# Title` and a `## Metadata` block (created date, `#tags`, and the mesh
-  `Rev:` Lamport stamp);
+  `Rev:` Lamport stamp), kept alongside the frontmatter so existing tooling and
+  un-upgraded mesh peers keep reading it unchanged;
 - `## Summary` / `## Details` free text;
 - `## Connections` — `[[wikilinks]]` to related notes (the graph the web UI and
   `omind lint` traverse);
 - `## Action Items` (a checkbox list) and `## References`.
+
+**Open Knowledge Format (OKF).** omind speaks
+[OKF](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf) —
+Google Cloud's vendor-neutral, Apache-2.0
+[specification](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
+for representing knowledge as a directory of Markdown files with YAML
+frontmatter, readable by any agent or tool with no SDK, runtime, or lock-in.
+Every note omind writes leads with a frontmatter block carrying the one field
+OKF requires (`type`) plus the recommended `title` / `description` / `tags` /
+`timestamp`, and `index.md` is the OKF directory listing — so an omind vault
+drops straight into any OKF-aware consumer. Migrate a pre-OKF vault in place with
+**`omind convert`** (idempotent; `--check` validates the three conformance rules,
+`--dry-run` previews). More: the
+[OKF spec](https://github.com/GoogleCloudPlatform/knowledge-catalog/blob/main/okf/SPEC.md)
+and [okf.md](https://okf.md/).
 
 **One writer, always.** Every write — `omind note`, the `omind node` MCP server an
 agent calls, the web UI, the mesh merge — goes through a single locked, atomic
