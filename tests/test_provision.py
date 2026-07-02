@@ -126,6 +126,41 @@ def _install_guard(config: SetupConfig, monkeypatch: pytest.MonkeyPatch, home: P
     prov.ensure_omi_guard_installed()
 
 
+def test_managed_hook_scripts_are_written_0755_atomically(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_tools: None
+) -> None:
+    """Regression: every managed hook script is written 0o755 in a SINGLE atomic
+    write (the mode is set on the temp file before the rename), never at mkstemp's
+    0600 default followed by a separate chmod. A 0600 destination that a root-run
+    provision then chowns to root is unreadable by the agent user until the chmod
+    runs — the transient window that made `python3 omi-enforce.py` fail with EACCES
+    mid-reprovision. World-readable (o+r) is what keeps a chown-root from hiding it."""
+    home = tmp_path / "home"
+    home.mkdir()
+    monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: home))
+    prov = Provisioner(_config(tmp_path), log=_quiet)
+    prov._write_enforce_hook_script()
+    prov._write_guard_hook_script()
+    prov._write_secret_output_guard_script()
+    prov._write_omi_guard_scripts()
+
+    hooks = home / ".claude" / "hooks"
+    for name in (
+        "omi-enforce.py",
+        "git-fresh-base.sh",
+        "secret-output-guard.sh",
+        "omi-guard.sh",
+        "omi-gate-reset.sh",
+    ):
+        f = hooks / name
+        assert f.exists(), f"{name} was not provisioned"
+        perms = f.stat().st_mode & 0o777
+        assert perms == 0o755, (
+            f"{name} is {oct(perms)}; expected 0o755 — a hook must be o+r+x so a "
+            "chown-root can't render it unreadable to the agent user"
+        )
+
+
 def test_default_vault_path_shape() -> None:
     path = default_vault_path()
     assert path.name == "Obsidian Vault"

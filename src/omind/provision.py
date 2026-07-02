@@ -344,7 +344,7 @@ class Provisioner:
         self.actions.append(line)
         self.log(line)
 
-    def _write_if_absent(self, path: Path, content: str) -> None:
+    def _write_if_absent(self, path: Path, content: str, *, mode: int | None = None) -> None:
         if path.exists() and not self.config.force:
             self.log(f"  exists, leaving as-is: {path}")
             return
@@ -352,14 +352,22 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, content)
+            paths.atomic_write_text(path, content, mode=mode)
 
-    def _write_managed(self, path: Path, content: str) -> None:
+    def _write_managed(self, path: Path, content: str, *, mode: int | None = None) -> None:
         """Write a Managed-by-omind file, refreshing it whenever its content drifts.
 
         Unlike user-owned seeds (``_write_if_absent``), managed files carry
         omind's own code; leaving stale copies in place means existing installs
         never receive fixes (issue #49 shipped a guard fix this way).
+
+        ``mode`` (e.g. ``0o755`` for an executable hook) is applied to the temp
+        file BEFORE the atomic rename, so the destination is never briefly at
+        ``mkstemp``'s 0600 default. That matters when provision runs as root: a
+        0600 dest that is then ``chown``'d to root is unreadable by the agent user
+        until a *separate* chmod runs — a transient window that made ``python3
+        omi-enforce.py`` fail with EACCES mid-reprovision. Setting the mode inside
+        the atomic write closes it.
         """
         if path.exists():
             try:
@@ -375,7 +383,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, content)
+            paths.atomic_write_text(path, content, mode=mode)
 
     # -- steps --------------------------------------------------------------
 
@@ -582,7 +590,7 @@ class Provisioner:
         except Exception as exc:
             self.log(f"  WARNING: could not read enforcement hook from package data: {exc}")
             return
-        self._write_managed(dest, content)
+        self._write_managed(dest, content, mode=0o755)
 
     def _write_guard_hook_script(self) -> None:
         """Write the fresh-base git guard hook from package data to ~/.claude/hooks/."""
@@ -596,10 +604,7 @@ class Provisioner:
         except Exception as exc:
             self.log(f"  WARNING: could not read git guard hook from package data: {exc}")
             return
-        self._write_managed(dest, content)
-        if not self.config.dry_run:
-            with contextlib.suppress(OSError):
-                dest.chmod(0o755)
+        self._write_managed(dest, content, mode=0o755)
 
     def _write_secret_output_guard_script(self) -> None:
         """Write the secret-output guard hook from package data to ~/.claude/hooks/.
@@ -617,10 +622,7 @@ class Provisioner:
         except Exception as exc:
             self.log(f"  WARNING: could not read secret-output guard hook from package data: {exc}")
             return
-        self._write_managed(dest, content)
-        if not self.config.dry_run:
-            with contextlib.suppress(OSError):
-                dest.chmod(0o755)
+        self._write_managed(dest, content, mode=0o755)
 
     def _write_fleet_sudo_script(self) -> None:
         """Install the `fleet-sudo` wrapper from package data to ~/.local/bin/.
@@ -643,10 +645,7 @@ class Provisioner:
         if not self.config.dry_run:
             with contextlib.suppress(OSError):
                 dest.parent.mkdir(parents=True, exist_ok=True)
-        self._write_managed(dest, content)
-        if not self.config.dry_run:
-            with contextlib.suppress(OSError):
-                dest.chmod(0o755)
+        self._write_managed(dest, content, mode=0o755)
 
     def install_claude_skill(self) -> None:
         """Install omind's Claude Code skill (OMI memory workflow + CLI ops).
@@ -808,10 +807,7 @@ class Provisioner:
             content = content.replace("__OMIND_BIN__", omind_exe).replace(
                 "__OMI_DIR__", omi_dir
             )
-            self._write_managed(dest, content)
-            if not self.config.dry_run:
-                with contextlib.suppress(OSError):
-                    dest.chmod(0o755)
+            self._write_managed(dest, content, mode=0o755)
         # Stamp what we just installed so #87 self-heal / #86 doctor can detect a
         # later binary shipping a newer hook-set. Silent (not a recorded action),
         # so re-stamping after a no-op version bump doesn't look like a change.

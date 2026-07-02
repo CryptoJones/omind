@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- Provision every managed hook script atomically at `0o755`: the writers wrote the file at `mkstemp`'s 0600 default and set the exec bit in a *separate* `chmod` step (and `omi-enforce.py` never got the chmod at all). When a re-provision runs as root and the B2 guard-config hardening then `chown`s the hook to `root`, that 0600 window — or the never-widened enforce hook — is unreadable by the agent user, so `python3 omi-enforce.py` fails with EACCES mid-reprovision (the transient "the guard hook is dead" blip). `_write_managed`/`_write_if_absent` now thread `mode=` into the atomic write, so the mode is set on the temp file *before* the rename and the destination is never briefly at 0600. Adds a regression test asserting every provisioned hook is `0o755` (world-readable, so a `chown root` can't hide it).
+
 ## [3.7.7] - 2026-07-01
 
 The follow-up batch to 3.7.6: the deferred findings from the 2026-07-01
