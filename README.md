@@ -18,7 +18,7 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 
 ![omind's knowledge graph over a vault's [[wikilinks]]](docs/graph.png)
 
-*`omind graph` over an OMI vault — every note a node, every `[[wikilink]]` an edge. Rendered from `omind graph export` (see [docs/graph-demo](docs/graph-demo/)).*
+*`omind graph` over an OMI vault — every note a node **coloured by its OKF `type`** (and sized by link degree), every `[[wikilink]]` an edge. Rendered from `omind graph export` (see [docs/graph-demo](docs/graph-demo/)).*
 
 ## What it does
 

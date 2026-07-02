@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Docs
+- Regenerated the README hero graph (`docs/graph.png`) so its nodes are coloured by OKF `type` (with a legend), matching the web graph view. The demo renderer (`docs/graph-demo/render_graph.py`) is now a self-contained `networkx` + `matplotlib` script (no Graphviz dependency); `make_demo_vault.py` assigns each demo note an illustrative `type`.
+
 ## [3.8.1] - 2026-07-02
 
 ### Fixed

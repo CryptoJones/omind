@@ -25,21 +25,21 @@ names = sorted(names, key=lambda w: -cap[w])[:70]
 # real lines (for flavor bodies, kept local only)
 lines = [ln.strip() for ln in txt.splitlines() if 30 < len(ln.strip()) < 90]
 
-# neon Cyberdeck categorical palette for node strokes
-PALETTE = ["#27d4ff", "#55ff99", "#ffb000", "#ff4f4f", "#a371f7", "#4c9aff", "#ff8ad8"]
-colors = {n: PALETTE[i % len(PALETTE)] for i, n in enumerate(sorted(names))}
+# Give each node an OKF `type` (cycled thematically by sorted name) so the render
+# demonstrates omind's colour-by-type. The demo is synthetic, so the types are
+# illustrative — the point is that each node's colour encodes its `type`.
+TYPES = ["Character", "Place", "Construct", "Corp", "Tech"]
+types = {n: TYPES[i % len(TYPES)] for i, n in enumerate(sorted(names))}
 
 for n in names:
     k = random.randint(1, 3)  # random out-links -> dense, organic graph
     targets = random.sample([m for m in names if m != n], k)
-    body = [f"# {n}", "", random.choice(lines), ""]
+    # A minimal OKF note: YAML frontmatter with the required `type`, then the body.
+    body = [f"---\ntype: {types[n]}\n---", "", f"# {n}", "", random.choice(lines), ""]
     body += [f"- [[{t}]]" for t in targets]
     safe = re.sub(r"[^\w '\-]", "", n)
     (OMI / f"{safe}.md").write_text("\n".join(body) + "\n", encoding="utf-8")
 
-# emit the color map for the renderer
-import json
-
-(VAULT / "colors.json").write_text(json.dumps(colors), encoding="utf-8")
 print(f"wrote {len(names)} Neuromancer nodes to {OMI}")
+print("types:", ", ".join(sorted(set(types.values()))))
 print("sample:", ", ".join(names[:12]))
