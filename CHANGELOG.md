@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.1] - 2026-07-02
+
 ### Fixed
 - **Web UI rendered the OKF frontmatter block as body text**: after 3.8.0 gave every note a leading YAML frontmatter block, the note view ran `marked` over the raw note, so the `---` block surfaced as a horizontal rule followed by the frontmatter keys at the top of every note. `renderMarkdown` now strips the leading frontmatter block before rendering — it's already surfaced in the structured header, not body prose.
 
