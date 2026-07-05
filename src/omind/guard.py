@@ -783,6 +783,36 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
     return None
 
 
+def _repo_has_remote(repo: Path) -> bool:
+    """True when the repo has at least one configured remote — i.e. there is an
+    upstream its local base could be stale against, so a freshness check is
+    meaningful. A brand-new ``git init`` repo with no remote has nothing to
+    fetch: a bare ``git fetch`` errors (*No remote repository specified*) and
+    ``git pull --ff-only`` errors (*no tracking information*), so demanding a
+    same-turn freshness check there locks the agent out of its own new repo
+    (#149). Such a repo is treated as vacuously fresh (the caller waives the
+    freshness demand only — the rules-note consult still applies).
+
+    Subprocess-free (this runs inside the PreToolUse hot path) and deliberately
+    CONSERVATIVE: it returns ``True`` on any doubt — a ``.git`` that is a
+    linked-worktree / submodule pointer *file* (whose remotes live in the shared
+    config, not here), an unreadable config, or a resolution error — so freshness
+    is waived ONLY when we positively read the repo's own config and find zero
+    ``[remote "…"]`` stanzas. This makes the change a pure correctness fix for
+    new local repos and never a loosening for a repo that has a remote. Never
+    raises."""
+    try:
+        gitdir = repo / ".git"
+        if not gitdir.is_dir():
+            # `.git` is a pointer file (worktree/submodule) or absent — don't
+            # guess the shared config; keep the freshness demand.
+            return True
+        text = (gitdir / "config").read_text(encoding="utf-8", errors="replace")
+    except OSError:
+        return True
+    return bool(re.search(r"(?m)^[ \t]*\[remote[ \t]", text))
+
+
 def _has_consulted_git_rules(session: str) -> bool:
     needle = GIT_RULES_NOTE.lower()
     for consult in consults(session):
@@ -986,7 +1016,10 @@ def decide(action: dict[str, Any]) -> Verdict:
                 reason=f"omi-guard (hard): {GIT_RULES_MESSAGE}",
                 rule_id="repo-work-read-git-rules",
             )
-        if not _git_fresh_for_repo(session, repo):
+        # A repo with no configured remote has nothing to fetch and no upstream
+        # to be stale against, so the freshness check is vacuous — waive it
+        # rather than lock the agent out of a brand-new `git init` repo (#149).
+        if not _git_fresh_for_repo(session, repo) and _repo_has_remote(repo):
             record_pending(session, command or _action_path(action))
             return Verdict(
                 allow=False,
