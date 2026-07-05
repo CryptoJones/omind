@@ -174,6 +174,69 @@ def test_repo_work_requires_git_rules_note_and_freshness_check() -> None:
     guard.clear_gate("repo")
 
 
+def _git_init(path: Path) -> None:
+    subprocess.run(["git", "init", "-q", str(path)], check=True)
+
+
+def test_repo_has_remote_detects_configured_remotes(tmp_path: Path) -> None:
+    repo = tmp_path / "r"
+    repo.mkdir()
+    _git_init(repo)
+    # A freshly initialised repo has no remote.
+    assert guard._repo_has_remote(repo) is False
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://x.invalid/y.git"],
+        check=True,
+    )
+    assert guard._repo_has_remote(repo) is True
+    # Conservative on any doubt: a path that isn't a resolvable repo dir (no
+    # readable `<repo>/.git/config`) is treated as HAVING a remote so freshness
+    # is never wrongly waived for a real repo.
+    assert guard._repo_has_remote(tmp_path / "does-not-exist") is True
+
+
+def test_new_repo_without_a_remote_does_not_demand_freshness(tmp_path: Path) -> None:
+    # A brand-new `git init` repo has no remote — `git fetch`/`git pull` are
+    # impossible, so the freshness gate must not lock the agent out of its own
+    # new repo (#149). The rules-note consult is still required.
+    repo = tmp_path / "newrepo"
+    repo.mkdir()
+    _git_init(repo)
+    session = "newrepo-noremote"
+    guard.clear_gate(session)
+
+    wfile = str(repo / "hello.py")
+    blocked = guard.decide({"tool": "Write", "file_path": wfile, "session": session})
+    assert not blocked.allow
+    assert blocked.rule_id == "repo-work-read-git-rules"
+
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    allowed = guard.decide({"tool": "Write", "file_path": wfile, "session": session})
+    assert allowed.allow, allowed.rule_id  # was repo-work-fresh-base before #149
+    guard.clear_gate(session)
+
+
+def test_new_repo_with_a_remote_still_demands_freshness(tmp_path: Path) -> None:
+    # A repo that HAS a remote has an upstream to be stale against, so the
+    # freshness demand is unchanged — the #149 waiver is scoped to no-remote.
+    repo = tmp_path / "hasremote"
+    repo.mkdir()
+    _git_init(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://x.invalid/y.git"],
+        check=True,
+    )
+    session = "hasremote-fresh"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+
+    wfile = str(repo / "hello.py")
+    blocked = guard.decide({"tool": "Write", "file_path": wfile, "session": session})
+    assert not blocked.allow
+    assert blocked.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
+
+
 def test_global_config_mutation_requires_explicit_turn_authorization() -> None:
     guard.begin_turn("global", "Can you fix both?")
     blocked = guard.decide(

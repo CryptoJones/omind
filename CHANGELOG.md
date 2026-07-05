@@ -7,7 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [3.8.4] - 2026-07-02
+## [3.8.5] - 2026-07-05
+
+### Fixed
+- **Guard: a brand-new `git init` repo with no remote no longer locks the agent out** (#149): the same-turn freshness gate demanded a `git fetch`/`git pull` before any review/edit/test/commit in a repo — but a freshly initialised repo has no remote, so `git fetch` errors (*No remote repository specified*) and `git pull --ff-only` errors (*no tracking information*); the freshness check was unsatisfiable and the agent could not work in its own new repo. A repo with **zero configured remotes has no upstream to be stale against**, so freshness is now waived for it (`repo-work-fresh-base` no longer fires) while the rules-note consult still applies. Detection (`_repo_has_remote`) is subprocess-free — it reads `<repo>/.git/config` for a `[remote "…"]` stanza — and deliberately conservative: a `.git` pointer file (linked worktree/submodule), an unreadable config, or any resolution error is treated as *has a remote*, so freshness is only ever waived when we positively confirm zero remotes. A repo that has a remote is completely unaffected.
 
 ### Fixed
 - **Verifier: reading the note a guard block demanded is no longer punished** (#148): the deny-log sampling under #147 found 16 cases where the guard blocked repo work demanding `Operational Rules - Git Repos and Secrets` be read, the agent obeyed, and the verifier scored that read off-topic and re-closed the gate. The guard now records the demanded note (per-turn marker, cleared at turn start by both `begin_turn` and the bash reset), and the verifier treats a consult of it as relevant by definition. A ritual read on a turn where nothing demanded it is still judged normally.
