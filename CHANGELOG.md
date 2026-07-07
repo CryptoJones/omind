@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [3.8.6] - 2026-07-06
+
+### Changed
+- **Guard: the freshness-block message now hands over the exact remediation instead of a riddle.** `GIT_FRESHNESS_MESSAGE` used to say *"run `git fetch --all --prune` … then inspect branch status"*, which left agents guessing — they would use a `$VAR` path (not resolved by the static parser) or a fetch that errored on an unreachable mirror, and burn many turns flailing. The message now spells out the working form verbatim: a **literal-path** fetch chained in the **same command** as the write (`git -C "/abs" fetch --all --prune && git -C "/abs" commit …`), and names the silent-failure gotchas (`$VAR` path not resolved; pipe/redirect in the fetch part; a fetch that exits non-zero because `--all` hit a keyless mirror — use `fetch origin --prune`). No behavior change; message text only.
+
 ## [3.8.5] - 2026-07-05
 
 ### Fixed

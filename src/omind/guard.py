@@ -63,9 +63,14 @@ GIT_RULES_MESSAGE = (
     "this turn; a generic project-memory consult is not enough."
 )
 GIT_FRESHNESS_MESSAGE = (
-    "repo work requires a same-turn freshness check before review/edit/test/commit/push: "
-    "run `git fetch --all --prune` or `git pull --ff-only`, then inspect branch status. "
-    "For a repo outside the cwd, `git -C <repo> fetch --all --prune` freshens that repo."
+    "repo work requires a same-turn freshness check before review/edit/test/commit/push. "
+    "Put a LITERAL-path fetch in the SAME command as the write, chained with && — e.g.:\n"
+    '  git -C "/abs/path/to/repo" fetch --all --prune && git -C "/abs/path/to/repo" commit -am "..."\n'
+    "(same shape for push / a git write; for `gh pr create`, prefix it with the literal-path fetch too). "
+    "Gotchas that make it silently fail: (1) the path must be a LITERAL absolute path — a $VAR is not "
+    "resolved by the static parser; (2) no pipe/redirect in the fetch part; (3) the fetch must succeed "
+    "(exit 0) — if `--all` hits an unreachable mirror (e.g. a Codeberg remote with no key loaded), use "
+    "`fetch origin --prune` so it doesn't error out and fail to register."
 )
 GLOBAL_MUTATION_MESSAGE = (
     "global config/hook/bootstrap mutation requires explicit user authorization in the "
