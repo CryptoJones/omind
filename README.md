@@ -297,6 +297,20 @@ guarded), `omind guard explain "<cmd>"` (dry-run a command), and
 `omind guard verify --explain` (why a consult scored relevant or off-topic).
 `omind guard repair` (and `omind doctor`) re-heal a wedged or drifted hook-set.
 
+When the guard is impeding critical work, temporarily pause the consult gate and
+verifier instead of editing hook config by hand:
+
+```bash
+omind guard pause --for 15m   # also accepts 90s, 2h, or bare minutes like 15
+omind guard status            # shows the remaining pause window
+omind guard resume            # re-arm immediately
+```
+
+Running `omind guard pause` without `--for` uses a 30-minute window. The pause is
+machine-global, auto-expires, and is written to the compliance log. Hard
+destructive blocks remain active while paused; this only skips the per-turn OMI
+consult gate and relevance verifier.
+
 ## The Playbook
 
 The **Playbook** is the small set of always-on operator rules — the cross-cutting
