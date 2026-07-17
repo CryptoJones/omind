@@ -10,7 +10,7 @@ from pathlib import Path
 import pytest
 from fastapi.testclient import TestClient
 
-from omind import paths
+from omind import ai_usage, paths
 from omind.web.app import create_app
 
 
@@ -29,6 +29,21 @@ def client(omi_dir: Path) -> Iterator[TestClient]:
 
 def test_list_empty(client: TestClient) -> None:
     assert client.get("/api/notes").json() == []
+
+
+def test_ai_profile_and_usage_api(client: TestClient, omi_dir: Path) -> None:
+    profile = client.get("/api/ai/profile")
+    assert profile.status_code == 200
+    assert profile.json()["effective"] == "low"
+    changed = client.put("/api/ai/profile", json={"profile": "high"})
+    assert changed.status_code == 200
+    assert changed.json()["effective"] == "high"
+    assert client.put("/api/ai/profile", json={"profile": "unknown"}).status_code == 422
+    ai_usage.record_priming(omi_dir, 400)
+    usage = client.get("/api/ai/usage", params={"since": "all"})
+    assert usage.status_code == 200
+    assert usage.json()["totals"]["input_tokens"] == 100
+    assert client.get("/api/ai/usage", params={"since": "forever"}).status_code == 422
 
 
 def test_foreign_host_header_is_rejected(omi_dir: Path) -> None:

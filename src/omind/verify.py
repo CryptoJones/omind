@@ -271,34 +271,48 @@ def _parse_verdict(text: str) -> bool | None:
     return None
 
 
-def _ask_model(task: str, text: str) -> bool | None:
+def _ask_model(task: str, text: str, omi_dir: Path | str | None = None) -> bool | None:
     """Ask headless ``claude -p`` whether the consult was relevant. ``None`` on
     any unavailability/error/timeout (the caller fails open)."""
-    claude = shutil.which("claude")
-    if not claude:
-        return None
+    from omind import ai_usage
+
+    limits = ai_usage.policy(omi_dir) if omi_dir is not None else None
+    task_cap = limits.verifier_task_chars if limits else 1_000
+    material_cap = limits.verifier_material_chars if limits else 2_000
     prompt = (
         "You are an OMI-compliance relevance checker. An agent was told to consult "
         "its memory (OMI) before acting on a task, and it consulted the material "
         "below. Answer with exactly one word — RELEVANT or IRRELEVANT — for whether "
         "that material is relevant to the task.\n\n"
         f"{_past_mistakes_context()}"
-        f"TASK:\n{task[:1000]}\n\n"
-        f"CONSULTED MATERIAL:\n{text[:2000]}\n"
+        f"TASK:\n{task[:task_cap]}\n\n"
+        f"CONSULTED MATERIAL:\n{text[:material_cap]}\n"
     )
     try:
         timeout = int(os.environ.get(_TIMEOUT_ENV) or _DEFAULT_TIMEOUT)
     except ValueError:
         timeout = _DEFAULT_TIMEOUT
-    try:
-        result = subprocess.run(
-            [claude, "-p", prompt], capture_output=True, text=True, timeout=timeout
-        )
-    except (subprocess.TimeoutExpired, OSError):
-        return None
-    if result.returncode != 0:
-        return None
-    return _parse_verdict(result.stdout or "")
+    if omi_dir is None:
+        # Compatibility path for the public pure ``judge`` helper. Real hook
+        # calls always supply the vault and therefore use the accounted wrapper.
+        claude = shutil.which("claude")
+        if not claude:
+            return None
+        try:
+            result = subprocess.run(
+                [claude, "-p", prompt], capture_output=True, text=True, timeout=timeout
+            )
+        except (subprocess.TimeoutExpired, OSError):
+            return None
+        return _parse_verdict(result.stdout or "") if result.returncode == 0 else None
+    response = ai_usage.run_claude(
+        omi_dir,
+        "verifier",
+        prompt,
+        timeout=timeout,
+        allowed=limits.verifier_llm if limits else True,
+    )
+    return _parse_verdict(response or "")
 
 
 def _signal_score(signal: str, text: str) -> float:
@@ -316,7 +330,13 @@ def _signal_score(signal: str, text: str) -> float:
     return max(keyword, semantic) if semantic is not None else keyword
 
 
-def _judge_scored(task: str, activity: str, text: str, pending: str = "") -> tuple[bool, float]:
+def _judge_scored(
+    task: str,
+    activity: str,
+    text: str,
+    pending: str = "",
+    omi_dir: Path | str | None = None,
+) -> tuple[bool, float]:
     """:func:`judge_with_activity` plus the deterministic score it decided on,
     so the off-topic log can carry WHAT the consult was judged against (#148) —
     without it, a sampling pass cannot adjudicate false positives after the fact."""
@@ -333,7 +353,11 @@ def _judge_scored(task: str, activity: str, text: str, pending: str = "") -> tup
         return True, score
     if score <= low:
         return False, score
-    verdict = _ask_model(task or activity or pending, text)
+    verdict = (
+        _ask_model(task or activity or pending, text)
+        if omi_dir is None
+        else _ask_model(task or activity or pending, text, omi_dir)
+    )
     return (True if verdict is None else verdict), score
 
 
@@ -419,7 +443,9 @@ def verify_consult(
     activity = recent_activity(session, omi_dir, now=now)
     # #96/#97: the gate-blocked action (path noise stripped) — the agent's freshest intent.
     pending = retrieve.normalize_intent(guard.pending_intent(session))
-    judged, score = _judge_scored(task, activity, _consult_text(kind, target, omi_dir), pending)
+    judged, score = _judge_scored(
+        task, activity, _consult_text(kind, target, omi_dir), pending, omi_dir
+    )
     relevant = _always_relevant(target) or _guard_demanded(session, target) or judged
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:

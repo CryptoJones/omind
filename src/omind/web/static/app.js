@@ -9,7 +9,7 @@ const state = {
   activeTag: null,
   current: null, // filename
   currentVersion: "", // mtime+size token of the open note, for conflict detection
-  mode: "empty", // empty | view | edit | raw | new
+  mode: "empty", // empty | view | edit | raw | new | ai
   lang: "en",
   showArchived: false, // include soft-deleted (Disabled: true) notes in the list
   mesh: false, // server-reported: DELETE archives (restorable) instead of removing
@@ -66,6 +66,12 @@ const I18N = {
     archivedToggle: "archived", archivedBadge: "archived", restore: "Restore",
     restoredToast: "Restored.", archivedToast: "Archived.",
     confirmArchive: 'Archive "{name}"? It stays restorable.',
+    aiUsage: "AI Usage", expenseProfile: "Model expense", window: "Window",
+    inputTokens: "Input tokens", outputTokens: "Output tokens",
+    cacheTokens: "Cache tokens", avoidedTokens: "Estimated avoided",
+    exactUsage: "Provider-reported", estimatedUsage: "Estimated",
+    attributionNote: "OMI overhead only · profiles do not select the model",
+    operation: "Operation", profileSaved: "Profile saved.",
   },
   es: {
     tagline: "memoria", search: "buscar…", theme: "Tema", language: "Idioma",
@@ -93,6 +99,12 @@ const I18N = {
     archivedToggle: "archivadas", archivedBadge: "archivada", restore: "Restaurar",
     restoredToast: "Restaurada.", archivedToast: "Archivada.",
     confirmArchive: "¿Archivar «{name}»? Podrás restaurarla.",
+    aiUsage: "Uso de IA", expenseProfile: "Coste del modelo", window: "Periodo",
+    inputTokens: "Tokens de entrada", outputTokens: "Tokens de salida",
+    cacheTokens: "Tokens en caché", avoidedTokens: "Ahorro estimado",
+    exactUsage: "Informado por el proveedor", estimatedUsage: "Estimado",
+    attributionNote: "Solo sobrecarga de OMI · los perfiles no eligen el modelo",
+    operation: "Operación", profileSaved: "Perfil guardado.",
   },
   fr: {
     tagline: "mémoire", search: "rechercher…", theme: "Thème", language: "Langue",
@@ -121,6 +133,12 @@ const I18N = {
     archivedToggle: "archivées", archivedBadge: "archivée", restore: "Restaurer",
     restoredToast: "Restaurée.", archivedToast: "Archivée.",
     confirmArchive: "Archiver « {name} » ? Restauration possible.",
+    aiUsage: "Utilisation IA", expenseProfile: "Coût du modèle", window: "Période",
+    inputTokens: "Jetons d’entrée", outputTokens: "Jetons de sortie",
+    cacheTokens: "Jetons en cache", avoidedTokens: "Économie estimée",
+    exactUsage: "Rapporté par le fournisseur", estimatedUsage: "Estimé",
+    attributionNote: "Surcharge OMI uniquement · le profil ne choisit pas le modèle",
+    operation: "Opération", profileSaved: "Profil enregistré.",
   },
   ar: {
     tagline: "ذاكرة", search: "بحث…", theme: "السمة", language: "اللغة",
@@ -147,6 +165,12 @@ const I18N = {
     archivedToggle: "المؤرشفة", archivedBadge: "مؤرشفة", restore: "استعادة",
     restoredToast: "تمت الاستعادة.", archivedToast: "تمت الأرشفة.",
     confirmArchive: "أرشفة «{name}»؟ يمكن استعادتها لاحقًا.",
+    aiUsage: "استخدام الذكاء الاصطناعي", expenseProfile: "تكلفة النموذج", window: "الفترة",
+    inputTokens: "رموز الإدخال", outputTokens: "رموز الإخراج",
+    cacheTokens: "رموز التخزين المؤقت", avoidedTokens: "التوفير التقديري",
+    exactUsage: "حسب تقرير المزوّد", estimatedUsage: "تقديري",
+    attributionNote: "تكلفة OMI فقط · الملفات لا تختار النموذج",
+    operation: "العملية", profileSaved: "تم حفظ الملف.",
   },
   ru: {
     tagline: "память", search: "поиск…", theme: "Тема", language: "Язык",
@@ -173,6 +197,12 @@ const I18N = {
     archivedToggle: "архив", archivedBadge: "в архиве", restore: "Восстановить",
     restoredToast: "Восстановлено.", archivedToast: "В архиве.",
     confirmArchive: "Архивировать «{name}»? Её можно будет восстановить.",
+    aiUsage: "Использование ИИ", expenseProfile: "Стоимость модели", window: "Период",
+    inputTokens: "Входные токены", outputTokens: "Выходные токены",
+    cacheTokens: "Токены кэша", avoidedTokens: "Оценка экономии",
+    exactUsage: "Отчёт провайдера", estimatedUsage: "Оценка",
+    attributionNote: "Только накладные расходы OMI · профиль не выбирает модель",
+    operation: "Операция", profileSaved: "Профиль сохранён.",
   },
   zh: {
     tagline: "记忆", search: "搜索…", theme: "主题", language: "语言",
@@ -197,6 +227,12 @@ const I18N = {
     archivedToggle: "已归档", archivedBadge: "已归档", restore: "恢复",
     restoredToast: "已恢复。", archivedToast: "已归档。",
     confirmArchive: "归档“{name}”？之后仍可恢复。",
+    aiUsage: "AI 用量", expenseProfile: "模型费用", window: "时间范围",
+    inputTokens: "输入令牌", outputTokens: "输出令牌",
+    cacheTokens: "缓存令牌", avoidedTokens: "预计节省",
+    exactUsage: "提供商报告", estimatedUsage: "估算",
+    attributionNote: "仅 OMI 开销 · 配置不会选择模型",
+    operation: "操作", profileSaved: "配置已保存。",
   },
 };
 
@@ -371,6 +407,7 @@ function renderSidebar() {
 
 function renderEmpty() {
   teardownGraph();
+  $("#ai-btn").classList.remove("active");
   state.mode = "empty";
   state.current = null;
   renderSidebar();
@@ -386,6 +423,7 @@ function renderEmpty() {
 
 async function openNote(name) {
   teardownGraph();
+  $("#ai-btn").classList.remove("active");
   try {
     const data = await api("GET", `/api/notes/${encodeURIComponent(name)}`);
     state.current = name;
@@ -597,6 +635,7 @@ function openEdit(data) {
 
 function openNew() {
   teardownGraph();
+  $("#ai-btn").classList.remove("active");
   state.mode = "new";
   state.current = null;
   renderSidebar();
@@ -719,12 +758,76 @@ searchEl.addEventListener("input", () => {
 });
 $("#new-btn").addEventListener("click", openNew);
 
+// ---- AI usage --------------------------------------------------------------
+
+const tokenNumber = (value) => Number(value || 0).toLocaleString();
+
+async function openAI(since = "7d") {
+  teardownGraph();
+  state.current = null;
+  state.mode = "ai";
+  $("#ai-btn").classList.add("active");
+  $("#graph-btn").classList.remove("active");
+  try { history.replaceState(null, "", "#ai"); } catch (_) {}
+  renderSidebar();
+  try {
+    const usage = await api("GET", `/api/ai/usage?since=${encodeURIComponent(since)}`);
+    const totals = usage.totals;
+    const exact = usage.exact;
+    const estimated = usage.estimated;
+    const profile = usage.profile;
+    const rows = Object.entries(usage.operations).map(([name, values]) => `
+      <tr><td>${escapeHtml(name)}</td><td>${tokenNumber(values.input_tokens)}</td>
+      <td>${tokenNumber(values.output_tokens)}</td><td>${tokenNumber(values.avoided_tokens)}</td></tr>`).join("");
+    contentEl.innerHTML = `
+      <section class="sheet ai-sheet">
+        <div class="ai-heading">
+          <div><div class="sheet-eyebrow">${escapeHtml(t("attributionNote"))}</div>
+          <h2 class="sheet-title">${escapeHtml(t("aiUsage"))}</h2></div>
+          <div class="ai-controls">
+            <label>${escapeHtml(t("expenseProfile"))}<select id="ai-profile" class="lang-select">
+              ${["low", "medium", "high"].map((name) => `<option value="${name}" ${name === profile.effective ? "selected" : ""}>${name}</option>`).join("")}
+            </select></label>
+            <label>${escapeHtml(t("window"))}<select id="ai-window" class="lang-select">
+              ${["24h", "7d", "30d", "all"].map((name) => `<option value="${name}" ${name === since ? "selected" : ""}>${name}</option>`).join("")}
+            </select></label>
+          </div>
+        </div>
+        <div class="ai-stats">
+          <div class="ai-stat"><span>${escapeHtml(t("inputTokens"))}</span><strong>${tokenNumber(totals.input_tokens)}</strong></div>
+          <div class="ai-stat"><span>${escapeHtml(t("outputTokens"))}</span><strong>${tokenNumber(totals.output_tokens)}</strong></div>
+          <div class="ai-stat"><span>${escapeHtml(t("cacheTokens"))}</span><strong>${tokenNumber(totals.cache_read_tokens + totals.cache_write_tokens)}</strong></div>
+          <div class="ai-stat"><span>${escapeHtml(t("avoidedTokens"))}</span><strong>${tokenNumber(totals.avoided_tokens)}</strong></div>
+        </div>
+        <div class="ai-measurement">
+          <span>${escapeHtml(t("exactUsage"))}: ${tokenNumber(exact.input_tokens + exact.output_tokens)}</span>
+          <span>${escapeHtml(t("estimatedUsage"))}: ${tokenNumber(estimated.input_tokens + estimated.output_tokens)}</span>
+        </div>
+        <table class="ai-table"><thead><tr><th>${escapeHtml(t("operation"))}</th>
+          <th>${escapeHtml(t("inputTokens"))}</th><th>${escapeHtml(t("outputTokens"))}</th>
+          <th>${escapeHtml(t("avoidedTokens"))}</th></tr></thead><tbody>${rows}</tbody></table>
+      </section>`;
+    $("#ai-window").addEventListener("change", (event) => openAI(event.target.value));
+    $("#ai-profile").addEventListener("change", async (event) => {
+      try {
+        await api("PUT", "/api/ai/profile", { profile: event.target.value });
+        toast(t("profileSaved"));
+        await openAI(since);
+      } catch (error) { toast(error.message); }
+    });
+  } catch (error) {
+    toast(error.message);
+  }
+}
+$("#ai-btn").addEventListener("click", () => openAI());
+
 // ---- Graph view -------------------------------------------------------------
 
 async function openGraph() {
   if (!window.OmindGraph) return;
   teardownGraph(); // destroy any previous graph before rendering a new one
   state.current = null;
+  $("#ai-btn").classList.remove("active");
   state.graphActive = true;
   try { history.replaceState(null, "", "#graph"); } catch (_) {}
   renderSidebar();
@@ -883,6 +986,7 @@ function applyStaticI18n() {
   if (tagline) tagline.textContent = t("tagline");
   searchEl.placeholder = t("search");
   $("#new-btn").textContent = t("new");
+  $("#ai-btn").textContent = t("aiUsage");
   const tp = $("#theme-picker");
   if (tp) tp.title = t("theme");
   const ls = $("#lang-select");
@@ -895,6 +999,7 @@ function applyStaticI18n() {
 function rerenderForLang() {
   if (state.mode === "view" && state.current) openNote(state.current);
   else if (state.mode === "empty") renderEmpty();
+  else if (state.mode === "ai") openAI();
   else renderSidebar();
 }
 
@@ -939,6 +1044,7 @@ initI18n();
       .catch(() => {});
     await refresh();
     if (location.hash === "#graph") openGraph();
+    else if (location.hash === "#ai") openAI();
     else renderEmpty();
   } catch (e) {
     contentEl.innerHTML = `<div class="empty"><div class="empty-title">${escapeHtml(

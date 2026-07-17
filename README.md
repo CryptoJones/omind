@@ -62,6 +62,8 @@ reads and writes as long-term memory. `omind` does two things with it:
 - **`omind checkpoint`** — a scheduled job that records what the agent has been
   doing every N minutes into a daily worklog note, by mining the trails the hooks
   already capture (see [Activity checkpoints](#activity-checkpoints) below).
+- **`omind ai`** — account for tokens attributable to OMI and select a manual
+  low/medium/high model-expense profile that bounds priming and optional model calls.
 
 The web UI works **fully offline** (fonts, styles, and the Markdown renderer are
 vendored — no CDN). It shows **backlinks** for the open note, refreshes the list
@@ -359,6 +361,32 @@ The summary is deterministic (action counts by tool + guard denies/violations);
 text. Because it's a scheduled job — the same systemd-user-timer mechanism as
 `omind backup` and `omind mesh` — it doesn't depend on the agent's cooperation,
 which is what makes it a reliable *record* rather than a hopeful instruction.
+
+## AI token usage and expense profiles
+
+omind keeps a machine-local, per-vault ledger for the AI tokens it causes: session
+priming injected into an agent plus the verifier and optional checkpoint
+`claude -p` calls. It does **not** parse or claim the rest of an agent session.
+Provider-reported subprocess usage is recorded exactly; provider-neutral priming
+is shown as an estimate (`ceil(characters / 4)`) and never mixed into the
+provider-reported subtotal. The ledger contains counts and operational metadata
+only — never prompts, responses, note contents, or credentials.
+
+```bash
+omind ai profile                         # show saved/effective profile
+omind ai profile medium                  # persist low, medium, or high per vault
+omind ai usage --since 7d                # 24h, 7d, 30d, or all
+omind ai usage --since all --json        # machine-readable report
+```
+
+Profiles describe the expense of the model already selected; they do not select a
+model. `low` is the backward-compatible default (48,000-character priming cap and
+all optional calls), `medium` halves the priming/prompt inputs, and `high` caps
+priming at 8,000 characters and uses deterministic verifier/checkpoint behavior
+without optional model calls. Set `OMI_AI_EXPENSE=low|medium|high` for a temporary
+override; it wins over the saved profile. The web app's **AI Usage** view exposes
+the same profile control, time windows, exact/estimated breakdown, per-operation
+totals, and estimated avoided tokens.
 
 ## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Claude Desktop, Kiro, VS Code, Amazon Q
 

@@ -144,47 +144,68 @@ def gather_activity(omi_dir: Path | str, cutoff: datetime, now: datetime) -> Act
     return Activity(actions=actions, guard_events=guard)
 
 
-def _llm_narrative(activity: Activity, since: str) -> str | None:
+def _llm_narrative(
+    activity: Activity, since: str, omi_dir: Path | str | None = None
+) -> str | None:
     """A one-paragraph narrative from headless ``claude -p``; ``None`` on any
     unavailability/error/timeout (caller falls back to the deterministic summary)."""
-    claude = shutil.which("claude")
-    if not claude:
-        return None
-    lines = [f"{a['time']} {a['event']} {a['tool']} {a['detail']}" for a in activity.actions[-60:]]
-    guard = [f"{e.get('ts')} {e.get('outcome')} {e.get('tool')} {e.get('command')}" for e in
-             activity.guard_events[-30:]]
+    from omind import ai_usage
+
+    limits = ai_usage.policy(omi_dir) if omi_dir is not None else None
+    action_limit = limits.checkpoint_actions if limits else 60
+    guard_limit = limits.checkpoint_guard_events if limits else 30
+    # A high-expense profile still builds the prompt shape so the skipped event
+    # can report an avoided-token estimate without exposing its contents.
+    lines = [
+        f"{a['time']} {a['event']} {a['tool']} {a['detail']}"
+        for a in activity.actions[-max(action_limit, 60 if action_limit == 0 else action_limit) :]
+    ]
+    guard = [
+        f"{e.get('ts')} {e.get('outcome')} {e.get('tool')} {e.get('command')}"
+        for e in activity.guard_events[
+            -max(guard_limit, 30 if guard_limit == 0 else guard_limit) :
+        ]
+    ]
     prompt = (
         "Summarize what this agent worked on in the last "
         f"{since}, in 1-3 sentences, factual and concise. No preamble.\n\n"
         "ACTIONS:\n" + "\n".join(lines) + "\n\nGUARD EVENTS:\n" + "\n".join(guard) + "\n"
     )
+    if omi_dir is not None:
+        return ai_usage.run_claude(
+            omi_dir,
+            "checkpoint",
+            prompt,
+            timeout=_LLM_TIMEOUT,
+            allowed=limits.checkpoint_llm if limits else True,
+        )
+    claude = shutil.which("claude")
+    if not claude:
+        return None
     try:
         result = subprocess.run(
-            [claude, "-p", prompt],
-            capture_output=True,
-            text=True,
-            encoding="utf-8",
-            errors="replace",
-            timeout=_LLM_TIMEOUT,
+            [claude, "-p", prompt], capture_output=True, text=True, timeout=_LLM_TIMEOUT
         )
     except (subprocess.TimeoutExpired, OSError):
         return None
-    # A non-zero exit means claude printed a diagnostic, not a summary — don't
-    # adopt an error message as the day's narrative.
-    if result.returncode != 0:
-        return None
-    text = (result.stdout or "").strip()
-    return text or None
+    return (result.stdout or "").strip() or None if result.returncode == 0 else None
 
 
-def render_section(activity: Activity, since: str, now: datetime, *, llm: bool = False) -> str:
+def render_section(
+    activity: Activity,
+    since: str,
+    now: datetime,
+    *,
+    llm: bool = False,
+    omi_dir: Path | str | None = None,
+) -> str:
     """One worklog section for this run (deterministic; ``llm`` adds a narrative)."""
     header = f"### {now.strftime('%H:%M')} — last {since}"
     if activity.is_empty():
         return f"{header}\n- no recorded activity in this window\n"
     lines = [header]
     if llm:
-        narrative = _llm_narrative(activity, since)
+        narrative = _llm_narrative(activity, since, omi_dir)
         if narrative:
             lines.append(narrative)
     tools = Counter(a["tool"] for a in activity.actions if a["tool"])
@@ -234,7 +255,7 @@ def write_checkpoint(
     now = now or datetime.now()
     cutoff = now - parse_since(since)
     activity = gather_activity(omi_dir, cutoff, now)
-    section = render_section(activity, since, now, llm=llm)
+    section = render_section(activity, since, now, llm=llm, omi_dir=omi_dir)
     title = f"Worklog {now.strftime('%Y-%m-%d')}"
     details = _append_section(_existing_details(omi_dir, title), section)
     fields = NoteFields(

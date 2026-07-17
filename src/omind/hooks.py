@@ -64,6 +64,8 @@ _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood 
 _SESSION_STATE_GLOB = "Session State *.md"
 _JOURNAL_GLOB = paths.JOURNAL_GLOB
 _JOURNAL_TAIL_BULLETS = 20
+# Backward-compatible name for the low-expense/default cap. Runtime selection
+# lives in :mod:`omind.ai_usage`.
 _TOTAL_CONTEXT_CHAR_CAP = 48_000
 _TRUNCATION_MARKER = "\n…[truncated]"
 
@@ -341,7 +343,44 @@ def _update_nudge_line() -> str | None:
     return f"⚠️ {nudge}" if nudge else None
 
 
-def build_session_start_context(omi_dir: Path | str) -> str:
+def _allocate_sections(
+    sections: list[str], budget: int, *, minimum: int = 1_000
+) -> list[str]:
+    """Fit sections into ``budget`` while giving every section a useful floor.
+
+    The floor prevents a long index from consuming the whole context before the
+    Playbook/workflow/persona sections get a voice. Unused space is then handed
+    out in priority order (the caller's order).
+    """
+    if not sections or budget <= len(_TRUNCATION_MARKER):
+        return []
+    allocations = [min(len(section), minimum) for section in sections]
+    total = sum(allocations)
+    if total > budget:
+        share = max(0, budget // len(sections))
+        allocations = [min(len(section), share) for section in sections]
+    remaining = max(0, budget - sum(allocations))
+    for index, section in enumerate(sections):
+        extra = min(remaining, len(section) - allocations[index])
+        allocations[index] += extra
+        remaining -= extra
+        if remaining <= 0:
+            break
+    fitted: list[str] = []
+    for section, size in zip(sections, allocations, strict=True):
+        if size <= len(_TRUNCATION_MARKER):
+            continue
+        fitted.append(
+            section
+            if size >= len(section)
+            else section[: size - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+        )
+    return fitted
+
+
+def build_session_start_context(
+    omi_dir: Path | str, *, _context_cap: int | None = None
+) -> str:
     """Build the SessionStart ``additionalContext`` payload.
 
     Injects the *content* of the OMI priming notes (:data:`PRIMING_FILES`)
@@ -349,9 +388,10 @@ def build_session_start_context(omi_dir: Path | str) -> str:
     the agent issuing reads, then two dynamic sections: the newest
     ``Session State YYYY-MM-DD`` handoff note and the last
     :data:`_JOURNAL_TAIL_BULLETS` bullets of the newest auto-journal. The whole
-    payload is capped at :data:`_TOTAL_CONTEXT_CHAR_CAP` chars — static files
-    always win the budget; dynamic sections truncate (or drop) first. Falls
-    back to a read-the-vault reminder if nothing can be read. Never raises.
+    payload is capped by the active AI expense profile. Every static note gets a
+    useful floor and 20% of the remaining budget is reserved for current dynamic
+    state. Falls back to a read-the-vault reminder if nothing can be read. Never
+    raises.
     """
     directory = Path(omi_dir)
     sections: list[str] = []
@@ -393,35 +433,64 @@ def build_session_start_context(omi_dir: Path | str) -> str:
         "already read. Read any [[wikilinked]] note you need before acting."
     )
     if not sections and not dynamic:
-        return prefix + (
+        fallback = prefix + (
             header
             + " (Priming notes could not be read this session; read index.md, "
             "Memory Workflow.md, and CLAUDE CODE PERSONALITY.md from the vault "
             "directly.)"
         )
+        from omind import ai_usage
 
-    payload = "\n\n".join([header, *sections])  # static sections are never cut
-    for section in dynamic:
-        remaining = _TOTAL_CONTEXT_CHAR_CAP - len(payload) - len("\n\n")
-        if remaining <= len(_TRUNCATION_MARKER):
-            break  # no useful room left for dynamic content
-        if len(section) > remaining:
-            section = section[: remaining - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
-        payload += "\n\n" + section
-    return prefix + payload
+        return fallback[: (_context_cap or ai_usage.policy(omi_dir).context_chars)]
+
+    from omind import ai_usage
+
+    cap = _context_cap or ai_usage.policy(omi_dir).context_chars
+    base = prefix + header
+    remaining = max(0, cap - len(base) - 2)
+    # Keep 20% of the available section budget for current state. The newest
+    # handoff gets 60% of that pool and the journal tail gets 40%; when either is
+    # absent the other naturally receives the whole pool.
+    dynamic_budget = int(remaining * 0.20) if dynamic else 0
+    static_budget = remaining - dynamic_budget
+    fitted_static = _allocate_sections(sections, static_budget)
+    fitted_dynamic: list[str] = []
+    if len(dynamic) == 1:
+        fitted_dynamic = _allocate_sections(dynamic, dynamic_budget, minimum=0)
+    elif len(dynamic) >= 2:
+        first = _allocate_sections(dynamic[:1], int(dynamic_budget * 0.60), minimum=0)
+        second = _allocate_sections(
+            dynamic[1:2], dynamic_budget - int(dynamic_budget * 0.60), minimum=0
+        )
+        fitted_dynamic = [*first, *second]
+    payload = "\n\n".join([base, *fitted_static, *fitted_dynamic])
+    if len(payload) > cap:
+        payload = payload[: cap - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
+    return payload
 
 
 def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -> None:
     """Emit OMI priming-note content as SessionStart ``additionalContext``. Never raises."""
     sink = out if out is not None else sys.stdout
+    context = build_session_start_context(omi_dir)
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
-            "additionalContext": build_session_start_context(omi_dir),
+            "additionalContext": context,
         }
     }
     try:
         sink.write(json.dumps(payload) + "\n")
+        from omind import ai_usage
+
+        baseline = (
+            build_session_start_context(omi_dir, _context_cap=_TOTAL_CONTEXT_CHAR_CAP)
+            if ai_usage.policy(omi_dir).context_chars < _TOTAL_CONTEXT_CHAR_CAP
+            else context
+        )
+        ai_usage.record_priming(
+            omi_dir, len(context), avoided_characters=max(0, len(baseline) - len(context))
+        )
     except Exception as exc:
         _record_failure(f"emit_session_start_context({omi_dir})", exc)
 
@@ -482,8 +551,19 @@ def emit_pre_llm_call_context(
         guard.begin_turn(session, str(event.get("prompt") or ""))
         if _already_primed(session):
             return
-        payload = {"context": build_session_start_context(omi_dir)}
+        context = build_session_start_context(omi_dir)
+        payload = {"context": context}
         sink.write(json.dumps(payload) + "\n")
+        from omind import ai_usage
+
+        baseline = (
+            build_session_start_context(omi_dir, _context_cap=_TOTAL_CONTEXT_CHAR_CAP)
+            if ai_usage.policy(omi_dir).context_chars < _TOTAL_CONTEXT_CHAR_CAP
+            else context
+        )
+        ai_usage.record_priming(
+            omi_dir, len(context), avoided_characters=max(0, len(baseline) - len(context))
+        )
     except Exception as exc:
         _record_failure(f"emit_pre_llm_call_context({omi_dir})", exc)
 
