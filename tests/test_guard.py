@@ -915,6 +915,12 @@ def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
     repo_a = _mk_repo(tmp_path, "a")
     repo_b = _mk_repo(tmp_path, "b")
     monkeypatch.chdir(repo_a)
+    windows_target = r"C:\Users\runneradmin\source\repo"
+    assert str(guard._git_dash_c_path(f"git -C {windows_target} fetch")) == windows_target
+    assert (
+        str(guard._git_dash_c_path(f'git -C "{windows_target} with spaces" fetch'))
+        == f"{windows_target} with spaces"
+    )
     # A `-C` target that is itself no repo attributes to its ENCLOSING repo when
     # one exists (that is where git would run — e.g. a stray /tmp/.git above
     # pytest's tmp dir), and only falls back to the cwd repo when there is none.

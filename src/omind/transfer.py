@@ -29,7 +29,7 @@ import tarfile
 import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
 from omind import __version__, paths
@@ -39,6 +39,12 @@ Logger = Callable[[str], None]
 
 EXPORT_VERSION = 1
 FORMATS = ("json", "targz")
+
+# VCS control directories are executable trust/config state, not vault data. A
+# crafted import that writes .git/config or hooks/ can change what later mesh
+# git operations execute, and exporting .git/ leaks deleted-note history while
+# making bundles enormous.
+CONTROL_DIR_NAMES = frozenset({".git", ".hg", ".svn"})
 
 
 class TransferError(Exception):
@@ -88,6 +94,11 @@ def _runtime_artifact(name: str) -> bool:
     destination's `.omi.lock`, and on Windows reading/replacing a locked file
     raises PermissionError mid-import."""
     return name == LOCK_FILENAME or name.startswith(".tmp-")
+
+
+def _control_artifact(rel: str | PurePosixPath) -> bool:
+    """True when an archive path crosses a VCS control directory."""
+    return any(part in CONTROL_DIR_NAMES for part in PurePosixPath(str(rel)).parts)
 
 
 def _exportable_md(omi_dir: Path) -> list[Path]:
@@ -154,6 +165,8 @@ def _export_targz(omi: Path, out: Path) -> int:
             if not path.is_file() or _runtime_artifact(path.name):
                 continue
             arcname = path.relative_to(omi).as_posix()
+            if _control_artifact(arcname):
+                continue
             tar.add(path, arcname=arcname)
             if (
                 path.suffix == ".md"
@@ -310,6 +323,8 @@ def _import_targz(
             # Traversal guard: every member must land inside the OMI dir.
             if target != omi_resolved and omi_resolved not in target.parents:
                 raise TransferError(f"archive member escapes the OMI directory: {rel!r}")
+            if _control_artifact(rel):
+                raise TransferError(f"archive member targets a VCS control directory: {rel!r}")
             if Path(rel).name == paths.INDEX_FILENAME and Path(rel).parent == Path("."):
                 continue  # derived top-level index; regenerated after import
             if _runtime_artifact(Path(rel).name):

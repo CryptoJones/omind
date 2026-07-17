@@ -16,10 +16,17 @@ from __future__ import annotations
 
 import contextlib
 import logging
+import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from pathlib import Path
 
+import anyio
+import mcp.types as mcp_types
+from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.server.fastmcp import FastMCP
+from mcp.shared.message import SessionMessage
 
 from omind import graph
 from omind.store import ActionItem, NoteFields, OmiStore, parse_note
@@ -33,6 +40,95 @@ restorable); nothing is removed from disk. Use the version token from
 read-note as expected_version when editing to detect concurrent writers."""
 
 logger = logging.getLogger(__name__)
+
+
+@asynccontextmanager
+async def _fd_stdio_server() -> AsyncIterator[
+    tuple[
+        MemoryObjectReceiveStream[SessionMessage | Exception],
+        MemoryObjectSendStream[SessionMessage],
+    ]
+]:
+    """MCP stdio transport using fd readiness instead of AnyIO file wrappers."""
+    stdin_fd = sys.stdin.buffer.fileno()
+    stdout_fd = sys.stdout.buffer.fileno()
+
+    read_stream_writer, read_stream = anyio.create_memory_object_stream[
+        SessionMessage | Exception
+    ](0)
+    write_stream, write_stream_reader = anyio.create_memory_object_stream[SessionMessage](0)
+
+    async def send_line(line: str) -> None:
+        try:
+            message = mcp_types.JSONRPCMessage.model_validate_json(line)
+        except Exception as exc:
+            await read_stream_writer.send(exc)
+            return
+        await read_stream_writer.send(SessionMessage(message))
+
+    async def stdin_reader() -> None:
+        buffer = b""
+        try:
+            async with read_stream_writer:
+                while True:
+                    if sys.platform == "win32":
+                        # Windows pipe handles are not sockets and cannot be
+                        # registered with AnyIO's readiness backend. Keep the
+                        # event loop free while one worker blocks on a line.
+                        chunk = await anyio.to_thread.run_sync(sys.stdin.buffer.readline)
+                    else:
+                        await anyio.wait_readable(stdin_fd)
+                        try:
+                            chunk = os.read(stdin_fd, 65536)
+                        except BlockingIOError:
+                            continue
+                    if not chunk:
+                        break
+                    buffer += chunk
+                    while b"\n" in buffer:
+                        raw, buffer = buffer.split(b"\n", 1)
+                        await send_line(raw.decode("utf-8", errors="replace"))
+                if buffer:
+                    await send_line(buffer.decode("utf-8", errors="replace"))
+        except anyio.ClosedResourceError:  # pragma: no cover
+            await anyio.lowlevel.checkpoint()
+
+    async def write_all(data: bytes) -> None:
+        if sys.platform == "win32":
+            def write_stdout() -> None:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+
+            await anyio.to_thread.run_sync(write_stdout)
+            return
+
+        offset = 0
+        while offset < len(data):
+            try:
+                written = os.write(stdout_fd, data[offset:])
+            except BlockingIOError:
+                await anyio.wait_writable(stdout_fd)
+                continue
+            if written == 0:
+                await anyio.wait_writable(stdout_fd)
+                continue
+            offset += written
+
+    async def stdout_writer() -> None:
+        try:
+            async with write_stream_reader:
+                async for session_message in write_stream_reader:
+                    payload = session_message.message.model_dump_json(
+                        by_alias=True, exclude_none=True
+                    )
+                    await write_all((payload + "\n").encode("utf-8"))
+        except (anyio.ClosedResourceError, BrokenPipeError):  # pragma: no cover
+            await anyio.lowlevel.checkpoint()
+
+    async with anyio.create_task_group() as tg:
+        tg.start_soon(stdin_reader)
+        tg.start_soon(stdout_writer)
+        yield read_stream, write_stream
 
 
 def _parse_action_items(items: list[str]) -> list[ActionItem]:
@@ -283,5 +379,15 @@ def run_node(omi_dir: Path, node_id: str | None = None) -> int:
     """CLI entry: serve the node over stdio until the client closes stdin."""
     # stdout is the protocol channel; everything else goes to stderr.
     logging.basicConfig(stream=sys.stderr, level=logging.WARNING)
-    build_server(omi_dir, node_id=node_id).run("stdio")
+
+    async def run_stdio() -> None:
+        mcp = build_server(omi_dir, node_id=node_id)
+        async with _fd_stdio_server() as (read_stream, write_stream):
+            await mcp._mcp_server.run(  # noqa: SLF001 - FastMCP exposes no public lower-level runner.
+                read_stream,
+                write_stream,
+                mcp._mcp_server.create_initialization_options(),  # noqa: SLF001
+            )
+
+    anyio.run(run_stdio)
     return 0
