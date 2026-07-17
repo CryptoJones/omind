@@ -84,6 +84,8 @@ def test_usage_summary_separates_exact_estimated_and_avoided(tmp_path: Path) -> 
     assert all_time["totals"]["avoided_tokens"] == 50
     with pytest.raises(ValueError):
         ai_usage.usage_summary(omi, since="weekly")
+    with pytest.raises(ValueError):
+        ai_usage.parse_window("9" * 100_000 + "x")
 
 
 def test_run_claude_records_provider_usage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
