@@ -745,7 +745,18 @@ def _git_dash_c_path(command: str) -> Path | None:
         parts = _split_simple_commands(command)
         if not parts:
             return None
-        tokens = shlex.split(parts[0])
+        # POSIX shlex treats every backslash as an escape and turns an unquoted
+        # Windows path such as ``C:\\repo`` into ``C:repo``.  PowerShell/cmd do
+        # not use backslashes that way, so retain them on Windows.  Non-POSIX
+        # shlex keeps surrounding quotes; remove only a matching outer pair.
+        tokens = shlex.split(parts[0], posix=os.name != "nt")
+        if os.name == "nt":
+            tokens = [
+                token[1:-1]
+                if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
+                else token
+                for token in tokens
+            ]
     except ValueError:
         return None
     if not tokens or tokens[0] != "git":

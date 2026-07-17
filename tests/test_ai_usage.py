@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import json
+import os
 import subprocess
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -40,7 +41,9 @@ def test_ledger_is_per_vault_private_and_skips_torn_lines(tmp_path: Path) -> Non
     ai_usage.record_priming(first, 9)
     assert ai_usage.read_events(second) == []
     path = ai_usage.usage_path(first)
-    assert path.stat().st_mode & 0o777 == 0o600
+    # Windows models file privacy with ACLs rather than POSIX mode bits.
+    if os.name != "nt":
+        assert path.stat().st_mode & 0o777 == 0o600
     with path.open("ab") as stream:
         stream.write(b"{torn\xff\n")
     events = ai_usage.read_events(first)
