@@ -184,13 +184,16 @@ def parse_window(value: str) -> timedelta | None:
     clean = (value or "").strip().lower()
     if clean == "all":
         return None
-    import re
-
-    match = re.fullmatch(r"(\d+)([hd])", clean)
-    if not match:
+    # This is a tiny public-input grammar; parse it directly instead of using a
+    # backtracking regex over attacker-controlled text (CodeQL py/redos).
+    if (
+        not 2 <= len(clean) <= 10
+        or clean[-1] not in {"h", "d"}
+        or any(char < "0" or char > "9" for char in clean[:-1])
+    ):
         raise ValueError("--since must be 24h, 7d, 30d, or all")
-    number = int(match.group(1))
-    return timedelta(hours=number) if match.group(2) == "h" else timedelta(days=number)
+    number = int(clean[:-1])
+    return timedelta(hours=number) if clean[-1] == "h" else timedelta(days=number)
 
 
 def usage_summary(

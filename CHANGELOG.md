@@ -18,6 +18,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   avoided tokens in text or JSON. The local web app adds the same profile control
   and 24-hour/7-day/30-day/all-time usage dashboard through `/api/ai/*` endpoints.
 
+### Security
+- Parse AI-usage reporting windows with a bounded direct grammar rather than a
+  regular expression over public API input, eliminating the polynomial-runtime
+  pattern identified by CodeQL during the 4.0.0 release review.
+
 ## [3.8.6] - 2026-07-06
 
 ### Changed
