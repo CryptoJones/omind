@@ -209,6 +209,10 @@ def test_static_index_is_served_without_staticfiles(client: WebClient) -> None:
     assert res.status_code == 200
     assert "text/html" in res.headers["content-type"]
 
+    asset = client.get("/app.js")
+    assert asset.status_code == 200
+    assert "javascript" in asset.headers["content-type"]
+
 
 def test_static_path_traversal_is_rejected(client: WebClient, tmp_path: Path) -> None:
     secret = tmp_path / "secret.txt"

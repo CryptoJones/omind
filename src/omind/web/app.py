@@ -151,24 +151,29 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
 
     if STATIC_DIR.is_dir():
         static_root = STATIC_DIR.resolve()
-
-        def static_inside(path: Path) -> bool:
-            return path == static_root or static_root in path.parents
+        static_assets: dict[str, tuple[bytes, str]] = {}
+        for source in STATIC_DIR.rglob("*"):
+            resolved = source.resolve()
+            if not resolved.is_file() or static_root not in resolved.parents:
+                continue
+            relative = source.relative_to(STATIC_DIR).as_posix()
+            media_type = mimetypes.guess_type(source.name)[0] or "application/octet-stream"
+            asset = (resolved.read_bytes(), media_type)
+            static_assets[relative] = asset
+            if source.name == "index.html":
+                parent = source.relative_to(STATIC_DIR).parent.as_posix()
+                route = "" if parent == "." else parent
+                static_assets[route] = asset
+                if route:
+                    static_assets[f"{route}/"] = asset
 
         @app.get("/{path:path}", include_in_schema=False)
         async def static_file(path: str = "") -> Response:
-            rel = path or "index.html"
-            candidate = (static_root / rel).resolve()
-            if not static_inside(candidate):
+            asset = static_assets.get(path)
+            if asset is None:
                 raise HTTPException(status_code=404, detail="Static asset not found")
-            if candidate.is_dir():
-                candidate = (candidate / "index.html").resolve()
-                if not static_inside(candidate):
-                    raise HTTPException(status_code=404, detail="Static asset not found")
-            if not candidate.is_file():
-                raise HTTPException(status_code=404, detail="Static asset not found")
-            media_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
-            return Response(candidate.read_bytes(), media_type=media_type)
+            content, media_type = asset
+            return Response(content, media_type=media_type)
 
     return app
 
