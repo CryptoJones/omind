@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   regular expression over public API input, eliminating the polynomial-runtime
   pattern identified by CodeQL during the 4.0.0 release review.
 
+### Fixed
+- Preserve backslashes when resolving `git -C` targets on Windows, and keep
+  POSIX permission-bit assertions scoped to platforms that implement them.
+
 ## [3.8.6] - 2026-07-06
 
 ### Changed
