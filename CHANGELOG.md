@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.0.0] - 2026-07-16
+
+### Added
+- **OMI-attributable AI token accounting and expense profiles.** A privacy-safe,
+  per-vault JSONL ledger records session-priming estimates and provider-reported
+  verifier/checkpoint usage without storing prompts or responses. `omind ai
+  profile low|medium|high` applies hard context budgets and progressively disables
+  optional model work; `omind ai usage` reports exact, estimated, cached, and
+  avoided tokens in text or JSON. The local web app adds the same profile control
+  and 24-hour/7-day/30-day/all-time usage dashboard through `/api/ai/*` endpoints.
+
+### Security
+- Parse AI-usage reporting windows with a bounded direct grammar rather than a
+  regular expression over public API input, eliminating the polynomial-runtime
+  pattern identified by CodeQL during the 4.0.0 release review.
+
+### Fixed
+- Preserve backslashes when resolving `git -C` targets on Windows, and keep
+  POSIX permission-bit assertions scoped to platforms that implement them.
+
 ## [3.8.6] - 2026-07-06
 
 ### Changed

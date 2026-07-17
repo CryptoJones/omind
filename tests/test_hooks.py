@@ -369,17 +369,49 @@ def test_session_start_total_cap_truncates_dynamic_first(tmp_path: Path) -> None
     state.write_text("d" * hooks._PRIMING_FILE_CHAR_CAP, encoding="utf-8")
     ctx = hooks.build_session_start_context(tmp_path)
     assert len(ctx) <= hooks._TOTAL_CONTEXT_CHAR_CAP
-    assert ctx.count("STATIC-END") == len(hooks.PRIMING_FILES)  # static never cut
-    assert "dddd" in ctx  # session state partially injected …
-    assert ctx.endswith("…[truncated]")  # … and truncated to fit the budget
+    for name in hooks.PRIMING_FILES:
+        assert f"===== OMI/{name} =====" in ctx  # every static note gets a floor
+    assert "dddd" in ctx  # 20% remains reserved for dynamic state
+    assert "…[truncated]" in ctx
 
 
-def test_session_start_drops_dynamic_when_static_fills_cap(tmp_path: Path) -> None:
+def test_session_start_reserves_dynamic_when_static_fills_cap(tmp_path: Path) -> None:
     _write_priming_files(tmp_path, body="s" * hooks._PRIMING_FILE_CHAR_CAP)  # ~48k static
     (tmp_path / "Session State 2026-06-09.md").write_text("DYNAMIC-STATE", encoding="utf-8")
     ctx = hooks.build_session_start_context(tmp_path)
-    assert "DYNAMIC-STATE" not in ctx  # no room: dynamic dropped, static intact
-    assert ctx.count("s" * hooks._PRIMING_FILE_CHAR_CAP) == len(hooks.PRIMING_FILES)
+    assert "DYNAMIC-STATE" in ctx
+    assert len(ctx) <= hooks._TOTAL_CONTEXT_CHAR_CAP
+
+
+def test_session_start_expense_profiles_apply_hard_caps(tmp_path: Path) -> None:
+    from omind import ai_usage
+
+    _write_priming_files(tmp_path, body="x" * hooks._PRIMING_FILE_CHAR_CAP)
+    for name, cap in (("medium", 24_000), ("high", 8_000)):
+        ai_usage.set_profile(tmp_path, name)
+        context = hooks.build_session_start_context(tmp_path)
+        assert len(context) <= cap
+        for priming in hooks.PRIMING_FILES:
+            assert f"===== OMI/{priming} =====" in context
+    hooks.emit_session_start_context(tmp_path, out=io.StringIO())
+    event = ai_usage.read_events(tmp_path)[-1]
+    assert event["profile"] == "high"
+    assert event["avoided_tokens"] > 0
+
+
+def test_session_start_records_priming_once_per_emission(
+    tmp_path: Path, isolated_state: Path
+) -> None:
+    from omind import ai_usage
+
+    (tmp_path / "index.md").write_text("remember", encoding="utf-8")
+    event = '{"session_id":"token-session"}'
+    hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO(event), stdout=io.StringIO())
+    hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO(event), stdout=io.StringIO())
+    events = ai_usage.read_events(tmp_path)
+    assert len(events) == 1
+    assert events[0]["operation"] == "priming"
+    assert events[0]["measurement"] == "estimated"
 
 
 def test_run_hook_stop_records_turn_line(tmp_path: Path) -> None:

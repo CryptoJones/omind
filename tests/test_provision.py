@@ -154,11 +154,12 @@ def test_managed_hook_scripts_are_written_0755_atomically(
     ):
         f = hooks / name
         assert f.exists(), f"{name} was not provisioned"
-        perms = f.stat().st_mode & 0o777
-        assert perms == 0o755, (
-            f"{name} is {oct(perms)}; expected 0o755 — a hook must be o+r+x so a "
-            "chown-root can't render it unreadable to the agent user"
-        )
+        if os.name != "nt":
+            perms = f.stat().st_mode & 0o777
+            assert perms == 0o755, (
+                f"{name} is {oct(perms)}; expected 0o755 — a hook must be o+r+x so a "
+                "chown-root can't render it unreadable to the agent user"
+            )
 
 
 def test_default_vault_path_shape() -> None:

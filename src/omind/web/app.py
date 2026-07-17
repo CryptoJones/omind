@@ -13,13 +13,14 @@ import os
 from collections.abc import Callable
 from dataclasses import asdict
 from pathlib import Path
-from typing import TypeVar
+from typing import Literal, TypeVar
 
 from fastapi import FastAPI, HTTPException
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
+from omind import ai_usage
 from omind import graph as graph_mod
 from omind.store import (
     NoteConflictError,
@@ -63,6 +64,10 @@ class RawUpdate(BaseModel):
     content: str
 
 
+class AIProfileUpdate(BaseModel):
+    profile: Literal["low", "medium", "high"]
+
+
 #: Host headers accepted by default (a localhost bind). ``testserver`` is
 #: Starlette's TestClient host.
 DEFAULT_ALLOWED_HOSTS = ["localhost", "127.0.0.1", "[::1]", "testserver"]
@@ -92,6 +97,21 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
     def get_meta() -> dict[str, object]:
         # mesh tells the UI whether DELETE archives (restorable) or removes.
         return {"mesh": store.mesh_mode()}
+
+    @app.get("/api/ai/profile")
+    async def get_ai_profile() -> dict[str, object]:
+        return ai_usage.profile_payload(store.omi_dir)
+
+    @app.put("/api/ai/profile")
+    async def put_ai_profile(payload: AIProfileUpdate) -> dict[str, str]:
+        try:
+            return ai_usage.set_profile(store.omi_dir, payload.profile)
+        except OSError as exc:
+            raise HTTPException(status_code=500, detail="could not save AI profile") from exc
+
+    @app.get("/api/ai/usage")
+    async def get_ai_usage(since: Literal["24h", "7d", "30d", "all"] = "7d") -> dict[str, object]:
+        return ai_usage.usage_summary(store.omi_dir, since=since)
 
     @app.get("/api/notes/{name}")
     def get_note(name: str) -> dict[str, object]:
