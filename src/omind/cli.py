@@ -64,7 +64,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{setup,quickstart,serve,doctor,self-update,backup,export,import,reindex,note,rollup,hook}",
+        metavar="{setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,note,rollup,hook}",
     )
 
     setup = sub.add_parser(
@@ -399,6 +399,20 @@ def build_parser() -> argparse.ArgumentParser:
         help="add a headless `claude -p` narrative (fail-open to the deterministic summary)",
     )
     _add_vault_args(checkpoint)
+
+    ai = sub.add_parser(
+        "ai", help="inspect OMI-attributable token usage and select a model-expense profile"
+    )
+    ai_sub = ai.add_subparsers(dest="ai_command", required=True)
+    ai_profile = ai_sub.add_parser("profile", help="show or set low/medium/high expense mode")
+    ai_profile.add_argument("profile", nargs="?", choices=("low", "medium", "high"))
+    _add_vault_args(ai_profile)
+    ai_usage = ai_sub.add_parser("usage", help="summarize OMI-attributable token usage")
+    ai_usage.add_argument(
+        "--since", choices=("24h", "7d", "30d", "all"), default="7d"
+    )
+    ai_usage.add_argument("--json", action="store_true", help="emit machine-readable JSON")
+    _add_vault_args(ai_usage)
 
     rollup = sub.add_parser(
         "rollup",
@@ -935,6 +949,56 @@ def _run_checkpoint(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_ai(args: argparse.Namespace) -> int:
+    import json
+
+    from omind import ai_usage
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    if args.ai_command == "profile":
+        try:
+            info = (
+                ai_usage.set_profile(omi_dir, args.profile)
+                if args.profile
+                else ai_usage.profile_info(omi_dir)
+            )
+        except (OSError, ValueError) as exc:
+            print(f"error: could not set AI expense profile: {exc}", file=sys.stderr)
+            return 1
+        print(
+            f"saved={info['saved']} effective={info['effective']} source={info['source']}"
+        )
+        if info["source"] == "environment":
+            print(f"note: {ai_usage.PROFILE_ENV} overrides the saved profile")
+        return 0
+    summary = ai_usage.usage_summary(omi_dir, since=args.since)
+    if args.json:
+        print(json.dumps(summary, indent=2))
+        return 0
+    totals = summary["totals"]
+    profile = summary["profile"]
+    print(
+        f"AI usage ({args.since}) — profile {profile['effective']} "
+        f"({profile['source']})"
+    )
+    print(
+        f"input {totals['input_tokens']:,} | output {totals['output_tokens']:,} | "
+        f"cache read {totals['cache_read_tokens']:,} | "
+        f"cache write {totals['cache_write_tokens']:,}"
+    )
+    print(
+        f"exact input {summary['exact']['input_tokens']:,} | "
+        f"estimated input {summary['estimated']['input_tokens']:,} | "
+        f"estimated avoided {totals['avoided_tokens']:,}"
+    )
+    for name, values in summary["operations"].items():
+        print(
+            f"  {name}: input {values['input_tokens']:,}, "
+            f"output {values['output_tokens']:,}, avoided {values['avoided_tokens']:,}"
+        )
+    return 0
+
+
 def _split_csv(value: str) -> list[str]:
     """Split a comma-separated CLI flag into a clean list."""
     return [item.strip() for item in value.split(",") if item.strip()]
@@ -1107,6 +1171,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_graph(args)
     if args.command == "checkpoint":
         return _run_checkpoint(args)
+    if args.command == "ai":
+        return _run_ai(args)
     if args.command == "reindex":
         return _run_reindex(args)
     if args.command == "convert":
