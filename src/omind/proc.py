@@ -22,11 +22,31 @@ Tests fake ``subprocess.run`` (the module attribute) and never spawn anything.
 from __future__ import annotations
 
 import os
+import re
 import shutil
 import subprocess
 
 DEFAULT_TIMEOUT = 600.0
 """Seconds before a spawned command is killed; generous for slow npm installs."""
+
+_URL_USERINFO_RE = re.compile(r"([A-Za-z][A-Za-z0-9+.-]*://)([^/\s@]+@)")
+_GITHUB_TOKEN_RE = re.compile(r"\b(?:ghp|gho|ghu|ghs|ghr)_[A-Za-z0-9_]{20,}\b")
+_GITHUB_PAT_RE = re.compile(r"\bgithub_pat_[A-Za-z0-9_]{20,}\b")
+_AUTH_HEADER_RE = re.compile(
+    r"(?i)(authorization:\s*(?:bearer|token|basic)\s+)[A-Za-z0-9._~+/\-]+=*"
+)
+
+
+def _redact(text: str) -> str:
+    """Scrub credentials from command/error text before surfacing it."""
+    text = _URL_USERINFO_RE.sub(r"\1[redacted]@", text)
+    text = _GITHUB_TOKEN_RE.sub("[redacted-token]", text)
+    text = _GITHUB_PAT_RE.sub("[redacted-token]", text)
+    return _AUTH_HEADER_RE.sub(r"\1[redacted-token]", text)
+
+
+def _cmd_text(cmd: list[str]) -> str:
+    return _redact(" ".join(cmd))
 
 
 def run_command(
@@ -62,7 +82,7 @@ def run_command(
     except FileNotFoundError as exc:
         raise error(f"command not found: {cmd[0]}") from exc
     except subprocess.TimeoutExpired as exc:
-        raise error(f"command timed out after {timeout:g}s: {' '.join(cmd)}") from exc
+        raise error(f"command timed out after {timeout:g}s: {_cmd_text(cmd)}") from exc
     except subprocess.CalledProcessError as exc:
-        detail = (exc.stderr or exc.stdout or "").strip()
-        raise error(f"command failed: {' '.join(cmd)}\n{detail}") from exc
+        detail = _redact((exc.stderr or exc.stdout or "").strip())
+        raise error(f"command failed: {_cmd_text(cmd)}\n{detail}") from exc

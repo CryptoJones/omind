@@ -9,6 +9,7 @@ by the static Tailwind SPA mounted at ``/``. All note access goes through
 
 from __future__ import annotations
 
+import mimetypes
 import os
 from collections.abc import Callable
 from dataclasses import asdict
@@ -16,7 +17,7 @@ from pathlib import Path
 from typing import TypeVar
 
 from fastapi import FastAPI, HTTPException
-from fastapi.staticfiles import StaticFiles
+from fastapi.responses import Response
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -81,20 +82,20 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
     )
 
     @app.get("/api/notes")
-    def list_notes(include_disabled: bool = False) -> list[dict[str, object]]:
+    async def list_notes(include_disabled: bool = False) -> list[dict[str, object]]:
         return [asdict(s) for s in store.list_notes(include_disabled=include_disabled)]
 
     @app.get("/api/tags")
-    def list_tags() -> list[str]:
+    async def list_tags() -> list[str]:
         return store.all_tags()
 
     @app.get("/api/meta")
-    def get_meta() -> dict[str, object]:
+    async def get_meta() -> dict[str, object]:
         # mesh tells the UI whether DELETE archives (restorable) or removes.
         return {"mesh": store.mesh_mode()}
 
     @app.get("/api/notes/{name}")
-    def get_note(name: str) -> dict[str, object]:
+    async def get_note(name: str) -> dict[str, object]:
         raw = _guard(lambda: store.read_note(name))
         version = _guard(lambda: store.note_version(name))
         # One read + one parse: read_fields would re-read the file just read.
@@ -102,22 +103,22 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
         return {"filename": name, "raw": raw, "fields": fields, "version": version}
 
     @app.get("/api/notes/{name}/backlinks")
-    def get_backlinks(name: str) -> list[dict[str, object]]:
+    async def get_backlinks(name: str) -> list[dict[str, object]]:
         return [asdict(s) for s in _guard(lambda: store.backlinks(name))]
 
     @app.get("/api/graph")
-    def get_graph() -> dict[str, object]:
+    async def get_graph() -> dict[str, object]:
         # The whole [[wikilink]] graph (nodes + edges + dangling) for the UI's
         # interactive view; same serialisation as `omind graph export --json`.
         return graph_mod.to_json(graph_mod.build_graph(store.omi_dir))
 
     @app.post("/api/notes", status_code=201)
-    def create_note(payload: NoteFieldsModel) -> dict[str, str]:
+    async def create_note(payload: NoteFieldsModel) -> dict[str, str]:
         filename = _guard(lambda: store.create_note(payload.to_fields()))
         return {"filename": filename}
 
     @app.put("/api/notes/{name}")
-    def update_note_structured(
+    async def update_note_structured(
         name: str, payload: NoteFieldsModel, expected_version: str | None = None
     ) -> dict[str, str]:
         filename = _guard(
@@ -126,7 +127,7 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
         return {"filename": filename}
 
     @app.put("/api/notes/{name}/raw")
-    def update_note_raw(
+    async def update_note_raw(
         name: str, payload: RawUpdate, expected_version: str | None = None
     ) -> dict[str, str]:
         # Validate the note exists, then overwrite its bytes verbatim.
@@ -137,15 +138,37 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
         return {"filename": filename}
 
     @app.delete("/api/notes/{name}", status_code=204)
-    def delete_note(name: str) -> None:
+    async def delete_note(name: str) -> None:
         _guard(lambda: store.delete_note(name))
 
     @app.post("/api/notes/{name}/restore")
-    def restore_note(name: str) -> dict[str, str]:
+    async def restore_note(name: str) -> dict[str, str]:
         return {"filename": _guard(lambda: store.restore_note(name))}
 
+    @app.api_route("/api/{path:path}", methods=["GET", "POST", "PUT", "DELETE", "PATCH"])
+    async def api_not_found(path: str) -> None:
+        raise HTTPException(status_code=404, detail="API route not found")
+
     if STATIC_DIR.is_dir():
-        app.mount("/", StaticFiles(directory=STATIC_DIR, html=True), name="static")
+        static_root = STATIC_DIR.resolve()
+
+        def static_inside(path: Path) -> bool:
+            return path == static_root or static_root in path.parents
+
+        @app.get("/{path:path}", include_in_schema=False)
+        async def static_file(path: str = "") -> Response:
+            rel = path or "index.html"
+            candidate = (static_root / rel).resolve()
+            if not static_inside(candidate):
+                raise HTTPException(status_code=404, detail="Static asset not found")
+            if candidate.is_dir():
+                candidate = (candidate / "index.html").resolve()
+                if not static_inside(candidate):
+                    raise HTTPException(status_code=404, detail="Static asset not found")
+            if not candidate.is_file():
+                raise HTTPException(status_code=404, detail="Static asset not found")
+            media_type = mimetypes.guess_type(candidate.name)[0] or "application/octet-stream"
+            return Response(candidate.read_bytes(), media_type=media_type)
 
     return app
 
