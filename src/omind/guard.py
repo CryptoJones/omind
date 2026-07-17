@@ -745,7 +745,14 @@ def _git_dash_c_path(command: str) -> Path | None:
         parts = _split_simple_commands(command)
         if not parts:
             return None
-        tokens = shlex.split(parts[0])
+        lexer = shlex.shlex(parts[0], posix=True)
+        lexer.whitespace_split = True
+        lexer.commenters = ""
+        # POSIX shlex treats backslash as an escape and would turn a literal
+        # Windows path such as C:\\repo into C:repo. Quotes are still honoured;
+        # disabling only escapes preserves paths on every supported platform.
+        lexer.escape = ""
+        tokens = list(lexer)
     except ValueError:
         return None
     if not tokens or tokens[0] != "git":

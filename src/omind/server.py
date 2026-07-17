@@ -71,11 +71,17 @@ async def _fd_stdio_server() -> AsyncIterator[
         try:
             async with read_stream_writer:
                 while True:
-                    await anyio.wait_readable(stdin_fd)
-                    try:
-                        chunk = os.read(stdin_fd, 65536)
-                    except BlockingIOError:
-                        continue
+                    if sys.platform == "win32":
+                        # Windows pipe handles are not sockets and cannot be
+                        # registered with AnyIO's readiness backend. Keep the
+                        # event loop free while one worker blocks on a line.
+                        chunk = await anyio.to_thread.run_sync(sys.stdin.buffer.readline)
+                    else:
+                        await anyio.wait_readable(stdin_fd)
+                        try:
+                            chunk = os.read(stdin_fd, 65536)
+                        except BlockingIOError:
+                            continue
                     if not chunk:
                         break
                     buffer += chunk
@@ -88,6 +94,14 @@ async def _fd_stdio_server() -> AsyncIterator[
             await anyio.lowlevel.checkpoint()
 
     async def write_all(data: bytes) -> None:
+        if sys.platform == "win32":
+            def write_stdout() -> None:
+                sys.stdout.buffer.write(data)
+                sys.stdout.buffer.flush()
+
+            await anyio.to_thread.run_sync(write_stdout)
+            return
+
         offset = 0
         while offset < len(data):
             try:
