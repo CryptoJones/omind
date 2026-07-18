@@ -71,8 +71,9 @@ claude mcp remove obsidian -s user
 ## 4. Auto-memory hooks
 
 Three hooks in `~/.claude/settings.json` give the agent a deterministic memory
-loop: every tool action is journaled to a per-day note (PostToolUse, Stop), and
-your memory index is injected as context when a session starts (SessionStart).
+loop: every tool action is journaled and OMI MCP payload sizes are accounted
+(PostToolUse), numeric session usage is captured (Stop), and a compact bounded
+memory capsule is injected when a session starts (SessionStart).
 
 **Merge** these entries into your existing `"hooks"` object — don't replace
 hooks you've authored yourself. omind recognizes its own entries by the literal
@@ -125,6 +126,12 @@ Two practical notes:
   the hooks fire even when the spawned shell lacks `~/.local/bin` on `PATH`.
 - The hook handler always exits 0 and swallows its own errors by design; a
   memory glitch must never block the agent.
+
+For the proactive `UserPromptSubmit` recall/consult guard and the managed
+`/omind` help skill, prefer `omind setup`; those managed artifacts contain
+rendered absolute paths and are refreshed safely on upgrade. The MCP server's
+`help` tool and local `omind help <command path>` are the shared source of live
+command syntax.
 
 ## Verify
 

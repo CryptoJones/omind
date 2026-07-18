@@ -22,14 +22,17 @@ from typing import Any
 
 from omind import filelock, paths
 
-PROFILES = ("low", "medium", "high")
+PROFILES = ("economy", "balanced", "full")
+PROFILE_ALIASES = {"high": "economy", "medium": "balanced", "low": "full"}
+ACCEPTED_PROFILES = (*PROFILES, *PROFILE_ALIASES)
 PROFILE_ENV = "OMI_AI_EXPENSE"
-DEFAULT_PROFILE = "low"
+DEFAULT_PROFILE = "economy"
 
 
 @dataclass(frozen=True)
 class ProfilePolicy:
     context_chars: int
+    preflight_chars: int
     verifier_task_chars: int
     verifier_material_chars: int
     checkpoint_actions: int
@@ -39,10 +42,17 @@ class ProfilePolicy:
 
 
 PROFILE_POLICIES: dict[str, ProfilePolicy] = {
-    "low": ProfilePolicy(48_000, 1_000, 2_000, 60, 30, True, True),
-    "medium": ProfilePolicy(24_000, 500, 1_000, 30, 15, True, True),
-    "high": ProfilePolicy(8_000, 1_000, 2_000, 0, 0, False, False),
+    "economy": ProfilePolicy(4_000, 1_500, 1_000, 2_000, 0, 0, False, False),
+    "balanced": ProfilePolicy(8_000, 2_500, 1_000, 2_000, 30, 15, False, False),
+    "full": ProfilePolicy(24_000, 4_000, 1_000, 2_000, 60, 30, True, True),
 }
+
+
+def normalize_profile(value: object) -> str | None:
+    clean = str(value or "").strip().lower()
+    if clean in PROFILES:
+        return clean
+    return PROFILE_ALIASES.get(clean)
 
 
 def _vault_key(omi_dir: Path | str) -> str:
@@ -66,13 +76,13 @@ def saved_profile(omi_dir: Path | str) -> str:
     except (OSError, ValueError, TypeError):
         return DEFAULT_PROFILE
     value = data.get("profile") if isinstance(data, dict) else None
-    return str(value) if value in PROFILES else DEFAULT_PROFILE
+    return normalize_profile(value) or DEFAULT_PROFILE
 
 
 def profile_info(omi_dir: Path | str) -> dict[str, str]:
     saved = saved_profile(omi_dir)
-    override = os.environ.get(PROFILE_ENV, "").strip().lower()
-    if override in PROFILES:
+    override = normalize_profile(os.environ.get(PROFILE_ENV, ""))
+    if override is not None:
         return {"saved": saved, "effective": override, "source": "environment"}
     return {
         "saved": saved,
@@ -90,9 +100,9 @@ def policy(omi_dir: Path | str) -> ProfilePolicy:
 
 
 def set_profile(omi_dir: Path | str, profile: str) -> dict[str, str]:
-    value = profile.strip().lower()
-    if value not in PROFILES:
-        raise ValueError(f"profile must be one of: {', '.join(PROFILES)}")
+    value = normalize_profile(profile)
+    if value is None:
+        raise ValueError(f"profile must be one of: {', '.join(ACCEPTED_PROFILES)}")
     path = profile_path(omi_dir)
     paths.atomic_write_text(path, json.dumps({"profile": value}, indent=2) + "\n", mode=0o600)
     return profile_info(omi_dir)
@@ -118,6 +128,7 @@ def log_event(
     characters: int = 0,
     avoided_tokens: int = 0,
     reason: str = "",
+    session_id: str = "",
     now: datetime | None = None,
 ) -> None:
     """Append a privacy-safe usage record. Never raises into an agent hook."""
@@ -138,6 +149,8 @@ def log_event(
         record["model"] = model[:120]
     if reason:
         record["reason"] = reason[:160]
+    if session_id:
+        record["session_id"] = session_id[:160]
     try:
         path = usage_path(omi_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -161,6 +174,110 @@ def record_priming(omi_dir: Path | str, characters: int, *, avoided_characters: 
         characters=characters,
         input_tokens=estimate_tokens(characters),
         avoided_tokens=estimate_tokens(avoided_characters),
+    )
+
+
+def record_context(
+    omi_dir: Path | str,
+    operation: str,
+    characters: int,
+    *,
+    session_id: str = "",
+) -> None:
+    """Record context inserted into the parent agent without retaining content."""
+    log_event(
+        omi_dir,
+        operation,
+        measurement="estimated",
+        characters=characters,
+        input_tokens=estimate_tokens(characters),
+        session_id=session_id,
+    )
+
+
+def record_mcp_response(omi_dir: Path | str, event: dict[str, Any]) -> None:
+    """Count an OMI MCP result visible to the parent agent, storing no payload."""
+    tool = str(event.get("tool_name") or "")
+    if not (tool.startswith("mcp__omi__") or tool.startswith("mcp_omi_")):
+        return
+    response = event.get("tool_response")
+    if response is None:
+        return
+    try:
+        characters = len(json.dumps(response, ensure_ascii=False, default=str))
+    except (TypeError, ValueError):
+        return
+    record_context(
+        omi_dir,
+        "mcp",
+        characters,
+        session_id=str(event.get("session_id") or ""),
+    )
+
+
+def record_session_transcript(
+    omi_dir: Path | str,
+    transcript_path: object,
+    *,
+    session_id: str = "",
+) -> None:
+    """Snapshot provider usage from a Claude JSONL transcript, privacy-safely.
+
+    Only numeric usage fields are retained. Repeated Stop hooks append newer
+    snapshots; :func:`usage_summary` keeps the latest snapshot per session.
+    """
+    try:
+        path = Path(str(transcript_path)).expanduser()
+        stream = path.open(encoding="utf-8", errors="replace")
+    except (OSError, ValueError):
+        return
+    totals = {
+        "input_tokens": 0,
+        "output_tokens": 0,
+        "cache_read_tokens": 0,
+        "cache_write_tokens": 0,
+    }
+    seen: set[str] = set()
+    try:
+        with stream:
+            for index, line in enumerate(stream):
+                try:
+                    item = json.loads(line)
+                except (ValueError, TypeError):
+                    continue
+                if not isinstance(item, dict) or item.get("type") != "assistant":
+                    continue
+                message = item.get("message")
+                if not isinstance(message, dict):
+                    continue
+                usage = message.get("usage")
+                if not isinstance(usage, dict):
+                    continue
+                identity = str(message.get("id") or item.get("uuid") or index)
+                if identity in seen:
+                    continue
+                seen.add(identity)
+                totals["input_tokens"] += _usage_int(usage, "input_tokens")
+                totals["output_tokens"] += _usage_int(usage, "output_tokens")
+                totals["cache_read_tokens"] += _usage_int(
+                    usage, "cache_read_input_tokens", "cache_read_tokens"
+                )
+                totals["cache_write_tokens"] += _usage_int(
+                    usage, "cache_creation_input_tokens", "cache_write_input_tokens"
+                )
+    except OSError:
+        return
+    if not any(totals.values()):
+        return
+    log_event(
+        omi_dir,
+        "session",
+        measurement="exact",
+        session_id=session_id or path.stem,
+        input_tokens=totals["input_tokens"],
+        output_tokens=totals["output_tokens"],
+        cache_read_tokens=totals["cache_read_tokens"],
+        cache_write_tokens=totals["cache_write_tokens"],
     )
 
 
@@ -233,17 +350,67 @@ def usage_summary(
             result[key] = value
         return result
 
-    operations: dict[str, dict[str, int]] = {}
-    for operation in ("priming", "verifier", "checkpoint"):
-        operations[operation] = totals([e for e in events if e.get("operation") == operation])
+    session_latest: dict[str, dict[str, Any]] = {}
+    attributable = [event for event in events if event.get("operation") != "session"]
+    for event in events:
+        if event.get("operation") != "session":
+            continue
+        session = str(event.get("session_id") or "")
+        if session:
+            session_latest[session] = event
+
+    operation_names = ("priming", "recall", "mcp", "verifier", "checkpoint")
+    operations = {
+        operation: totals([e for e in attributable if e.get("operation") == operation])
+        for operation in operation_names
+    }
+    attributed_totals = totals(attributable)
+    session_totals = totals(list(session_latest.values()))
+    subprocess_totals = totals(
+        [e for e in attributable if e.get("operation") in {"verifier", "checkpoint"}]
+    )
+
+    def traffic(values: dict[str, int]) -> int:
+        return sum(
+            values[key]
+            for key in ("input_tokens", "output_tokens", "cache_read_tokens", "cache_write_tokens")
+        )
+
+    attributable_traffic = traffic(attributed_totals)
+    provider_traffic = traffic(session_totals) + traffic(subprocess_totals)
+    # A percentage is meaningful only when the parent agent's transcript was
+    # observed. Subprocess-only traffic is still reported, but using it alone as
+    # the denominator can make OMI appear to exceed 100% of a session.
+    share = (
+        round(attributable_traffic * 100 / provider_traffic, 1)
+        if session_latest and provider_traffic
+        else None
+    )
+    priming_events = [e for e in attributable if e.get("operation") == "priming"]
     return {
         "since": since,
         "profile": profile_info(omi_dir),
         "events": len(events),
-        "totals": totals(events),
-        "exact": totals([e for e in events if e.get("measurement") == "exact"]),
-        "estimated": totals([e for e in events if e.get("measurement") == "estimated"]),
+        "totals": attributed_totals,
+        "exact": totals([e for e in attributable if e.get("measurement") == "exact"]),
+        "estimated": totals(
+            [e for e in attributable if e.get("measurement") == "estimated"]
+        ),
         "operations": operations,
+        "session": {
+            "count": len(session_latest),
+            "totals": session_totals,
+            "average_priming_tokens": (
+                round(operations["priming"]["input_tokens"] / len(priming_events))
+                if priming_events
+                else 0
+            ),
+        },
+        "traffic": {
+            "omi_attributable_tokens": attributable_traffic,
+            "provider_tokens": provider_traffic,
+            "omi_share_percent": share,
+        },
     }
 
 
@@ -336,4 +503,5 @@ def run_claude(
 def profile_payload(omi_dir: Path | str) -> dict[str, Any]:
     info: dict[str, Any] = profile_info(omi_dir)
     info["policies"] = {name: asdict(value) for name, value in PROFILE_POLICIES.items()}
+    info["aliases"] = dict(PROFILE_ALIASES)
     return info

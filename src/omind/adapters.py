@@ -138,7 +138,7 @@ def run_adapter(
             blocked, spec.block_format, sys.stdout, sys.stderr, event=""
         )
     action = normalize_action(event)
-    verdict = guard.check_action(action)
+    verdict = guard.check_action(action, omi_dir=omi_dir)
     # Codex's deny shape depends on which hook fired (PreToolUse vs
     # PermissionRequest); pass the event name through (ignored by other harnesses).
     return harness_mod.render_decision(

@@ -22,6 +22,8 @@ from pathlib import Path
 from mcp.server.fastmcp import FastMCP
 
 from omind import graph
+from omind.help_system import render_help
+from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
 from omind.store import ActionItem, NoteFields, OmiStore, parse_note
 
 SERVER_NAME = "omi"
@@ -90,8 +92,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     @mcp.tool(
         name="read-note",
         description=(
-            "Read one memory note: raw Markdown, parsed fields, and the version "
-            "token to pass as expected_version when editing."
+            "Read one memory note in the legacy full/editing representation: raw "
+            "Markdown, parsed fields, and a version token. Prefer recall-note for "
+            "ordinary memory retrieval because it avoids duplicate token payloads."
         ),
     )
     def read_note(name: str) -> dict[str, object]:
@@ -103,6 +106,21 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
             "fields": parse_note(raw).to_dict(),
             "version": store.note_version(name),
         }
+
+    @mcp.tool(
+        name="recall-note",
+        description=(
+            "Token-efficient memory recall. Returns title, summary, one bounded "
+            "content representation, and version. Use this instead of read-note "
+            "unless raw Markdown/parsed edit fields are required."
+        ),
+    )
+    def recall_note(
+        name: str,
+        max_chars: int = DEFAULT_RECALL_CHARS,
+        section: str = "",
+    ) -> dict[str, object]:
+        return compact_recall(store.omi_dir, name, max_chars=max_chars, section=section)
 
     @mcp.tool(
         name="create-note",
@@ -138,7 +156,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         name="edit-note",
         description=(
             "Update fields of an existing note; omitted fields keep their current "
-            "value. Pass expected_version from read-note to fail loudly (instead "
+            "value. Pass expected_version from recall-note/read-note to fail loudly (instead "
             "of overwriting) when another writer changed the note in between."
         ),
     )
@@ -182,10 +200,33 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         ),
     )
     def search_vault(
-        query: str, tag: str | None = None, include_archived: bool = False
-    ) -> list[dict[str, object]]:
+        query: str,
+        tag: str | None = None,
+        include_archived: bool = False,
+        limit: int = 5,
+        offset: int = 0,
+    ) -> dict[str, object]:
         results = store.search(query, tag=tag, include_disabled=include_archived)
-        return [s.__dict__ for s in results]
+        start = max(0, int(offset))
+        size = min(25, max(1, int(limit)))
+        page = results[start : start + size]
+        return {
+            "result": [s.__dict__ for s in page],
+            "count": len(page),
+            "offset": start,
+            "has_more": start + size < len(results),
+        }
+
+    @mcp.tool(
+        name="help",
+        description=(
+            "Authoritative omind command syntax generated from the installed CLI. "
+            "Use for `/omind help` and command-specific help such as `ai usage` "
+            "or `mesh sync`; never rely on stale skill-embedded syntax."
+        ),
+    )
+    def help_tool(command: str = "") -> dict[str, object]:
+        return render_help(command)
 
     @mcp.tool(
         name="list-notes",
