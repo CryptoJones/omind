@@ -20,15 +20,15 @@ def test_profile_default_saved_and_environment_override(
 ) -> None:
     omi = tmp_path / "OMI"
     assert ai_usage.profile_info(omi) == {
-        "saved": "low",
-        "effective": "low",
+        "saved": "economy",
+        "effective": "economy",
         "source": "default",
     }
-    assert ai_usage.set_profile(omi, "medium")["effective"] == "medium"
+    assert ai_usage.set_profile(omi, "medium")["effective"] == "balanced"
     monkeypatch.setenv(ai_usage.PROFILE_ENV, "high")
     assert ai_usage.profile_info(omi) == {
-        "saved": "medium",
-        "effective": "high",
+        "saved": "balanced",
+        "effective": "economy",
         "source": "environment",
     }
     with pytest.raises(ValueError):
@@ -139,14 +139,14 @@ def test_cli_profile_and_json_usage(tmp_path: Path, capsys: pytest.CaptureFixtur
     vault = tmp_path / "vault"
     args = ["--vault", str(vault), "--folder", "OMI"]
     assert main(["ai", "profile", "medium", *args]) == 0
-    assert "effective=medium" in capsys.readouterr().out
+    assert "effective=balanced" in capsys.readouterr().out
     assert main(["ai", "usage", "--since", "all", "--json", *args]) == 0
     payload = json.loads(capsys.readouterr().out)
-    assert payload["profile"]["effective"] == "medium"
+    assert payload["profile"]["effective"] == "balanced"
     assert payload["totals"]["input_tokens"] == 0
 
 
-def test_medium_verifier_caps_prompt_and_high_skips(
+def test_full_verifier_caps_prompt_and_lower_expense_profiles_skip(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from omind import verify
@@ -167,11 +167,70 @@ def test_medium_verifier_caps_prompt_and_high_skips(
         return "RELEVANT"
 
     monkeypatch.setattr(ai_usage, "run_claude", fake_run)
-    ai_usage.set_profile(omi, "medium")
+    ai_usage.set_profile(omi, "full")
     assert verify._ask_model("t" * 2_000, "m" * 4_000, omi) is True
     assert captured[-1][1] is True
-    assert "t" * 501 not in captured[-1][0]
-    assert "m" * 1_001 not in captured[-1][0]
-    ai_usage.set_profile(omi, "high")
+    assert "t" * 1_001 not in captured[-1][0]
+    assert "m" * 2_001 not in captured[-1][0]
+    ai_usage.set_profile(omi, "balanced")
     assert verify._ask_model("task", "material", omi) is True
     assert captured[-1][1] is False
+    ai_usage.set_profile(omi, "economy")
+    assert verify._ask_model("task", "material", omi) is True
+    assert captured[-1][1] is False
+
+
+def test_mcp_and_cache_inclusive_session_share_are_accounted_privately(
+    tmp_path: Path,
+) -> None:
+    omi = tmp_path / "OMI"
+    transcript = tmp_path / "session.jsonl"
+    assistant = {
+        "type": "assistant",
+        "message": {
+            "id": "msg-1",
+            "usage": {
+                "input_tokens": 100,
+                "output_tokens": 20,
+                "cache_read_input_tokens": 300,
+                "cache_creation_input_tokens": 80,
+            },
+        },
+    }
+    transcript.write_text(
+        json.dumps(assistant) + "\n" + json.dumps(assistant) + "\n",
+        encoding="utf-8",
+    )
+    ai_usage.record_session_transcript(omi, transcript, session_id="session-1")
+    ai_usage.record_priming(omi, 400)
+    ai_usage.record_mcp_response(
+        omi,
+        {
+            "tool_name": "mcp__omi__recall-note",
+            "session_id": "session-1",
+            "tool_response": {"content": "private memory text"},
+        },
+    )
+
+    summary = ai_usage.usage_summary(omi, since="all")
+    assert summary["session"]["count"] == 1
+    assert summary["session"]["totals"] == {
+        "input_tokens": 100,
+        "output_tokens": 20,
+        "cache_read_tokens": 300,
+        "cache_write_tokens": 80,
+        "avoided_tokens": 0,
+    }
+    assert summary["operations"]["mcp"]["input_tokens"] > 0
+    assert summary["traffic"]["provider_tokens"] == 500
+    assert summary["traffic"]["omi_share_percent"] is not None
+    ledger = ai_usage.usage_path(omi).read_text(encoding="utf-8")
+    assert "private memory text" not in ledger and "msg-1" not in ledger
+
+
+def test_share_is_unavailable_until_parent_session_usage_is_observed(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    ai_usage.record_priming(omi, 4_000)
+    summary = ai_usage.usage_summary(omi, since="all")
+    assert summary["traffic"]["provider_tokens"] == 0
+    assert summary["traffic"]["omi_share_percent"] is None

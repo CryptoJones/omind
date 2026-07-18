@@ -19,6 +19,7 @@ opening the secrets notes.
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -248,10 +249,12 @@ def suggest_message(task: str, omi_dir: Path | str, *, limit: int = 3) -> str:
     titles = relevant_titles(task, omi_dir, limit=limit) if task else []
     if not titles:
         return GATE_MESSAGE
-    links = ", ".join(f"[[{t}]]" for t in titles)
+    call = json.dumps({"name": titles[0]}, ensure_ascii=False, separators=(",", ":"))
+    alternatives = ", ".join(f"[[{title}]]" for title in titles[1:])
+    extra = f" Other candidates: {alternatives}." if alternatives else ""
     return (
-        "consult OMI before acting this turn — notes relevant to your task: "
-        f"{links} (or another note you know is on-point), then retry. One consult "
-        "clears the rest of the turn. This is NOT a prompt to open the "
-        "credential/auth notes."
+        f"ACTION BLOCKED. Relevant memory: [[{titles[0]}]]. "
+        f"Next call OMI MCP `recall-note` with `{call}`, then retry."
+        f"{extra} Do not open credential/auth notes unless the task is explicitly "
+        "about credentials."
     )

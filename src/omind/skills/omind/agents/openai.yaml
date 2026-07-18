@@ -1,0 +1,4 @@
+interface:
+  display_name: "omind"
+  short_description: "Recall memory and get live omind syntax"
+  default_prompt: "Use $omind to show the current omind command syntax."

@@ -27,9 +27,11 @@ from omind.server import build_server
 
 EXPECTED_TOOLS = {
     "read-note",
+    "recall-note",
     "create-note",
     "edit-note",
     "search-vault",
+    "help",
     "list-notes",
     "delete-note",
     "restore-note",
@@ -141,6 +143,66 @@ def test_search_vault(server: FastMCP) -> None:
     assert [h["filename"] for h in hits] == ["Alpha.md"]
     by_tag = call(server, "search-vault", {"query": "", "tag": "pets"})["result"]
     assert {h["filename"] for h in by_tag} == {"Alpha.md", "Beta.md"}
+
+
+def test_search_vault_is_bounded_and_pageable(server: FastMCP) -> None:
+    for number in range(7):
+        call(server, "create-note", {"title": f"Page {number}", "summary": "shared"})
+    first = call(server, "search-vault", {"query": "shared", "limit": 2})
+    second = call(
+        server,
+        "search-vault",
+        {"query": "shared", "limit": 2, "offset": 2},
+    )
+    assert first["count"] == 2 and first["has_more"] is True
+    assert second["count"] == 2 and second["offset"] == 2
+    assert {item["filename"] for item in first["result"]}.isdisjoint(
+        item["filename"] for item in second["result"]
+    )
+
+
+def test_recall_note_returns_one_bounded_representation(server: FastMCP) -> None:
+    call(
+        server,
+        "create-note",
+        {
+            "title": "Compact",
+            "summary": "short durable summary",
+            "details": "D" * 2_000,
+            "tags": ["memory"],
+        },
+    )
+    recalled = call(server, "recall-note", {"name": "Compact", "max_chars": 500})
+    assert set(recalled) == {
+        "filename",
+        "title",
+        "summary",
+        "content",
+        "section",
+        "truncated",
+        "version",
+    }
+    assert recalled["summary"] == "short durable summary"
+    assert len(recalled["content"]) <= 500
+    assert recalled["truncated"] is True
+    assert "raw" not in recalled and "fields" not in recalled
+
+    section = call(
+        server,
+        "recall-note",
+        {"name": "Compact", "section": "Details", "max_chars": 500},
+    )
+    assert section["section"] == "Details"
+
+
+def test_help_tool_is_generated_from_live_cli(server: FastMCP) -> None:
+    result = call(server, "help", {"command": "/omind help ai usage"})
+    assert result["ok"] is True
+    assert result["command"] == "omind ai usage"
+    assert "--since" in result["help"] and "--json" in result["help"]
+    unknown = call(server, "help", {"command": "ai usgae"})
+    assert unknown["ok"] is False
+    assert "usage" in unknown["error"]
 
 
 def test_backlinks_and_tags(server: FastMCP) -> None:

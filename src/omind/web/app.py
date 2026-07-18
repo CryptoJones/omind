@@ -65,7 +65,7 @@ class RawUpdate(BaseModel):
 
 
 class AIProfileUpdate(BaseModel):
-    profile: Literal["low", "medium", "high"]
+    profile: Literal["economy", "balanced", "full", "high", "medium", "low"]
 
 
 #: Host headers accepted by default (a localhost bind). ``testserver`` is

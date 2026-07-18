@@ -409,6 +409,62 @@ def test_reset_clears_gate_and_captures_task() -> None:
     assert guard.turn_task("t2") == "do the thing"  # task captured for the verifier
 
 
+def test_turn_preflight_recalls_relevant_memory_and_satisfies_soft_gate(
+    tmp_path: Path,
+) -> None:
+    from omind import ai_usage
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Token Usage Strategy",
+            summary="Keep OMI token usage bounded.",
+            details="Use compact recall and avoid duplicate note representations.",
+        )
+    )
+    event = {"session_id": "preflight-1", "prompt": "reduce OMI token usage"}
+    context = guard.preflight_turn(event, omi)
+    assert "[[Token Usage Strategy]]" in context
+    assert "compact recall" in context
+    assert guard.consulted_this_turn("preflight-1")
+    usage = ai_usage.read_events(omi)
+    assert usage[-1]["operation"] == "recall"
+
+    repeated = guard.preflight_turn(event, omi)
+    assert "already injected earlier this session" in repeated
+    assert "Keep OMI token usage bounded." in repeated
+    assert "compact recall" not in repeated
+
+
+def test_turn_preflight_without_match_leaves_gate_armed(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    context = guard.preflight_turn(
+        {"session_id": "preflight-none", "prompt": "unmatched subject"},
+        omi,
+    )
+    assert "search-vault" in context and "recall-note" in context
+    assert not guard.consulted_this_turn("preflight-none")
+
+
+def test_preflight_cli_emits_user_prompt_additional_context(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    rc = guard.run_guard(
+        "preflight",
+        io.StringIO(json.dumps({"session_id": "preflight-cli", "prompt": "unknown"})),
+        omi_dir=omi,
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "additionalContext" in payload["hookSpecificOutput"]
+
+
 def test_reset_with_no_session_clears_every_gate() -> None:
     """A by-hand ``omind guard reset`` (no session id) clears ALL gates — the
     recovery path, since a human un-wedging the gate cannot know the live sid."""
