@@ -64,7 +64,17 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,note,rollup,hook}",
+        metavar="{help,setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,note,rollup,hook}",
+    )
+
+    help_p = sub.add_parser(
+        "help",
+        help="show authoritative syntax for omind or a nested command",
+    )
+    help_p.add_argument(
+        "topic",
+        nargs=argparse.REMAINDER,
+        help="command path, for example `ai usage` or `mesh sync`",
     )
 
     setup = sub.add_parser(
@@ -404,8 +414,15 @@ def build_parser() -> argparse.ArgumentParser:
         "ai", help="inspect OMI-attributable token usage and select a model-expense profile"
     )
     ai_sub = ai.add_subparsers(dest="ai_command", required=True)
-    ai_profile = ai_sub.add_parser("profile", help="show or set low/medium/high expense mode")
-    ai_profile.add_argument("profile", nargs="?", choices=("low", "medium", "high"))
+    ai_profile = ai_sub.add_parser(
+        "profile",
+        help="show or set economy/balanced/full mode (legacy high/medium/low aliases work)",
+    )
+    ai_profile.add_argument(
+        "profile",
+        nargs="?",
+        choices=("economy", "balanced", "full", "high", "medium", "low"),
+    )
     _add_vault_args(ai_profile)
     ai_usage = ai_sub.add_parser("usage", help="summarize OMI-attributable token usage")
     ai_usage.add_argument(
@@ -490,6 +507,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=(
             "check",
             "reset",
+            "preflight",
             "learn",
             "escalate",
             "verify",
@@ -505,7 +523,7 @@ def build_parser() -> argparse.ArgumentParser:
             "resume",
             "repair",
         ),
-        help="check/reset the gate; learn/escalate rules; verify/suggest; adapter "
+        help="check/reset/preflight the gate; learn/escalate rules; verify/suggest; adapter "
         "normalizes another harness's event; selftest replays canned events; "
         "export-corpus emits fine-tuning JSONL; log/policy/status inspect the "
         "compliance log, active rules, and guardable harnesses; explain dry-runs a "
@@ -991,6 +1009,17 @@ def _run_ai(args: argparse.Namespace) -> int:
         f"estimated input {summary['estimated']['input_tokens']:,} | "
         f"estimated avoided {totals['avoided_tokens']:,}"
     )
+    traffic = summary["traffic"]
+    share = traffic["omi_share_percent"]
+    print(
+        f"OMI traffic {traffic['omi_attributable_tokens']:,} | "
+        f"provider traffic {traffic['provider_tokens']:,} | "
+        f"OMI share {f'{share:.1f}%' if share is not None else 'unavailable'}"
+    )
+    print(
+        f"sessions {summary['session']['count']:,} | "
+        f"average priming {summary['session']['average_priming_tokens']:,} tokens"
+    )
     for name, values in summary["operations"].items():
         print(
             f"  {name}: input {values['input_tokens']:,}, "
@@ -1138,9 +1167,25 @@ def _run_self_update(args: argparse.Namespace) -> int:
     return self_update(check_only=args.check, force=args.force)
 
 
+def _run_help(args: argparse.Namespace) -> int:
+    from omind.help_system import render_help
+
+    result = render_help(" ".join(args.topic))
+    if result.get("ok"):
+        print(result["help"])
+        return 0
+    print(f"error: {result['error']}", file=sys.stderr)
+    available = result.get("available") or []
+    if available:
+        print("available: " + ", ".join(available), file=sys.stderr)
+    return 2
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = build_parser()
     args = parser.parse_args(argv)
+    if args.command == "help":
+        return _run_help(args)
     if args.command == "setup":
         return _run_setup(args)
     if args.command == "quickstart":

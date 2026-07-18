@@ -22,6 +22,20 @@ def test_version_is_set() -> None:
     assert omind.__version__ == declared.group(1)
 
 
+def test_help_command_uses_live_nested_parser(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["help", "ai", "usage"]) == 0
+    output = capsys.readouterr().out
+    assert "usage: omind ai usage" in output
+    assert "--since" in output and "--json" in output
+
+
+def test_help_command_reports_unknown_component(capsys: pytest.CaptureFixture[str]) -> None:
+    assert main(["help", "ai", "usgae"]) == 2
+    error = capsys.readouterr().err
+    assert "unknown command component" in error
+    assert "usage" in error
+
+
 def test_doctor_subcommand_parses() -> None:
     args = build_parser().parse_args(["doctor", "--folder", "OMI", "--server-name", "obsidian"])
     assert args.command == "doctor"

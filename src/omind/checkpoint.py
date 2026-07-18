@@ -154,7 +154,7 @@ def _llm_narrative(
     limits = ai_usage.policy(omi_dir) if omi_dir is not None else None
     action_limit = limits.checkpoint_actions if limits else 60
     guard_limit = limits.checkpoint_guard_events if limits else 30
-    # A high-expense profile still builds the prompt shape so the skipped event
+    # A model-disabled profile still builds the prompt shape so the skipped event
     # can report an avoided-token estimate without exposing its contents.
     lines = [
         f"{a['time']} {a['event']} {a['tool']} {a['detail']}"

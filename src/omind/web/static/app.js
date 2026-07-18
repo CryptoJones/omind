@@ -71,7 +71,8 @@ const I18N = {
     cacheTokens: "Cache tokens", avoidedTokens: "Estimated avoided",
     exactUsage: "Provider-reported", estimatedUsage: "Estimated",
     attributionNote: "OMI overhead only · profiles do not select the model",
-    operation: "Operation", profileSaved: "Profile saved.",
+    operation: "Operation", omiShare: "OMI share", averagePriming: "Avg. priming",
+    profileSaved: "Profile saved.",
   },
   es: {
     tagline: "memoria", search: "buscar…", theme: "Tema", language: "Idioma",
@@ -104,7 +105,8 @@ const I18N = {
     cacheTokens: "Tokens en caché", avoidedTokens: "Ahorro estimado",
     exactUsage: "Informado por el proveedor", estimatedUsage: "Estimado",
     attributionNote: "Solo sobrecarga de OMI · los perfiles no eligen el modelo",
-    operation: "Operación", profileSaved: "Perfil guardado.",
+    operation: "Operación", omiShare: "Proporción OMI", averagePriming: "Promedio inicial",
+    profileSaved: "Perfil guardado.",
   },
   fr: {
     tagline: "mémoire", search: "rechercher…", theme: "Thème", language: "Langue",
@@ -138,7 +140,8 @@ const I18N = {
     cacheTokens: "Jetons en cache", avoidedTokens: "Économie estimée",
     exactUsage: "Rapporté par le fournisseur", estimatedUsage: "Estimé",
     attributionNote: "Surcharge OMI uniquement · le profil ne choisit pas le modèle",
-    operation: "Opération", profileSaved: "Profil enregistré.",
+    operation: "Opération", omiShare: "Part OMI", averagePriming: "Amorçage moyen",
+    profileSaved: "Profil enregistré.",
   },
   ar: {
     tagline: "ذاكرة", search: "بحث…", theme: "السمة", language: "اللغة",
@@ -170,7 +173,8 @@ const I18N = {
     cacheTokens: "رموز التخزين المؤقت", avoidedTokens: "التوفير التقديري",
     exactUsage: "حسب تقرير المزوّد", estimatedUsage: "تقديري",
     attributionNote: "تكلفة OMI فقط · الملفات لا تختار النموذج",
-    operation: "العملية", profileSaved: "تم حفظ الملف.",
+    operation: "العملية", omiShare: "حصة OMI", averagePriming: "متوسط التهيئة",
+    profileSaved: "تم حفظ الملف.",
   },
   ru: {
     tagline: "память", search: "поиск…", theme: "Тема", language: "Язык",
@@ -202,7 +206,8 @@ const I18N = {
     cacheTokens: "Токены кэша", avoidedTokens: "Оценка экономии",
     exactUsage: "Отчёт провайдера", estimatedUsage: "Оценка",
     attributionNote: "Только накладные расходы OMI · профиль не выбирает модель",
-    operation: "Операция", profileSaved: "Профиль сохранён.",
+    operation: "Операция", omiShare: "Доля OMI", averagePriming: "Средний прогрев",
+    profileSaved: "Профиль сохранён.",
   },
   zh: {
     tagline: "记忆", search: "搜索…", theme: "主题", language: "语言",
@@ -232,7 +237,8 @@ const I18N = {
     cacheTokens: "缓存令牌", avoidedTokens: "预计节省",
     exactUsage: "提供商报告", estimatedUsage: "估算",
     attributionNote: "仅 OMI 开销 · 配置不会选择模型",
-    operation: "操作", profileSaved: "配置已保存。",
+    operation: "操作", omiShare: "OMI 占比", averagePriming: "平均预加载",
+    profileSaved: "配置已保存。",
   },
 };
 
@@ -786,7 +792,7 @@ async function openAI(since = "7d") {
           <h2 class="sheet-title">${escapeHtml(t("aiUsage"))}</h2></div>
           <div class="ai-controls">
             <label>${escapeHtml(t("expenseProfile"))}<select id="ai-profile" class="lang-select">
-              ${["low", "medium", "high"].map((name) => `<option value="${name}" ${name === profile.effective ? "selected" : ""}>${name}</option>`).join("")}
+              ${["economy", "balanced", "full"].map((name) => `<option value="${name}" ${name === profile.effective ? "selected" : ""}>${name}</option>`).join("")}
             </select></label>
             <label>${escapeHtml(t("window"))}<select id="ai-window" class="lang-select">
               ${["24h", "7d", "30d", "all"].map((name) => `<option value="${name}" ${name === since ? "selected" : ""}>${name}</option>`).join("")}
@@ -798,6 +804,8 @@ async function openAI(since = "7d") {
           <div class="ai-stat"><span>${escapeHtml(t("outputTokens"))}</span><strong>${tokenNumber(totals.output_tokens)}</strong></div>
           <div class="ai-stat"><span>${escapeHtml(t("cacheTokens"))}</span><strong>${tokenNumber(totals.cache_read_tokens + totals.cache_write_tokens)}</strong></div>
           <div class="ai-stat"><span>${escapeHtml(t("avoidedTokens"))}</span><strong>${tokenNumber(totals.avoided_tokens)}</strong></div>
+          <div class="ai-stat"><span>${escapeHtml(t("omiShare"))}</span><strong>${usage.traffic.omi_share_percent == null ? "—" : `${usage.traffic.omi_share_percent}%`}</strong></div>
+          <div class="ai-stat"><span>${escapeHtml(t("averagePriming"))}</span><strong>${tokenNumber(usage.session.average_priming_tokens)}</strong></div>
         </div>
         <div class="ai-measurement">
           <span>${escapeHtml(t("exactUsage"))}: ${tokenNumber(exact.input_tokens + exact.output_tokens)}</span>

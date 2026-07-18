@@ -7,6 +7,58 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.0] - 2026-07-18
+
+### Added
+- **Live `/omind help` backed by the installed command tree.** The `omi` MCP
+  server now exposes a `help` tool generated directly from argparse, while the
+  CLI provides the same source through `omind help [command path]`. A packaged,
+  validated `omind` skill is installed for Claude Code and Codex and routes
+  `/omind help`/`$omind` requests to that live tool instead of embedding syntax
+  that can drift.
+- **Token-efficient MCP recall.** `recall-note` returns one bounded memory
+  representation (optionally one Markdown section) instead of the raw-plus-
+  parsed duplication required for editing. `search-vault` defaults to five
+  results and supports bounded pagination; `read-note` remains the raw editing
+  contract.
+- **Proactive turn-time memory injection.** Claude `UserPromptSubmit` and Hermes
+  `pre_llm_call` now deterministically recall one relevant compact memory before
+  the model acts, satisfying the ordinary consult gate without requiring a
+  lower-capability model to recover from a `PreToolUse` error. Unchanged notes
+  are deduplicated to their summary for the rest of the session.
+
+### Changed
+- **Economy is now the safe default.** Profiles are named `economy`, `balanced`,
+  and `full`, with hard SessionStart/preflight limits of 4k/1.5k, 8k/2.5k, and
+  24k/4k characters. Economy and balanced use deterministic verification;
+  optional verifier/checkpoint model calls are full-only. Legacy
+  `high`/`medium`/`low` settings map to economy/balanced/full.
+- **SessionStart is a compact capsule, not a vault dump.** It keeps standing
+  directives, recent-memory titles, concise identity/workflow/operator rules,
+  and only a cwd-matched project handoff. Full notes and auto-journal trails are
+  recalled on demand and every profile is hard-bounded.
+- **Actionable guard failures.** Soft-gate and repo-rule blocks now identify the
+  exact MCP operation and arguments to call next. The ordinary gate is normally
+  satisfied by proactive preflight; rule-specific hard prerequisites remain
+  independent and cannot be bypassed by a general recall.
+- **Codex receives the complete help/accounting integration.** Setup installs
+  the packaged skill plus a trusted `PostToolUse` hook alongside MCP, guard,
+  SessionStart, and AGENTS bootstrap wiring; doctor verifies both additions.
+
+### Fixed
+- **OMI attribution includes the traffic users actually see.** The privacy-safe
+  ledger now counts compact recalls and serialized OMI MCP responses, snapshots
+  numeric Claude session usage at Stop, includes cache reads/writes in both
+  provider traffic and the OMI-share denominator, and reports average priming.
+  No prompt, response, note body, message ID, or credential is retained.
+- Add the HTTPX2 development dependency preferred by Starlette 1.2's TestClient,
+  keeping the web test suite on its supported client implementation.
+
+### Security
+- Refresh the locked MCP, Starlette, cryptography, msgpack, and
+  pydantic-settings dependency set to advisory-fixed compatible releases; the
+  4.2.0 release environment passes `pip-audit` with no known vulnerabilities.
+
 ## [4.0.0] - 2026-07-16
 
 ### Added

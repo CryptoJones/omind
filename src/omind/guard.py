@@ -53,14 +53,15 @@ from typing import Any, TextIO
 from omind import compliance, paths, policy
 
 GATE_MESSAGE = (
-    "consult OMI before acting this turn — read a note relevant to your task "
-    "(an OMI search or read), then retry. One consult clears the rest of the "
-    "turn. This is NOT a prompt to open the credential/auth notes."
+    "ACTION BLOCKED. Next call OMI MCP `search-vault` with a focused task query, "
+    "then call `recall-note` on one result and retry the blocked action. Do not "
+    "open credential/auth notes unless the task is explicitly about credentials."
 )
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
-    "repo work requires reading OMI note `Operational Rules - Git Repos and Secrets` "
-    "this turn; a generic project-memory consult is not enough."
+    "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
+    '`{"name":"Operational Rules - Git Repos and Secrets"}`, then retry. '
+    "Repo work requires that specific memory this turn."
 )
 GIT_FRESHNESS_MESSAGE = (
     "repo work requires a same-turn freshness check before "
@@ -117,6 +118,30 @@ def _turn_path(session: str) -> Path:
     reset so the verifier (Layer C) and retrieval know what the agent is working
     on. A sibling of the gate sentinel, so both turn-start paths agree."""
     return paths.state_dir() / f"turn-{_safe_sid(session)}.txt"
+
+
+def _injected_path(session: str) -> Path:
+    """Per-session note versions already injected by proactive turn preflight."""
+    return paths.state_dir() / f"injected-{_safe_sid(session)}.json"
+
+
+def _injected_versions(session: str) -> dict[str, str]:
+    try:
+        value = json.loads(_injected_path(session).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
+def _record_injected(session: str, filename: str, version: str) -> None:
+    if not session or not filename:
+        return
+    with contextlib.suppress(OSError):
+        path = _injected_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        values = _injected_versions(session)
+        values[filename] = version
+        paths.atomic_write_text(path, json.dumps(values), mode=0o600)
 
 
 def begin_turn(session: str, task: str) -> None:
@@ -483,7 +508,15 @@ def clear_all_gates() -> None:
     state = paths.state_dir()
     # ``turn-*`` holds the captured raw prompt; it was never reaped, so those
     # files accumulated unboundedly (and leaked prompt text) across sessions.
-    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*", "git-fresh-*", "turn-*"):
+    for pattern in (
+        "gate-*",
+        "reclose-*",
+        "pending-*",
+        "offtopic-*",
+        "git-fresh-*",
+        "turn-*",
+        "injected-*",
+    ):
         try:
             stale = list(state.glob(pattern))
         except OSError:
@@ -1064,7 +1097,7 @@ def decide(action: dict[str, Any]) -> Verdict:
     return Verdict(allow=False, reason=f"omi-gate: {GATE_MESSAGE}", rule_id="omi-gate")
 
 
-def check_action(action: dict[str, Any]) -> Verdict:
+def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict:
     """Decide an action and log a real policy-rule deny to the compliance log.
 
     The shared core behind ``omind guard check`` and the per-harness adapters
@@ -1072,6 +1105,15 @@ def check_action(action: dict[str, Any]) -> Verdict:
     routine ``omi-gate`` "you didn't consult" deny is friction, not logged.
     """
     verdict = decide(action)
+    if not verdict.allow and verdict.rule_id == "omi-gate" and omi_dir is not None:
+        from omind import retrieve
+
+        session = str(action.get("session") or "")
+        verdict = Verdict(
+            allow=False,
+            reason=f"omi-gate: {retrieve.suggest_message(turn_task(session), omi_dir)}",
+            rule_id=verdict.rule_id,
+        )
     if not verdict.allow and verdict.rule_id and verdict.rule_id != "omi-gate":
         compliance.log_event(
             compliance.KIND_DECISION,
@@ -1134,6 +1176,8 @@ def run_guard(
             # session is stuck. (The hook path always supplies a session.)
             clear_all_gates()
         return 0
+    if action_name == "preflight":
+        return _run_preflight(_load(src), omi_dir)
     if action_name == "learn":
         return _run_learn(_load(src), omi_dir)
     if action_name == "escalate":
@@ -1178,10 +1222,76 @@ def run_guard(
         sys.stderr.write(f"exported {count} corpus example(s)\n")
         return 0
     if action_name == "check":
-        verdict = check_action(_load(src))
+        verdict = check_action(_load(src), omi_dir=omi_dir)
         if not verdict.allow:
             sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
         return verdict.exit_code
+    return 0
+
+
+def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
+    """Prepare one turn with compact relevant memory and satisfy the soft gate.
+
+    Hard policy prerequisites still run before the soft gate, so a general
+    preflight memory cannot bypass the specific git-rules/freshness controls.
+    """
+    session = str(data.get("session_id") or data.get("session") or "")
+    task = str(data.get("prompt") or data.get("user_prompt") or "")
+    clear_gate(session)
+    begin_turn(session, task)
+    if gate_paused() or omi_dir is None:
+        return ""
+
+    from omind import ai_usage, recall, retrieve
+
+    titles = retrieve.relevant_titles(task, omi_dir, limit=1) if task else []
+    filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
+    if filename is None:
+        return (
+            "OMI turn preflight found no confident memory match. The consult gate "
+            "remains armed. Before any non-memory tool, call OMI MCP `search-vault` "
+            "with a focused query, then `recall-note` on one result."
+        )
+
+    memory = recall.compact_recall(
+        omi_dir,
+        filename,
+        max_chars=ai_usage.policy(omi_dir).preflight_chars,
+    )
+    version = str(memory.get("version") or "")
+    repeated = _injected_versions(session).get(filename) == version
+    summary = str(memory.get("summary") or "").strip()
+    excerpt = str(memory.get("content") or "").strip()
+    content = summary if repeated else "\n\n".join(
+        part for part in (summary, excerpt) if part and part != summary
+    )
+    if not content:
+        content = str(memory.get("title") or filename)
+    record_consult(session, kind="preflight", target=filename, relevant=True)
+    reset_offtopic(session)
+    _record_injected(session, filename, version)
+    context = (
+        f"OMI turn preflight recalled [[{memory.get('title') or Path(filename).stem}]]"
+        + (" (full excerpt already injected earlier this session)" if repeated else "")
+        + ". Treat this as durable local memory; the current user instruction wins "
+        "on conflict.\n\n"
+        + content
+    )
+    ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
+    return context
+
+
+def _run_preflight(data: dict[str, Any], omi_dir: Path | None) -> int:
+    """Claude UserPromptSubmit adapter: inject preflight beside the user prompt."""
+    context = preflight_turn(data, omi_dir)
+    if context:
+        payload = {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context,
+            }
+        }
+        sys.stdout.write(json.dumps(payload) + "\n")
     return 0
 
 

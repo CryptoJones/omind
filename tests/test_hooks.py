@@ -39,16 +39,14 @@ def _action_bullets(text: str) -> list[str]:
 # -- naming ------------------------------------------------------------------
 
 
-def test_playbook_is_primed_every_session(tmp_path: Path) -> None:
-    """The Playbook is a priming file injected verbatim at SessionStart, so its
-    operator rules reach a fresh instance whether or not it reads the vault."""
+def test_playbook_rules_are_compiled_into_each_session_capsule(tmp_path: Path) -> None:
     assert "Playbook.md" in hooks.PRIMING_FILES
     (tmp_path / "Playbook.md").write_text(
         "# OMI Playbook\n\n- sudo -> fleet-sudo; never hand CJ homework.\n",
         encoding="utf-8",
     )
     ctx = hooks.build_session_start_context(tmp_path)
-    assert "OMI/Playbook.md" in ctx
+    assert "OMI capsule: Playbook.md" in ctx
     assert "fleet-sudo" in ctx
 
 
@@ -251,17 +249,22 @@ def test_run_hook_session_start_emits_context_no_journal(tmp_path: Path) -> None
 
 
 def test_session_start_injects_priming_note_content(tmp_path: Path) -> None:
-    (tmp_path / "index.md").write_text("RECENT: [[Some Memory]]", encoding="utf-8")
+    (tmp_path / "index.md").write_text(
+        "## Recent Memories\n- [[Some Memory]] — useful context\n",
+        encoding="utf-8",
+    )
     (tmp_path / "Memory Workflow.md").write_text("OMI is the source", encoding="utf-8")
     (tmp_path / "CLAUDE CODE PERSONALITY.md").write_text("You are Dix", encoding="utf-8")
     ctx = hooks.build_session_start_context(tmp_path)
-    assert "RECENT: [[Some Memory]]" in ctx  # content injected, not just a reminder
+    assert "[[Some Memory]]" in ctx
     assert "You are Dix" in ctx
-    assert "===== OMI/index.md =====" in ctx
+    assert "===== OMI capsule: index.md =====" in ctx
 
 
 def test_session_start_caps_runaway_note(tmp_path: Path) -> None:
-    (tmp_path / "index.md").write_text("x" * (hooks._PRIMING_FILE_CHAR_CAP + 500), encoding="utf-8")
+    (tmp_path / "Playbook.md").write_text(
+        "x" * (hooks._PRIMING_FILE_CHAR_CAP + 500), encoding="utf-8"
+    )
     ctx = hooks.build_session_start_context(tmp_path)
     assert "…[truncated]" in ctx
 
@@ -286,17 +289,19 @@ def isolated_state(monkeypatch, tmp_path: Path):  # type: ignore[no-untyped-def]
 def test_pre_llm_call_emits_context_once_per_session(
     tmp_path: Path, isolated_state: Path
 ) -> None:
-    (tmp_path / "index.md").write_text("RECENT: [[A Memory]]", encoding="utf-8")
+    (tmp_path / "index.md").write_text("- [[A Memory]] — relevant\n", encoding="utf-8")
     event = '{"session_id": "sess-abc-123"}'
 
     first = io.StringIO()
     hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO(event), stdout=first)
     payload = json.loads(first.getvalue())
-    assert "RECENT: [[A Memory]]" in payload["context"]  # primed on first turn
+    assert "[[A Memory]]" in payload["context"]  # primed on first turn
 
     second = io.StringIO()
     hooks.run_hook("pre_llm_call", tmp_path, stdin=io.StringIO(event), stdout=second)
-    assert second.getvalue() == ""  # same session -> silent no-op
+    second_payload = json.loads(second.getvalue())
+    assert "OMI capsule" not in second_payload["context"]  # priming is once per session
+    assert "consult gate remains armed" in second_payload["context"]  # preflight is every turn
 
 
 def test_pre_llm_call_primes_each_call_without_session_id(
@@ -323,18 +328,46 @@ def test_pre_llm_call_never_raises_on_garbage(
 
 def _write_priming_files(omi: Path, body: str | None = None) -> None:
     for name in hooks.PRIMING_FILES:
-        (omi / name).write_text(body if body is not None else f"BODY OF {name}",
-                                encoding="utf-8")
+        text = body if body is not None else f"BODY OF {name}"
+        if name == "index.md":
+            text = "## Standing Directives\n" + text
+        (omi / name).write_text(text, encoding="utf-8")
 
 
 def test_session_start_injects_newest_session_state_by_name(tmp_path: Path) -> None:
     _write_priming_files(tmp_path)
-    (tmp_path / "Session State 2026-06-01.md").write_text("OLD STATE", encoding="utf-8")
-    (tmp_path / "Session State 2026-06-09.md").write_text("NEW STATE", encoding="utf-8")
-    ctx = hooks.build_session_start_context(tmp_path)
+    (tmp_path / "Session State omind 2026-06-01.md").write_text(
+        "OLD STATE", encoding="utf-8"
+    )
+    (tmp_path / "Session State omind 2026-06-09.md").write_text(
+        "NEW STATE", encoding="utf-8"
+    )
+    ctx = hooks.build_session_start_context(tmp_path, cwd="/work/repos/omind")
     assert "NEW STATE" in ctx  # newest filename wins
     assert "OLD STATE" not in ctx  # older handoffs stay out of context
-    assert "===== OMI/Session State 2026-06-09.md (latest session state) =====" in ctx
+    assert "OMI capsule: Session State omind 2026-06-09.md (project handoff)" in ctx
+
+
+def test_session_start_selects_only_cwd_matched_project_handoff(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path)
+    (tmp_path / "Session State omind 2026-06-09.md").write_text(
+        "OMIND HANDOFF", encoding="utf-8"
+    )
+    (tmp_path / "Session State website 2026-06-10.md").write_text(
+        "WEBSITE HANDOFF", encoding="utf-8"
+    )
+    ctx = hooks.build_session_start_context(tmp_path, cwd="/work/repos/omind")
+    assert "OMIND HANDOFF" in ctx
+    assert "WEBSITE HANDOFF" not in ctx
+
+
+def test_session_start_matches_handoff_content_and_requires_cwd(tmp_path: Path) -> None:
+    _write_priming_files(tmp_path)
+    state = tmp_path / "Session State 2026-06-09.md"
+    state.write_text("Current project: omind\nCONTENT MATCH", encoding="utf-8")
+    assert "CONTENT MATCH" not in hooks.build_session_start_context(tmp_path)
+    matched = hooks.build_session_start_context(tmp_path, cwd="/work/repos/omind")
+    assert "CONTENT MATCH" in matched
 
 
 def test_session_start_missing_session_state_degrades_to_static(tmp_path: Path) -> None:
@@ -353,32 +386,40 @@ def test_session_start_journal_tail_is_last_bullets_only(tmp_path: Path) -> None
         bullet = f"- 14:32 [session abcd1234] PostToolUse Bash -> c{i:02d} (ok)"
         hooks.append_entry(tmp_path, bullet, _NOW)
     ctx = hooks.build_session_start_context(tmp_path)
-    assert "recent actions (auto-journal)" in ctx
+    assert "auto-journal" not in ctx
     assert "OLD-J" not in ctx  # only the newest journal is primed
-    assert "-> c24 (ok)" in ctx  # newest bullets kept
+    assert "-> c24 (ok)" not in ctx  # action trails are recalled on demand
     assert "-> c04 (ok)" not in ctx  # bullets beyond the tail dropped
     tail = [ln for ln in ctx.splitlines() if ln.startswith("- 14:32 [session abcd1234]")]
-    assert len(tail) == hooks._JOURNAL_TAIL_BULLETS
+    assert tail == []
     assert "- Created:" not in ctx  # metadata list lines are not action bullets
 
 
 def test_session_start_total_cap_truncates_dynamic_first(tmp_path: Path) -> None:
+    from omind import ai_usage
+
+    ai_usage.set_profile(tmp_path, "full")
     per = 42_000 // len(hooks.PRIMING_FILES) - 80  # ~42k static total, regardless of count
     _write_priming_files(tmp_path, body="s" * per + " STATIC-END")
-    state = tmp_path / "Session State 2026-06-09.md"
+    state = tmp_path / "Session State omind 2026-06-09.md"
     state.write_text("d" * hooks._PRIMING_FILE_CHAR_CAP, encoding="utf-8")
-    ctx = hooks.build_session_start_context(tmp_path)
+    ctx = hooks.build_session_start_context(tmp_path, cwd="/work/repos/omind")
     assert len(ctx) <= hooks._TOTAL_CONTEXT_CHAR_CAP
     for name in hooks.PRIMING_FILES:
-        assert f"===== OMI/{name} =====" in ctx  # every static note gets a floor
-    assert "dddd" in ctx  # 20% remains reserved for dynamic state
+        assert f"===== OMI capsule: {name} =====" in ctx
+    assert "dddd" in ctx  # matched handoff keeps a bounded capsule section
     assert "…[truncated]" in ctx
 
 
 def test_session_start_reserves_dynamic_when_static_fills_cap(tmp_path: Path) -> None:
+    from omind import ai_usage
+
+    ai_usage.set_profile(tmp_path, "full")
     _write_priming_files(tmp_path, body="s" * hooks._PRIMING_FILE_CHAR_CAP)  # ~48k static
-    (tmp_path / "Session State 2026-06-09.md").write_text("DYNAMIC-STATE", encoding="utf-8")
-    ctx = hooks.build_session_start_context(tmp_path)
+    (tmp_path / "Session State omind 2026-06-09.md").write_text(
+        "DYNAMIC-STATE", encoding="utf-8"
+    )
+    ctx = hooks.build_session_start_context(tmp_path, cwd="/work/repos/omind")
     assert "DYNAMIC-STATE" in ctx
     assert len(ctx) <= hooks._TOTAL_CONTEXT_CHAR_CAP
 
@@ -387,15 +428,15 @@ def test_session_start_expense_profiles_apply_hard_caps(tmp_path: Path) -> None:
     from omind import ai_usage
 
     _write_priming_files(tmp_path, body="x" * hooks._PRIMING_FILE_CHAR_CAP)
-    for name, cap in (("medium", 24_000), ("high", 8_000)):
+    for name, cap in (("full", 24_000), ("balanced", 8_000), ("economy", 4_000)):
         ai_usage.set_profile(tmp_path, name)
         context = hooks.build_session_start_context(tmp_path)
         assert len(context) <= cap
         for priming in hooks.PRIMING_FILES:
-            assert f"===== OMI/{priming} =====" in context
+            assert f"===== OMI capsule: {priming} =====" in context
     hooks.emit_session_start_context(tmp_path, out=io.StringIO())
     event = ai_usage.read_events(tmp_path)[-1]
-    assert event["profile"] == "high"
+    assert event["profile"] == "economy"
     assert event["avoided_tokens"] > 0
 
 
@@ -517,7 +558,7 @@ def test_session_start_context_surfaces_update_nudge(
     ctx = hooks.build_session_start_context(tmp_path)
     assert ctx.startswith("⚠️")  # surfaced at the very top
     assert "omind 9.9.9 is available" in ctx
-    assert "OMI memory is the source of truth" in ctx  # priming still present
+    assert "OMI is the durable-memory source of truth" in ctx
 
 
 def test_session_start_context_no_nudge_when_up_to_date(
@@ -541,5 +582,5 @@ def test_session_start_context_survives_nudge_failure(
 
     monkeypatch.setattr(update, "update_nudge", boom)
     ctx = hooks.build_session_start_context(tmp_path)  # must never raise
-    assert "OMI memory is the source of truth" in ctx
+    assert "OMI is the durable-memory source of truth" in ctx
     assert "⚠️" not in ctx

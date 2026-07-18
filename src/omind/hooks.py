@@ -53,20 +53,20 @@ JOURNAL_DIRNAME = "Journal"  # subfolder keeping dailies out of listings/index
 JOURNAL_TAGS = ("session-journal", "omi")
 _TARGET_LIMIT = 80
 
-# Notes whose *content* is injected verbatim at SessionStart so OMI is in
-# context whether or not the agent remembers to read it. Order = priming order.
+# Notes compiled into a concise SessionStart capsule. Rich note bodies stay in
+# OMI and are recalled just-in-time from the user prompt instead of being copied
+# wholesale into every conversation.
 PRIMING_FILES = ("index.md", "Playbook.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
 _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood context
 
-# Dynamic priming: the newest handoff note and the tail of today's auto-journal
-# are injected after the static files, under a whole-payload budget. Static
-# files always win the budget; dynamic sections truncate (or drop) first.
+# Dynamic priming: include a session handoff only when its name matches the
+# current working directory. Auto-journal actions remain searchable but are not
+# injected at session start.
 _SESSION_STATE_GLOB = "Session State *.md"
 _JOURNAL_GLOB = paths.JOURNAL_GLOB
 _JOURNAL_TAIL_BULLETS = 20
-# Backward-compatible name for the low-expense/default cap. Runtime selection
-# lives in :mod:`omind.ai_usage`.
-_TOTAL_CONTEXT_CHAR_CAP = 48_000
+# Maximum canonical "full" capsule. Runtime selection lives in ai_usage.
+_TOTAL_CONTEXT_CHAR_CAP = 24_000
 _TRUNCATION_MARKER = "\n…[truncated]"
 
 
@@ -343,6 +343,77 @@ def _update_nudge_line() -> str | None:
     return f"⚠️ {nudge}" if nudge else None
 
 
+def _clip(text: str, limit: int) -> str:
+    clean = text.strip()
+    if len(clean) <= limit:
+        return clean
+    return clean[: max(0, limit - len(_TRUNCATION_MARKER))].rstrip() + _TRUNCATION_MARKER
+
+
+def _index_digest(text: str, limit: int = 1_200) -> str:
+    """Keep standing directives plus a small recent-memory catalog."""
+    lines = text.splitlines()
+    kept: list[str] = []
+    in_standing = False
+    recent = 0
+    for line in lines:
+        if line.startswith("## Standing Directives"):
+            in_standing = True
+            kept.append(line)
+            continue
+        if in_standing and line.startswith("## "):
+            in_standing = False
+        if in_standing:
+            kept.append(line)
+            continue
+        if line.startswith("- [[") and recent < 8:
+            if recent == 0:
+                kept.extend(["", "## Recent memory catalog"])
+            kept.append(line)
+            recent += 1
+    return _clip("\n".join(kept), limit)
+
+
+def _note_digest(text: str, limit: int) -> str:
+    """Strip redundant frontmatter/metadata from a priming note."""
+    try:
+        from omind.store import parse_note
+
+        fields = parse_note(text)
+        parts = [fields.summary, fields.details, fields.lead]
+        digest = "\n\n".join(part.strip() for part in parts if part.strip())
+    except Exception:
+        digest = ""
+    return _clip(digest or text, limit)
+
+
+def _select_session_state(directory: Path, cwd: Path | str | None) -> Path | None:
+    try:
+        matches = sorted(directory.glob(_SESSION_STATE_GLOB), key=lambda p: p.name, reverse=True)
+    except OSError:
+        return None
+    if not matches or cwd is None:
+        return None
+    location = Path(cwd)
+    tokens = {
+        part.casefold()
+        for part in (location.name, location.parent.name)
+        if len(part) >= 3 and part.casefold() not in {"repos", "source", "users", "home"}
+    }
+    scored: list[tuple[int, Path]] = []
+    for path in matches:
+        sample = ""
+        try:
+            with path.open(encoding="utf-8", errors="replace") as stream:
+                sample = stream.read(2_000).casefold()
+        except OSError:
+            pass
+        haystack = path.name.casefold() + "\n" + sample
+        scored.append((sum(token in haystack for token in tokens), path))
+    score, selected = max(scored, key=lambda item: (item[0], item[1].name))
+    return selected if score > 0 else None
+
+
 def _allocate_sections(
     sections: list[str], budget: int, *, minimum: int = 1_000
 ) -> list[str]:
@@ -379,45 +450,33 @@ def _allocate_sections(
 
 
 def build_session_start_context(
-    omi_dir: Path | str, *, _context_cap: int | None = None
+    omi_dir: Path | str,
+    *,
+    _context_cap: int | None = None,
+    cwd: Path | str | None = None,
 ) -> str:
     """Build the SessionStart ``additionalContext`` payload.
 
-    Injects the *content* of the OMI priming notes (:data:`PRIMING_FILES`)
-    directly so the vault is in context at session start without depending on
-    the agent issuing reads, then two dynamic sections: the newest
-    ``Session State YYYY-MM-DD`` handoff note and the last
-    :data:`_JOURNAL_TAIL_BULLETS` bullets of the newest auto-journal. The whole
-    payload is capped by the active AI expense profile. Every static note gets a
-    useful floor and 20% of the remaining budget is reserved for current dynamic
-    state. Falls back to a read-the-vault reminder if nothing can be read. Never
-    raises.
+    Compiles identity, workflow, hard operator rules, recent-memory titles, and
+    an optional cwd-matched handoff into a bounded capsule. Full notes and the
+    auto-journal stay out of always-on context and are recalled at turn start.
     """
     directory = Path(omi_dir)
     sections: list[str] = []
     for name in PRIMING_FILES:
         body = _read_priming_note(directory / name)
         if body is not None:
-            sections.append(f"===== OMI/{name} =====\n{body.rstrip()}")
+            digest = _index_digest(body) if name == "index.md" else _note_digest(body, 1_200)
+            if digest:
+                sections.append(f"===== OMI capsule: {name} =====\n{digest}")
 
-    dynamic: list[str] = []
-    state_path = _latest_by_name(directory, _SESSION_STATE_GLOB)
+    state_path = _select_session_state(directory, cwd)
     if state_path is not None:
         body = _read_priming_note(state_path)
         if body is not None:
-            dynamic.append(
-                f"===== OMI/{state_path.name} (latest session state) =====\n{body.rstrip()}"
-            )
-    # Journals live in Journal/ since the relocation; fall back to the vault
-    # root for a not-yet-migrated vault.
-    journal_path = _latest_by_name(journal_dir(directory), _JOURNAL_GLOB) or _latest_by_name(
-        directory, _JOURNAL_GLOB
-    )
-    if journal_path is not None:
-        tail = _journal_tail(journal_path)
-        if tail is not None:
-            dynamic.append(
-                f"===== OMI/{journal_path.name} — recent actions (auto-journal) =====\n{tail}"
+            sections.append(
+                f"===== OMI capsule: {state_path.name} (project handoff) =====\n"
+                f"{_note_digest(body, 1_200)}"
             )
 
     # An "omind X.Y.Z available" line, surfaced every session (not just once at
@@ -427,12 +486,12 @@ def build_session_start_context(
     prefix = f"{nudge}\n\n" if nudge else ""
 
     header = (
-        "OMI memory is the source of truth (do NOT use Claude Code's built-in "
-        "memory). The OMI vault lives at "
-        f"{directory}. Its priming notes are injected below — treat them as "
-        "already read. Read any [[wikilinked]] note you need before acting."
+        "OMI is the durable-memory source of truth. This is a compact session "
+        f"capsule from {directory}; full notes remain available through OMI MCP "
+        "search-vault and recall-note. Current explicit user instructions win "
+        "when they conflict with memory."
     )
-    if not sections and not dynamic:
+    if not sections:
         fallback = prefix + (
             header
             + " (Priming notes could not be read this session; read index.md, "
@@ -448,31 +507,22 @@ def build_session_start_context(
     cap = _context_cap or ai_usage.policy(omi_dir).context_chars
     base = prefix + header
     remaining = max(0, cap - len(base) - 2)
-    # Keep 20% of the available section budget for current state. The newest
-    # handoff gets 60% of that pool and the journal tail gets 40%; when either is
-    # absent the other naturally receives the whole pool.
-    dynamic_budget = int(remaining * 0.20) if dynamic else 0
-    static_budget = remaining - dynamic_budget
-    fitted_static = _allocate_sections(sections, static_budget)
-    fitted_dynamic: list[str] = []
-    if len(dynamic) == 1:
-        fitted_dynamic = _allocate_sections(dynamic, dynamic_budget, minimum=0)
-    elif len(dynamic) >= 2:
-        first = _allocate_sections(dynamic[:1], int(dynamic_budget * 0.60), minimum=0)
-        second = _allocate_sections(
-            dynamic[1:2], dynamic_budget - int(dynamic_budget * 0.60), minimum=0
-        )
-        fitted_dynamic = [*first, *second]
-    payload = "\n\n".join([base, *fitted_static, *fitted_dynamic])
+    fitted = _allocate_sections(sections, remaining, minimum=400)
+    payload = "\n\n".join([base, *fitted])
     if len(payload) > cap:
         payload = payload[: cap - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
     return payload
 
 
-def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -> None:
+def emit_session_start_context(
+    omi_dir: Path | str,
+    out: TextIO | None = None,
+    *,
+    cwd: Path | str | None = None,
+) -> None:
     """Emit OMI priming-note content as SessionStart ``additionalContext``. Never raises."""
     sink = out if out is not None else sys.stdout
-    context = build_session_start_context(omi_dir)
+    context = build_session_start_context(omi_dir, cwd=cwd)
     payload = {
         "hookSpecificOutput": {
             "hookEventName": "SessionStart",
@@ -484,7 +534,9 @@ def emit_session_start_context(omi_dir: Path | str, out: TextIO | None = None) -
         from omind import ai_usage
 
         baseline = (
-            build_session_start_context(omi_dir, _context_cap=_TOTAL_CONTEXT_CHAR_CAP)
+            build_session_start_context(
+                omi_dir, _context_cap=_TOTAL_CONTEXT_CHAR_CAP, cwd=cwd
+            )
             if ai_usage.policy(omi_dir).context_chars < _TOTAL_CONTEXT_CHAR_CAP
             else context
         )
@@ -506,7 +558,7 @@ def _already_primed(session_id: object) -> bool:
     return False. Never raises.
 
     Hermes' ``pre_llm_call`` fires before *every* LLM turn, so without a guard
-    omind would re-inject the (large) priming payload on each turn. A marker
+    omind would re-inject the priming capsule on each turn. A marker
     file per session id makes priming fire exactly once. When no session id is
     supplied we cannot tell turns apart, so we prime this call rather than risk
     never priming (an empty id would otherwise collide every session onto one
@@ -543,27 +595,31 @@ def emit_pre_llm_call_context(
     try:
         event = read_event(stdin)
         session = str(event.get("session_id") or "")
-        # Re-arm the consult gate for the new turn + capture its task (best-effort;
-        # the Hermes guard's pre_tool_call adapter enforces the gate this re-arms).
         from omind import guard
 
-        guard.clear_gate(session)
-        guard.begin_turn(session, str(event.get("prompt") or ""))
-        if _already_primed(session):
+        preflight = guard.preflight_turn(event, Path(omi_dir))
+        first = not _already_primed(session)
+        priming = (
+            build_session_start_context(omi_dir, cwd=event.get("cwd")) if first else ""
+        )
+        context = "\n\n".join(part for part in (priming, preflight) if part)
+        if not context:
             return
-        context = build_session_start_context(omi_dir)
         payload = {"context": context}
         sink.write(json.dumps(payload) + "\n")
         from omind import ai_usage
 
-        baseline = (
-            build_session_start_context(omi_dir, _context_cap=_TOTAL_CONTEXT_CHAR_CAP)
-            if ai_usage.policy(omi_dir).context_chars < _TOTAL_CONTEXT_CHAR_CAP
-            else context
-        )
-        ai_usage.record_priming(
-            omi_dir, len(context), avoided_characters=max(0, len(baseline) - len(context))
-        )
+        if first:
+            baseline = build_session_start_context(
+                omi_dir,
+                _context_cap=_TOTAL_CONTEXT_CHAR_CAP,
+                cwd=event.get("cwd"),
+            )
+            ai_usage.record_priming(
+                omi_dir,
+                len(priming),
+                avoided_characters=max(0, len(baseline) - len(priming)),
+            )
     except Exception as exc:
         _record_failure(f"emit_pre_llm_call_context({omi_dir})", exc)
 
@@ -578,7 +634,8 @@ def run_hook(
     """Dispatch one hook invocation. ALWAYS returns 0 so the agent never blocks."""
     try:
         if event_name == "SessionStart":
-            emit_session_start_context(omi_dir, out=stdout)
+            event = read_event(stdin)
+            emit_session_start_context(omi_dir, out=stdout, cwd=event.get("cwd"))
             return 0
         if event_name == HERMES_PRIME_EVENT:
             emit_pre_llm_call_context(omi_dir, stdin=stdin, stdout=stdout)
@@ -588,6 +645,13 @@ def run_hook(
         if line:
             append_entry(omi_dir, line)
         if event_name == "Stop":
+            from omind import ai_usage
+
+            ai_usage.record_session_transcript(
+                omi_dir,
+                event.get("transcript_path"),
+                session_id=str(event.get("session_id") or ""),
+            )
             # Loop guard: while an autonomous loop is ARMED, refuse the stop so the
             # agent keeps working (operator switch — `omind loop arm/disarm`). Fails
             # open to allowing the stop on any error (a broken guard must never trap).
@@ -605,8 +669,9 @@ def run_hook(
             loopguard.reset(session=event.get("session_id"))
             # Layer E: scan the command that actually ran against the policy and
             # record any rule match into the compliance log (the learning corpus).
-            from omind import compliance, verify
+            from omind import ai_usage, compliance, verify
 
+            ai_usage.record_mcp_response(omi_dir, event)
             compliance.record_post_tool(event)
             # Layer C: if this action was an OMI consult, judge its relevance to
             # the turn's task (off the synchronous PreToolUse hot path).
