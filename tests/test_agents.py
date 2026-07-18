@@ -483,6 +483,10 @@ def test_codex_setup_installs_guard_hooks(tmp_path: Path) -> None:
     assert session["type"] == "command"
     assert " hook SessionStart " in f" {session['command']} "
     assert str(config.vault) in session["command"]
+    accounting = hooks["PostToolUse"][0]["hooks"][0]
+    assert accounting["type"] == "command"
+    assert " hook PostToolUse " in f" {accounting['command']} "
+    assert str(config.vault) in accounting["command"]
 
 
 def test_codex_hook_trust_hash_matches_known_codex_vector() -> None:
@@ -514,7 +518,7 @@ def test_codex_setup_persists_trust_for_omind_hooks(tmp_path: Path) -> None:
     doc = tomlkit.parse(agents.codex_config_path().read_text(encoding="utf-8"))
     state = doc["hooks"]["state"]  # type: ignore[index]
     entries = agents.CodexProvisioner(config, log=_quiet).omind_hook_trust_entries()
-    assert len(entries) == 3
+    assert len(entries) == 4
     for key, trusted_hash in entries.items():
         assert state[key]["trusted_hash"] == trusted_hash  # type: ignore[index]
 
@@ -618,7 +622,9 @@ def test_diagnose_codex_reports_guard_state(tmp_path: Path) -> None:
     after = {r.key: r for r in agents.diagnose_codex(config)}
     assert after["codex_guard"].level == "ok"
     assert after["codex_priming"].level == "ok"
+    assert after["codex_accounting"].level == "ok"
     assert after["codex_bootstrap"].level == "ok"
+    assert after["codex_skill"].level == "ok"
     assert after["codex_hook_trust"].level == "ok"
     assert after["codex_root"].level == "ok"
 
@@ -632,6 +638,7 @@ def test_codex_provisioner_honors_codex_home(
     assert agents.codex_config_dir() == home
     run_setup_for(_config(tmp_path, "codex"), log=_quiet)
     assert (home / "hooks.json").is_file()
+    assert (home / "skills" / "omind" / "SKILL.md").is_file()
 
 
 def test_codex_setup_registers_mcp_server(tmp_path: Path) -> None:
@@ -684,7 +691,9 @@ def test_diagnose_codex_reports_mcp_registration_state(tmp_path: Path) -> None:
     assert after["codex_mcp_registration"].level == "ok"
     assert after["codex_guard"].level == "ok"  # both pieces wired by one `setup`
     assert after["codex_priming"].level == "ok"
+    assert after["codex_accounting"].level == "ok"
     assert after["codex_bootstrap"].level == "ok"
+    assert after["codex_skill"].level == "ok"
     assert after["codex_hook_trust"].level == "ok"
 
 
@@ -935,7 +944,7 @@ def test_skill_template_renders_clean_yaml_frontmatter(tmp_path: Path) -> None:
     body = content.split("---\n")[1]
     meta = yaml.safe_load(body)
     assert meta["name"] == "omind-omi-memory"
-    assert "single-insight" in meta["description"]
+    assert "/omind help" in meta["description"]
 
 
 # -- provisioner overrides stay subprocess-free ---------------------------------------

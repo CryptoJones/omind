@@ -34,10 +34,10 @@ def test_list_empty(client: TestClient) -> None:
 def test_ai_profile_and_usage_api(client: TestClient, omi_dir: Path) -> None:
     profile = client.get("/api/ai/profile")
     assert profile.status_code == 200
-    assert profile.json()["effective"] == "low"
+    assert profile.json()["effective"] == "economy"
     changed = client.put("/api/ai/profile", json={"profile": "high"})
     assert changed.status_code == 200
-    assert changed.json()["effective"] == "high"
+    assert changed.json()["effective"] == "economy"
     assert client.put("/api/ai/profile", json={"profile": "unknown"}).status_code == 422
     ai_usage.record_priming(omi_dir, 400)
     usage = client.get("/api/ai/usage", params={"since": "all"})

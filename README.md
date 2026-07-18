@@ -63,7 +63,7 @@ reads and writes as long-term memory. `omind` does two things with it:
   doing every N minutes into a daily worklog note, by mining the trails the hooks
   already capture (see [Activity checkpoints](#activity-checkpoints) below).
 - **`omind ai`** — account for tokens attributable to OMI and select a manual
-  low/medium/high model-expense profile that bounds priming and optional model calls.
+  economy/balanced/full expense profile that bounds priming and optional model calls.
 
 The web UI works **fully offline** (fonts, styles, and the Markdown renderer are
 vendored — no CDN). It shows **backlinks** for the open note, refreshes the list
@@ -245,8 +245,10 @@ compare-and-swap that rejects a write made against a stale read. That is what le
 several agents and tools touch the same folder at once without corrupting it.
 "Deleting" a note **archives** it (hidden, restorable) rather than removing it.
 
-A maintained `index.md` lists the most recent notes; that index plus the latest
-session state is exactly what the guard's priming injects at session start. Run
+A maintained `index.md` lists the most recent notes. Session priming compiles a
+bounded capsule from its standing directives/recent titles, the Playbook,
+workflow/persona summaries, and only a project-matched session handoff. Full note
+bodies and auto-journals stay out of always-on context. Run
 `omind lint` to catch drift (broken wikilinks, orphaned or near-duplicate notes,
 missing titles). The cross-machine replication story — git-backed mesh, per-note
 Lamport versioning, the field-level merge driver — is its own section:
@@ -262,18 +264,21 @@ harnesses wire it through [the per-agent adapters](#other-agents-hermes-agent-op
 It enforces the same rules everywhere and **fails open** at every layer — a
 broken hook can never wedge the agent.
 
-- **Priming (injection).** On session start the agent is handed the recent-memory
-  index + latest session state, so the relevant memory is in front of it before
-  the first turn (Claude Code `SessionStart`, Hermes `pre_llm_call`, …).
-- **The consult gate.** A `PreToolUse` hook blocks the *first* action of each turn
-  until the agent reads OMI; one OMI search/read clears the gate for the rest of
-  the turn. The gate is a per-turn sentinel under the state dir, reset on the
-  harness's turn boundary.
+- **Compact priming.** On session start the agent receives a hard-bounded capsule
+  of identity, workflow, operator rules, recent-memory titles, and a cwd-matched
+  handoff (Claude Code `SessionStart`, Hermes `pre_llm_call`, …).
+- **Proactive turn recall.** Claude's `UserPromptSubmit` and Hermes'
+  `pre_llm_call` deterministically select and inject one compact relevant memory
+  before the model acts. A repeated unchanged note falls back to its summary.
+  This satisfies the ordinary consult gate without asking a smaller model to
+  interpret a `PreToolUse` error. When no confident match exists, the gate stays
+  armed and its block response names the exact `search-vault`/`recall-note` call
+  to make. Hard rule-specific prerequisites remain independent.
 - **The verifier.** Clearing the gate by reading *any* note isn't enough, so a
   `PostToolUse` verifier judges whether the consult was actually **relevant** to
   the turn's task — a deterministic keyword-overlap prefilter decides the clear
-  cases, and only the ambiguous middle shells out to headless `claude -p`
-  (fail-open). Default is **WARN** (it logs the off-topic consult and nudges
+  cases. Only the `full` expense profile lets the ambiguous middle shell out to
+  headless `claude -p` (fail-open). Default is **WARN** (it logs the off-topic consult and nudges
   toward better notes); opt-in **REQUIRE** (`OMI_VERIFY_REQUIRE=1`) re-closes the
   gate until a relevant consult happens. The thresholds
   (`OMI_VERIFY_HIGH`/`OMI_VERIFY_LOW`) and an always-relevant allowlist
@@ -320,8 +325,8 @@ procedures (sudo, secrets, forges, "pull before you work", "do it yourself") tha
 fresh agent instance otherwise keeps re-learning the hard way. It lives as a priming
 file, `Playbook.md`, in the OMI vault, and omind surfaces it two ways:
 
-- **Always in context.** `Playbook.md` is injected verbatim into *every* session's
-  SessionStart context (alongside `index.md`), so the rules are present whether or
+- **Always in context.** A compact digest of `Playbook.md` is compiled into
+  *every* session's capsule, so the rules are present whether or
   not the agent thinks to search for them — they do not depend on the per-turn
   gate's relevance matching to surface.
 - **Enforced at the action.** The guard backs the most-violated rules with hard
@@ -362,31 +367,52 @@ text. Because it's a scheduled job — the same systemd-user-timer mechanism as
 `omind backup` and `omind mesh` — it doesn't depend on the agent's cooperation,
 which is what makes it a reliable *record* rather than a hopeful instruction.
 
+## Live help and token-efficient recall
+
+`omind setup` installs a managed `omind` skill for Claude Code and Codex. When a
+user asks `/omind help` (or `$omind` in Codex), the skill calls the OMI MCP
+`help` tool, whose output is generated from the installed argparse tree. The
+fallback CLI uses the same source:
+
+```bash
+omind help                  # top-level commands
+omind help ai usage         # exact nested syntax and flags
+omind help guard pause
+```
+
+For ordinary memory access, use the bounded `search-vault` result page and then
+`recall-note`. `recall-note` returns a single compact representation with an
+optional Markdown section and 500–8,000-character bound. The legacy `read-note`
+tool remains available when raw Markdown plus parsed editing fields are needed.
+
 ## AI token usage and expense profiles
 
-omind keeps a machine-local, per-vault ledger for the AI tokens it causes: session
-priming injected into an agent plus the verifier and optional checkpoint
-`claude -p` calls. It does **not** parse or claim the rest of an agent session.
-Provider-reported subprocess usage is recorded exactly; provider-neutral priming
-is shown as an estimate (`ceil(characters / 4)`) and never mixed into the
-provider-reported subtotal. The ledger contains counts and operational metadata
-only — never prompts, responses, note contents, or credentials.
+omind keeps a machine-local, per-vault ledger for session priming, proactive
+recall, OMI MCP responses, and verifier/checkpoint calls. Claude's Stop hook also
+snapshots numeric provider usage from the session transcript, including cache
+read/write tokens, so the report can show OMI's share of total session traffic.
+Injected/MCP content uses the provider-neutral estimate `ceil(characters / 4)`;
+subprocess and session usage use provider-reported counts. The ledger stores only
+counts and operational metadata—never prompts, responses, note contents, or
+credentials.
 
 ```bash
 omind ai profile                         # show saved/effective profile
-omind ai profile medium                  # persist low, medium, or high per vault
+omind ai profile economy                 # default: 4k priming, deterministic checks
+omind ai profile balanced                # 8k priming, deterministic checks
+omind ai profile full                    # 24k priming, optional model checks enabled
 omind ai usage --since 7d                # 24h, 7d, 30d, or all
 omind ai usage --since all --json        # machine-readable report
 ```
 
-Profiles describe the expense of the model already selected; they do not select a
-model. `low` is the backward-compatible default (48,000-character priming cap and
-all optional calls), `medium` halves the priming/prompt inputs, and `high` caps
-priming at 8,000 characters and uses deterministic verifier/checkpoint behavior
-without optional model calls. Set `OMI_AI_EXPENSE=low|medium|high` for a temporary
-override; it wins over the saved profile. The web app's **AI Usage** view exposes
-the same profile control, time windows, exact/estimated breakdown, per-operation
-totals, and estimated avoided tokens.
+Profiles describe OMI overhead; they do not select the parent agent's model.
+`economy` is the default and caps session priming at 4,000 characters, proactive
+recall at 1,500, and disables optional model subprocesses. `balanced` uses
+8,000/2,500 characters and remains deterministic. `full` uses 24,000/4,000 and
+enables verifier/checkpoint model calls. Legacy `high`/`medium`/`low` values map
+to `economy`/`balanced`/`full`. Set `OMI_AI_EXPENSE` for a temporary override.
+The CLI and web app show cache-inclusive OMI share, average priming, exact versus
+estimated usage, per-operation totals, and estimated avoided tokens.
 
 ## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Claude Desktop, Kiro, VS Code, Amazon Q
 
@@ -424,8 +450,9 @@ Codex also gets the `omi` MCP server registered — under `[mcp_servers.omi]` in
 other agent config omind touches, `config.toml` is **TOML**, so this merge is
 done with `tomlkit` (round-trip parsing) instead of the JSON idiom the rest
 share; only the `mcp_servers.omi` table is ever touched, and a `config.toml`
-that doesn't parse is never overwritten. Codex has no memory skill because it
-reads the MCP tools directly.
+that doesn't parse is never overwritten. A managed `~/.codex/skills/omind`
+skill routes `$omind`/help requests to the live MCP `help` tool and ordinary
+memory reads to compact recall.
 
 For Codex, one command installs the whole integration:
 
@@ -440,9 +467,11 @@ That command idempotently:
    `~/.codex/hooks.json`.
 3. Installs `SessionStart` OMI priming, using the same recent-memory context
    Claude Code receives.
-4. Writes a managed global `~/.codex/AGENTS.md` bootstrap pointer that tells
+4. Installs `PostToolUse` accounting for OMI MCP response sizes.
+5. Installs the managed `omind` help/recall skill.
+6. Writes a managed global `~/.codex/AGENTS.md` bootstrap pointer that tells
    fresh Codex sessions to read OMI first.
-5. Persists Codex hook trust for those omind-owned hook groups under
+7. Persists Codex hook trust for those omind-owned hook groups under
    `[hooks.state]` in `~/.codex/config.toml`.
 
 Then restart Codex and verify:
@@ -476,9 +505,9 @@ treatment:
 The **Gemini CLI** is wired **guard-only** — just the hard-block hook described
 above (the `BeforeTool` hook under `hooks` in `~/.gemini/settings.json`); its
 MCP-memory registration, skill, and priming are a separate follow-up. **Codex
-CLI** gets guard, MCP-memory registration, SessionStart priming, and the global
-AGENTS bootstrap pointer (see above), but no memory skill because it uses the
-MCP tools directly. **OpenCode** priming is likewise not wired yet (its MCP
+CLI** gets guard, MCP-memory registration, compact SessionStart priming,
+PostToolUse accounting, the `omind` help/recall skill, and the global AGENTS
+bootstrap pointer (see above). **OpenCode** priming is likewise not wired yet (its MCP
 server and skill are). The cross-harness **guard** reaches Claude Code, Hermes,
 OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
 **detect-only** — its POST `/hooks/agent` gateway receives the guard verdict but
