@@ -222,6 +222,8 @@ Repo and global-config work has extra hard requirements:
 - Before touching repo code, run `git status --short --branch` and a freshness
   command (`git fetch --all --prune` or `git pull --ff-only`), then resolve the
   current branch/base state.
+  If neither the current working directory nor the action target is inside a
+  Git repository, skip the Git status and freshness commands.
 - Do not infer permission to edit installed global agent config, hooks, bootstrap
   files, or JUMPSTART-style instructions from a question. Answer the question
   first; change those files only after explicit current-turn authorization.
