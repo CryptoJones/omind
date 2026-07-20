@@ -7,6 +7,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.1] - 2026-07-19
+
+### Fixed
+- Explicitly waive the repository freshness check when neither the working directory nor the action target is inside a Git repository.
+
 ## [4.2.0] - 2026-07-18
 
 ### Added

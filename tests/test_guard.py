@@ -216,6 +216,26 @@ def test_new_repo_without_a_remote_does_not_demand_freshness(tmp_path: Path) -> 
     guard.clear_gate(session)
 
 
+def test_non_repo_work_does_not_demand_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cwd and target outside Git must never demand an impossible fetch."""
+    monkeypatch.chdir(tmp_path)
+    session = "not-a-repo"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target="task memory", relevant=True)
+
+    target = tmp_path / "notes.txt"
+    assert guard._repo_root_for_action(
+        {"tool": "Write", "file_path": str(target), "session": session}
+    ) is None
+    allowed = guard.decide(
+        {"tool": "Write", "file_path": str(target), "session": session}
+    )
+    assert allowed.allow, allowed.rule_id
+    guard.clear_gate(session)
+
+
 def test_new_repo_with_a_remote_still_demands_freshness(tmp_path: Path) -> None:
     # A repo that HAS a remote has an upstream to be stale against, so the
     # freshness demand is unchanged — the #149 waiver is scoped to no-remote.

@@ -65,7 +65,9 @@ GIT_RULES_MESSAGE = (
 )
 GIT_FRESHNESS_MESSAGE = (
     "repo work requires a same-turn freshness check before "
-    "review/edit/test/commit/push. Put a LITERAL-path fetch in the SAME command as "
+    "review/edit/test/commit/push. If neither the working directory nor the action "
+    "target is inside a Git repository, no fetch is required. Otherwise, put a "
+    "LITERAL-path fetch in the SAME command as "
     "the write, chained with && — e.g.:\n"
     '  git -C "/abs/path/to/repo" fetch --all --prune '
     '&& git -C "/abs/path/to/repo" commit -am "..."\n'
