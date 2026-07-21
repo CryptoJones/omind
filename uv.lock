@@ -2405,7 +2405,7 @@ wheels = [
 
 [[package]]
 name = "omind"
-version = "4.2.2"
+version = "4.2.3"
 source = { editable = "." }
 dependencies = [
     { name = "fastapi" },
