@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.3] - 2026-07-21
+
+### Fixed
+- Upgrade both CodeQL workflow actions together to 4.37.1, avoiding the
+  incompatible split-version runs produced by separate Dependabot pull requests.
+- Group GitHub Actions updates in Dependabot so coupled action components remain
+  on the same version in future upgrades.
+
 ## [4.2.2] - 2026-07-20
 
 ### Changed
