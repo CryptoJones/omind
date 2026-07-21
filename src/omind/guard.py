@@ -64,19 +64,24 @@ GIT_RULES_MESSAGE = (
     "Repo work requires that specific memory this turn."
 )
 GIT_FRESHNESS_MESSAGE = (
-    "repo work requires a same-turn freshness check before "
-    "review/edit/test/commit/push. If neither the working directory nor the action "
-    "target is inside a Git repository, no fetch is required. Otherwise, put a "
-    "LITERAL-path fetch in the SAME command as "
-    "the write, chained with && — e.g.:\n"
-    '  git -C "/abs/path/to/repo" fetch --all --prune '
-    '&& git -C "/abs/path/to/repo" commit -am "..."\n'
-    "(same shape for push / a git write; for `gh pr create`, prefix it with the "
-    "literal-path fetch too). Gotchas that make it silently fail: (1) the path must "
-    "be a LITERAL absolute path — a $VAR is not resolved by the static parser; (2) no "
-    "pipe/redirect in the fetch part; (3) the fetch must succeed (exit 0) — if `--all` "
+    "a git commit requires a same-turn freshness check — refresh the local base "
+    "before recording work onto it. (Only the commit is gated; edits, tests, reads, "
+    "and pushes are not.) If the repo has no remote there is nothing to be stale "
+    "against and no fetch is required. Otherwise, run a LITERAL-path fetch as ITS OWN "
+    "command FIRST, then commit as a SEPARATE command — two calls, not one:\n"
+    '  git -C "/abs/path/to/repo" fetch --all --prune\n'
+    '  git -C "/abs/path/to/repo" commit -am "..."\n'
+    "Do NOT chain the commit onto the fetch. A command that also contains the commit — "
+    "or ANY non-git-read step, even a harmless `&& echo ok` — is not recognised as a "
+    "freshness command, records nothing, and the commit stays blocked. The fetch "
+    "command may only be combined with other git READS, e.g. "
+    '`git -C "/repo" fetch --all --prune && git -C "/repo" status`. Gotchas that make '
+    "it silently fail: (1) the path must be a LITERAL absolute path — a $VAR is not "
+    "resolved by the static parser; (2) no pipe, redirect, or command-substitution "
+    "anywhere in the fetch command; (3) the fetch must succeed (exit 0) — if `--all` "
     "hits an unreachable mirror (e.g. a Codeberg remote with no key loaded), use "
-    "`fetch origin --prune` so it doesn't error out and fail to register."
+    "`fetch origin --prune`; (4) freshness resets every turn, so re-run the standalone "
+    "fetch once per turn before your next commit."
 )
 GLOBAL_MUTATION_MESSAGE = (
     "global config/hook/bootstrap mutation requires explicit user authorization in the "
@@ -876,6 +881,24 @@ def _has_consulted_git_rules(session: str) -> bool:
     return False
 
 
+# A ``git commit`` at command position, tolerating the ``-C <dir>`` / ``-c k=v``
+# global opts before the verb (so ``git -C <repo> commit`` still matches).
+_GIT_COMMIT_RE = re.compile(rf"(?:^|[;&|\n(]\s*)git[ \t]+{_GIT_GLOBAL_OPTS}commit\b")
+
+
+def _is_commit_action(action: dict[str, Any]) -> bool:
+    """True only when a Bash command runs ``git commit``. Freshness is demanded
+    ONLY here: a commit is the moment work is recorded onto the local base, so a
+    stale base is what gets committed if it was never refreshed. Edits, tests,
+    reads, and even pushes do NOT trip the freshness gate (a push of an
+    already-fresh-based commit is not stale-prone). Those still require the
+    git-rules consult via :func:`_is_repo_sensitive_action` — only the freshness
+    demand is narrowed to commits."""
+    if str(action.get("tool") or "") != "Bash":
+        return False
+    return bool(_GIT_COMMIT_RE.search(str(action.get("command") or "")))
+
+
 def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
     tool = str(action.get("tool") or "")
     command = str(action.get("command") or "")
@@ -1070,10 +1093,17 @@ def decide(action: dict[str, Any]) -> Verdict:
                 reason=f"omi-guard (hard): {GIT_RULES_MESSAGE}",
                 rule_id="repo-work-read-git-rules",
             )
-        # A repo with no configured remote has nothing to fetch and no upstream
-        # to be stale against, so the freshness check is vacuous — waive it
-        # rather than lock the agent out of a brand-new `git init` repo (#149).
-        if not _git_fresh_for_repo(session, repo) and _repo_has_remote(repo):
+        # Freshness is demanded ONLY before a commit — that is when a stale local
+        # base actually gets recorded; edits, tests, reads, and pushes are not
+        # gated on it. A repo with no configured remote has nothing to fetch and
+        # no upstream to be stale against, so the check is vacuous there too —
+        # waive it rather than lock the agent out of a brand-new `git init` repo
+        # (#149).
+        if (
+            _is_commit_action(action)
+            and not _git_fresh_for_repo(session, repo)
+            and _repo_has_remote(repo)
+        ):
             record_pending(session, command or _action_path(action))
             return Verdict(
                 allow=False,

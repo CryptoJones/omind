@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [4.2.2] - 2026-07-20
+
+### Changed
+- **Narrowed the repository freshness gate to `git commit` only.** Previously any
+  repo-sensitive action (edit, test, push, review-read) demanded a same-turn
+  fetch; now only a commit does — that is the moment a stale local base is
+  actually recorded. Edits, tests, pushes, and reads still require the git-rules
+  consult, but no longer a fetch. (`repo-work-fresh-base` now fires solely on a
+  `git commit`.)
+
+### Fixed
+- Corrected the git-freshness block message. Its worked example
+  (`git fetch … && git commit …`) could never satisfy the check: a command that
+  also contains the commit is not a freshness command, so it records nothing and
+  the commit stays blocked. The message now tells the agent to run a standalone
+  literal-path fetch as its own command first, then commit as a separate command,
+  and spells out that any non-git-read step (even `&& echo`) disqualifies the
+  fetch and that freshness resets each turn.
+
 ## [4.2.1] - 2026-07-19
 
 ### Fixed
