@@ -464,7 +464,7 @@ class SearchIndex:
     ) -> list[tuple[int, str]] | None:
         """(Re-)index one note. Returns ``(chunk_id, text)`` pairs needing an
         embedding, or ``None`` when the note's bytes are unchanged (a touch)."""
-        from omind.store import _read_text, derive_okf_type, parse_note
+        from omind.store import _read_text
 
         try:
             text = _read_text(path)
@@ -478,14 +478,15 @@ class SearchIndex:
                 (st.st_mtime_ns, st.st_size, path.name),
             )
             return None
-        fields = parse_note(text)
+        fields = retrieve.parse_note(text)
         row = _NoteRow(
             filename=path.name,
             title=fields.title or path.stem,
             created=fields.created,
             # Derived when undeclared, the same rule render_fields applies, so a
             # graph node built from the index always carries a non-empty type.
-            okf_type=fields.okf_type.strip() or derive_okf_type(fields.tags),
+            okf_type=fields.okf_type.strip()
+            or next((tag.removeprefix("type:").strip() for tag in fields.tags if tag.lower().startswith("type:") and tag.removeprefix("type:").strip()), "note"),
             tags=fields.tags,
             disabled=fields.disabled,
         )
