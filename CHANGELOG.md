@@ -7,6 +7,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A derived hybrid search index (`omind.searchindex`).** One SQLite file per
+  vault, in the state dir, holding FTS5/BM25 over heading-split chunks, packed
+  `float32` chunk embeddings, and the resolved `[[wikilink]]` graph. Queries fuse
+  a keyword leg, a semantic leg, and a weak recency leg with Reciprocal Rank
+  Fusion. Notes remain the source of truth; the index is disposable, machine-local,
+  never committed and never mesh-synced, and refreshes only the notes whose bytes
+  changed. On a 744-note vault: search 268 ms → 18 ms, full build 1.5 s,
+  incremental refresh 5 ms. See `docs/retrieval.md`.
+- `omind bench` — measures index build/refresh, search latency (indexed *and*
+  pre-index scan), capsule size, and the token cost of the listing payload, so
+  retrieval performance is observed rather than asserted.
+- `omind search --explain` prints the fused score and per-leg ranks behind each
+  hit; `omind reindex` gained `--index-only` and `--rebuild`.
+- `OMI_INDEX_DISABLE=1` turns the index off and restores the scanning search path.
+
+### Changed
+- **Search is relevance-ranked, not substring-filtered.** `store.search` (and so
+  `search-vault`, the web UI, and `omind search`) previously read and parsed every
+  note on every query to run `needle in haystack`, then sorted the hits by *date*.
+  A natural-language question with no literal substring returned nothing at all.
+  Results now come back best-first with the matched excerpt attached, and a
+  multi-term query ranks partial matches instead of dropping them.
+- **Every list-shaped MCP tool is paged** (`limit`, `offset`, `total`,
+  `has_more`): `list-notes`, `backlinks`, `list-tags`, `graph-neighbors`,
+  `graph-orphans`, `graph-dangling`. `list-notes` was unbounded and returned
+  ~90,800 tokens in a single tool result on a 744-note vault; one page is ~3,100.
+- **`read-note` returns one representation, not two.** It sent every note body
+  through the context twice (`raw` *and* `fields`); it now takes
+  `representation="fields"|"raw"` and defaults to parsed fields.
+- `store.backlinks` and `omind.graph` are served from the index's link table
+  instead of each running their own full-vault scan.
+- The gate/nudge suggestion path (`retrieve.relevant_titles`, called on every
+  user prompt) queries the index instead of building two full vault listings.
+
+### Removed
+- `omind.vectorindex`. Its metadata-only embeddings (title + summary + tags, so a
+  fact in `## Details` was unreachable), JSON float-list storage, refresh-on-every-
+  query, and pure-Python cosine loop are superseded by the chunk vectors in
+  `omind.searchindex`; `nearest()` (the create-note dedup hint) moved across.
+
 ## [4.2.3] - 2026-07-21
 
 ### Fixed

@@ -95,7 +95,10 @@ def test_create_read_round_trip(server: FastMCP, omi_dir: Path) -> None:
     ]
     assert got["fields"]["rev"] == "1@testnode-abc123"  # node stamps Lamport revs
     assert got["version"]
-    assert "[[Other Note]]" in got["raw"]
+    assert "raw" not in got  # ONE representation per call, never the body twice
+    raw = call(server, "read-note", {"name": "Server Note.md", "representation": "raw"})
+    assert "[[Other Note]]" in raw["raw"]
+    assert "fields" not in raw
 
 
 def test_edit_note_partial_update(server: FastMCP) -> None:
@@ -159,6 +162,54 @@ def test_search_vault_is_bounded_and_pageable(server: FastMCP) -> None:
     assert {item["filename"] for item in first["result"]}.isdisjoint(
         item["filename"] for item in second["result"]
     )
+
+
+def test_every_list_tool_is_bounded(server: FastMCP) -> None:
+    """No tool may return the whole vault in one result.
+
+    `list-notes` used to: ~348 KB / 87k tokens on a 744-note vault, in a single
+    tool payload. Every list-shaped tool now pages, and the caps are asserted
+    here so a new one cannot quietly go unbounded again.
+    """
+    for number in range(40):
+        call(server, "create-note", {"title": f"Note {number:02d}", "summary": "body"})
+    call(server, "create-note", {"title": "Linker", "summary": "see [[Note 00]] and [[Ghost]]"})
+
+    listed = call(server, "list-notes", {})
+    assert listed["count"] == 25 and listed["has_more"] is True  # default page
+    assert listed["total"] == 41
+    assert call(server, "list-notes", {"limit": 5})["count"] == 5
+    assert call(server, "list-notes", {"limit": 9_999})["count"] == 41  # clamped to MAX_PAGE
+    second = call(server, "list-notes", {"limit": 25, "offset": 25})
+    assert second["count"] == 16 and second["has_more"] is False
+    assert {n["filename"] for n in listed["result"]}.isdisjoint(
+        n["filename"] for n in second["result"]
+    )
+
+    for tool, args in (
+        ("backlinks", {"name": "Note 00.md", "limit": 1}),
+        ("list-tags", {"limit": 1}),
+        ("graph-orphans", {"limit": 1}),
+        ("graph-dangling", {"limit": 1}),
+        ("graph-neighbors", {"name": "Linker", "limit": 1}),
+    ):
+        page = call(server, tool, args)
+        assert set(page) >= {"result", "count", "offset", "total", "has_more"}, tool
+        assert page["count"] <= 1, tool
+
+
+def test_search_hits_carry_an_excerpt_of_the_matched_text(server: FastMCP) -> None:
+    """The excerpt is why a search result is often enough on its own — it shows
+    the matched text even when the match is in a section `summary` never shows."""
+    call(
+        server,
+        "create-note",
+        {"title": "Deploy", "summary": "unrelated one-liner", "details": "the runbook step is X"},
+    )
+    hit = call(server, "search-vault", {"query": "runbook"})["result"][0]
+    assert hit["filename"] == "Deploy.md"
+    assert "runbook" in hit["excerpt"]
+    assert hit["score"] > 0
 
 
 def test_recall_note_returns_one_bounded_representation(server: FastMCP) -> None:

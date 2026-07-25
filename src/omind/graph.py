@@ -68,6 +68,57 @@ class Graph:
 
 
 def build_graph(omi_dir: Path | str) -> Graph:
+    """Resolve the vault's ``[[wikilinks]]`` into a graph.
+
+    Served from the derived index (:mod:`omind.searchindex`) when it is available —
+    it already stores every note's identity and every link it makes, so the graph
+    is a couple of SQLite reads instead of a full-vault read+parse. Falls back to
+    parsing every note when the index is unavailable.
+    """
+    from_index = _from_index(omi_dir)
+    if from_index is not None:
+        return from_index
+    return _from_disk(omi_dir)
+
+
+def _from_index(omi_dir: Path | str) -> Graph | None:
+    """The graph assembled from the search index, or ``None`` to scan instead."""
+    try:
+        from omind import searchindex
+
+        index = searchindex.shared(omi_dir)
+        if index is None:
+            return None
+        rows = index.link_rows()
+    except Exception:
+        return None
+    if rows is None:
+        return None
+    notes, links = rows
+    live = {row.filename: row for row in notes if not row.disabled}
+    id_to_file: dict[str, str] = {}
+    for filename, row in live.items():
+        id_to_file[filename[:-3].strip().lower()] = filename
+        if row.title.strip():
+            id_to_file[row.title.strip().lower()] = filename
+    nodes = {
+        filename: GraphNode(filename=filename, title=row.title.strip(), okf_type=row.okf_type)
+        for filename, row in live.items()
+    }
+    dangling: list[tuple[str, str]] = []
+    for src, target in sorted(set(links)):
+        if src not in nodes:
+            continue  # a link out of an archived note is not an edge
+        dest = id_to_file.get(target.lower())
+        if dest is None:
+            dangling.append((src, target))
+        elif dest != src:  # a note linking itself is not an edge
+            nodes[src].out.add(dest)
+            nodes[dest].inn.add(src)
+    return Graph(nodes=nodes, dangling=dangling)
+
+
+def _from_disk(omi_dir: Path | str) -> Graph:
     """Parse every live note once and resolve its ``[[wikilinks]]`` into a graph."""
     omi = Path(omi_dir)
     # (filename, title, raw outbound targets) for each live note, plus an index

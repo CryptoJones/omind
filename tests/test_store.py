@@ -618,7 +618,12 @@ def test_search_matches_fields_and_filters_disabled(mesh_store: OmiStore) -> Non
     hits = {s.filename for s in mesh_store.search("quantum")}
     assert hits == {"Alpha.md", "Beta.md"}
     assert {s.filename for s in mesh_store.search("", tag="pets")} == {"Alpha.md", "Beta.md"}
-    assert {s.filename for s in mesh_store.search("QUANTUM CATS")} == {"Alpha.md"}
+    # Multi-term queries RANK rather than filter: search is relevance-ordered
+    # (BM25 + semantic + recency fused), so the note matching both terms leads
+    # and the one matching a single term follows instead of being dropped.
+    multi = [s.filename for s in mesh_store.search("QUANTUM CATS")]
+    assert multi[0] == "Alpha.md"
+    assert set(multi) <= {"Alpha.md", "Beta.md"}
     mesh_store.disable_note(a)
     assert {s.filename for s in mesh_store.search("quantum")} == {"Beta.md"}
     assert {s.filename for s in mesh_store.search("quantum", include_disabled=True)} == {

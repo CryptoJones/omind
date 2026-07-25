@@ -150,7 +150,8 @@ def encode(texts: list[str]) -> np.ndarray | None:
             vecs = vecs.reshape(1, -1)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
-        return vecs / norms
+        normalised: np.ndarray = vecs / norms
+        return normalised
     except Exception as exc:
         _last_error = f"encode failed ({type(exc).__name__})"
         return None

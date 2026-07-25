@@ -382,8 +382,30 @@ omind help guard pause
 
 For ordinary memory access, use the bounded `search-vault` result page and then
 `recall-note`. `recall-note` returns a single compact representation with an
-optional Markdown section and 500–8,000-character bound. The legacy `read-note`
-tool remains available when raw Markdown plus parsed editing fields are needed.
+optional Markdown section and 500–8,000-character bound. `read-note` is the
+editing path: it returns *one* representation (`fields` by default, `raw` on
+request) plus a version token.
+
+Every list-shaped MCP tool is paged (`limit`, `offset`, `has_more`), so no tool
+can return the whole vault in a single result.
+
+## Search
+
+`search-vault` and `omind search` are relevance-ranked, not substring matches:
+a derived SQLite index fuses BM25 keyword search, semantic vector similarity,
+and a light recency signal, and returns the matched excerpt with each hit. On a
+744-note vault a query drops from ~270 ms to ~20 ms, and natural-language
+questions that previously matched nothing now return ranked answers.
+
+```bash
+omind search "why did release signing fail" --explain
+omind reindex --index-only     # refresh the derived index (search does this too)
+omind bench                    # latency and token cost on your own vault
+```
+
+The index lives in the state directory, never in the vault — it is disposable
+and rebuildable. Semantic ranking needs the optional `[embed]` extra; without it
+search still works on keywords alone. See [docs/retrieval.md](docs/retrieval.md).
 
 ## AI token usage and expense profiles
 

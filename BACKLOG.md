@@ -2,27 +2,96 @@
 
 This file and the GitHub **[Issues tab](https://github.com/CryptoJones/omind/issues)** are two
 views of the same list and must stay in sync. Every backlog item below has a matching GitHub issue
-and vice versa — when an item ships and its issue closes, check the box (or remove the line) here so
-neither side drifts.
+and vice versa — when an item ships and its issue closes, check the box (or move it to `Done`)
+here so neither side drifts.
 
 ## Open
 
-_Deferred from the 2026-07-01 adversarial code review (shipped fixes are in 3.7.6, [#132](https://github.com/CryptoJones/omind/issues/132)); these are the findings that need a design change or a larger change rather than a contained fix._
+_From a 2026-07-24 survey of open-source AI memory layers (Mem0, Zep/Graphiti, Letta/MemGPT,
+Cognee, memvid, Memori) and the 2025–2026 agent-memory literature (Memori arXiv:2603.19935 —
+81.95% LoCoMo at 1,294 tokens/query; SimpleMem arXiv:2601.02553 — 26.4% F1 gain at 30× fewer
+tokens; H-MEM, EACL 2026; RecMem arXiv:2605.16045; Multi-Layer Memory arXiv:2603.29194), scoped
+to what omind actually needs. The foundation — a derived SQLite hybrid index (BM25 + vectors +
+RRF), excerpt-returning search, and paged MCP payloads — shipped first; see `docs/retrieval.md`.
+These are the next tier, ranked by leverage._
 
-- [ ] **Web UI: sanitize rendered note HTML (stored XSS) + localhost auth/Host allowlist** ([#125](https://github.com/CryptoJones/omind/issues/125)) — _bug (security)_ — agent-written note markdown renders through marked v15 into `innerHTML` unsanitized (same-origin JS against the CRUD API on open); no auth/CSRF/Host validation. Sanitize + add a Host allowlist.
-- [ ] **CI: add macOS to the test matrix and build + smoke-test the wheel** ([#126](https://github.com/CryptoJones/omind/issues/126)) — _chore_ — no macOS leg despite a macOS fleet; the wheel's file-selection (hook scripts, fonts) is never exercised because CI installs editable.
-- [ ] **Mesh: expire / GC tombstones so a re-created note is not silently deleted** ([#127](https://github.com/CryptoJones/omind/issues/127)) — _bug_ — `.omi-tombstones` never expires, so re-creating a previously-purged filename gets deleted fleet-wide with no signal.
-- [ ] **loopguard: scope the autonomous-loop guard per session** ([#128](https://github.com/CryptoJones/omind/issues/128)) — _bug_ — the machine-global guard traps concurrent unrelated sessions and its block counter is reset cross-session.
-- [ ] **Web UI: fix O(n^2) synchronous graph settle and leaked render loops** ([#129](https://github.com/CryptoJones/omind/issues/129)) — _bug (perf)_ — the graph force-settle freezes the tab at scale; every Graph open leaks a rAF loop + observers.
-- [ ] **MCP server + web: run vault I/O off the event loop and lock the shared store** ([#130](https://github.com/CryptoJones/omind/issues/130)) — _bug_ — sync handlers block the MCP loop and the shared store cache is mutated from FastAPI's threadpool (dict-changed-size 500s).
-- [ ] **Packaging: pin runtime dependency upper bounds and install the fleet by tag** ([#131](https://github.com/CryptoJones/omind/issues/131)) — _chore_ — open dep floors + untagged-`main` bootstrap let a breaking upstream release land fleet-wide overnight.
+### Retrieval quality
+
+- [ ] **Rerank the fused top-k so the result tail is clean** ([#167](https://github.com/CryptoJones/omind/issues/167)) — _enhancement (retrieval)_ — RRF over
+  an OR-matched keyword leg gets rank 1 right but admits weakly-related notes at ranks 4–10 (a
+  query for "how do I handle colorblindness" pulls in notes matching only "handle"). Reranking is
+  the one technique universal across the surveyed systems. Do it locally and cheaply — score the
+  top ~20 fused candidates against the query with the existing embedding model over the *whole
+  matched chunk* (not the note metadata), or a small cross-encoder behind the `[embed]` extra —
+  never an API call on the query path.
+- [ ] **A retrieval-quality eval harness** ([#168](https://github.com/CryptoJones/omind/issues/168)) — _chore (testing)_ — ranking changes are currently
+  judged by eye on one vault. Add a small labelled query set (query → the note that should win,
+  LoCoMo/LongMemEval in miniature) plus a `omind bench --quality` mode reporting recall@1/@5 and
+  MRR, so a change to weights, fusion, or chunking is measurable instead of a vibe. Prerequisite
+  for tuning `_W_*`, `RRF_K`, or chunk size with any confidence.
+- [ ] **Temporal validity on facts, so superseded memories stop being retrieved as current** ([#169](https://github.com/CryptoJones/omind/issues/169)) —
+  _enhancement (retrieval)_ — Zep/Graphiti's central idea: a fact has a validity interval, not just
+  a creation date. omind has many notes that supersede earlier ones ("v1.2.0 released" → "v1.3.0
+  released") and search happily returns the stale one. Model supersession explicitly (a
+  `Supersedes:`/`Superseded by:` metadata line, indexed), and de-rank superseded chunks instead of
+  deleting them.
+- [ ] **Weight auto-generated notes below hand-curated ones** ([#170](https://github.com/CryptoJones/omind/issues/170)) — _enhancement (retrieval)_ — session
+  journals, worklogs, and checkpoint rollups are numerous, dense, and topically broad, so they
+  crowd genuine memories out of BM25 results. The OKF `type` and the `Session Journal` naming
+  convention already distinguish them; make that a ranking signal.
+- [ ] **Adaptive retrieval scope by query complexity** ([#171](https://github.com/CryptoJones/omind/issues/171)) — _enhancement (efficiency)_ — SimpleMem's
+  third stage: a one-word lookup and a multi-hop question should not retrieve the same `k`. Vary
+  depth and returned excerpt budget by query shape, so simple recalls get cheaper rather than
+  everything getting more expensive.
+
+### Memory shape
+
+- [ ] **Consolidate near-duplicate notes instead of only listing them** ([#172](https://github.com/CryptoJones/omind/issues/172)) — _enhancement (memory)_ —
+  SimpleMem/RecMem both show recursive consolidation is where lifelong memory stops degrading.
+  `omind lint` reports near-duplicates and stops; the index now has the chunk vectors needed to
+  detect real semantic duplicates (not just similar titles). Add an `omind consolidate` that
+  proposes merges and applies them under review — never silently.
+- [ ] **Tiered memory: a small always-loaded core, a large searched archive** ([#173](https://github.com/CryptoJones/omind/issues/173)) — _enhancement
+  (memory)_ — Letta/MemGPT's core/archival split. omind approximates it with `index.md` +
+  `Playbook.md` priming, but tier membership is hand-maintained. Promote/demote by access
+  frequency and recency, so the always-injected set stays small and earns its tokens.
+- [ ] **Wire `lint` to the index (one scan, vector-based near-duplicate detection)** ([#174](https://github.com/CryptoJones/omind/issues/174)) — _chore
+  (perf)_ — `lint_vault` is now the last independent full-vault scanner, and its near-duplicate
+  pass is O(n²) over titles (~553k comparisons on 744 notes). Deliberately left alone during the
+  index work: lint strips code fences before extracting links, and the index does not, so a naive
+  swap would resurrect the false broken-link errors that fix exists to prevent. Do it properly —
+  index a fence-stripped link set alongside the raw one.
+
+### Efficiency
+
+- [ ] **Quantize stored embeddings (int8) and shrink the index** ([#175](https://github.com/CryptoJones/omind/issues/175)) — _enhancement (efficiency)_ — the
+  index is ~19 MB for 5,678 chunks, almost all of it `float32` vectors. int8 with a per-vector
+  scale is standard practice (and what the low-storage retrievers in the survey do), cutting the
+  file ~4× and speeding the matmul, with negligible ranking loss at this scale. Add a residual-norm
+  tiebreaker for near-equal cosines.
+- [ ] **Throttle the per-query index refresh** ([#176](https://github.com/CryptoJones/omind/issues/176)) — _enhancement (perf)_ — every `search()` calls
+  `refresh()`, which stats every note (~5 ms of a ~18 ms query on 762 notes). Skip the refresh when
+  the vault's cheap signature is unchanged since the last one within the same process, and let the
+  existing write-signal file invalidate it, so a burst of queries pays the stat sweep once.
+- [ ] **Consolidate the four `graph-*` audit tools into one paged `graph` tool** ([#177](https://github.com/CryptoJones/omind/issues/177)) — _chore (tokens)_
+  — 16 always-resident tool definitions cost ~1.2–1.8k tokens of every context. `graph-path`,
+  `graph-orphans`, `graph-dangling` and `graph-stats` are one tool with an `op` argument. **Needs a
+  decision first:** it renames tools that the OMI vault's `Playbook.md`, the managed `omind` skill,
+  and other fleet machines reference, so it is a coordinated change, not a local one.
+- [ ] **`omind doctor`: report search-index health** ([#178](https://github.com/CryptoJones/omind/issues/178)) — _chore_ — doctor knows nothing about the
+  index. Report FTS5 availability, whether the semantic leg is on, index size/age, and any stale
+  or corrupt file (with the one-line `omind reindex --rebuild` fix), since a silently-degraded
+  index shows up only as worse answers.
 
 ## Not planned
 
 - [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
+- [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
 
+- [x] **Hybrid search index + MCP token budgets** — _enhancement_ — `omind.searchindex`: FTS5/BM25 over heading-split chunks, packed `float32` chunk vectors, RRF fusion with a weak recency leg, excerpt-returning hits, and the link graph, all in one disposable state-dir SQLite file. Retired `omind.vectorindex` (metadata-only embeddings, JSON float storage, per-query refresh, pure-Python cosine). Paged every list-shaped MCP tool; `read-note` stopped returning the body twice. Added `omind bench`, `omind search --explain`, `omind reindex --index-only/--rebuild`, `docs/retrieval.md`. Measured on a 744-note vault: search 268 ms → 18 ms, natural-language queries 0 hits → ranked answers, `list-notes` ~90,800 → 3,136 tokens.
+- [x] **Deferred adversarial-review batch: #125–#131** — _meta_ — all seven shipped and closed upstream: web XSS/Host allowlist ([#125](https://github.com/CryptoJones/omind/issues/125)), macOS CI + wheel smoke ([#126](https://github.com/CryptoJones/omind/issues/126)), tombstone GC ([#127](https://github.com/CryptoJones/omind/issues/127)), per-session loopguard ([#128](https://github.com/CryptoJones/omind/issues/128)), web graph O(n²) ([#129](https://github.com/CryptoJones/omind/issues/129)), vault I/O off the event loop + store lock ([#130](https://github.com/CryptoJones/omind/issues/130)), dependency pinning ([#131](https://github.com/CryptoJones/omind/issues/131)).
 - [x] **Hardening batch from adversarial code review** ([#132](https://github.com/CryptoJones/omind/issues/132), [PR #124](https://github.com/CryptoJones/omind/pull/124)) — _meta_ — v3.7.6: note data-integrity (frontmatter/lead + fence-aware parse, symmetric mesh-merge convergence), one-bad-byte read hardening, guard false-positive fixes (freshness `-C`/compound forms, command-anchored forge rules, bare `>` side-effect, project-vs-global `.claude/`, negation-aware auth), guard crash-hardening, enforcement fail-open holes (adapter fail-closed, contentless-consult gate-dodge, secret-output `2>/dev/null` leak), atomic config/hook/backup writes, checkpoint/mesh/update/lint availability, and the migrate-hook data-loss. 714 tests + ruff + mypy green. Deferred items → #125–#131. Shipped in 3.7.6.
 - [x] **Codex CLI: `omind setup` only wired the guard, not the `omi` MCP server** ([GitHub #114](https://github.com/CryptoJones/omind/issues/114)) — _enhancement_ — `omind setup --agent codex` now also merges `[mcp_servers.omi]` into `~/.codex/config.toml` (via `tomlkit`, TOML round-trip preserved) so Codex can call the OMI memory tools directly, not just get blocked by the guard. `doctor --agent codex` reports `codex_mcp_registration` alongside `codex_guard`. Shipped in 3.7.0.
 - [x] **Rotate `MCP_CONFORMANCE_TOKEN` before it expires** ([Codeberg #88](https://codeberg.org/CryptoJones/omind/issues/88), [GitHub #105](https://github.com/CryptoJones/omind/issues/105)) — _chore_ — `MCP_CONFORMANCE_TOKEN` is set on the omind repo's Actions secrets and verified live: a re-run of `test.yml` installed the private `mcp-conformance` package and ran the suite (`10 passed, 1 skipped`), no graceful-skip. The PAT is non-expiring (Contents:Read on `CryptoJones/mcp-conformance`), so there is no rotation-before-expiry deadline.
