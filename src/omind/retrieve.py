@@ -170,7 +170,12 @@ def _score_note(
 
 
 def _indexed_titles(
-    task: str, omi_dir: Path | str, *, task_is_cred: bool, limit: int
+    task: str,
+    omi_dir: Path | str,
+    *,
+    task_is_cred: bool,
+    limit: int,
+    searchindex_module: object | None = None,
 ) -> list[str] | None:
     """Hybrid-index ranking of notes against the task — the gate/nudge suggestion
     path (4.3.0). Better than keyword overlap alone, and it replaces the two full
@@ -179,9 +184,11 @@ def _indexed_titles(
     secrets unless the task is about them). ``None`` when the index is
     unavailable, so the caller falls back to keyword scoring."""
     try:
-        from omind import searchindex
+        module = searchindex_module
+        if module is None:
+            from omind import searchindex as module
 
-        index = searchindex.shared(omi_dir)
+        index = module.shared(omi_dir)
         if index is None:
             return None
         rows = index.notes()
