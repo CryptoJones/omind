@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import os
 import re
 import tempfile
@@ -938,8 +939,7 @@ class OmiStore:
         """
         if self._index is _UNSET:
             try:
-                from omind import searchindex
-
+                searchindex = importlib.import_module("omind.searchindex")
                 self._index = (
                     searchindex.SearchIndex(self.omi_dir) if searchindex.available() else None
                 )
