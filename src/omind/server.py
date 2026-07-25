@@ -18,6 +18,7 @@ import contextlib
 import logging
 import sys
 from pathlib import Path
+from typing import Any
 
 from mcp.server.fastmcp import FastMCP
 
@@ -35,6 +36,30 @@ restorable); nothing is removed from disk. Use the version token from
 read-note as expected_version when editing to detect concurrent writers."""
 
 logger = logging.getLogger(__name__)
+
+
+#: Default and hard-cap page sizes for every list-shaped tool. Unbounded list
+#: tools were the single largest token leak in the memory layer: `list-notes` on
+#: a 744-note vault returned ~348 KB (~87k tokens) in ONE tool result, and
+#: graph-orphans/graph-dangling returned hundreds of rows nobody paged through.
+#: An agent that needs more asks for the next page; an agent that needed one
+#: note no longer pays for the whole vault.
+DEFAULT_PAGE = 25
+MAX_PAGE = 100
+
+
+def _page(rows: list[Any], limit: int, offset: int) -> dict[str, object]:
+    """One bounded page of ``rows`` in the shape every list tool returns."""
+    start = max(0, int(offset))
+    size = min(MAX_PAGE, max(1, int(limit)))
+    window = rows[start : start + size]
+    return {
+        "result": window,
+        "count": len(window),
+        "offset": start,
+        "total": len(rows),
+        "has_more": start + size < len(rows),
+    }
 
 
 def _parse_action_items(items: list[str]) -> list[ActionItem]:
@@ -92,20 +117,26 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     @mcp.tool(
         name="read-note",
         description=(
-            "Read one memory note in the legacy full/editing representation: raw "
-            "Markdown, parsed fields, and a version token. Prefer recall-note for "
-            "ordinary memory retrieval because it avoids duplicate token payloads."
+            "Read one note for EDITING, with a version token. representation: "
+            "fields (default, parsed) or raw (Markdown). Prefer recall-note to "
+            "simply remember something."
         ),
     )
-    def read_note(name: str) -> dict[str, object]:
+    def read_note(name: str, representation: str = "fields") -> dict[str, object]:
         raw = store.read_note(name)
         # One read + one parse: read_fields would re-read the file just read.
-        return {
+        # ONE representation, never both: returning `raw` and `fields` together
+        # sent every note body through the context twice, and the editing caller
+        # only ever uses one of them.
+        payload: dict[str, object] = {
             "filename": store.safe_name(name).name,
-            "raw": raw,
-            "fields": parse_note(raw).to_dict(),
             "version": store.note_version(name),
         }
+        if representation == "raw":
+            payload["raw"] = raw
+        else:
+            payload["fields"] = parse_note(raw).to_dict()
+        return payload
 
     @mcp.tool(
         name="recall-note",
@@ -195,8 +226,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     @mcp.tool(
         name="search-vault",
         description=(
-            "Case-insensitive substring search over note titles, summaries, "
-            "details, and tags; optionally filter to one tag."
+            "Relevance-ranked memory search (keyword + semantic + recency) over "
+            "titles, summaries, details, and tags; each hit carries a matched "
+            "excerpt. Empty query + tag lists that tag. Optional limit/offset."
         ),
     )
     def search_vault(
@@ -207,15 +239,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         offset: int = 0,
     ) -> dict[str, object]:
         results = store.search(query, tag=tag, include_disabled=include_archived)
-        start = max(0, int(offset))
-        size = min(25, max(1, int(limit)))
-        page = results[start : start + size]
-        return {
-            "result": [s.__dict__ for s in page],
-            "count": len(page),
-            "offset": start,
-            "has_more": start + size < len(results),
-        }
+        return _page([s.__dict__ for s in results], limit, offset)
 
     @mcp.tool(
         name="help",
@@ -230,10 +254,16 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
 
     @mcp.tool(
         name="list-notes",
-        description="List all memory notes (newest first). Archived notes are hidden by default.",
+        description=(
+            "One page of memory notes, newest first (limit default 25, max 100). "
+            "To FIND a note use search-vault; listing is for browsing."
+        ),
     )
-    def list_notes(include_archived: bool = False) -> list[dict[str, object]]:
-        return [s.__dict__ for s in store.list_notes(include_disabled=include_archived)]
+    def list_notes(
+        include_archived: bool = False, limit: int = DEFAULT_PAGE, offset: int = 0
+    ) -> dict[str, object]:
+        rows = [s.__dict__ for s in store.list_notes(include_disabled=include_archived)]
+        return _page(rows, limit, offset)
 
     @mcp.tool(
         name="delete-note",
@@ -253,14 +283,16 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
 
     @mcp.tool(
         name="backlinks",
-        description="List the notes whose [[wikilinks]] point at the given note.",
+        description="One page of the notes whose [[wikilinks]] point at the given note.",
     )
-    def backlinks(name: str) -> list[dict[str, object]]:
-        return [s.__dict__ for s in store.backlinks(name)]
+    def backlinks(
+        name: str, limit: int = DEFAULT_PAGE, offset: int = 0
+    ) -> dict[str, object]:
+        return _page([s.__dict__ for s in store.backlinks(name)], limit, offset)
 
-    @mcp.tool(name="list-tags", description="List every tag in use across the notes.")
-    def list_tags() -> list[str]:
-        return store.all_tags()
+    @mcp.tool(name="list-tags", description="Every tag in use across the notes (paged).")
+    def list_tags(limit: int = MAX_PAGE, offset: int = 0) -> dict[str, object]:
+        return _page(store.all_tags(), limit, offset)
 
     @mcp.tool(
         name="graph-neighbors",
@@ -270,15 +302,20 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         ),
     )
     def graph_neighbors(
-        name: str, depth: int = 1, direction: str = "both"
-    ) -> list[dict[str, object]]:
+        name: str,
+        depth: int = 1,
+        direction: str = "both",
+        limit: int = DEFAULT_PAGE,
+        offset: int = 0,
+    ) -> dict[str, object]:
         g = graph_for()
-        return [
+        rows = [
             {"filename": filename, "distance": distance}
             for filename, distance in graph.neighbors(
                 g, name, depth=depth, direction=direction
             )
         ]
+        return _page(rows, limit, offset)
 
     @mcp.tool(
         name="graph-path",
@@ -294,21 +331,25 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     @mcp.tool(
         name="graph-orphans",
         description=(
-            "Notes with no inbound or outbound [[wikilinks]] (disconnected from the graph)."
+            "One page of notes with no inbound or outbound [[wikilinks]]. "
+            "graph-stats gives the count without the list."
         ),
     )
-    def graph_orphans() -> list[str]:
-        return graph.orphans(graph_for())
+    def graph_orphans(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, object]:
+        return _page(graph.orphans(graph_for()), limit, offset)
 
     @mcp.tool(
         name="graph-dangling",
         description=(
-            "[[wikilinks]] that resolve to no existing note (broken links), with their source."
+            "One page of [[wikilinks]] resolving to no existing note, with their "
+            "source. graph-stats gives the count without the list."
         ),
     )
-    def graph_dangling() -> list[dict[str, str]]:
-        g = graph_for()
-        return [{"source": src, "target": target} for src, target in graph.dangling_links(g)]
+    def graph_dangling(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, object]:
+        rows = [
+            {"source": src, "target": target} for src, target in graph.dangling_links(graph_for())
+        ]
+        return _page(rows, limit, offset)
 
     @mcp.tool(
         name="graph-stats",

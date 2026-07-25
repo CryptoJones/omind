@@ -275,8 +275,18 @@ def build_parser() -> argparse.ArgumentParser:
 
     reindex = sub.add_parser(
         "reindex",
-        help="regenerate index.md's Recent Memories list under the write lock "
-        "(safe to run from a session that wrote a note file directly)",
+        help="regenerate index.md's Recent Memories list under the write lock, and "
+        "refresh the derived search index",
+    )
+    reindex.add_argument(
+        "--rebuild",
+        action="store_true",
+        help="discard the search index and build it from scratch",
+    )
+    reindex.add_argument(
+        "--index-only",
+        action="store_true",
+        help="refresh the search index without rewriting index.md",
     )
     _add_vault_args(reindex)
 
@@ -324,10 +334,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     search = sub.add_parser("search", help="search OMI notes from the terminal")
     search.add_argument(
-        "query", help="case-insensitive substring over title/summary/details/tags"
+        "query", help="free text; ranked by keyword (BM25) + semantic + recency relevance"
     )
     search.add_argument("--tag", default=None, help="also require this tag")
+    search.add_argument(
+        "--limit", type=int, default=10, help="how many results to print (default 10)"
+    )
+    search.add_argument(
+        "--explain",
+        action="store_true",
+        help="show each hit's fused score and its per-leg ranks (keyword/semantic)",
+    )
     _add_vault_args(search)
+
+    bench = sub.add_parser(
+        "bench",
+        help="measure retrieval performance on this vault: index build, search "
+        "latency, capsule build, and the token cost of a recall",
+    )
+    bench.add_argument(
+        "--query", default="", help="query to time (default: a built-in sample set)"
+    )
+    bench.add_argument("--json", action="store_true", help="emit measurements as JSON")
+    _add_vault_args(bench)
 
     lint = sub.add_parser(
         "lint",
@@ -825,15 +854,34 @@ def _run_import(args: argparse.Namespace) -> int:
 
 
 def _run_reindex(args: argparse.Namespace) -> int:
+    from omind import searchindex
     from omind.journal import migrate_journals
     from omind.store import OmiStore
 
     omi_dir = (args.vault / args.folder).expanduser()
-    moved = migrate_journals(omi_dir)  # locked; idempotent no-op on a clean vault
-    if moved:
-        print(f"moved {len(moved)} session journal(s) into Journal/")
-    OmiStore(omi_dir).update_index()  # locked + atomic
-    print(f"reindexed {omi_dir / 'index.md'}")
+    if not args.index_only:
+        moved = migrate_journals(omi_dir)  # locked; idempotent no-op on a clean vault
+        if moved:
+            print(f"moved {len(moved)} session journal(s) into Journal/")
+        OmiStore(omi_dir).update_index()  # locked + atomic
+        print(f"reindexed {omi_dir / 'index.md'}")
+    index = searchindex.SearchIndex(omi_dir)
+    if not searchindex.available():
+        print("search index unavailable (no FTS5 or disabled) — search will scan", file=sys.stderr)
+        return 0
+    if args.rebuild:
+        index.drop()
+    result = index.refresh()
+    if result is None:
+        print("search index refresh skipped (locked or unavailable)", file=sys.stderr)
+        return 0
+    stats = index.stats() or {}
+    size = stats.get("bytes")
+    print(
+        f"search index: {result.notes} note(s), {result.reindexed} reindexed, "
+        f"{result.removed} removed, {result.embedded} embedded in {result.seconds:.2f}s "
+        f"({stats.get('chunks', 0)} chunks, {(size if isinstance(size, int) else 0) // 1024} KiB)"
+    )
     return 0
 
 
@@ -859,13 +907,58 @@ def _run_search(args: argparse.Namespace) -> int:
     from omind.store import OmiStore
 
     omi_dir = (args.vault / args.folder).expanduser()
-    results = OmiStore(omi_dir).search(args.query, tag=args.tag)
+    if args.explain:
+        return _run_search_explain(omi_dir, args)
+    results = OmiStore(omi_dir).search(args.query, tag=args.tag)[: max(1, args.limit)]
     if not results:
         print("no matches")
         return 0
     for note in results:
-        summary = f" — {note.summary}" if note.summary else ""
-        print(f"{note.title}{summary}")
+        # The excerpt is the MATCHED text, which may live in a section the
+        # 200-char summary never shows — prefer it when the two differ.
+        detail = note.excerpt or note.summary
+        print(f"{note.title}{f' — {detail}' if detail else ''}")
+    return 0
+
+
+def _run_search_explain(omi_dir: Path, args: argparse.Namespace) -> int:
+    """``--explain``: the fused score and per-leg ranks behind each hit, so a bad
+    ranking is diagnosable instead of a black box."""
+    from omind import embed, searchindex
+
+    index = searchindex.shared(omi_dir)
+    if index is None:
+        print("search index unavailable — `omind search` is scanning the vault")
+        return 0
+    hits = index.search(args.query, tag=args.tag, limit=max(1, args.limit))
+    if hits is None:
+        print("search index could not answer (locked or corrupt) — falling back to a scan")
+        return 0
+    semantic = "on" if embed.available() else "off (install the [embed] extra)"
+    print(f"query: {args.query!r}  legs: keyword=on semantic={semantic} recency=on")
+    if not hits:
+        print("no matches")
+        return 0
+    for rank, hit in enumerate(hits, start=1):
+        where = f"#{hit.heading}" if hit.heading else " (title/name)"
+        print(
+            f"{rank}. {hit.filename}{where}  score={hit.score:.5f} "
+            f"keyword={hit.keyword_rank or '-'} semantic={hit.vector_rank or '-'}"
+        )
+        if hit.excerpt:
+            print(f"     {hit.excerpt}")
+    return 0
+
+
+def _run_bench(args: argparse.Namespace) -> int:
+    import json
+
+    from omind import bench
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    queries = (args.query,) if args.query else bench.SAMPLE_QUERIES
+    report = bench.run(omi_dir, queries=queries)
+    print(json.dumps(report.to_dict(), indent=2) if args.json else report.format())
     return 0
 
 
@@ -1070,13 +1163,16 @@ def _dedup_hint(omi_dir: Path, fields: object, filename: str) -> None:
     duplicating (3.0.0). Silent unless the embed backend is installed and a close
     match is found; never raises, never blocks the write."""
     try:
-        from omind import vectorindex
+        from omind import searchindex
 
+        index = searchindex.shared(omi_dir)
+        if index is None:
+            return
         title = getattr(fields, "title", "")
         summary = getattr(fields, "summary", "")
         tags = getattr(fields, "tags", []) or []
         text = "\n".join([title, summary, " ".join(tags)]).strip()
-        near = vectorindex.VectorIndex(omi_dir).nearest(text, exclude=filename, limit=1)
+        near = index.nearest(text, exclude=filename, limit=1)
         if not near:
             return
         name, score = near[0]
@@ -1210,6 +1306,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_import(args)
     if args.command == "search":
         return _run_search(args)
+    if args.command == "bench":
+        return _run_bench(args)
     if args.command == "lint":
         return _run_lint(args)
     if args.command == "graph":
