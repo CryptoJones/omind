@@ -71,6 +71,7 @@ def test_suggest_message_names_notes_or_falls_back(tmp_path: Path) -> None:
     omi = _vault(tmp_path)
     msg = retrieve.suggest_message("codeberg release push", omi)
     assert "[[Codeberg release workflow]]" in msg
+    assert '`recall-note` with `{"name":"Codeberg release workflow"}`' in msg
     assert "credential" in msg.lower()  # keeps the do-not-open-secrets caveat
     # No task -> generic gate message (never invents a note).
     assert retrieve.suggest_message("", omi) == guard.GATE_MESSAGE

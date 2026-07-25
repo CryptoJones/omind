@@ -1,18 +1,29 @@
 #!/usr/bin/env bash
 # omi-gate-reset.sh — Claude Code UserPromptSubmit adapter, installed by omind.
 #
-# Clears the per-turn OMI-consult sentinel so omi-guard.sh re-arms each turn:
-# the first non-OMI action of every turn is blocked until OMI is consulted. It
-# also CAPTURES the turn's task (the user prompt) into a sibling turn-<sid>.txt
-# so the verifier (Layer C) and just-in-time retrieval know what the agent is
-# working on. Pure bash (no subprocess); the sentinel path matches omind's state
-# dir, the same location guard.py uses. Never raises.
+# Runs omind's proactive turn preflight: capture the prompt, recall one compact
+# relevant memory when available, inject it through UserPromptSubmit
+# additionalContext, and satisfy the ordinary consult gate. Hard rule-specific
+# prerequisites still run independently at PreToolUse. If the Python core is
+# unavailable, fall back to the legacy pure-bash reset so enforcement remains
+# armed rather than silently trusting stale state. Never blocks prompt handling.
 
 set -u
 # Default HOME so `set -u` can't crash the reset (which would leave the gate
 # cleared from the previous turn); mirrors omi-guard.sh.
 HOME="${HOME:-/tmp}"
+OMIND='__OMIND_BIN__'
+OMI_DIR='__OMI_DIR__'
 input="$(cat 2>/dev/null)"
+[ -z "$input" ] && exit 0
+
+# Normal path: the core emits the exact UserPromptSubmit JSON on stdout. It also
+# performs local deterministic retrieval only — no model call and no network.
+if [ -x "$OMIND" ] || command -v "$OMIND" >/dev/null 2>&1; then
+  printf '%s' "$input" | "$OMIND" guard preflight --omi-dir "$OMI_DIR" && exit 0
+fi
+
+# Fail-open fallback for prompt submission, but re-arm the gate in pure bash.
 command -v jq >/dev/null 2>&1 || exit 0
 sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
 [ -z "$sid" ] && sid="nosid"

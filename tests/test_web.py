@@ -14,7 +14,7 @@ import httpx
 import pytest
 from fastapi import FastAPI
 
-from omind import paths
+from omind import ai_usage, paths
 from omind.web.app import create_app
 
 
@@ -65,6 +65,21 @@ def client(omi_dir: Path) -> Iterator[WebClient]:
 
 def test_list_empty(client: WebClient) -> None:
     assert client.get("/api/notes").json() == []
+
+
+def test_ai_profile_and_usage_api(client: WebClient, omi_dir: Path) -> None:
+    profile = client.get("/api/ai/profile")
+    assert profile.status_code == 200
+    assert profile.json()["effective"] == "economy"
+    changed = client.put("/api/ai/profile", json={"profile": "high"})
+    assert changed.status_code == 200
+    assert changed.json()["effective"] == "economy"
+    assert client.put("/api/ai/profile", json={"profile": "unknown"}).status_code == 422
+    ai_usage.record_priming(omi_dir, 400)
+    usage = client.get("/api/ai/usage", params={"since": "all"})
+    assert usage.status_code == 200
+    assert usage.json()["totals"]["input_tokens"] == 100
+    assert client.get("/api/ai/usage", params={"since": "forever"}).status_code == 422
 
 
 def test_foreign_host_header_is_rejected(omi_dir: Path) -> None:

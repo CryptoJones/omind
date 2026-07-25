@@ -7,6 +7,7 @@ from __future__ import annotations
 import importlib.resources
 import io
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -155,22 +156,29 @@ def test_repo_work_requires_git_rules_note_and_freshness_check() -> None:
     assert not blocked.allow
     assert blocked.rule_id == "repo-work-read-git-rules"
 
+    # After the rules-note consult, NON-commit repo work (a test run) is allowed —
+    # freshness is only demanded before a commit.
     guard.record_consult("repo", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
-    blocked = guard.decide({"tool": "Bash", "command": "pytest", "session": "repo"})
+    assert guard.decide({"tool": "Bash", "command": "pytest", "session": "repo"}).allow
+
+    # A commit, however, still demands freshness.
+    blocked = guard.decide({"tool": "Bash", "command": "git commit -am x", "session": "repo"})
     assert not blocked.allow
     assert blocked.rule_id == "repo-work-fresh-base"
 
-    compound = guard.decide(
-        {"tool": "Bash", "command": "git fetch --all --prune && pytest", "session": "repo"}
-    )
+    # A fetch chained with the commit is NOT a pure freshness command, so it
+    # records nothing and the commit stays blocked.
+    compound_cmd = "git fetch --all --prune && git commit -am x"
+    compound = guard.decide({"tool": "Bash", "command": compound_cmd, "session": "repo"})
     assert not compound.allow
     assert compound.rule_id == "repo-work-fresh-base"
 
+    # A standalone fetch establishes freshness for the separate next commit.
     fresh = guard.decide(
         {"tool": "Bash", "command": "git fetch --all --prune", "session": "repo"}
     )
     assert fresh.allow
-    assert guard.decide({"tool": "Bash", "command": "pytest", "session": "repo"}).allow
+    assert guard.decide({"tool": "Bash", "command": "git commit -am x", "session": "repo"}).allow
     guard.clear_gate("repo")
 
 
@@ -216,9 +224,31 @@ def test_new_repo_without_a_remote_does_not_demand_freshness(tmp_path: Path) -> 
     guard.clear_gate(session)
 
 
+def test_non_repo_work_does_not_demand_freshness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A cwd and target outside Git must never demand an impossible fetch."""
+    monkeypatch.chdir(tmp_path)
+    session = "not-a-repo"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target="task memory", relevant=True)
+
+    target = tmp_path / "notes.txt"
+    assert guard._repo_root_for_action(
+        {"tool": "Write", "file_path": str(target), "session": session}
+    ) is None
+    allowed = guard.decide(
+        {"tool": "Write", "file_path": str(target), "session": session}
+    )
+    assert allowed.allow, allowed.rule_id
+    guard.clear_gate(session)
+
+
 def test_new_repo_with_a_remote_still_demands_freshness(tmp_path: Path) -> None:
-    # A repo that HAS a remote has an upstream to be stale against, so the
-    # freshness demand is unchanged — the #149 waiver is scoped to no-remote.
+    # A repo that HAS a remote has an upstream to be stale against, so a COMMIT
+    # still demands freshness — the #149 waiver is scoped to no-remote. (A plain
+    # edit no longer demands it; only the commit does — see
+    # test_freshness_gate_applies_only_to_commits.)
     repo = tmp_path / "hasremote"
     repo.mkdir()
     _git_init(repo)
@@ -230,8 +260,44 @@ def test_new_repo_with_a_remote_still_demands_freshness(tmp_path: Path) -> None:
     guard.clear_gate(session)
     guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
 
-    wfile = str(repo / "hello.py")
-    blocked = guard.decide({"tool": "Write", "file_path": wfile, "session": session})
+    commit = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo} commit -am x", "session": session}
+    )
+    assert not commit.allow
+    assert commit.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
+
+
+def test_freshness_gate_applies_only_to_commits(tmp_path: Path) -> None:
+    """CJ, 2026-07-20: the freshness check is scoped to ``git commit`` only. After
+    the rules-note consult, edits/tests/pushes/reads on a stale (never-fetched)
+    repo are allowed; only a commit is blocked until a standalone fetch runs."""
+    repo = tmp_path / "scoped"
+    repo.mkdir()
+    _git_init(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://x.invalid/y.git"],
+        check=True,
+    )
+    session = "commit-scope"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+
+    # Non-commit repo work on a stale base: allowed (rules-note satisfied, no fetch).
+    assert guard.decide(
+        {"tool": "Edit", "file_path": str(repo / "x.py"), "session": session}
+    ).allow
+    assert guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo} push origin main", "session": session}
+    ).allow
+    assert guard.decide(
+        {"tool": "Bash", "command": f"cd {repo} && pytest", "session": session}
+    ).allow
+
+    # The commit is the one action still gated on freshness.
+    blocked = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo} commit -am x", "session": session}
+    )
     assert not blocked.allow
     assert blocked.rule_id == "repo-work-fresh-base"
     guard.clear_gate(session)
@@ -407,6 +473,62 @@ def test_reset_clears_gate_and_captures_task() -> None:
     )
     assert not guard.consulted_this_turn("t2")  # gate re-armed
     assert guard.turn_task("t2") == "do the thing"  # task captured for the verifier
+
+
+def test_turn_preflight_recalls_relevant_memory_and_satisfies_soft_gate(
+    tmp_path: Path,
+) -> None:
+    from omind import ai_usage
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Token Usage Strategy",
+            summary="Keep OMI token usage bounded.",
+            details="Use compact recall and avoid duplicate note representations.",
+        )
+    )
+    event = {"session_id": "preflight-1", "prompt": "reduce OMI token usage"}
+    context = guard.preflight_turn(event, omi)
+    assert "[[Token Usage Strategy]]" in context
+    assert "compact recall" in context
+    assert guard.consulted_this_turn("preflight-1")
+    usage = ai_usage.read_events(omi)
+    assert usage[-1]["operation"] == "recall"
+
+    repeated = guard.preflight_turn(event, omi)
+    assert "already injected earlier this session" in repeated
+    assert "Keep OMI token usage bounded." in repeated
+    assert "compact recall" not in repeated
+
+
+def test_turn_preflight_without_match_leaves_gate_armed(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    context = guard.preflight_turn(
+        {"session_id": "preflight-none", "prompt": "unmatched subject"},
+        omi,
+    )
+    assert "search-vault" in context and "recall-note" in context
+    assert not guard.consulted_this_turn("preflight-none")
+
+
+def test_preflight_cli_emits_user_prompt_additional_context(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    rc = guard.run_guard(
+        "preflight",
+        io.StringIO(json.dumps({"session_id": "preflight-cli", "prompt": "unknown"})),
+        omi_dir=omi,
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hookSpecificOutput"]["hookEventName"] == "UserPromptSubmit"
+    assert "additionalContext" in payload["hookSpecificOutput"]
 
 
 def test_reset_with_no_session_clears_every_gate() -> None:
@@ -849,6 +971,51 @@ def test_freshness_accepts_dash_c_and_compound_read_forms() -> None:
     guard.clear_gate("fresh2")
 
 
+def test_freshness_message_recommends_standalone_fetch_then_separate_write() -> None:
+    """Regression for the self-contradictory guidance: the old block message told
+    the agent to chain ``git fetch … && git commit …``, which can NEVER satisfy the
+    check — a command that also contains the write is not a pure freshness command,
+    so it records nothing and the write stays blocked. The message must recommend a
+    standalone fetch, then a separate write, and the behaviour it describes must
+    actually hold."""
+    msg = guard.GIT_FRESHNESS_MESSAGE
+    assert re.search(r"separate", msg, re.IGNORECASE)
+    assert re.search(r"own command", msg, re.IGNORECASE)
+    # The worked examples are two SEPARATE command lines: the fetch example carries
+    # no commit and the commit example carries no fetch (never chained as the remedy).
+    example_lines = [ln.strip() for ln in msg.splitlines() if ln.strip().startswith("git ")]
+    fetch_examples = [ln for ln in example_lines if "fetch" in ln]
+    commit_examples = [ln for ln in example_lines if "commit" in ln]
+    assert fetch_examples and commit_examples
+    assert all("commit" not in ln for ln in fetch_examples)
+    assert all("fetch" not in ln for ln in commit_examples)
+
+    # The behaviour the message now describes: chaining the write does NOT establish
+    # freshness, so it stays blocked…
+    guard.clear_gate("freshmsg")
+    guard.record_consult("freshmsg", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    chained = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "git fetch --all --prune && git commit -am x",
+            "session": "freshmsg",
+        }
+    )
+    assert not chained.allow
+    assert chained.rule_id == "repo-work-fresh-base"
+
+    # …but a standalone fetch establishes freshness for the SEPARATE next write.
+    guard.clear_gate("freshmsg")
+    guard.record_consult("freshmsg", kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    assert guard.decide(
+        {"tool": "Bash", "command": "git fetch --all --prune", "session": "freshmsg"}
+    ).allow
+    assert guard.decide(
+        {"tool": "Bash", "command": "git commit -am x", "session": "freshmsg"}
+    ).allow
+    guard.clear_gate("freshmsg")
+
+
 def test_stderr_redirect_is_not_a_side_effect_under_a_capability_question() -> None:
     """#498: `pytest 2>&1 | tail` must not be read as a file-writing side effect."""
     guard.mark_consulted("redir")
@@ -876,9 +1043,10 @@ def test_project_local_dotclaude_is_not_a_global_config_mutation(tmp_path: Path)
 
 
 def _mk_repo(tmp_path: Path, name: str) -> Path:
-    """A minimal repo-shaped dir (`.git` present) — the root walk needs no real git."""
+    """A minimal repo-shaped dir with the HEAD marker every real worktree has."""
     repo = tmp_path / name
     (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     return repo.resolve()
 
 
@@ -897,11 +1065,16 @@ def test_dash_c_fetch_attributes_freshness_to_the_target_repo(
     assert fetch.allow
     assert str(repo_b) in guard._fresh_repos("dashc")
     assert str(repo_a) not in guard._fresh_repos("dashc")
-    # An edit in B (repo resolved from the FILE path) now passes the freshness check...
-    edit = guard.decide({"tool": "Edit", "file_path": str(repo_b / "x.py"), "session": "dashc"})
-    assert edit.allow, edit.reason
+    # A commit in B (repo resolved from the -C path) now passes the freshness check
+    # — freshness gates commits only, so a commit is the probe that exercises it...
+    commit_b = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo_b} commit -am x", "session": "dashc"}
+    )
+    assert commit_b.allow, commit_b.reason
     # ...while A — never fetched — is still stale.
-    stale = guard.decide({"tool": "Edit", "file_path": str(repo_a / "x.py"), "session": "dashc"})
+    stale = guard.decide(
+        {"tool": "Bash", "command": f"git -C {repo_a} commit -am x", "session": "dashc"}
+    )
     assert not stale.allow
     assert stale.rule_id == "repo-work-fresh-base"
     guard.clear_gate("dashc")
@@ -926,7 +1099,14 @@ def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
     # pytest's tmp dir), and only falls back to the cwd repo when there is none.
     plain = tmp_path / "plain"
     plain.mkdir()
-    enclosing = next((p for p in (plain, *plain.parents) if (p / ".git").exists()), None)
+    enclosing = next(
+        (
+            p
+            for p in (plain, *plain.parents)
+            if (p / ".git").is_file() or (p / ".git" / "HEAD").is_file()
+        ),
+        None,
+    )
     for command, expected in [
         (f"git -C {repo_b} fetch", repo_b),  # absolute
         ("git -C ../b fetch", repo_b),  # relative to cwd

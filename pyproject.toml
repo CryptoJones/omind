@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "3.8.6"
+version = "4.2.3"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -63,7 +63,11 @@ dev = [
     "ruff>=0.4",
     "mypy>=1.9",
     "httpx>=0.27",
+    # Starlette 1.2+ TestClient prefers the maintained HTTPX2 continuation.
+    "httpx2>=2.0,<3.0",
     "pip-audit>=2.10.0",
+    # Exercise the vector-index paths in CI without installing a model backend.
+    "numpy>=1.24,<3.0",
     # Security floor for pip-audit/cachecontrol's msgpack edge.
     "msgpack>=1.2.1,<2.0",
     "types-PyYAML",

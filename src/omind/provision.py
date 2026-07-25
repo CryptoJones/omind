@@ -655,13 +655,29 @@ class Provisioner:
         and managing the omind CLI. Managed like the hook scripts (not
         write-if-absent) so existing installs pick up edits to omind's guidance.
         """
-        skill = claude_skill_dir() / paths.AGENT_SKILL_FILENAME
-        content = seeds.CLAUDE_SKILL_TEMPLATE.format(
-            vault=self.config.vault,
-            folder=self.config.folder,
-            omi_dir=self.config.omi_dir,
-        )
-        self._write_managed(skill, content)
+        self.install_packaged_skill(claude_skill_dir())
+
+    def install_packaged_skill(self, destination: Path) -> None:
+        """Install the packaged ``omind`` skill with machine paths rendered.
+
+        The same source files serve Claude and Codex, keeping `/omind help` and
+        ``$omind`` behavior aligned. The MCP help tool remains the live syntax
+        source; the skill only teaches the routing workflow.
+        """
+        root = importlib.resources.files("omind").joinpath("skills").joinpath("omind")
+        for relative in (Path(paths.AGENT_SKILL_FILENAME), Path("agents/openai.yaml")):
+            try:
+                resource = root.joinpath(*relative.parts)
+                content = resource.read_text(encoding="utf-8")
+            except Exception as exc:
+                self.log(f"  WARNING: could not read packaged skill {relative}: {exc}")
+                continue
+            content = (
+                content.replace("__OMI_VAULT__", str(self.config.vault))
+                .replace("__OMI_FOLDER__", self.config.folder)
+                .replace("__OMI_DIR__", str(self.config.omi_dir))
+            )
+            self._write_managed(destination / relative, content)
 
     def _read_settings(self, path: Path) -> dict[str, Any]:
         """Load settings.json as a dict; raise rather than clobber bad/foreign JSON."""
@@ -887,9 +903,11 @@ class Provisioner:
             changed = True
         for rule in (
             f"Read({self.config.omi_dir}/**)",
+            "mcp__omi__recall-note",
             "mcp__omi__read-note",
             "mcp__omi__search-vault",
             "mcp__omi__list-notes",
+            "mcp__omi__help",
         ):
             if rule not in allow_list:
                 allow_list.append(rule)

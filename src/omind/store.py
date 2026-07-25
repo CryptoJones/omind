@@ -14,12 +14,13 @@ from __future__ import annotations
 
 import contextlib
 import hashlib
+import importlib
 import os
 import re
 import tempfile
 import threading
 from collections.abc import Callable, Iterator
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 from datetime import date
 from pathlib import Path
 from typing import Any
@@ -131,6 +132,15 @@ _JOURNAL_NOTE_RE = re.compile(rf"^{re.escape(JOURNAL_PREFIX)} .*\.md$")
 _RESERVED_LOWER = frozenset(r.lower() for r in RESERVED_FILENAMES)
 
 
+#: Sentinel for "the search index has not been resolved yet" — distinct from
+#: ``None``, which means "resolved, and unavailable on this machine".
+_UNSET = object()
+#: How many ranked hits the index returns to :meth:`OmiStore.search`. Generous
+#: because callers page through the list (the MCP tool's ``offset``); the payload
+#: those callers actually emit is capped at their own limit.
+_SEARCH_HITS = 200
+
+
 def _is_reserved(name: str) -> bool:
     return name.lower() in _RESERVED_LOWER
 
@@ -238,6 +248,11 @@ class NoteSummary:
     created: str
     summary: str
     disabled: bool = False
+    #: Search-only: the matched text (which may live in a section the 200-char
+    #: ``summary`` never shows) and its fused relevance score. Empty on listings,
+    #: so a listing entry costs no more than it did before.
+    excerpt: str = ""
+    score: float = 0.0
 
 
 def _clean_tag(tag: object) -> str:
@@ -733,6 +748,9 @@ class OmiStore:
         # so concurrent list_notes() calls mutated the cache while another thread
         # iterated it -> "dictionary changed size during iteration" 500s.
         self._cache_lock = threading.Lock()
+        # Lazily-opened hybrid search index (omind.searchindex); _UNSET until the
+        # first search/backlinks call, then either an index or None (unavailable).
+        self._index: Any = _UNSET
 
     @property
     def node_id(self) -> str | None:
@@ -912,10 +930,64 @@ class OmiStore:
         summaries.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return summaries
 
+    def index(self) -> Any:
+        """This vault's derived hybrid index, or ``None`` where unavailable.
+
+        Held on the store so a long-lived process (the node server, the web app)
+        reuses one sqlite connection and one packed vector matrix instead of
+        rebuilding both per query.
+        """
+        if self._index is _UNSET:
+            try:
+                searchindex = importlib.import_module("omind.searchindex")
+                self._index = (
+                    searchindex.SearchIndex(self.omi_dir) if searchindex.available() else None
+                )
+            except Exception:
+                self._index = None
+        return self._index
+
     def search(
         self, query: str, tag: str | None = None, include_disabled: bool = False
     ) -> list[NoteSummary]:
-        """Case-insensitive substring search over title/summary/details/tags."""
+        """Notes relevant to ``query``, best first (BM25 + semantic + recency).
+
+        Served by the derived hybrid index (:mod:`omind.searchindex`); falls back
+        to the historical full-scan substring match whenever the index is
+        unavailable, disabled, or mid-rebuild, so search never depends on it.
+        """
+        indexed = self._indexed_search(query, tag, include_disabled)
+        if indexed is not None:
+            return indexed
+        return self._scan_search(query, tag, include_disabled)
+
+    def _indexed_search(
+        self, query: str, tag: str | None, include_disabled: bool
+    ) -> list[NoteSummary] | None:
+        index = self.index()
+        if index is None:
+            return None
+        try:
+            hits = index.search(
+                query, tag=tag, limit=_SEARCH_HITS, include_disabled=include_disabled
+            )
+        except Exception:
+            return None
+        if hits is None:
+            return None
+        results: list[NoteSummary] = []
+        for hit in hits:
+            summary = self._cached_summary(self.omi_dir / hit.filename)
+            if summary is None:
+                continue  # indexed a note that has since been deleted
+            # replace(), not mutation: ``summary`` is the shared cached instance.
+            results.append(replace(summary, excerpt=hit.excerpt, score=round(hit.score, 6)))
+        return results
+
+    def _scan_search(
+        self, query: str, tag: str | None = None, include_disabled: bool = False
+    ) -> list[NoteSummary]:
+        """The pre-index path: case-insensitive substring over the whole vault."""
         needle = query.strip().lower()
         tag_needle = _clean_tag(tag).lower() if tag else ""
         results: list[NoteSummary] = []
@@ -936,39 +1008,7 @@ class OmiStore:
                 continue
             results.append(self._summarize_fields(path, fields))
         results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
-        # Semantic recall (3.0.0): augment the substring hits with notes close in
-        # MEANING that share no literal term with the query — the fix for a
-        # natural-language query returning []. Substring hits keep their place
-        # (date order); semantic-only matches are appended in similarity order.
-        # Fails open to substring-only when no embed backend is installed.
-        if query.strip():
-            seen = {s.filename for s in results}
-            results.extend(self._semantic_recall(query, tag_needle, include_disabled, seen))
         return results
-
-    def _semantic_recall(
-        self, query: str, tag_needle: str, include_disabled: bool, seen: set[str]
-    ) -> list[NoteSummary]:
-        """Notes semantically closest to ``query`` that the substring pass missed.
-        ``[]`` when no embed backend (the caller keeps just the substring results)."""
-        try:
-            from omind import vectorindex
-
-            notes = self.list_notes(include_disabled=include_disabled)
-            candidates = {
-                s.filename
-                for s in notes
-                if not tag_needle or tag_needle in {t.lower() for t in s.tags}
-            }
-            ranked = vectorindex.VectorIndex(self.omi_dir).rank(
-                query, limit=10, candidates=candidates
-            )
-            if not ranked:
-                return []
-            by_name = {s.filename: s for s in notes}
-            return [by_name[fn] for fn, _ in ranked if fn in by_name and fn not in seen]
-        except Exception:
-            return []
 
     def backlinks(self, name: str) -> list[NoteSummary]:
         """Notes that ``[[wikilink]]`` to the given note (by title or stem)."""
@@ -981,6 +1021,10 @@ class OmiStore:
         title = parse_note(target_text).title.strip().lower()
         if title:
             identifiers.add(title)
+
+        indexed = self._indexed_backlinks(target.name, title)
+        if indexed is not None:
+            return indexed
 
         results: list[NoteSummary] = []
         for path in self._note_paths():
@@ -1000,6 +1044,26 @@ class OmiStore:
                 summary = self._summarize(path, text)
                 if not summary.disabled:
                     results.append(summary)
+        results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
+        return results
+
+    def _indexed_backlinks(self, filename: str, title: str) -> list[NoteSummary] | None:
+        """Backlinks from the index's ``links`` table — one query instead of a
+        second full-vault regex scan. ``None`` falls back to that scan."""
+        index = self.index()
+        if index is None:
+            return None
+        try:
+            names = index.backlinks(filename, title=title)
+        except Exception:
+            return None
+        if names is None:
+            return None
+        results = [
+            summary
+            for summary in (self._cached_summary(self.omi_dir / name) for name in names)
+            if summary is not None and not summary.disabled
+        ]
         results.sort(key=lambda s: (s.created or "", s.title.lower()), reverse=True)
         return results
 

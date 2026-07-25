@@ -27,9 +27,11 @@ from omind.server import build_server
 
 EXPECTED_TOOLS = {
     "read-note",
+    "recall-note",
     "create-note",
     "edit-note",
     "search-vault",
+    "help",
     "list-notes",
     "delete-note",
     "restore-note",
@@ -93,7 +95,10 @@ def test_create_read_round_trip(server: FastMCP, omi_dir: Path) -> None:
     ]
     assert got["fields"]["rev"] == "1@testnode-abc123"  # node stamps Lamport revs
     assert got["version"]
-    assert "[[Other Note]]" in got["raw"]
+    assert "raw" not in got  # ONE representation per call, never the body twice
+    raw = call(server, "read-note", {"name": "Server Note.md", "representation": "raw"})
+    assert "[[Other Note]]" in raw["raw"]
+    assert "fields" not in raw
 
 
 def test_edit_note_partial_update(server: FastMCP) -> None:
@@ -141,6 +146,114 @@ def test_search_vault(server: FastMCP) -> None:
     assert [h["filename"] for h in hits] == ["Alpha.md"]
     by_tag = call(server, "search-vault", {"query": "", "tag": "pets"})["result"]
     assert {h["filename"] for h in by_tag} == {"Alpha.md", "Beta.md"}
+
+
+def test_search_vault_is_bounded_and_pageable(server: FastMCP) -> None:
+    for number in range(7):
+        call(server, "create-note", {"title": f"Page {number}", "summary": "shared"})
+    first = call(server, "search-vault", {"query": "shared", "limit": 2})
+    second = call(
+        server,
+        "search-vault",
+        {"query": "shared", "limit": 2, "offset": 2},
+    )
+    assert first["count"] == 2 and first["has_more"] is True
+    assert second["count"] == 2 and second["offset"] == 2
+    assert {item["filename"] for item in first["result"]}.isdisjoint(
+        item["filename"] for item in second["result"]
+    )
+
+
+def test_every_list_tool_is_bounded(server: FastMCP) -> None:
+    """No tool may return the whole vault in one result.
+
+    `list-notes` used to: ~348 KB / 87k tokens on a 744-note vault, in a single
+    tool payload. Every list-shaped tool now pages, and the caps are asserted
+    here so a new one cannot quietly go unbounded again.
+    """
+    for number in range(40):
+        call(server, "create-note", {"title": f"Note {number:02d}", "summary": "body"})
+    call(server, "create-note", {"title": "Linker", "summary": "see [[Note 00]] and [[Ghost]]"})
+
+    listed = call(server, "list-notes", {})
+    assert listed["count"] == 25 and listed["has_more"] is True  # default page
+    assert listed["total"] == 41
+    assert call(server, "list-notes", {"limit": 5})["count"] == 5
+    assert call(server, "list-notes", {"limit": 9_999})["count"] == 41  # clamped to MAX_PAGE
+    second = call(server, "list-notes", {"limit": 25, "offset": 25})
+    assert second["count"] == 16 and second["has_more"] is False
+    assert {n["filename"] for n in listed["result"]}.isdisjoint(
+        n["filename"] for n in second["result"]
+    )
+
+    for tool, args in (
+        ("backlinks", {"name": "Note 00.md", "limit": 1}),
+        ("list-tags", {"limit": 1}),
+        ("graph-orphans", {"limit": 1}),
+        ("graph-dangling", {"limit": 1}),
+        ("graph-neighbors", {"name": "Linker", "limit": 1}),
+    ):
+        page = call(server, tool, args)
+        assert set(page) >= {"result", "count", "offset", "total", "has_more"}, tool
+        assert page["count"] <= 1, tool
+
+
+def test_search_hits_carry_an_excerpt_of_the_matched_text(server: FastMCP) -> None:
+    """The excerpt is why a search result is often enough on its own — it shows
+    the matched text even when the match is in a section `summary` never shows."""
+    call(
+        server,
+        "create-note",
+        {"title": "Deploy", "summary": "unrelated one-liner", "details": "the runbook step is X"},
+    )
+    hit = call(server, "search-vault", {"query": "runbook"})["result"][0]
+    assert hit["filename"] == "Deploy.md"
+    assert "runbook" in hit["excerpt"]
+    assert hit["score"] > 0
+
+
+def test_recall_note_returns_one_bounded_representation(server: FastMCP) -> None:
+    call(
+        server,
+        "create-note",
+        {
+            "title": "Compact",
+            "summary": "short durable summary",
+            "details": "D" * 2_000,
+            "tags": ["memory"],
+        },
+    )
+    recalled = call(server, "recall-note", {"name": "Compact", "max_chars": 500})
+    assert set(recalled) == {
+        "filename",
+        "title",
+        "summary",
+        "content",
+        "section",
+        "truncated",
+        "version",
+    }
+    assert recalled["summary"] == "short durable summary"
+    assert len(recalled["content"]) <= 500
+    assert recalled["truncated"] is True
+    assert "raw" not in recalled and "fields" not in recalled
+
+    section = call(
+        server,
+        "recall-note",
+        {"name": "Compact", "section": "Details", "max_chars": 500},
+    )
+    assert section["section"] == "Details"
+
+
+def test_help_tool_is_generated_from_live_cli(server: FastMCP) -> None:
+    result = call(server, "help", {"command": "/omind help ai usage"})
+    assert result["ok"] is True
+    assert result["command"] == "omind ai usage"
+    assert "--since" in result["help"] and "--json" in result["help"]
+    unknown = call(server, "help", {"command": "ai usgae"})
+    assert unknown["ok"] is False
+    assert "usage" in unknown["error"]
 
 
 def test_backlinks_and_tags(server: FastMCP) -> None:

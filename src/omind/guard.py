@@ -53,27 +53,35 @@ from typing import Any, TextIO
 from omind import compliance, paths, policy
 
 GATE_MESSAGE = (
-    "consult OMI before acting this turn — read a note relevant to your task "
-    "(an OMI search or read), then retry. One consult clears the rest of the "
-    "turn. This is NOT a prompt to open the credential/auth notes."
+    "ACTION BLOCKED. Next call OMI MCP `search-vault` with a focused task query, "
+    "then call `recall-note` on one result and retry the blocked action. Do not "
+    "open credential/auth notes unless the task is explicitly about credentials."
 )
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
-    "repo work requires reading OMI note `Operational Rules - Git Repos and Secrets` "
-    "this turn; a generic project-memory consult is not enough."
+    "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
+    '`{"name":"Operational Rules - Git Repos and Secrets"}`, then retry. '
+    "Repo work requires that specific memory this turn."
 )
 GIT_FRESHNESS_MESSAGE = (
-    "repo work requires a same-turn freshness check before "
-    "review/edit/test/commit/push. Put a LITERAL-path fetch in the SAME command as "
-    "the write, chained with && — e.g.:\n"
-    '  git -C "/abs/path/to/repo" fetch --all --prune '
-    '&& git -C "/abs/path/to/repo" commit -am "..."\n'
-    "(same shape for push / a git write; for `gh pr create`, prefix it with the "
-    "literal-path fetch too). Gotchas that make it silently fail: (1) the path must "
-    "be a LITERAL absolute path — a $VAR is not resolved by the static parser; (2) no "
-    "pipe/redirect in the fetch part; (3) the fetch must succeed (exit 0) — if `--all` "
+    "a git commit requires a same-turn freshness check — refresh the local base "
+    "before recording work onto it. (Only the commit is gated; edits, tests, reads, "
+    "and pushes are not.) If the repo has no remote there is nothing to be stale "
+    "against and no fetch is required. Otherwise, run a LITERAL-path fetch as ITS OWN "
+    "command FIRST, then commit as a SEPARATE command — two calls, not one:\n"
+    '  git -C "/abs/path/to/repo" fetch --all --prune\n'
+    '  git -C "/abs/path/to/repo" commit -am "..."\n'
+    "Do NOT chain the commit onto the fetch. A command that also contains the commit — "
+    "or ANY non-git-read step, even a harmless `&& echo ok` — is not recognised as a "
+    "freshness command, records nothing, and the commit stays blocked. The fetch "
+    "command may only be combined with other git READS, e.g. "
+    '`git -C "/repo" fetch --all --prune && git -C "/repo" status`. Gotchas that make '
+    "it silently fail: (1) the path must be a LITERAL absolute path — a $VAR is not "
+    "resolved by the static parser; (2) no pipe, redirect, or command-substitution "
+    "anywhere in the fetch command; (3) the fetch must succeed (exit 0) — if `--all` "
     "hits an unreachable mirror (e.g. a Codeberg remote with no key loaded), use "
-    "`fetch origin --prune` so it doesn't error out and fail to register."
+    "`fetch origin --prune`; (4) freshness resets every turn, so re-run the standalone "
+    "fetch once per turn before your next commit."
 )
 GLOBAL_MUTATION_MESSAGE = (
     "global config/hook/bootstrap mutation requires explicit user authorization in the "
@@ -117,6 +125,30 @@ def _turn_path(session: str) -> Path:
     reset so the verifier (Layer C) and retrieval know what the agent is working
     on. A sibling of the gate sentinel, so both turn-start paths agree."""
     return paths.state_dir() / f"turn-{_safe_sid(session)}.txt"
+
+
+def _injected_path(session: str) -> Path:
+    """Per-session note versions already injected by proactive turn preflight."""
+    return paths.state_dir() / f"injected-{_safe_sid(session)}.json"
+
+
+def _injected_versions(session: str) -> dict[str, str]:
+    try:
+        value = json.loads(_injected_path(session).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return {}
+    return {str(k): str(v) for k, v in value.items()} if isinstance(value, dict) else {}
+
+
+def _record_injected(session: str, filename: str, version: str) -> None:
+    if not session or not filename:
+        return
+    with contextlib.suppress(OSError):
+        path = _injected_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        values = _injected_versions(session)
+        values[filename] = version
+        paths.atomic_write_text(path, json.dumps(values), mode=0o600)
 
 
 def begin_turn(session: str, task: str) -> None:
@@ -483,7 +515,15 @@ def clear_all_gates() -> None:
     state = paths.state_dir()
     # ``turn-*`` holds the captured raw prompt; it was never reaped, so those
     # files accumulated unboundedly (and leaked prompt text) across sessions.
-    for pattern in ("gate-*", "reclose-*", "pending-*", "offtopic-*", "git-fresh-*", "turn-*"):
+    for pattern in (
+        "gate-*",
+        "reclose-*",
+        "pending-*",
+        "offtopic-*",
+        "git-fresh-*",
+        "turn-*",
+        "injected-*",
+    ):
         try:
             stale = list(state.glob(pattern))
         except OSError:
@@ -745,14 +785,20 @@ def _git_dash_c_path(command: str) -> Path | None:
         parts = _split_simple_commands(command)
         if not parts:
             return None
-        lexer = shlex.shlex(parts[0], posix=True)
-        lexer.whitespace_split = True
-        lexer.commenters = ""
-        # POSIX shlex treats backslash as an escape and would turn a literal
-        # Windows path such as C:\\repo into C:repo. Quotes are still honoured;
-        # disabling only escapes preserves paths on every supported platform.
-        lexer.escape = ""
-        tokens = list(lexer)
+        # POSIX shlex treats every backslash as an escape and turns an unquoted
+        # Windows path such as ``C:\\repo`` into ``C:repo``.  PowerShell/cmd do
+        # not use backslashes that way, so retain them for a Windows shell or
+        # an explicit drive path. Non-POSIX shlex keeps surrounding quotes;
+        # remove only a matching outer pair.
+        windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", parts[0])
+        tokens = shlex.split(parts[0], posix=not windows_style)
+        if windows_style:
+            tokens = [
+                token[1:-1]
+                if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
+                else token
+                for token in tokens
+            ]
     except ValueError:
         return None
     if not tokens or tokens[0] != "git":
@@ -793,7 +839,12 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
         except OSError:
             cur = candidate.absolute()
         for parent in (cur, *cur.parents):
-            if (parent / ".git").exists():
+            marker = parent / ".git"
+            # A real worktree has either a .git pointer file or a directory
+            # containing HEAD. Merely finding an empty directory named .git
+            # (for example a sandbox mount marker) must not turn every child
+            # path into a repository and demand an impossible freshness fetch.
+            if marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file()):
                 return parent
     return None
 
@@ -835,6 +886,24 @@ def _has_consulted_git_rules(session: str) -> bool:
         if needle in target:
             return True
     return False
+
+
+# A ``git commit`` at command position, tolerating the ``-C <dir>`` / ``-c k=v``
+# global opts before the verb (so ``git -C <repo> commit`` still matches).
+_GIT_COMMIT_RE = re.compile(rf"(?:^|[;&|\n(]\s*)git[ \t]+{_GIT_GLOBAL_OPTS}commit\b")
+
+
+def _is_commit_action(action: dict[str, Any]) -> bool:
+    """True only when a Bash command runs ``git commit``. Freshness is demanded
+    ONLY here: a commit is the moment work is recorded onto the local base, so a
+    stale base is what gets committed if it was never refreshed. Edits, tests,
+    reads, and even pushes do NOT trip the freshness gate (a push of an
+    already-fresh-based commit is not stale-prone). Those still require the
+    git-rules consult via :func:`_is_repo_sensitive_action` — only the freshness
+    demand is narrowed to commits."""
+    if str(action.get("tool") or "") != "Bash":
+        return False
+    return bool(_GIT_COMMIT_RE.search(str(action.get("command") or "")))
 
 
 def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
@@ -1031,10 +1100,17 @@ def decide(action: dict[str, Any]) -> Verdict:
                 reason=f"omi-guard (hard): {GIT_RULES_MESSAGE}",
                 rule_id="repo-work-read-git-rules",
             )
-        # A repo with no configured remote has nothing to fetch and no upstream
-        # to be stale against, so the freshness check is vacuous — waive it
-        # rather than lock the agent out of a brand-new `git init` repo (#149).
-        if not _git_fresh_for_repo(session, repo) and _repo_has_remote(repo):
+        # Freshness is demanded ONLY before a commit — that is when a stale local
+        # base actually gets recorded; edits, tests, reads, and pushes are not
+        # gated on it. A repo with no configured remote has nothing to fetch and
+        # no upstream to be stale against, so the check is vacuous there too —
+        # waive it rather than lock the agent out of a brand-new `git init` repo
+        # (#149).
+        if (
+            _is_commit_action(action)
+            and not _git_fresh_for_repo(session, repo)
+            and _repo_has_remote(repo)
+        ):
             record_pending(session, command or _action_path(action))
             return Verdict(
                 allow=False,
@@ -1060,7 +1136,7 @@ def decide(action: dict[str, Any]) -> Verdict:
     return Verdict(allow=False, reason=f"omi-gate: {GATE_MESSAGE}", rule_id="omi-gate")
 
 
-def check_action(action: dict[str, Any]) -> Verdict:
+def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict:
     """Decide an action and log a real policy-rule deny to the compliance log.
 
     The shared core behind ``omind guard check`` and the per-harness adapters
@@ -1068,6 +1144,15 @@ def check_action(action: dict[str, Any]) -> Verdict:
     routine ``omi-gate`` "you didn't consult" deny is friction, not logged.
     """
     verdict = decide(action)
+    if not verdict.allow and verdict.rule_id == "omi-gate" and omi_dir is not None:
+        from omind import retrieve
+
+        session = str(action.get("session") or "")
+        verdict = Verdict(
+            allow=False,
+            reason=f"omi-gate: {retrieve.suggest_message(turn_task(session), omi_dir)}",
+            rule_id=verdict.rule_id,
+        )
     if not verdict.allow and verdict.rule_id and verdict.rule_id != "omi-gate":
         compliance.log_event(
             compliance.KIND_DECISION,
@@ -1130,6 +1215,8 @@ def run_guard(
             # session is stuck. (The hook path always supplies a session.)
             clear_all_gates()
         return 0
+    if action_name == "preflight":
+        return _run_preflight(_load(src), omi_dir)
     if action_name == "learn":
         return _run_learn(_load(src), omi_dir)
     if action_name == "escalate":
@@ -1174,10 +1261,76 @@ def run_guard(
         sys.stderr.write(f"exported {count} corpus example(s)\n")
         return 0
     if action_name == "check":
-        verdict = check_action(_load(src))
+        verdict = check_action(_load(src), omi_dir=omi_dir)
         if not verdict.allow:
             sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
         return verdict.exit_code
+    return 0
+
+
+def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
+    """Prepare one turn with compact relevant memory and satisfy the soft gate.
+
+    Hard policy prerequisites still run before the soft gate, so a general
+    preflight memory cannot bypass the specific git-rules/freshness controls.
+    """
+    session = str(data.get("session_id") or data.get("session") or "")
+    task = str(data.get("prompt") or data.get("user_prompt") or "")
+    clear_gate(session)
+    begin_turn(session, task)
+    if gate_paused() or omi_dir is None:
+        return ""
+
+    from omind import ai_usage, recall, retrieve
+
+    titles = retrieve.relevant_titles(task, omi_dir, limit=1) if task else []
+    filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
+    if filename is None:
+        return (
+            "OMI turn preflight found no confident memory match. The consult gate "
+            "remains armed. Before any non-memory tool, call OMI MCP `search-vault` "
+            "with a focused query, then `recall-note` on one result."
+        )
+
+    memory = recall.compact_recall(
+        omi_dir,
+        filename,
+        max_chars=ai_usage.policy(omi_dir).preflight_chars,
+    )
+    version = str(memory.get("version") or "")
+    repeated = _injected_versions(session).get(filename) == version
+    summary = str(memory.get("summary") or "").strip()
+    excerpt = str(memory.get("content") or "").strip()
+    content = summary if repeated else "\n\n".join(
+        part for part in (summary, excerpt) if part and part != summary
+    )
+    if not content:
+        content = str(memory.get("title") or filename)
+    record_consult(session, kind="preflight", target=filename, relevant=True)
+    reset_offtopic(session)
+    _record_injected(session, filename, version)
+    context = (
+        f"OMI turn preflight recalled [[{memory.get('title') or Path(filename).stem}]]"
+        + (" (full excerpt already injected earlier this session)" if repeated else "")
+        + ". Treat this as durable local memory; the current user instruction wins "
+        "on conflict.\n\n"
+        + content
+    )
+    ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
+    return context
+
+
+def _run_preflight(data: dict[str, Any], omi_dir: Path | None) -> int:
+    """Claude UserPromptSubmit adapter: inject preflight beside the user prompt."""
+    context = preflight_turn(data, omi_dir)
+    if context:
+        payload = {
+            "hookSpecificOutput": {
+                "hookEventName": "UserPromptSubmit",
+                "additionalContext": context,
+            }
+        }
+        sys.stdout.write(json.dumps(payload) + "\n")
     return 0
 
 

@@ -145,8 +145,8 @@ This is what `omind setup` provisioned in 1.x, and the fix shipped in 2.0:
   third-party MCP. `setup` also removes the retired `obsidian` registration.
 - `omind doctor` warns when the registered command is not the expected
   `omind node` form, so a leak-prone leftover wrapper is surfaced.
-- Optional: document that read-only OMI tools (`list-available-vaults`,
-  `read-note`, `search-vault`) can be added to Claude Code's permission
+- Optional: document that read-only OMI tools (`recall-note`, `search-vault`,
+  `read-note`, `list-notes`, `help`) can be added to Claude Code's permission
   allowlist to avoid per-call prompts; leave write/delete tools behind prompts.
 
 ## `omind setup` on a machine without `jq` locks the agent out of every tool

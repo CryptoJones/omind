@@ -24,6 +24,7 @@ import hashlib
 import importlib.resources
 import json
 import os
+import shlex
 import shutil
 import sys
 from pathlib import Path
@@ -153,6 +154,11 @@ def codex_agents_path() -> Path:
     return codex_config_dir() / "AGENTS.md"
 
 
+def codex_skill_dir() -> Path:
+    """User-scope Codex skill installed by omind setup."""
+    return codex_config_dir() / "skills" / "omind"
+
+
 #: Substring identifying omind's own Codex guard hook command, so a re-run finds
 #: and replaces only our entry (and never duplicates) inside the user's hooks.json.
 CODEX_GUARD_MARKER = "guard adapter --harness codex"
@@ -184,7 +190,7 @@ def _codex_omind_hook(event: str, hook: dict[str, Any]) -> bool:
     command = str(hook.get("command", ""))
     if event in {"PreToolUse", "PermissionRequest"}:
         return CODEX_GUARD_MARKER in command
-    if event == "SessionStart":
+    if event in {"PostToolUse", "SessionStart"}:
         return HOOK_MARKER in command
     return False
 
@@ -985,8 +991,8 @@ class CodexProvisioner(AgentProvisioner):
     AGENT_LABEL = "Codex CLI"
     INSTALL_HINT = "Install Codex CLI (`npm i -g @openai/codex`, or the snap), then re-run."
     DONE_MESSAGE = (
-        "Done. Restart Codex to load the OMI memory tools, trusted omind hooks, "
-        "and the global AGENTS.md bootstrap."
+        "Done. Restart Codex to load the OMI memory tools, /omind skill, trusted "
+        "omind hooks, and the global AGENTS.md bootstrap."
     )
 
     def agent_root(self) -> Path:
@@ -995,9 +1001,11 @@ class CodexProvisioner(AgentProvisioner):
     def integrate(self) -> None:
         self.install_guard()
         self.install_priming()
+        self.install_accounting()
         self.register_mcp()
         self.install_hook_trust()
         self.install_bootstrap()
+        self.install_packaged_skill(codex_skill_dir())
 
     def _guard_hook_group(self) -> dict[str, Any]:
         """One Claude-schema matcher group running the omind codex adapter on all
@@ -1007,7 +1015,10 @@ class CodexProvisioner(AgentProvisioner):
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"{omind} guard adapter --harness codex",
+                    "command": (
+                        f"{shlex.quote(omind)} guard adapter --harness codex "
+                        f"--omi-dir {shlex.quote(str(self.config.omi_dir))}"
+                    ),
                     "timeout": 30,
                 }
             ]
@@ -1099,6 +1110,37 @@ class CodexProvisioner(AgentProvisioner):
             path.parent.mkdir(parents=True, exist_ok=True)
             paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
+    def install_accounting(self) -> None:
+        """Record OMI MCP response sizes after Codex tool calls.
+
+        The same hook also feeds the existing privacy-safe journal and
+        deterministic relevance verifier. Economy/balanced profiles never start
+        a verifier model subprocess.
+        """
+        path = codex_hooks_path()
+        data, hooks_cfg = self._read_hooks_file()
+        command = self._omind_hook_command("PostToolUse")
+        desired = {"hooks": [{"type": "command", "command": command, "timeout": 15}]}
+
+        groups = hooks_cfg.get("PostToolUse")
+        existing = groups if isinstance(groups, list) else []
+        kept = [
+            group
+            for group in existing
+            if not (isinstance(group, dict) and HOOK_MARKER in json.dumps(group))
+        ]
+        merged = kept + [desired]
+        if merged == existing and not self.config.force:
+            self.log(f"  OMI accounting hook already installed in {path}")
+            return
+
+        hooks_cfg["PostToolUse"] = merged
+        data["hooks"] = hooks_cfg
+        self._record(f"install OMI MCP accounting hook (PostToolUse) in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
     def _guard_wired(self) -> bool:
         try:
             _root, hooks_cfg = self._read_hooks_file()
@@ -1127,6 +1169,13 @@ class CodexProvisioner(AgentProvisioner):
         else:
             self.log(
                 "  NOTE: could not confirm OMI SessionStart priming in Codex's "
+                "hooks.json; re-run with --force."
+            )
+        if self._accounting_wired():
+            self.log(f"  verified: OMI MCP accounting wired into Codex ({codex_hooks_path()})")
+        else:
+            self.log(
+                "  NOTE: could not confirm OMI PostToolUse accounting in Codex's "
                 "hooks.json; re-run with --force."
             )
         if self._hook_trust_installed():
@@ -1162,6 +1211,16 @@ class CodexProvisioner(AgentProvisioner):
         return any(
             isinstance(g, dict) and HOOK_MARKER in json.dumps(g)
             for g in (hooks_cfg.get("SessionStart") or [])
+        )
+
+    def _accounting_wired(self) -> bool:
+        try:
+            _root, hooks_cfg = self._read_hooks_file()
+        except ProvisionError:
+            return False
+        return any(
+            isinstance(group, dict) and HOOK_MARKER in json.dumps(group)
+            for group in (hooks_cfg.get("PostToolUse") or [])
         )
 
     # -- persisted hook trust ----------------------------------------------
@@ -1219,7 +1278,7 @@ class CodexProvisioner(AgentProvisioner):
         except ProvisionError:
             return {}
         entries: dict[str, str] = {}
-        for event in ("PreToolUse", "PermissionRequest", "SessionStart"):
+        for event in ("PreToolUse", "PermissionRequest", "PostToolUse", "SessionStart"):
             groups = hooks_cfg.get(event)
             if not isinstance(groups, list):
                 continue
@@ -1672,6 +1731,23 @@ def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
                 "(run `omind setup --agent codex`)",
             )
         )
+    if prov._accounting_wired():
+        results.append(
+            CheckResult(
+                "codex_accounting",
+                "ok",
+                f"OMI PostToolUse accounting wired into {codex_hooks_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "codex_accounting",
+                "fail",
+                "OMI PostToolUse accounting not in Codex hooks.json "
+                "(run `omind setup --agent codex`)",
+            )
+        )
     if prov.bootstrap_installed():
         results.append(
             CheckResult(
@@ -1687,6 +1763,17 @@ def diagnose_codex(config: SetupConfig) -> list[CheckResult]:
                 "fail",
                 f"OMI bootstrap pointer missing from {codex_agents_path()} "
                 "(run `omind setup --agent codex`)",
+            )
+        )
+    skill = codex_skill_dir() / paths.AGENT_SKILL_FILENAME
+    if skill.is_file():
+        results.append(CheckResult("codex_skill", "ok", f"omind skill installed: {skill}"))
+    else:
+        results.append(
+            CheckResult(
+                "codex_skill",
+                "warn",
+                f"omind skill missing: {skill} (run `omind setup --agent codex`)",
             )
         )
     if prov._hook_trust_installed():

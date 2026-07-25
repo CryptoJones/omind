@@ -19,9 +19,10 @@ opening the secrets notes.
 
 from __future__ import annotations
 
+import importlib
+import json
 import re
 from pathlib import Path
-from typing import Any
 
 #: Stopword set — common function words plus the *instruction filler* that wraps
 #: a request ("please fix … before we move any further") and otherwise inflates
@@ -169,32 +170,43 @@ def _score_note(
     return score
 
 
-def _semantic_titles(
-    task: str, omi_dir: Path | str, notes: list[Any], *, task_is_cred: bool, limit: int
+def _indexed_titles(
+    task: str, omi_dir: Path | str, *, task_is_cred: bool, limit: int
 ) -> list[str] | None:
-    """Semantic-similarity ranking of notes to the task (3.0.0) — better gate/nudge
-    suggestions than keyword overlap, which surfaced off-topic notes. Preserves the
-    credential de-prioritization (never steer to secrets unless the task is about
-    them). ``None`` when no embed backend, so the caller falls back to keyword."""
+    """Hybrid-index ranking of notes against the task — the gate/nudge suggestion
+    path (4.3.0). Better than keyword overlap alone, and it replaces the two full
+    vault listings this used to cost on **every user prompt**: the index answers
+    from SQLite. Preserves the credential de-prioritization (never steer to
+    secrets unless the task is about them). ``None`` when the index is
+    unavailable, so the caller falls back to keyword scoring."""
     try:
-        from omind import embed, vectorindex
-
-        if not embed.available():
+        # Keep this edge dynamic: searchindex lazily imports the token helpers
+        # in this module, so a static import here would recreate the cycle that
+        # the retrieval integration deliberately removed.
+        searchindex = importlib.import_module("omind.searchindex")
+        index = searchindex.shared(omi_dir)
+        if index is None:
             return None
-        title_by_file: dict[str, str] = {}
-        cred_files: set[str] = set()
-        for note in notes:
-            stem = note.filename[:-3] if note.filename.endswith(".md") else note.filename
-            title_by_file[note.filename] = note.title or stem
-            if not task_is_cred and _looks_credential(
-                note.title, note.summary, " ".join(note.tags)
-            ):
-                cred_files.add(note.filename)
-        ranked = vectorindex.VectorIndex(omi_dir).rank(task, limit=limit + len(cred_files) + 1)
-        if ranked is None:
+        rows = index.notes()
+        hits = index.search(task, limit=limit * 3 + 3)
+        if rows is None or hits is None:
             return None
+        title_by_file = {
+            row.filename: row.title
+            or (row.filename[:-3] if row.filename.endswith(".md") else row.filename)
+            for row in rows
+        }
+        cred_files = set()
+        if not task_is_cred:
+            cred_files = {
+                row.filename
+                for row in rows
+                if _looks_credential(row.title, " ".join(row.tags))
+            }
         titles = [
-            title_by_file[fn] for fn, _ in ranked if fn in title_by_file and fn not in cred_files
+            title_by_file[hit.filename]
+            for hit in hits
+            if hit.filename in title_by_file and hit.filename not in cred_files
         ]
         return titles[:limit]
     except Exception:
@@ -204,22 +216,22 @@ def _semantic_titles(
 def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[str]:
     """Titles of the notes most relevant to ``task`` (best first), or ``[]``.
 
-    Best-effort over the note listing; any read/parse failure yields ``[]`` so
-    the gate falls back to its generic message rather than wedging.
+    Best-effort: any read/parse failure yields ``[]`` so the gate falls back to
+    its generic message rather than wedging.
     """
     task_terms = _tokens(task)
     if not task_terms:
         return []
+    task_is_cred = bool(task_terms & _CREDENTIAL_STEMS)
+    indexed = _indexed_titles(task, omi_dir, task_is_cred=task_is_cred, limit=limit)
+    if indexed is not None:
+        return indexed
     try:
         from omind.store import OmiStore
 
         notes = OmiStore(omi_dir).list_notes()
     except Exception:
         return []
-    task_is_cred = bool(task_terms & _CREDENTIAL_STEMS)
-    semantic = _semantic_titles(task, omi_dir, notes, task_is_cred=task_is_cred, limit=limit)
-    if semantic is not None:
-        return semantic
     scored: list[tuple[float, str]] = []
     for note in notes:
         stem = note.filename[:-3] if note.filename.endswith(".md") else note.filename
@@ -248,10 +260,12 @@ def suggest_message(task: str, omi_dir: Path | str, *, limit: int = 3) -> str:
     titles = relevant_titles(task, omi_dir, limit=limit) if task else []
     if not titles:
         return GATE_MESSAGE
-    links = ", ".join(f"[[{t}]]" for t in titles)
+    call = json.dumps({"name": titles[0]}, ensure_ascii=False, separators=(",", ":"))
+    alternatives = ", ".join(f"[[{title}]]" for title in titles[1:])
+    extra = f" Other candidates: {alternatives}." if alternatives else ""
     return (
-        "consult OMI before acting this turn — notes relevant to your task: "
-        f"{links} (or another note you know is on-point), then retry. One consult "
-        "clears the rest of the turn. This is NOT a prompt to open the "
-        "credential/auth notes."
+        f"ACTION BLOCKED. Relevant memory: [[{titles[0]}]]. "
+        f"Next call OMI MCP `recall-note` with `{call}`, then retry."
+        f"{extra} Do not open credential/auth notes unless the task is explicitly "
+        "about credentials."
     )

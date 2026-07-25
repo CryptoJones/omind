@@ -7,6 +7,151 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **A derived hybrid search index (`omind.searchindex`).** One SQLite file per
+  vault, in the state dir, holding FTS5/BM25 over heading-split chunks, packed
+  `float32` chunk embeddings, and the resolved `[[wikilink]]` graph. Queries fuse
+  a keyword leg, a semantic leg, and a weak recency leg with Reciprocal Rank
+  Fusion. Notes remain the source of truth; the index is disposable, machine-local,
+  never committed and never mesh-synced, and refreshes only the notes whose bytes
+  changed. On a 744-note vault: search 268 ms → 18 ms, full build 1.5 s,
+  incremental refresh 5 ms. See `docs/retrieval.md`.
+- `omind bench` — measures index build/refresh, search latency (indexed *and*
+  pre-index scan), capsule size, and the token cost of the listing payload, so
+  retrieval performance is observed rather than asserted.
+- `omind search --explain` prints the fused score and per-leg ranks behind each
+  hit; `omind reindex` gained `--index-only` and `--rebuild`.
+- `OMI_INDEX_DISABLE=1` turns the index off and restores the scanning search path.
+
+### Changed
+- **Search is relevance-ranked, not substring-filtered.** `store.search` (and so
+  `search-vault`, the web UI, and `omind search`) previously read and parsed every
+  note on every query to run `needle in haystack`, then sorted the hits by *date*.
+  A natural-language question with no literal substring returned nothing at all.
+  Results now come back best-first with the matched excerpt attached, and a
+  multi-term query ranks partial matches instead of dropping them.
+- **Every list-shaped MCP tool is paged** (`limit`, `offset`, `total`,
+  `has_more`): `list-notes`, `backlinks`, `list-tags`, `graph-neighbors`,
+  `graph-orphans`, `graph-dangling`. `list-notes` was unbounded and returned
+  ~90,800 tokens in a single tool result on a 744-note vault; one page is ~3,100.
+- **`read-note` returns one representation, not two.** It sent every note body
+  through the context twice (`raw` *and* `fields`); it now takes
+  `representation="fields"|"raw"` and defaults to parsed fields.
+- `store.backlinks` and `omind.graph` are served from the index's link table
+  instead of each running their own full-vault scan.
+- The gate/nudge suggestion path (`retrieve.relevant_titles`, called on every
+  user prompt) queries the index instead of building two full vault listings.
+
+### Removed
+- `omind.vectorindex`. Its metadata-only embeddings (title + summary + tags, so a
+  fact in `## Details` was unreachable), JSON float-list storage, refresh-on-every-
+  query, and pure-Python cosine loop are superseded by the chunk vectors in
+  `omind.searchindex`; `nearest()` (the create-note dedup hint) moved across.
+
+## [4.2.3] - 2026-07-21
+
+### Fixed
+- Upgrade both CodeQL workflow actions together to 4.37.1, avoiding the
+  incompatible split-version runs produced by separate Dependabot pull requests.
+- Group GitHub Actions updates in Dependabot so coupled action components remain
+  on the same version in future upgrades.
+
+## [4.2.2] - 2026-07-20
+
+### Changed
+- **Narrowed the repository freshness gate to `git commit` only.** Previously any
+  repo-sensitive action (edit, test, push, review-read) demanded a same-turn
+  fetch; now only a commit does — that is the moment a stale local base is
+  actually recorded. Edits, tests, pushes, and reads still require the git-rules
+  consult, but no longer a fetch. (`repo-work-fresh-base` now fires solely on a
+  `git commit`.)
+
+### Fixed
+- Corrected the git-freshness block message. Its worked example
+  (`git fetch … && git commit …`) could never satisfy the check: a command that
+  also contains the commit is not a freshness command, so it records nothing and
+  the commit stays blocked. The message now tells the agent to run a standalone
+  literal-path fetch as its own command first, then commit as a separate command,
+  and spells out that any non-git-read step (even `&& echo`) disqualifies the
+  fetch and that freshness resets each turn.
+
+## [4.2.1] - 2026-07-19
+
+### Fixed
+- Explicitly waive the repository freshness check when neither the working directory nor the action target is inside a Git repository.
+
+## [4.2.0] - 2026-07-18
+
+### Added
+- **Live `/omind help` backed by the installed command tree.** The `omi` MCP
+  server now exposes a `help` tool generated directly from argparse, while the
+  CLI provides the same source through `omind help [command path]`. A packaged,
+  validated `omind` skill is installed for Claude Code and Codex and routes
+  `/omind help`/`$omind` requests to that live tool instead of embedding syntax
+  that can drift.
+- **Token-efficient MCP recall.** `recall-note` returns one bounded memory
+  representation (optionally one Markdown section) instead of the raw-plus-
+  parsed duplication required for editing. `search-vault` defaults to five
+  results and supports bounded pagination; `read-note` remains the raw editing
+  contract.
+- **Proactive turn-time memory injection.** Claude `UserPromptSubmit` and Hermes
+  `pre_llm_call` now deterministically recall one relevant compact memory before
+  the model acts, satisfying the ordinary consult gate without requiring a
+  lower-capability model to recover from a `PreToolUse` error. Unchanged notes
+  are deduplicated to their summary for the rest of the session.
+
+### Changed
+- **Economy is now the safe default.** Profiles are named `economy`, `balanced`,
+  and `full`, with hard SessionStart/preflight limits of 4k/1.5k, 8k/2.5k, and
+  24k/4k characters. Economy and balanced use deterministic verification;
+  optional verifier/checkpoint model calls are full-only. Legacy
+  `high`/`medium`/`low` settings map to economy/balanced/full.
+- **SessionStart is a compact capsule, not a vault dump.** It keeps standing
+  directives, recent-memory titles, concise identity/workflow/operator rules,
+  and only a cwd-matched project handoff. Full notes and auto-journal trails are
+  recalled on demand and every profile is hard-bounded.
+- **Actionable guard failures.** Soft-gate and repo-rule blocks now identify the
+  exact MCP operation and arguments to call next. The ordinary gate is normally
+  satisfied by proactive preflight; rule-specific hard prerequisites remain
+  independent and cannot be bypassed by a general recall.
+- **Codex receives the complete help/accounting integration.** Setup installs
+  the packaged skill plus a trusted `PostToolUse` hook alongside MCP, guard,
+  SessionStart, and AGENTS bootstrap wiring; doctor verifies both additions.
+
+### Fixed
+- **OMI attribution includes the traffic users actually see.** The privacy-safe
+  ledger now counts compact recalls and serialized OMI MCP responses, snapshots
+  numeric Claude session usage at Stop, includes cache reads/writes in both
+  provider traffic and the OMI-share denominator, and reports average priming.
+  No prompt, response, note body, message ID, or credential is retained.
+- Add the HTTPX2 development dependency preferred by Starlette 1.2's TestClient,
+  keeping the web test suite on its supported client implementation.
+
+### Security
+- Refresh the locked MCP, Starlette, cryptography, msgpack, and
+  pydantic-settings dependency set to advisory-fixed compatible releases; the
+  4.2.0 release environment passes `pip-audit` with no known vulnerabilities.
+
+## [4.0.0] - 2026-07-16
+
+### Added
+- **OMI-attributable AI token accounting and expense profiles.** A privacy-safe,
+  per-vault JSONL ledger records session-priming estimates and provider-reported
+  verifier/checkpoint usage without storing prompts or responses. `omind ai
+  profile low|medium|high` applies hard context budgets and progressively disables
+  optional model work; `omind ai usage` reports exact, estimated, cached, and
+  avoided tokens in text or JSON. The local web app adds the same profile control
+  and 24-hour/7-day/30-day/all-time usage dashboard through `/api/ai/*` endpoints.
+
+### Security
+- Parse AI-usage reporting windows with a bounded direct grammar rather than a
+  regular expression over public API input, eliminating the polynomial-runtime
+  pattern identified by CodeQL during the 4.0.0 release review.
+
+### Fixed
+- Preserve backslashes when resolving `git -C` targets on Windows, and keep
+  POSIX permission-bit assertions scoped to platforms that implement them.
+
 ## [3.8.6] - 2026-07-06
 
 ### Changed

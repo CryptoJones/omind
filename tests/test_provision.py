@@ -155,11 +155,12 @@ def test_managed_hook_scripts_are_written_0755_atomically(
     ):
         f = hooks / name
         assert f.exists(), f"{name} was not provisioned"
-        perms = f.stat().st_mode & 0o777
-        assert perms == 0o755, (
-            f"{name} is {oct(perms)}; expected 0o755 — a hook must be o+r+x so a "
-            "chown-root can't render it unreadable to the agent user"
-        )
+        if os.name != "nt":
+            perms = f.stat().st_mode & 0o777
+            assert perms == 0o755, (
+                f"{name} is {oct(perms)}; expected 0o755 — a hook must be o+r+x so a "
+                "chown-root can't render it unreadable to the agent user"
+            )
 
 
 def test_default_vault_path_shape() -> None:
@@ -334,6 +335,10 @@ def test_real_run_installs_claude_skill(
     assert body.startswith("---\nname: omind\n")
     assert str(config.vault) in body  # placeholders were filled
     assert "omind note" in body  # teaches the single-writer write path
+    assert "MCP `help` tool first" in body
+    metadata = isolate_claude_skill / "agents" / "openai.yaml"
+    assert metadata.is_file()
+    assert 'default_prompt: "Use $omind' in metadata.read_text(encoding="utf-8")
 
 
 def test_claude_skill_refreshes_on_drift(
@@ -676,6 +681,8 @@ def test_omi_guard_installed_idempotently(tmp_path: Path, isolate_settings: Path
     assert pre[0]["matcher"] == "*"
     assert len(ups) == 1
     assert "mcp__omi__read-note" in data["permissions"]["allow"]
+    assert "mcp__omi__recall-note" in data["permissions"]["allow"]
+    assert "mcp__omi__help" in data["permissions"]["allow"]
 
 
 def test_omi_guard_preserves_user_hooks(tmp_path: Path, isolate_settings: Path) -> None:

@@ -82,7 +82,7 @@ case "$tool" in
     [ -z "$target" ] && exit 0
     jq -nc --arg t "$tool" --arg s "$sid" --arg target "$target" \
       '{tool:$t, command:"", session:$s, is_omi_consult:true, consult_target:$target}' 2>/dev/null \
-      | "$OMIND" guard check >/dev/null 2>&1
+      | "$OMIND" guard check --omi-dir "$OMI_DIR" >/dev/null 2>&1
     exit 0
     ;;
   # Tool-schema loading is never gated: deferred OMI MCP tools become callable
@@ -106,7 +106,7 @@ if [ "$tool" = "Read" ]; then
         *)
           jq -nc --arg s "$sid" --arg target "$fp" \
             '{tool:"Read", command:"", session:$s, is_omi_consult:true, consult_target:$target, consult_kind:"read", file_path:$target}' 2>/dev/null \
-            | "$OMIND" guard check >/dev/null 2>&1
+            | "$OMIND" guard check --omi-dir "$OMI_DIR" >/dev/null 2>&1
           exit 0
           ;;
       esac
@@ -126,7 +126,7 @@ if [ "$tool" = "Bash" ]; then
   fi
   jq -nc --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" \
     '{tool:"Bash", command:$c, session:$s, prompt:$prompt, is_omi_consult:false}' 2>/dev/null \
-    | "$OMIND" guard check
+    | "$OMIND" guard check --omi-dir "$OMI_DIR"
   rc=$?
   # Only a clean allow(0) / block(2) from the core is authoritative. ANY other
   # code (crash, broken pipe, missing binary, OOM) means the policy was NOT
@@ -155,7 +155,7 @@ fi
 fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // .file_path // .path // empty' 2>/dev/null)"
 jq -nc --arg t "$tool" --arg s "$sid" --arg fp "$fp" --arg prompt "$prompt" \
   '{tool:$t, command:"", session:$s, prompt:$prompt, is_omi_consult:false, file_path:$fp}' 2>/dev/null \
-  | "$OMIND" guard check
+  | "$OMIND" guard check --omi-dir "$OMI_DIR"
 rc=$?
 case "$rc" in
   0 | 2) exit "$rc" ;;
@@ -164,6 +164,6 @@ if msg="$(printf '%s' "$input" | "$OMIND" guard suggest --omi-dir "$OMI_DIR" 2>/
    && [ -n "$msg" ]; then
   printf '%s\n' "$msg" >&2
 else
-  printf 'BLOCKED by omi-gate: consult OMI before acting this turn — call mcp__omi__search-vault / read-note, or Read any file under the OMI folder. One consult clears the rest of this turn. Consult the notes RELEVANT to your task; this is NOT a prompt to open the credential/auth notes.\n' >&2
+  printf 'BLOCKED by omi-gate: ACTION BLOCKED. Next call OMI MCP search-vault with a focused query, then recall-note on one result and retry.\n' >&2
 fi
 exit 2

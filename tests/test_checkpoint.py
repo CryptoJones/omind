@@ -149,3 +149,21 @@ def test_checkpoint_cli_install_timer(tmp_path: Path, monkeypatch: pytest.Monkey
     assert rc == 0
     timer = (checkpoint.systemd_user_dir() / checkpoint.TIMER_UNIT_NAME).read_text(encoding="utf-8")
     assert "OnUnitActiveSec=1800s" in timer
+
+
+def test_high_expense_checkpoint_skips_llm_and_records_avoided_tokens(tmp_path: Path) -> None:
+    from omind import ai_usage
+
+    omi = _omi(tmp_path)
+    ai_usage.set_profile(omi, "high")
+    activity = checkpoint.Activity(
+        actions=[{"time": "12:00", "event": "PostToolUse", "tool": "Bash", "detail": "work"}]
+    )
+    rendered = checkpoint.render_section(
+        activity, "15m", datetime(2026, 6, 20, 12, 30), llm=True, omi_dir=omi
+    )
+    assert "1 action(s)" in rendered
+    event = ai_usage.read_events(omi)[-1]
+    assert event["operation"] == "checkpoint"
+    assert event["status"] == "skipped"
+    assert event["avoided_tokens"] > 0
