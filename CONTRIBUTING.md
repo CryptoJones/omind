@@ -4,6 +4,10 @@ Thanks for your interest. omind is small and the bar to contribute is low — fi
 an issue, send a patch, or open a pull request. This page covers the dev setup
 and the checks a change has to pass.
 
+Working through an AI agent? Point it at [AGENTS.md](AGENTS.md) as well — it
+carries the subsystem invariants, in-flight handoffs, and known dead ends that
+this page deliberately leaves out.
+
 ## Mirrors
 
 omind lives on two forges, kept in sync:
