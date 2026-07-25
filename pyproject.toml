@@ -66,8 +66,9 @@ dev = [
     # Starlette 1.2+ TestClient prefers the maintained HTTPX2 continuation.
     "httpx2>=2.0,<3.0",
     "pip-audit>=2.10.0",
-    # Exercise the vector-index paths in CI without installing a model backend.
-    "numpy>=1.24,<3.0",
+    # Exercise vector-index paths in CI without the model backend. NumPy 2.5's
+    # stubs require newer syntax than mypy's configured Python 3.10 target.
+    "numpy>=1.24,<2.5",
     # Security floor for pip-audit/cachecontrol's msgpack edge.
     "msgpack>=1.2.1,<2.0",
     "types-PyYAML",
