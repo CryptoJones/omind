@@ -55,7 +55,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
-from omind import paths, retrieve
+from omind import paths
 
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
 SCHEMA_VERSION = 1
