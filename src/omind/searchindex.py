@@ -1012,15 +1012,43 @@ def chunk_note(md: str, stem: str) -> list[_Chunk]:
     ``## Details`` neither swamps BM25's length normalisation nor produces an
     excerpt nobody can read.
     """
-    from omind.store import _scan_note
+    lines = md.splitlines()
 
-    _frontmatter, title, lead, sections = _scan_note(md)
+    title = stem
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped.startswith("# ") and not stripped.startswith("## "):
+            title = stripped[2:].strip() or stem
+            break
+
+    first_section_idx = next(
+        (i for i, raw in enumerate(lines) if raw.strip().startswith("## ")),
+        len(lines),
+    )
+    lead_lines: list[str] = []
+    for i, raw in enumerate(lines[:first_section_idx]):
+        stripped = raw.strip()
+        if i == 0 and stripped.startswith("# ") and not stripped.startswith("## "):
+            continue
+        lead_lines.append(raw)
+    lead = "\n".join(lead_lines).strip()
+
+    sections: dict[str, list[str]] = {}
+    current_heading: str | None = None
+    for raw in lines:
+        stripped = raw.strip()
+        if stripped.startswith("## "):
+            current_heading = stripped[3:].strip()
+            sections[current_heading] = []
+            continue
+        if current_heading is not None:
+            sections[current_heading].append(raw)
+
     parts = (stem, title, lead)
     identity = "\n".join(dict.fromkeys(part for part in parts if part.strip()))
     chunks: list[_Chunk] = [
         _Chunk(heading="", ordinal=0, text=identity.strip(), start_line=1, end_line=1)
     ]
-    lines = md.splitlines()
     ordinal = 1
     for heading, body in sections.items():
         text = "\n".join(body).strip()
