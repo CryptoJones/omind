@@ -60,6 +60,12 @@ from omind import paths, retrieve
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
 SCHEMA_VERSION = 1
 
+
+def _is_reserved_note_name(name: str) -> bool:
+    """Return whether a note filename is reserved for internal/system use."""
+    stem = Path(name).stem.lower()
+    return stem in {"index", "template", "_template"}
+
 #: RRF constant. 60 is the value from the original TREC paper and what every
 #: hybrid-retrieval implementation in the survey uses; it damps the difference
 #: between rank 1 and rank 2 enough that no single leg dictates the fusion.
@@ -394,12 +400,10 @@ class SearchIndex:
     # -- ingest -------------------------------------------------------------
 
     def _note_paths(self) -> Iterator[Path]:
-        from omind.store import _is_reserved
-
         if not self.omi_dir.is_dir():
             return
         for path in self.omi_dir.glob("*.md"):
-            if _is_reserved(path.name) or path.name.startswith("."):
+            if _is_reserved_note_name(path.name) or path.name.startswith("."):
                 continue
             yield path
 
