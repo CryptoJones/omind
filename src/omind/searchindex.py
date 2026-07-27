@@ -61,11 +61,6 @@ from omind import paths
 SCHEMA_VERSION = 1
 
 
-def _is_reserved_note_name(name: str) -> bool:
-    """Return whether a note filename is reserved for internal/system use."""
-    stem = Path(name).stem.lower()
-    return stem in {"index", "template", "_template"}
-
 #: RRF constant. 60 is the value from the original TREC paper and what every
 #: hybrid-retrieval implementation in the survey uses; it damps the difference
 #: between rank 1 and rank 2 enough that no single leg dictates the fusion.
@@ -239,6 +234,8 @@ def index_path(omi_dir: Path | str) -> Path:
 
 def _stems_of(text: str) -> str:
     """The stem bag indexed alongside raw text, from omind's own stemmer."""
+    from omind import retrieve
+
     return " ".join(sorted(retrieve._tokens(text)))
 
 
@@ -248,6 +245,8 @@ def _query_words(query: str) -> list[list[str]]:
     Grouping matters: matching must be *all words*, but any spelling of a word —
     ``colorblindness`` and its stem ``colorblind`` are one requirement, not two.
     """
+    from omind import retrieve
+
     groups: list[list[str]] = []
     seen: set[str] = set()
     for word in retrieve._WORD_RE.findall(query.lower()):
@@ -400,10 +399,12 @@ class SearchIndex:
     # -- ingest -------------------------------------------------------------
 
     def _note_paths(self) -> Iterator[Path]:
+        from omind.store import _is_reserved
+
         if not self.omi_dir.is_dir():
             return
         for path in self.omi_dir.glob("*.md"):
-            if _is_reserved_note_name(path.name) or path.name.startswith("."):
+            if _is_reserved(path.name) or path.name.startswith("."):
                 continue
             yield path
 
@@ -464,7 +465,7 @@ class SearchIndex:
     ) -> list[tuple[int, str]] | None:
         """(Re-)index one note. Returns ``(chunk_id, text)`` pairs needing an
         embedding, or ``None`` when the note's bytes are unchanged (a touch)."""
-        from omind.store import _read_text
+        from omind.store import _read_text, derive_okf_type, parse_note
 
         try:
             text = _read_text(path)
@@ -478,15 +479,14 @@ class SearchIndex:
                 (st.st_mtime_ns, st.st_size, path.name),
             )
             return None
-        fields = retrieve.parse_note(text)
+        fields = parse_note(text)
         row = _NoteRow(
             filename=path.name,
             title=fields.title or path.stem,
             created=fields.created,
             # Derived when undeclared, the same rule render_fields applies, so a
             # graph node built from the index always carries a non-empty type.
-            okf_type=fields.okf_type.strip()
-            or next((tag.removeprefix("type:").strip() for tag in fields.tags if tag.lower().startswith("type:") and tag.removeprefix("type:").strip()), "note"),
+            okf_type=fields.okf_type.strip() or derive_okf_type(fields.tags),
             tags=fields.tags,
             disabled=fields.disabled,
         )
@@ -773,6 +773,8 @@ class SearchIndex:
         limit: int,
     ) -> list[Hit]:
         """Best chunk per note, credential-penalised, with a bounded excerpt."""
+        from omind import retrieve
+
         task_is_cred = bool(retrieve._tokens(query) & retrieve._CREDENTIAL_STEMS)
         hits: list[Hit] = []
         seen: set[str] = set()
@@ -1013,43 +1015,15 @@ def chunk_note(md: str, stem: str) -> list[_Chunk]:
     ``## Details`` neither swamps BM25's length normalisation nor produces an
     excerpt nobody can read.
     """
-    lines = md.splitlines()
+    from omind.store import _scan_note
 
-    title = stem
-    for raw in lines:
-        stripped = raw.strip()
-        if stripped.startswith("# ") and not stripped.startswith("## "):
-            title = stripped[2:].strip() or stem
-            break
-
-    first_section_idx = next(
-        (i for i, raw in enumerate(lines) if raw.strip().startswith("## ")),
-        len(lines),
-    )
-    lead_lines: list[str] = []
-    for i, raw in enumerate(lines[:first_section_idx]):
-        stripped = raw.strip()
-        if i == 0 and stripped.startswith("# ") and not stripped.startswith("## "):
-            continue
-        lead_lines.append(raw)
-    lead = "\n".join(lead_lines).strip()
-
-    sections: dict[str, list[str]] = {}
-    current_heading: str | None = None
-    for raw in lines:
-        stripped = raw.strip()
-        if stripped.startswith("## "):
-            current_heading = stripped[3:].strip()
-            sections[current_heading] = []
-            continue
-        if current_heading is not None:
-            sections[current_heading].append(raw)
-
+    _frontmatter, title, lead, sections = _scan_note(md)
     parts = (stem, title, lead)
     identity = "\n".join(dict.fromkeys(part for part in parts if part.strip()))
     chunks: list[_Chunk] = [
         _Chunk(heading="", ordinal=0, text=identity.strip(), start_line=1, end_line=1)
     ]
+    lines = md.splitlines()
     ordinal = 1
     for heading, body in sections.items():
         text = "\n".join(body).strip()

@@ -38,8 +38,12 @@ dependencies = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
     "pyyaml>=6.0,<7.0",
-    "mcp>=1.10,<2.0",
+    "mcp>=1.28.1,<2.0",
     "tomlkit>=0.12,<1.0",
+    # Security floors for runtime transitives pulled by fastapi/mcp.
+    "cryptography>=48.0.1,<50.0",
+    "pydantic-settings>=2.14.2,<3.0",
+    "starlette>=1.3.1,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -62,6 +66,11 @@ dev = [
     # Starlette 1.2+ TestClient prefers the maintained HTTPX2 continuation.
     "httpx2>=2.0,<3.0",
     "pip-audit>=2.10.0",
+    # Exercise vector-index paths in CI without the model backend. NumPy 2.5's
+    # stubs require newer syntax than mypy's configured Python 3.10 target.
+    "numpy>=1.24,<2.5",
+    # Security floor for pip-audit/cachecontrol's msgpack edge.
+    "msgpack>=1.2.1,<2.0",
     "types-PyYAML",
 ]
 

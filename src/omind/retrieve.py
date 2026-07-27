@@ -19,6 +19,7 @@ opening the secrets notes.
 
 from __future__ import annotations
 
+import importlib
 import json
 import re
 from pathlib import Path
@@ -170,12 +171,7 @@ def _score_note(
 
 
 def _indexed_titles(
-    task: str,
-    omi_dir: Path | str,
-    *,
-    task_is_cred: bool,
-    limit: int,
-    searchindex_module: object | None = None,
+    task: str, omi_dir: Path | str, *, task_is_cred: bool, limit: int
 ) -> list[str] | None:
     """Hybrid-index ranking of notes against the task — the gate/nudge suggestion
     path (4.3.0). Better than keyword overlap alone, and it replaces the two full
@@ -184,11 +180,11 @@ def _indexed_titles(
     secrets unless the task is about them). ``None`` when the index is
     unavailable, so the caller falls back to keyword scoring."""
     try:
-        module = searchindex_module
-        if module is None:
-            from omind import searchindex as module
-
-        index = module.shared(omi_dir)
+        # Keep this edge dynamic: searchindex lazily imports the token helpers
+        # in this module, so a static import here would recreate the cycle that
+        # the retrieval integration deliberately removed.
+        searchindex = importlib.import_module("omind.searchindex")
+        index = searchindex.shared(omi_dir)
         if index is None:
             return None
         rows = index.notes()

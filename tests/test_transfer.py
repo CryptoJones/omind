@@ -162,6 +162,24 @@ def test_targz_round_trip_includes_obsidian_config(tmp_path: Path) -> None:
     assert (dest / ".obsidian" / "app.json").is_file()  # full-fidelity restore
 
 
+def test_targz_export_excludes_vcs_control_dirs(tmp_path: Path) -> None:
+    """A mesh vault's .git internals are control state/history, not export data."""
+    src = tmp_path / "src" / "OMI"
+    _seed_omi(src)
+    (src / ".git" / "hooks").mkdir(parents=True)
+    (src / ".git" / "config").write_text("url = https://token@example/repo.git\n")
+    (src / ".git" / "hooks" / "post-merge").write_text("#!/bin/sh\n")
+    bundle = tmp_path / "omi.tar.gz"
+
+    export_dataset(src, bundle, fmt="targz", log=_quiet)
+
+    with tarfile.open(bundle) as tar:
+        names = {m.name for m in tar.getmembers()}
+    assert ".git/config" not in names
+    assert ".git/hooks/post-merge" not in names
+    assert "Alpha.md" in names
+
+
 def test_targz_rejects_path_traversal(tmp_path: Path) -> None:
     """A crafted archive with a ../ member must be refused, not extracted."""
     evil = tmp_path / "evil.tar.gz"
@@ -174,6 +192,21 @@ def test_targz_rejects_path_traversal(tmp_path: Path) -> None:
     with pytest.raises(TransferError):
         import_dataset(tmp_path / "OMI", evil, log=_quiet)
     assert not (tmp_path / "escape.md").exists()
+
+
+def test_targz_import_rejects_vcs_control_dirs(tmp_path: Path) -> None:
+    """A crafted bundle must not install git config/hooks into a mesh vault."""
+    evil = tmp_path / "evil.tar.gz"
+    payload = b"[core]\n"
+    with tarfile.open(evil, "w:gz") as tar:
+        info = tarfile.TarInfo(name=".git/config")
+        info.size = len(payload)
+        tar.addfile(info, io.BytesIO(payload))
+
+    dest = tmp_path / "OMI"
+    with pytest.raises(TransferError, match="VCS control"):
+        import_dataset(dest, evil, log=_quiet)
+    assert not (dest / ".git" / "config").exists()
 
 
 def test_bundles_never_carry_lock_or_temp_files(tmp_path: Path) -> None:

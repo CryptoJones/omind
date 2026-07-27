@@ -54,6 +54,23 @@ def test_timeout_maps_to_domain_error() -> None:
         run_command(cmd, error=DomainError, timeout=0.5)
 
 
+def test_errors_redact_credentials_from_command_and_detail() -> None:
+    token = "ghp_" + ("A" * 36)
+    cmd = [
+        sys.executable,
+        "-c",
+        f"import sys; sys.stderr.write({token!r}); sys.exit(2)",
+        "https://x-access-token:sekret@example.com/repo.git",
+    ]
+    with pytest.raises(DomainError) as excinfo:
+        run_command(cmd, error=DomainError)
+    msg = str(excinfo.value)
+    assert "sekret" not in msg
+    assert token not in msg
+    assert "https://[redacted]@example.com/repo.git" in msg
+    assert "[redacted-token]" in msg
+
+
 def test_env_is_passed_through() -> None:
     cmd = _py("import os; print(os.environ['OMIND_PROC_TEST'])")
     env = {**os.environ, "OMIND_PROC_TEST": "marker"}

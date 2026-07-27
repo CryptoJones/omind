@@ -787,10 +787,12 @@ def _git_dash_c_path(command: str) -> Path | None:
             return None
         # POSIX shlex treats every backslash as an escape and turns an unquoted
         # Windows path such as ``C:\\repo`` into ``C:repo``.  PowerShell/cmd do
-        # not use backslashes that way, so retain them on Windows.  Non-POSIX
-        # shlex keeps surrounding quotes; remove only a matching outer pair.
-        tokens = shlex.split(parts[0], posix=os.name != "nt")
-        if os.name == "nt":
+        # not use backslashes that way, so retain them for a Windows shell or
+        # an explicit drive path. Non-POSIX shlex keeps surrounding quotes;
+        # remove only a matching outer pair.
+        windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", parts[0])
+        tokens = shlex.split(parts[0], posix=not windows_style)
+        if windows_style:
             tokens = [
                 token[1:-1]
                 if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
@@ -837,7 +839,12 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
         except OSError:
             cur = candidate.absolute()
         for parent in (cur, *cur.parents):
-            if (parent / ".git").exists():
+            marker = parent / ".git"
+            # A real worktree has either a .git pointer file or a directory
+            # containing HEAD. Merely finding an empty directory named .git
+            # (for example a sandbox mount marker) must not turn every child
+            # path into a repository and demand an impossible freshness fetch.
+            if marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file()):
                 return parent
     return None
 

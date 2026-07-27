@@ -215,6 +215,8 @@ def test_dedup_hint_warns_about_a_similar_existing_note(
     from omind.cli import _dedup_hint
     from omind.store import NoteFields, OmiStore
 
+    pytest.importorskip("numpy")
+
     vocab = ["release", "push", "forge", "smoothie"]
 
     def _enc(texts: list[str]) -> list[list[float]]:

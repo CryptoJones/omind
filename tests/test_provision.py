@@ -126,6 +126,7 @@ def _install_guard(config: SetupConfig, monkeypatch: pytest.MonkeyPatch, home: P
     prov.ensure_omi_guard_installed()
 
 
+@pytest.mark.skipif(os.name == "nt", reason="Windows does not expose POSIX executable bits")
 def test_managed_hook_scripts_are_written_0755_atomically(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, fake_tools: None
 ) -> None:

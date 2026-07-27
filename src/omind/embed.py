@@ -25,10 +25,7 @@ hot path re-paying a slow/failing import per consult.
 from __future__ import annotations
 
 import os
-from typing import TYPE_CHECKING, Any, Protocol
-
-if TYPE_CHECKING:  # pragma: no cover - typing only
-    import numpy as np
+from typing import Any, Protocol
 
 #: Env: force the keyword path even when model2vec is installed.
 _DISABLE_ENV = "OMI_EMBED_DISABLE"
@@ -132,7 +129,7 @@ def status() -> dict[str, Any]:
     }
 
 
-def encode(texts: list[str]) -> np.ndarray | None:
+def encode(texts: list[str]) -> Any | None:
     """Embed ``texts`` into an L2-normalised ``(n, dim)`` float array, or ``None``.
 
     ``None`` whenever there is no backend or the encode raises — the caller falls
@@ -150,7 +147,7 @@ def encode(texts: list[str]) -> np.ndarray | None:
             vecs = vecs.reshape(1, -1)
         norms = np.linalg.norm(vecs, axis=1, keepdims=True)
         norms[norms == 0] = 1.0
-        normalised: np.ndarray = vecs / norms
+        normalised = vecs / norms
         return normalised
     except Exception as exc:
         _last_error = f"encode failed ({type(exc).__name__})"

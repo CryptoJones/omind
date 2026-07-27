@@ -262,6 +262,7 @@ def test_guard_demanded_note_consult_is_relevant(
     note.write_text("# Rules\n\nbranch pr nebraska codeberg token\n", encoding="utf-8")
     repo = tmp_path / "repo"
     (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
     guard.begin_turn("dmd", "bake a banana smoothie")  # disjoint from the note
     guard.mark_consulted("dmd")
     blocked = guard.decide({"tool": "Edit", "file_path": str(repo / "x.py"), "session": "dmd"})
