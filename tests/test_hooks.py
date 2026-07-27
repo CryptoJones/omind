@@ -261,6 +261,25 @@ def test_session_start_injects_priming_note_content(tmp_path: Path) -> None:
     assert "===== OMI capsule: index.md =====" in ctx
 
 
+def test_session_start_promotes_recently_recalled_notes_into_a_small_core(
+    tmp_path: Path,
+) -> None:
+    from omind import access
+    from omind.store import NoteFields, OmiStore
+
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="Earned Core", summary="frequently needed detail"))
+    store.create_note(
+        NoteFields(title="Forge Password", summary="never prime credentials", tags=["auth"])
+    )
+    access.record(tmp_path, "Earned Core.md")
+    access.record(tmp_path, "Forge Password.md")
+    context = hooks.build_session_start_context(tmp_path)
+    assert "Earned Core.md (dynamic core)" in context
+    assert "frequently needed detail" in context
+    assert "Forge Password.md (dynamic core)" not in context
+
+
 def test_session_start_caps_runaway_note(tmp_path: Path) -> None:
     (tmp_path / "Playbook.md").write_text(
         "x" * (hooks._PRIMING_FILE_CHAR_CAP + 500), encoding="utf-8"

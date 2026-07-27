@@ -30,6 +30,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 from pathlib import Path
+from typing import Any
 
 from omind.paths import RESERVED_FILENAMES
 from omind.store import _FENCE_RE, _WIKILINK_RE, NoteFields, parse_note
@@ -168,9 +169,53 @@ def _load(omi_dir: Path | str) -> tuple[list[_Note], set[str]]:
     return notes, known_extra
 
 
+def _load_indexed(omi_dir: Path | str) -> tuple[list[_Note], set[str], Any] | None:
+    """Use the derived index for top-level notes/links; scan only subfolders."""
+    from omind import searchindex
+
+    index = searchindex.shared(omi_dir)
+    if index is None:
+        return None
+    payload = index.lint_rows()
+    if payload is None:
+        return None
+    rows, links = payload
+    outbound: dict[str, set[str]] = {}
+    for source, target in links:
+        outbound.setdefault(source, set()).add(target)
+    omi = Path(omi_dir)
+    notes: list[_Note] = []
+    known_extra: set[str] = set()
+    for row in rows:
+        fields = NoteFields(
+            title=row.title if row.has_title else "",
+            disabled=row.disabled,
+        )
+        path = omi / row.filename
+        ids = _note_ids(path, fields)
+        if row.disabled:
+            known_extra |= ids
+            continue
+        notes.append(_Note(path, fields, outbound.get(row.filename, set()), frozenset(ids)))
+    for path in sorted(omi.rglob("*.md")):
+        if path.parent == omi or path.name.startswith("."):
+            continue
+        try:
+            fields = parse_note(path.read_text(encoding="utf-8", errors="replace"))
+        except OSError:
+            continue
+        known_extra |= _note_ids(path, fields)
+    return notes, known_extra, index
+
+
 def lint_vault(omi_dir: Path | str) -> list[LintIssue]:
     """Every problem found in the vault, ordered error → warn → info then by note."""
-    notes, known_extra = _load(omi_dir)
+    indexed = _load_indexed(omi_dir)
+    if indexed is None:
+        notes, known_extra = _load(omi_dir)
+        index = None
+    else:
+        notes, known_extra, index = indexed
     # Every identifier any note can be linked by (+ reserved stems, archived
     # notes, and subfolder notes, which are legitimate link targets).
     known = {stem for path in RESERVED_FILENAMES for stem in (Path(path).stem.lower(),)}
@@ -199,20 +244,35 @@ def lint_vault(omi_dir: Path | str) -> list[LintIssue]:
                 LintIssue("isolated", "info", n.path.name, "no inbound or outbound links")
             )
 
-    # Near-duplicate titles — each unordered pair reported once.
-    toks = [(_title_tokens(n.fields.title or n.path.stem), n.fields.title or n.path.stem, n)
-            for n in notes]
-    for i in range(len(toks)):
-        for j in range(i + 1, len(toks)):
-            if _jaccard(toks[i][0], toks[j][0]) < _NEAR_DUP:
+    # Semantic duplicate candidates from the index; title-Jaccard is the
+    # fail-open path when the optional embedding backend is absent.
+    semantic = index.duplicate_pairs() if index is not None else None
+    titles = {n.path.name: n.fields.title or n.path.stem for n in notes}
+    if semantic is not None:
+        for a, b, score in semantic:
+            if a not in titles or b not in titles:
                 continue
-            if _is_periodic_series(toks[i][1], toks[j][1]):
-                continue  # "Worklog 2026-06-29" vs "…-30": a dated series, not a dupe
-            score = _jaccard(toks[i][0], toks[j][0])
-            a, b = sorted((toks[i][2].path.name, toks[j][2].path.name))
+            if _is_periodic_series(titles[a], titles[b]):
+                continue
             issues.append(
-                LintIssue("near-duplicate", "info", f"{a} | {b}", f"titles {score:.0%} similar")
+                LintIssue("near-duplicate", "info", f"{a} | {b}", f"content {score:.0%} similar")
             )
+    else:
+        toks = [
+            (_title_tokens(n.fields.title or n.path.stem), n.fields.title or n.path.stem, n)
+            for n in notes
+        ]
+        for i in range(len(toks)):
+            for j in range(i + 1, len(toks)):
+                score = _jaccard(toks[i][0], toks[j][0])
+                if score < _NEAR_DUP or _is_periodic_series(toks[i][1], toks[j][1]):
+                    continue
+                a, b = sorted((toks[i][2].path.name, toks[j][2].path.name))
+                issues.append(
+                    LintIssue(
+                        "near-duplicate", "info", f"{a} | {b}", f"titles {score:.0%} similar"
+                    )
+                )
 
     rank = {"error": 0, "warn": 1, "info": 2}
     issues.sort(key=lambda x: (rank.get(x.severity, 9), x.kind, x.note))

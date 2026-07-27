@@ -89,6 +89,46 @@ def test_refresh_is_incremental(omi: Path) -> None:
     assert third is not None and third.reindexed == 1  # only the edited note
 
 
+def test_query_burst_throttles_refresh_but_signal_invalidates(
+    omi: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _note(omi, "Release Guide", "how to cut a release", ["release"])
+    idx = searchindex.SearchIndex(omi)
+    original = idx.refresh
+    calls = 0
+
+    def counted_refresh(*, vectors: bool = True) -> searchindex.Refresh | None:
+        nonlocal calls
+        calls += 1
+        return original(vectors=vectors)
+
+    monkeypatch.setattr(idx, "refresh", counted_refresh)
+    assert idx.search("release")
+    assert idx.search("release")
+    assert calls == 1
+
+    signal = searchindex.paths.sync_signal_path(omi)
+    signal.parent.mkdir(parents=True, exist_ok=True)
+    signal.touch()
+    assert idx.search("release")
+    assert calls == 2
+
+
+def test_refresh_throttle_expires_for_external_edits(
+    omi: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    note = _note(omi, "Release Guide", "how to cut a release", ["release"])
+    idx = searchindex.SearchIndex(omi)
+    now = [100.0]
+    monkeypatch.setattr(searchindex.time, "monotonic", lambda: now[0])
+
+    assert idx.search("release")
+    note.write_text(note.read_text(encoding="utf-8") + "\nexternal edit", encoding="utf-8")
+    assert not idx.search("external")  # still inside the bounded burst window
+    now[0] += searchindex._REFRESH_THROTTLE_SECONDS
+    assert idx.search("external")
+
+
 def test_touch_without_a_content_change_does_not_reindex(omi: Path) -> None:
     """An mtime bump with identical bytes (a mesh sync, a `touch`) is not a change."""
     path = _note(omi, "Stable", "unchanged text", ["x"])
@@ -194,6 +234,35 @@ def test_credential_notes_are_deprioritised_for_unrelated_tasks(omi: Path) -> No
     assert hits[0].filename == "Forge Guide.md"
 
 
+def test_generated_worklogs_rank_below_equivalent_curated_notes(omi: Path) -> None:
+    detail = "zebracorn deployment rollback procedure"
+    _note(omi, "Handbook", "curated operations", ["ops"], details=detail)
+    _note(omi, "Worklog 2026-07-27", "automatic activity", ["worklog"], details=detail)
+    hits = searchindex.SearchIndex(omi).search("zebracorn rollback") or []
+    by_name = {hit.filename: hit for hit in hits}
+    assert set(by_name) == {"Handbook.md", "Worklog 2026-07-27.md"}
+    assert by_name["Handbook.md"].score > by_name["Worklog 2026-07-27.md"].score
+    assert hits[0].filename == "Handbook.md"
+
+
+def test_superseded_notes_remain_searchable_but_rank_lower(omi: Path) -> None:
+    detail = "zebracorn release status"
+    _note(omi, "Release v1", "old release", ["release"], details=detail)
+    current = _note(omi, "Release v2", "current release", ["release"], details=detail)
+    current.write_text(
+        current.read_text(encoding="utf-8").replace(
+            "- Tags: #release",
+            "- Tags: #release\n- Supersedes: [[Release v1]]",
+        ),
+        encoding="utf-8",
+    )
+    hits = searchindex.SearchIndex(omi).search("zebracorn status") or []
+    by_name = {hit.filename: hit for hit in hits}
+    assert set(by_name) == {"Release v1.md", "Release v2.md"}
+    assert by_name["Release v2.md"].score > by_name["Release v1.md"].score
+    assert hits[0].filename == "Release v2.md"
+
+
 def test_query_punctuation_cannot_break_the_match_expression(omi: Path) -> None:
     """FTS5 operators in user text are data, not syntax (every term is quoted)."""
     _note(omi, "Quoted", "handling NEAR and OR in queries", ["x"])
@@ -206,7 +275,24 @@ def test_excerpt_is_bounded(omi: Path) -> None:
     _note(omi, "Wordy", "x", ["x"], details="haystack " * 500 + " needle")
     idx = searchindex.SearchIndex(omi)
     hits = idx.search("needle") or []
-    assert hits and len(hits[0].excerpt) <= searchindex.EXCERPT_CHARS
+    assert hits and len(hits[0].excerpt) <= 120
+
+
+def test_query_complexity_adapts_result_and_excerpt_budgets(omi: Path) -> None:
+    detail = "needle alpha beta gamma relationship " + "context " * 100
+    for number in range(12):
+        _note(omi, f"Item {number}", "matching record", ["x"], details=detail)
+    idx = searchindex.SearchIndex(omi)
+    simple = idx.search("needle", limit=50) or []
+    complex_hits = idx.search(
+        "why needle alpha beta gamma relationship matters",
+        limit=50,
+    ) or []
+    assert len(simple) == 5
+    assert len(complex_hits) == 12
+    assert all(len(hit.excerpt) <= 120 for hit in simple)
+    assert any(len(hit.excerpt) > 180 for hit in complex_hits)
+    assert all(len(hit.excerpt) <= 240 for hit in complex_hits)
 
 
 def test_identity_hit_shows_the_summary_not_the_title_echo(omi: Path) -> None:
@@ -229,6 +315,42 @@ def test_vector_leg_finds_a_paraphrase_with_no_shared_term(
     hits = idx.search("push release version forge") or []
     assert hits[0].filename == "Release Guide.md"
     assert hits[0].vector_rank > 0  # the semantic leg actually contributed
+
+
+def test_vectors_are_quantized_to_int8_with_scale_and_residual(
+    omi: Path, semantic: None
+) -> None:
+    _note(omi, "Release Guide", "release push forge version", ["release"])
+    idx = searchindex.SearchIndex(omi)
+    assert idx.refresh() is not None
+    db = idx._connect()
+    assert db is not None
+    row = db.execute("SELECT vec, scale, residual FROM vectors LIMIT 1").fetchone()
+    assert row is not None
+    assert len(row["vec"]) == len(_VOCAB)
+    assert float(row["scale"]) > 0
+    assert float(row["residual"]) >= 0
+
+
+def test_duplicate_pairs_use_mean_chunk_vector_similarity(
+    omi: Path, semantic: None
+) -> None:
+    _note(omi, "First", "release push forge version", ["release"])
+    _note(omi, "Second", "release push forge version", ["release"])
+    _note(omi, "Different", "banana smoothie", ["food"])
+    pairs = searchindex.SearchIndex(omi).duplicate_pairs(threshold=0.99)
+    assert pairs is not None
+    assert [(left, right) for left, right, _score in pairs] == [
+        ("First.md", "Second.md")
+    ]
+
+
+def test_reranker_scores_the_whole_chunk_body(omi: Path, semantic: None) -> None:
+    _note(omi, "Strong", "release push forge version", ["x"])
+    _note(omi, "Weak", "release", ["x"])
+    hits = searchindex.SearchIndex(omi).search("release push") or []
+    assert [hit.filename for hit in hits[:2]] == ["Strong.md", "Weak.md"]
+    assert hits[0].score > hits[1].score
 
 
 def test_nearest_excludes_the_note_being_written(omi: Path, semantic: None) -> None:
@@ -277,6 +399,35 @@ def test_a_corrupt_index_file_does_not_raise(omi: Path) -> None:
     path.write_bytes(b"this is not a database")
     broken = searchindex.SearchIndex(omi)
     assert broken.search("content") is None  # fails open; caller scans instead
+
+
+def test_health_reports_size_age_counts_and_staleness(omi: Path) -> None:
+    note = _note(omi, "Fine", "content here", ["x"])
+    idx = searchindex.SearchIndex(omi)
+    assert idx.refresh() is not None
+    idx.close()
+
+    healthy = searchindex.health(omi)
+    assert healthy.fts5 is True
+    assert healthy.exists is True
+    assert healthy.size_bytes > 0
+    assert healthy.age_seconds is not None
+    assert healthy.notes == 1
+    assert healthy.stale == 0
+    assert healthy.corrupt == ""
+
+    note.write_text(note.read_text(encoding="utf-8") + "\nchanged\n", encoding="utf-8")
+    assert searchindex.health(omi).stale == 1
+
+
+def test_health_explains_a_corrupt_index(omi: Path) -> None:
+    path = searchindex.index_path(omi)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(b"this is not a database")
+
+    result = searchindex.health(omi)
+    assert result.exists is True
+    assert result.corrupt
 
 
 def test_store_search_falls_back_when_the_index_is_off(

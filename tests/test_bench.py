@@ -64,3 +64,31 @@ def test_report_serialises_to_json_and_text(tmp_path: Path) -> None:
     report = bench.run(_vault(tmp_path), queries=("nebraska",))
     assert report.to_dict()["vault"].endswith("OMI")
     assert "omind bench" in report.format()
+
+
+def test_quality_report_calculates_recall_and_mrr(tmp_path: Path) -> None:
+    omi = _vault(tmp_path)
+    report = bench.run_quality(
+        omi,
+        cases=(
+            ("release signing failure", "Signing Runbook.md"),
+            ("nebraska", "Nebraska.md"),
+            ("missing target is skipped", "Absent.md"),
+        ),
+    )
+    by_name = {measurement.name: measurement for measurement in report.measurements}
+    assert by_name["quality cases"].value == 2
+    assert by_name["quality cases"].detail == "1 skipped"
+    assert by_name["recall@1"].value == 100.0
+    assert by_name["recall@5"].value == 100.0
+    assert by_name["MRR"].value == 1.0
+
+
+def test_quality_report_handles_no_matching_labelled_notes(tmp_path: Path) -> None:
+    report = bench.run_quality(
+        _vault(tmp_path),
+        cases=(("unknown", "Absent.md"),),
+    )
+    by_name = {measurement.name: measurement for measurement in report.measurements}
+    assert by_name["quality cases"].value == 0
+    assert by_name["MRR"].value == 0

@@ -39,6 +39,8 @@ def test_render_parse_round_trip() -> None:
         created="2026-06-03",
         tags=["omi", "memory", "thesis"],
         related_to="Some project",
+        supersedes="Older Memory",
+        superseded_by="Newer Memory",
         connections=["Concept One", "Concept Two"],
         action_items=[
             ActionItem("do the thing", done=False),

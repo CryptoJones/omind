@@ -178,6 +178,8 @@ class NoteFields:
     created: str = ""
     tags: list[str] = field(default_factory=list)
     related_to: str = ""
+    supersedes: str = ""
+    superseded_by: str = ""
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
@@ -223,6 +225,8 @@ class NoteFields:
             created=str(data.get("created", "")).strip(),
             tags=[_clean_tag(t) for t in (data.get("tags") or []) if _clean_tag(t)],
             related_to=str(data.get("related_to", "")).strip(),
+            supersedes=str(data.get("supersedes", "")).strip(),
+            superseded_by=str(data.get("superseded_by", "")).strip(),
             connections=[str(c).strip() for c in (data.get("connections") or []) if str(c).strip()],
             action_items=items,
             references=[str(r).strip() for r in (data.get("references") or []) if str(r).strip()],
@@ -459,6 +463,8 @@ def parse_note(md: str) -> NoteFields:
     meta = sections.get("Metadata", [])
     created = ""
     related_to = ""
+    supersedes = ""
+    superseded_by = ""
     rev = ""
     disabled = False
     tags: list[str] = []
@@ -469,6 +475,10 @@ def parse_note(md: str) -> NoteFields:
             tags = _TAG_RE.findall(m.group(1))
         elif m := re.match(r"^\s*-\s*Related to:\s*(.*)$", line):
             related_to = m.group(1).strip()
+        elif m := re.match(r"^\s*-\s*Supersedes:\s*(.*)$", line):
+            supersedes = m.group(1).strip()
+        elif m := re.match(r"^\s*-\s*Superseded by:\s*(.*)$", line):
+            superseded_by = m.group(1).strip()
         elif m := _REV_LINE_RE.match(line):
             rev = m.group(1).strip()
         elif _DISABLED_LINE_RE.match(line):
@@ -516,6 +526,8 @@ def parse_note(md: str) -> NoteFields:
         created=created,
         tags=tags,
         related_to=related_to,
+        supersedes=supersedes,
+        superseded_by=superseded_by,
         connections=[c.strip() for c in connections if c.strip()],
         action_items=action_items,
         references=references,
@@ -550,6 +562,10 @@ def render_fields(f: NoteFields) -> str:
     tag_str = " ".join(f"#{_clean_tag(t)}" for t in f.tags if _clean_tag(t))
     out.append(f"- Tags: {tag_str}".rstrip())
     out.append(f"- Related to: {f.related_to}".rstrip())
+    if f.supersedes:
+        out.append(f"- Supersedes: {f.supersedes}")
+    if f.superseded_by:
+        out.append(f"- Superseded by: {f.superseded_by}")
     if f.rev:
         out.append(f"- Rev: {f.rev}")
     if f.disabled:
@@ -788,15 +804,13 @@ class OmiStore:
     _write_lock = write_lock
 
     def _signal_write(self) -> None:
-        """Advisory nudge for the mesh daemon's debounced sync; never raises.
+        """Advisory nudge for search-index invalidation and mesh sync; never raises.
 
         Lives in the store so *every* write surface (MCP server, web UI,
-        ``omind note``, import) triggers replication — previously only the MCP
-        server's tools remembered to, and edits made elsewhere sat
-        uncommitted for up to the full sync interval.
+        ``omind note``, import) invalidates the derived index immediately. In
+        mesh mode the same signal also triggers replication; previously only
+        the MCP server's tools remembered to signal writes.
         """
-        if not self.mesh_mode():
-            return
         try:
             signal = sync_signal_path(self.omi_dir)
             signal.parent.mkdir(parents=True, exist_ok=True)
@@ -1199,6 +1213,58 @@ class OmiStore:
         # concurrent-create race, not here.
         return self.write_note(filename, render_fields(fields), must_create=True)
 
+    def create_and_disable_sources(
+        self,
+        fields: NoteFields,
+        sources: list[tuple[str, str]],
+    ) -> str:
+        """Create one reviewed note and archive unchanged sources under one lock.
+
+        The source tuples are ``(filename, expected_version)``. All versions and
+        the target's nonexistence are checked before the first write, closing
+        the gap where another OmiStore writer could change the second source
+        between a separate create and two archive calls. A process crash can
+        still leave extra recoverable copies, never a hard-deleted source.
+        """
+        if not fields.title.strip():
+            raise NoteError("a note requires a title")
+        if len(sources) < 2:
+            raise NoteError("consolidation requires at least two source notes")
+        if not fields.created:
+            fields.created = today()
+        target = self.safe_name(self.filename_for_title(fields.title))
+        self._reject_reserved(target)
+        source_paths = [(self.safe_name(name), version) for name, version in sources]
+        for path, _version in source_paths:
+            self._reject_reserved(path)
+        _hoist_field_headings(fields)
+
+        with self.write_lock():
+            if target.exists():
+                raise NoteError(f"a note named {target.name!r} already exists")
+            for path, expected in source_paths:
+                if not path.is_file():
+                    raise NoteNotFoundError(f"note not found: {path.name!r}")
+                current = self.note_version(path.name)
+                if current != expected:
+                    raise NoteConflictError(
+                        f"note {path.name!r} changed on disk (expected {expected!r}, "
+                        f"found {current!r})"
+                    )
+
+            content = render_fields(fields)
+            if self.node_id is not None:
+                content = self._stamped(target, content)
+            _atomic_write(target, content)
+            for path, _expected in source_paths:
+                archived = _with_disabled(_read_text(path), True)
+                if self.node_id is not None:
+                    archived = self._stamped(path, archived)
+                _atomic_write(path, archived)
+            self._write_index()
+        self._signal_write()
+        return target.name
+
     def update_note(
         self, name: str, fields: NoteFields, expected_version: str | None = None
     ) -> str:
@@ -1233,6 +1299,10 @@ class OmiStore:
                 fields.tags = current.tags
             if not fields.okf_type:
                 fields.okf_type = current.okf_type
+            if not fields.supersedes:
+                fields.supersedes = current.supersedes
+            if not fields.superseded_by:
+                fields.superseded_by = current.superseded_by
             # A multi-section body supplied through `details` (the only such
             # field the MCP/CLI API exposes) carries ## H2s that read back as
             # extras. Hoist them now so they REPLACE the same-named inherited
@@ -1254,12 +1324,20 @@ class OmiStore:
         else:
             self.purge_note(name)
 
-    def disable_note(self, name: str) -> str:
-        """Soft-delete: set ``Disabled: true``; hidden from listings, restorable."""
+    def disable_note(self, name: str, expected_version: str | None = None) -> str:
+        """Soft-delete: set ``Disabled: true``; hidden from listings, restorable.
+
+        ``expected_version`` lets reviewed multi-note operations refuse to
+        archive a source that changed after the operator inspected it.
+        """
         path = self.safe_name(name)
         if _is_reserved(path.name):
             raise NoteError(f"refusing to disable reserved file: {path.name}")
-        return self._mutate_note(name, lambda md: _with_disabled(md, True))
+        return self._mutate_note(
+            name,
+            lambda md: _with_disabled(md, True),
+            expected_version=expected_version,
+        )
 
     def restore_note(self, name: str) -> str:
         """Clear a soft-deleted note's ``Disabled`` flag."""

@@ -34,6 +34,23 @@ SAMPLE_QUERIES = (
     "mesh sync conflict",
 )
 
+#: Small labelled set drawn from the durable notes present in CryptoJones's
+#: reference vault. It is intentionally human-readable and version-controlled:
+#: ranking changes should move these metrics, not merely "look better."
+QUALITY_CASES = (
+    ("where does long-term assistant memory live", "Omi Is The Memory.md"),
+    (
+        "how does CryptoJones want the assistant to work",
+        "Working Preferences - How CryptoJones Wants Me to Operate.md",
+    ),
+    ("what voice and persona should Dix use", "Voice and Persona - Dix and Shelly.md"),
+    (
+        "rules for working in git repos and handling secrets",
+        "Operational Rules - Git Repos and Secrets.md",
+    ),
+    ("how should durable memory notes be created", "Memory Workflow.md"),
+)
+
 
 @dataclass
 class Measurement:
@@ -150,6 +167,51 @@ def run(omi_dir: Path | str, *, queries: tuple[str, ...] = SAMPLE_QUERIES) -> Re
         listing = _listing_tokens(notes)
         report.add("list-notes, one page", listing[0], "tokens", "limit 25")
         report.add("list-notes, unpaged (was)", listing[1], "tokens", f"all {len(notes)} notes")
+    return report
+
+
+def run_quality(
+    omi_dir: Path | str,
+    *,
+    cases: tuple[tuple[str, str], ...] = QUALITY_CASES,
+) -> Report:
+    """Evaluate labelled query→expected-note pairs with recall@k and MRR."""
+    from omind import searchindex
+
+    omi = Path(omi_dir).expanduser()
+    report = Report(vault=str(omi))
+    index = searchindex.SearchIndex(omi)
+    available = {path.name for path in omi.glob("*.md")}
+    evaluable = [(query, expected) for query, expected in cases if expected in available]
+    report.add("quality cases", len(evaluable), "count", f"{len(cases) - len(evaluable)} skipped")
+    if not evaluable:
+        report.add("recall@1", 0.0, "%", "no labelled target notes found")
+        report.add("recall@5", 0.0, "%", "no labelled target notes found")
+        report.add("MRR", 0.0, "score", "no labelled target notes found")
+        return report
+
+    at_one = 0
+    at_five = 0
+    reciprocal = 0.0
+    misses: list[str] = []
+    for query, expected in evaluable:
+        hits = index.search(query, limit=50) or []
+        ranked = [hit.filename for hit in hits]
+        try:
+            rank = ranked.index(expected) + 1
+        except ValueError:
+            rank = 0
+        at_one += rank == 1
+        at_five += 0 < rank <= 5
+        reciprocal += 1.0 / rank if rank else 0.0
+        if not rank or rank > 5:
+            misses.append(f"{query!r}→{rank or 'miss'}")
+
+    total = len(evaluable)
+    detail = "; ".join(misses[:3])
+    report.add("recall@1", at_one * 100.0 / total, "%")
+    report.add("recall@5", at_five * 100.0 / total, "%", detail)
+    report.add("MRR", reciprocal / total, "score")
     return report
 
 

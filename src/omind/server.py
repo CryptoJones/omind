@@ -220,12 +220,16 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     )
     def read_note(name: str, representation: str = "fields") -> dict[str, object]:
         raw = store.read_note(name)
+        filename = store.safe_name(name).name
+        from omind import access
+
+        access.record(store.omi_dir, filename)
         # One read + one parse: read_fields would re-read the file just read.
         # ONE representation, never both: returning `raw` and `fields` together
         # sent every note body through the context twice, and the editing caller
         # only ever uses one of them.
         payload: dict[str, object] = {
-            "filename": store.safe_name(name).name,
+            "filename": filename,
             "version": store.note_version(name),
         }
         if representation == "raw":
@@ -262,6 +266,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         details: str = "",
         tags: list[str] | None = None,
         related_to: str = "",
+        supersedes: str = "",
+        superseded_by: str = "",
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
@@ -272,6 +278,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
             details=details,
             tags=tags or [],
             related_to=related_to,
+            supersedes=supersedes,
+            superseded_by=superseded_by,
             connections=connections or [],
             action_items=_parse_action_items(action_items or []),
             references=references or [],
@@ -294,6 +302,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         details: str | None = None,
         tags: list[str] | None = None,
         related_to: str | None = None,
+        supersedes: str | None = None,
+        superseded_by: str | None = None,
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
@@ -310,6 +320,10 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
             fields.tags = tags
         if related_to is not None:
             fields.related_to = related_to
+        if supersedes is not None:
+            fields.supersedes = supersedes
+        if superseded_by is not None:
+            fields.superseded_by = superseded_by
         if connections is not None:
             fields.connections = connections
         if action_items is not None:
@@ -413,46 +427,89 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         ]
         return _page(rows, limit, offset)
 
+    def _graph_query(
+        op: str,
+        source: str = "",
+        target: str = "",
+        limit: int = DEFAULT_PAGE,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        operation = op.strip().lower()
+        if operation == "path":
+            if not source.strip() or not target.strip():
+                raise ValueError("graph op=path requires source and target")
+            g = graph_for()
+            return {"path": graph.shortest_path(g, source, target)}
+        if operation == "orphans":
+            return _page(graph.orphans(graph_for()), limit, offset)
+        if operation == "dangling":
+            rows = [
+                {"source": src, "target": raw_target}
+                for src, raw_target in graph.dangling_links(graph_for())
+            ]
+            return _page(rows, limit, offset)
+        if operation == "stats":
+            return dict(graph.stats(graph_for()))
+        raise ValueError("graph op must be one of: path, orphans, dangling, stats")
+
+    @mcp.tool(
+        name="graph",
+        description=(
+            "Graph audit/query selected by op: path (requires source + target), "
+            "orphans, dangling, or stats. Orphan/dangling results are paged."
+        ),
+    )
+    def graph_tool(
+        op: str,
+        source: str = "",
+        target: str = "",
+        limit: int = DEFAULT_PAGE,
+        offset: int = 0,
+    ) -> dict[str, object]:
+        return _graph_query(op, source, target, limit, offset)
+
     @mcp.tool(
         name="graph-path",
         description=(
             "Shortest [[wikilink]] path between two notes, as a list of filenames; "
-            "`path` is null when no path connects them."
+            "`path` is null when no path connects them. Deprecated: use graph "
+            "with op=path; this compatibility name will be removed next release."
         ),
     )
     def graph_path(source: str, target: str) -> dict[str, object]:
-        g = graph_for()
-        return {"path": graph.shortest_path(g, source, target)}
+        return _graph_query("path", source, target)
 
     @mcp.tool(
         name="graph-orphans",
         description=(
             "One page of notes with no inbound or outbound [[wikilinks]]. "
-            "graph-stats gives the count without the list."
+            "Deprecated: use graph with op=orphans; this compatibility name "
+            "will be removed next release."
         ),
     )
     def graph_orphans(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, object]:
-        return _page(graph.orphans(graph_for()), limit, offset)
+        return _graph_query("orphans", limit=limit, offset=offset)
 
     @mcp.tool(
         name="graph-dangling",
         description=(
             "One page of [[wikilinks]] resolving to no existing note, with their "
-            "source. graph-stats gives the count without the list."
+            "source. Deprecated: use graph with op=dangling; this compatibility "
+            "name will be removed next release."
         ),
     )
     def graph_dangling(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, object]:
-        rows = [
-            {"source": src, "target": target} for src, target in graph.dangling_links(graph_for())
-        ]
-        return _page(rows, limit, offset)
+        return _graph_query("dangling", limit=limit, offset=offset)
 
     @mcp.tool(
         name="graph-stats",
-        description="Whole-graph counts: notes, links, orphans, and dangling links.",
+        description=(
+            "Whole-graph counts. Deprecated: use graph with op=stats; this "
+            "compatibility name will be removed next release."
+        ),
     )
-    def graph_stats() -> dict[str, int]:
-        return graph.stats(graph_for())
+    def graph_stats() -> dict[str, object]:
+        return _graph_query("stats")
 
     return mcp
 

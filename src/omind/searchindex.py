@@ -19,7 +19,7 @@ What replaces it, in one SQLite file:
 * **BM25** through SQLite's stdlib FTS5 module, over title/heading/tags/text
   plus a *stems* column fed by :func:`omind.retrieve._stem`, so the existing
   stemmer still earns its keep and ``scoring``/``scored`` match ``score``.
-* **Dense vectors** — packed ``float32`` BLOBs scored with one numpy matmul,
+* **Dense vectors** — quantized ``int8`` BLOBs scored with one numpy matmul,
   replacing the old JSON-float-list store and its pure-Python ``sum(x*y)``
   loop over every entry. Written only when :func:`omind.embed.available`.
 * **Reciprocal Rank Fusion** of the keyword, vector, and recency rankings.
@@ -47,6 +47,7 @@ import contextlib
 import functools
 import hashlib
 import os
+import re
 import sqlite3
 import threading
 import time
@@ -58,7 +59,7 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 from omind import paths
 
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
-SCHEMA_VERSION = 1
+SCHEMA_VERSION = 4
 
 
 #: RRF constant. 60 is the value from the original TREC paper and what every
@@ -71,6 +72,13 @@ RRF_K = 60
 _W_KEYWORD = 1.0
 _W_VECTOR = 0.9
 _W_RECENCY = 0.25
+#: Auto-generated journals/worklogs are useful evidence but broad and numerous.
+#: A modest multiplier lets a hand-curated note with comparable content win.
+_GENERATED_WEIGHT = 0.75
+#: Superseded notes remain searchable history, but should not present as current.
+_SUPERSEDED_WEIGHT = 0.35
+#: Only the fused head pays the extra local embedding pass.
+_RERANK_DEPTH = 20
 #: How many candidates each leg contributes before fusion.
 _LEG_DEPTH = 60
 #: Soft cap on one indexed chunk. Long ``## Details`` bodies are split further so
@@ -80,6 +88,10 @@ _MAX_CHUNK_CHARS = 1_200
 #: reads. Bounded here because "return excerpts, not documents" is where the
 #: token savings in the literature (Memori, SimpleMem) come from.
 EXCERPT_CHARS = 180
+#: A burst of reads should pay the full-vault stat sweep once. Direct writes
+#: invalidate immediately through ``sync_signal_path``; edits made outside
+#: OmiStore are still discovered after this short bound.
+_REFRESH_THROTTLE_SECONDS = 1.0
 
 _MODEL_ENV = "OMI_EMBED_MODEL"
 #: Set to disable the index entirely and fall back to the scanning search paths.
@@ -133,6 +145,29 @@ class Refresh:
 
 
 @dataclass
+class Health:
+    """Read-only diagnostic snapshot for one derived search index."""
+
+    fts5: bool
+    disabled: bool
+    path: Path
+    exists: bool = False
+    size_bytes: int = 0
+    age_seconds: float | None = None
+    notes: int = 0
+    vectors: int = 0
+    stale: int = 0
+    corrupt: str = ""
+
+
+@dataclass(frozen=True)
+class _Scope:
+    depth: int
+    limit: int
+    excerpt_chars: int
+
+
+@dataclass
 class _Chunk:
     heading: str
     ordinal: int
@@ -147,6 +182,9 @@ class _NoteRow:
     title: str
     created: str
     okf_type: str = ""
+    supersedes: str = ""
+    superseded_by: str = ""
+    has_title: bool = True
     tags: list[str] = field(default_factory=list)
     disabled: bool = False
 
@@ -157,6 +195,9 @@ CREATE TABLE IF NOT EXISTS notes (
     title    TEXT NOT NULL DEFAULT '',
     created  TEXT NOT NULL DEFAULT '',
     okf_type TEXT NOT NULL DEFAULT '',
+    supersedes TEXT NOT NULL DEFAULT '',
+    superseded_by TEXT NOT NULL DEFAULT '',
+    has_title INTEGER NOT NULL DEFAULT 1,
     disabled INTEGER NOT NULL DEFAULT 0,
     mtime_ns INTEGER NOT NULL DEFAULT 0,
     size     INTEGER NOT NULL DEFAULT 0,
@@ -183,12 +224,15 @@ CREATE VIRTUAL TABLE IF NOT EXISTS chunks_fts USING fts5(
 );
 CREATE TABLE IF NOT EXISTS vectors (
     chunk_id INTEGER PRIMARY KEY,
-    vec      BLOB NOT NULL
+    vec      BLOB NOT NULL,
+    scale    REAL NOT NULL,
+    residual REAL NOT NULL DEFAULT 0
 );
 CREATE TABLE IF NOT EXISTS links (
     src    TEXT NOT NULL,
     target TEXT NOT NULL,   -- lowercased, for resolution
-    raw    TEXT NOT NULL    -- as written, for reporting a dangling link
+    raw    TEXT NOT NULL,   -- as written, for reporting a dangling link
+    lint   INTEGER NOT NULL DEFAULT 1 -- false when the link occurs only in code
 );
 CREATE INDEX IF NOT EXISTS links_src ON links(src);
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
@@ -230,6 +274,80 @@ def _vault_id(omi_dir: Path | str) -> str:
 def index_path(omi_dir: Path | str) -> Path:
     """Where this vault's derived index lives (state dir, never the vault)."""
     return paths.state_dir() / f"searchindex-{_vault_id(omi_dir)}.sqlite3"
+
+
+def health(omi_dir: Path | str) -> Health:
+    """Inspect an index without creating, refreshing, or repairing it.
+
+    Doctor must be able to diagnose a corrupt cache without going through
+    :meth:`SearchIndex._connect`, whose normal query-path behaviour deliberately
+    hides errors and fails open.
+    """
+    omi = Path(omi_dir)
+    path = index_path(omi)
+    result = Health(
+        fts5=_fts5_available(),
+        disabled=bool(os.environ.get(DISABLE_ENV)),
+        path=path,
+        exists=path.is_file(),
+    )
+    if not result.exists:
+        return result
+
+    files = [candidate for candidate in (path, Path(f"{path}-wal")) if candidate.is_file()]
+    try:
+        stats = [candidate.stat() for candidate in files]
+        result.size_bytes = sum(item.st_size for item in stats)
+        result.age_seconds = max(0.0, time.time() - max(item.st_mtime for item in stats))
+    except OSError as exc:
+        result.corrupt = f"cannot stat index: {exc}"
+        return result
+
+    try:
+        uri = f"{path.resolve().as_uri()}?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=1.0)) as db:
+            db.row_factory = sqlite3.Row
+            check = db.execute("PRAGMA quick_check").fetchone()
+            if check is None or str(check[0]).lower() != "ok":
+                result.corrupt = f"SQLite quick_check: {check[0] if check else 'no result'}"
+                return result
+            schema = db.execute("SELECT value FROM meta WHERE key = 'schema'").fetchone()
+            model = db.execute("SELECT value FROM meta WHERE key = 'model'").fetchone()
+            if schema is None or str(schema[0]) != str(SCHEMA_VERSION):
+                result.corrupt = "search-index schema is missing or obsolete"
+                return result
+            from omind import embed
+
+            expected_model = os.environ.get(_MODEL_ENV) or embed._DEFAULT_MODEL
+            if model is None or str(model[0]) != expected_model:
+                result.corrupt = "search-index embedding model does not match configuration"
+                return result
+            rows = {
+                str(row["filename"]): (int(row["mtime_ns"]), int(row["size"]))
+                for row in db.execute("SELECT filename, mtime_ns, size FROM notes")
+            }
+            result.notes = len(rows)
+            result.vectors = int(db.execute("SELECT count(*) FROM vectors").fetchone()[0])
+    except (sqlite3.Error, OSError, ValueError) as exc:
+        result.corrupt = str(exc)
+        return result
+
+    seen: set[str] = set()
+    if omi.is_dir():
+        from omind.store import _is_reserved
+
+        for note in omi.glob("*.md"):
+            if _is_reserved(note.name) or note.name.startswith("."):
+                continue
+            try:
+                stat = note.stat()
+            except OSError:
+                continue
+            seen.add(note.name)
+            if rows.get(note.name) != (stat.st_mtime_ns, stat.st_size):
+                result.stale += 1
+    result.stale += len(set(rows) - seen)
+    return result
 
 
 def _stems_of(text: str) -> str:
@@ -282,10 +400,31 @@ def _fts_query(query: str, *, require_all: bool = False) -> str:
     return " AND ".join(f"({part})" for part in joined)
 
 
-def _pack(vec: Sequence[float]) -> bytes:
+def _scope(query: str, requested_limit: int) -> _Scope:
+    """Retrieval depth/output budget derived from query complexity."""
+    word_count = len(_query_words(query))
+    low = query.lower()
+    multi_hop = word_count >= 3 and any(
+        marker in low for marker in ("why ", "how ", "compare ", "relationship", "because")
+    )
+    if word_count <= 1:
+        return _Scope(depth=20, limit=min(requested_limit, 5), excerpt_chars=120)
+    if word_count >= 5 or multi_hop:
+        return _Scope(depth=90, limit=min(requested_limit, 25), excerpt_chars=240)
+    return _Scope(depth=_LEG_DEPTH, limit=min(requested_limit, 10), excerpt_chars=EXCERPT_CHARS)
+
+
+def _quantize(vec: Sequence[float]) -> tuple[bytes, float, float]:
+    """Symmetric int8 vector plus per-row scale and quantization residual."""
     import numpy as np
 
-    return bytes(np.asarray(vec, dtype="float32").tobytes())
+    source = np.asarray(vec, dtype="float32")
+    peak = float(np.max(np.abs(source))) if source.size else 0.0
+    scale = peak / 127.0 if peak else 1.0
+    packed = np.clip(np.rint(source / scale), -127, 127).astype("int8")
+    restored = packed.astype("float32") * scale
+    residual = float(np.linalg.norm(source - restored))
+    return bytes(packed.tobytes()), scale, residual
 
 
 def _query_vector(text: str) -> Any:
@@ -321,7 +460,9 @@ class SearchIndex:
         self._db: sqlite3.Connection | None = None
         # Per-process cache of the packed vector matrix, keyed by the index
         # generation so a refresh (here or in another process) invalidates it.
-        self._matrix: tuple[str, list[int], Any] | None = None
+        self._matrix: tuple[str, list[int], Any, Any] | None = None
+        self._last_refresh_at = 0.0
+        self._last_signature: tuple[int, int] | None = None
         # One connection shared across threads (the web app serves requests on a
         # thread pool), so every public entry point serializes on this lock —
         # sqlite3 connections are not safe to use concurrently.
@@ -408,6 +549,28 @@ class SearchIndex:
                 continue
             yield path
 
+    def _cheap_signature(self) -> tuple[int, int]:
+        """Directory/write-signal mtimes that cheaply catch normal vault writes."""
+        signal = paths.sync_signal_path(self.omi_dir)
+        values: list[int] = []
+        for path in (self.omi_dir, signal):
+            try:
+                values.append(path.stat().st_mtime_ns)
+            except OSError:
+                values.append(-1)
+        return values[0], values[1]
+
+    def _refresh_if_needed(self) -> Refresh | None:
+        """Refresh once per burst, or immediately after an OmiStore write."""
+        now = time.monotonic()
+        signature = self._cheap_signature()
+        if (
+            self._last_signature == signature
+            and now - self._last_refresh_at < _REFRESH_THROTTLE_SECONDS
+        ):
+            return Refresh()
+        return self.refresh()
+
     @_locked
     def refresh(self, *, vectors: bool = True) -> Refresh | None:
         """Bring the index in line with the notes on disk.
@@ -454,6 +617,8 @@ class SearchIndex:
             db.execute("COMMIT")
             stats.seconds = time.perf_counter() - started
             self._matrix = None
+            self._last_signature = self._cheap_signature()
+            self._last_refresh_at = time.monotonic()
             return stats
         except sqlite3.Error:
             with contextlib.suppress(sqlite3.Error):
@@ -487,18 +652,24 @@ class SearchIndex:
             # Derived when undeclared, the same rule render_fields applies, so a
             # graph node built from the index always carries a non-empty type.
             okf_type=fields.okf_type.strip() or derive_okf_type(fields.tags),
+            supersedes=fields.supersedes,
+            superseded_by=fields.superseded_by,
+            has_title=bool(fields.title),
             tags=fields.tags,
             disabled=fields.disabled,
         )
         self._forget(db, path.name)
         db.execute(
-            "INSERT INTO notes(filename, title, created, okf_type, disabled, mtime_ns, size, sha)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+            "INSERT INTO notes(filename, title, created, okf_type, supersedes, superseded_by,"
+            " has_title, disabled, mtime_ns, size, sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.filename,
                 row.title,
                 row.created,
                 row.okf_type,
+                row.supersedes,
+                row.superseded_by,
+                int(row.has_title),
                 int(row.disabled),
                 st.st_mtime_ns,
                 st.st_size,
@@ -509,9 +680,13 @@ class SearchIndex:
             "INSERT INTO note_tags(filename, tag) VALUES (?, ?)",
             [(row.filename, tag.lower()) for tag in row.tags],
         )
+        lint_targets = {target.lower() for target in lint_link_targets(text)}
         db.executemany(
-            "INSERT INTO links(src, target, raw) VALUES (?, ?, ?)",
-            [(row.filename, raw.lower(), raw) for raw in link_targets(text)],
+            "INSERT INTO links(src, target, raw, lint) VALUES (?, ?, ?, ?)",
+            [
+                (row.filename, raw.lower(), raw, int(raw.lower() in lint_targets))
+                for raw in link_targets(text)
+            ],
         )
         tag_text = " ".join(row.tags)
         pending: list[tuple[int, str]] = []
@@ -558,9 +733,14 @@ class SearchIndex:
         if vecs is None:
             return 0
         try:
+            rows = [
+                (cid, *_quantize(row))
+                for (cid, _text), row in zip(pending, vecs, strict=True)
+            ]
             db.executemany(
-                "INSERT OR REPLACE INTO vectors(chunk_id, vec) VALUES (?, ?)",
-                [(cid, _pack(row)) for (cid, _text), row in zip(pending, vecs, strict=True)],
+                "INSERT OR REPLACE INTO vectors(chunk_id, vec, scale, residual)"
+                " VALUES (?, ?, ?, ?)",
+                rows,
             )
         except (sqlite3.Error, ValueError, ImportError):
             return 0
@@ -585,7 +765,7 @@ class SearchIndex:
         db = self._connect()
         if db is None:
             return None
-        if self.refresh() is None and not self._has_rows(db):
+        if self._refresh_if_needed() is None and not self._has_rows(db):
             return None  # nothing indexed and we couldn't build it
         try:
             allowed = self._candidates(db, tag=tag, include_disabled=include_disabled)
@@ -593,26 +773,34 @@ class SearchIndex:
                 return []
             if not query.strip():
                 return self._listing(db, allowed, limit)
+            scope = _scope(query, limit)
             expr = _fts_query(query)  # the OR form; also snips the excerpts
-            keyword = self._keyword_leg(db, query, allowed)
-            vector = self._vector_leg(db, query, allowed)
+            keyword = self._keyword_leg(db, query, allowed, scope.depth)
+            vector = self._vector_leg(db, query, allowed, scope.depth)
             matched = set(keyword) | set(vector)
             if not matched:
                 return []
             # Recency re-ranks what the content legs matched; it never *adds* a
             # note. Left unrestricted it made every query return the whole vault
             # newest-first — the exact failure this index exists to end.
-            recency = [cid for cid in self._recency_leg(db, allowed) if cid in matched]
+            recency = [
+                cid for cid in self._recency_leg(db, allowed, scope.depth) if cid in matched
+            ]
             fused = _fuse(
                 [(_W_KEYWORD, keyword), (_W_VECTOR, vector), (_W_RECENCY, recency)]
             )
+            fused = self._rerank(db, query, fused)
+            fused = self._weight_generated(db, fused)
+            fused = self._weight_superseded(db, fused)
             if not fused:
                 return []
             ranks = {
                 "keyword": {cid: i + 1 for i, cid in enumerate(keyword)},
                 "vector": {cid: i + 1 for i, cid in enumerate(vector)},
             }
-            return self._materialize(db, query, expr, fused, ranks, limit)
+            return self._materialize(
+                db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars
+            )
         except (sqlite3.Error, ValueError):
             return None
 
@@ -638,7 +826,7 @@ class SearchIndex:
         return {str(r["filename"]) for r in db.execute(sql, args)}
 
     def _keyword_leg(
-        self, db: sqlite3.Connection, query: str, allowed: set[str] | None
+        self, db: sqlite3.Connection, query: str, allowed: set[str] | None, depth: int
     ) -> list[int]:
         """BM25 over the FTS index, graded: chunks matching every query word
         first, then chunks matching any of them."""
@@ -648,16 +836,18 @@ class SearchIndex:
             expr = _fts_query(query, require_all=require_all)
             if not expr:
                 break
-            for chunk_id in self._bm25(db, expr, allowed):
+            for chunk_id in self._bm25(db, expr, allowed, depth):
                 if chunk_id not in seen:
                     seen.add(chunk_id)
                     ranked.append(chunk_id)
-            if len(ranked) >= _LEG_DEPTH:
+            if len(ranked) >= depth:
                 break
-        return ranked[:_LEG_DEPTH]
+        return ranked[:depth]
 
     @staticmethod
-    def _bm25(db: sqlite3.Connection, expr: str, allowed: set[str] | None) -> list[int]:
+    def _bm25(
+        db: sqlite3.Connection, expr: str, allowed: set[str] | None, depth: int
+    ) -> list[int]:
         """Chunk ids for one MATCH expression, best BM25 first. Column weights put
         a title/tag match well above a body mention of the same word."""
         try:
@@ -667,7 +857,7 @@ class SearchIndex:
                 " WHERE chunks_fts MATCH ?"
                 " ORDER BY bm25(chunks_fts, 5.0, 2.0, 4.0, 1.0, 1.0)"
                 " LIMIT ?",
-                (expr, _LEG_DEPTH * 3),
+                (expr, depth * 3),
             )
         except sqlite3.Error:
             return []  # an unparseable expression is no matches, never a crash
@@ -676,7 +866,7 @@ class SearchIndex:
         ]
 
     def _vector_leg(
-        self, db: sqlite3.Connection, query: str, allowed: set[str] | None
+        self, db: sqlite3.Connection, query: str, allowed: set[str] | None, depth: int
     ) -> list[int]:
         from omind import embed
 
@@ -688,24 +878,25 @@ class SearchIndex:
             packed = self._vector_matrix(db)
             if packed is None:
                 return []
-            ids, matrix = packed
+            ids, matrix, residuals = packed
             qv = _query_vector(query)
             if qv is None or int(qv.shape[0]) != int(matrix.shape[1]):
                 return []
             scores = matrix @ qv
-            order = np.argsort(-scores)[: _LEG_DEPTH * 3]
+            # Residual error only decides effectively-equal cosine scores.
+            order = np.lexsort((residuals, -np.round(scores, 6)))[: depth * 3]
             owner = self._owners(db)
             ranked = [ids[int(i)] for i in order]
             return [
                 cid
                 for cid in ranked
                 if allowed is None or owner.get(cid, "") in allowed
-            ][:_LEG_DEPTH]
+            ][:depth]
         except (ImportError, ValueError, sqlite3.Error):
             return []
 
-    def _vector_matrix(self, db: sqlite3.Connection) -> tuple[list[int], Any] | None:
-        """``(chunk_ids, (n, dim) float32 matrix)`` for every stored vector.
+    def _vector_matrix(self, db: sqlite3.Connection) -> tuple[list[int], Any, Any] | None:
+        """Chunk ids, dequantized float32 matrix, and per-row residuals.
 
         One matmul beats the per-entry Python dot product the old vector index
         did; the matrix is cached per process and invalidated by the generation.
@@ -714,37 +905,154 @@ class SearchIndex:
 
         generation = self._meta(db, "generation")
         if self._matrix is not None and self._matrix[0] == generation:
-            return self._matrix[1], self._matrix[2]
+            return self._matrix[1], self._matrix[2], self._matrix[3]
         ids: list[int] = []
         rows: list[Any] = []
+        residuals: list[float] = []
         width = 0
-        for row in db.execute("SELECT chunk_id, vec FROM vectors ORDER BY chunk_id"):
-            vec = np.frombuffer(row["vec"], dtype="float32")
+        for row in db.execute(
+            "SELECT chunk_id, vec, scale, residual FROM vectors ORDER BY chunk_id"
+        ):
+            vec = np.frombuffer(row["vec"], dtype="int8").astype("float32")
+            vec *= float(row["scale"])
             if width and vec.size != width:
                 continue  # a stale/corrupt row rather than a wrong score
             width = width or int(vec.size)
             ids.append(int(row["chunk_id"]))
             rows.append(vec)
+            residuals.append(float(row["residual"]))
         if not rows:
             return None
         matrix = np.vstack(rows)
-        self._matrix = (generation, ids, matrix)
-        return ids, matrix
+        residual_array = np.asarray(residuals, dtype="float32")
+        self._matrix = (generation, ids, matrix, residual_array)
+        return ids, matrix, residual_array
+
+    @staticmethod
+    def _rerank(
+        db: sqlite3.Connection, query: str, fused: list[tuple[int, float]]
+    ) -> list[tuple[int, float]]:
+        """Locally rerank the fused head against each whole matched chunk.
+
+        The stored vectors include title/tags to improve broad recall. This
+        second, bounded pass deliberately embeds only the chunk body so a weak
+        metadata or one-word match cannot dominate the result tail.
+        """
+        from omind import embed
+
+        if not embed.available() or not fused:
+            return fused
+        head = fused[:_RERANK_DEPTH]
+        placeholders = ", ".join("?" for _ in head)
+        try:
+            rows = db.execute(
+                f"SELECT rowid, text FROM chunks_fts WHERE rowid IN ({placeholders})",
+                [chunk_id for chunk_id, _score in head],
+            )
+            texts = {int(row["rowid"]): str(row["text"]) for row in rows}
+            ordered = [(chunk_id, score, texts.get(chunk_id, "")) for chunk_id, score in head]
+            vectors = embed.encode([query, *(text for _chunk_id, _score, text in ordered)])
+            if vectors is None:
+                return fused
+            import numpy as np
+
+            matrix = np.asarray(vectors, dtype="float32")
+            if matrix.ndim != 2 or matrix.shape[0] != len(ordered) + 1:
+                return fused
+            query_vector = matrix[0]
+            query_norm = float(np.linalg.norm(query_vector))
+            if not query_norm:
+                return fused
+            rescored: list[tuple[int, float]] = []
+            for (chunk_id, score, _text), vector in zip(ordered, matrix[1:], strict=True):
+                denominator = query_norm * float(np.linalg.norm(vector))
+                cosine = float(np.dot(query_vector, vector) / denominator) if denominator else 0.0
+                rescored.append((chunk_id, score * (0.5 + max(0.0, cosine))))
+            rescored.sort(key=lambda item: (-item[1], item[0]))
+            return [*rescored, *fused[_RERANK_DEPTH:]]
+        except (ImportError, sqlite3.Error, TypeError, ValueError):
+            return fused
 
     def _owners(self, db: sqlite3.Connection) -> dict[int, str]:
         rows = db.execute("SELECT id, filename FROM chunks")
         return {int(r["id"]): str(r["filename"]) for r in rows}
 
-    def _recency_leg(self, db: sqlite3.Connection, allowed: set[str] | None) -> list[int]:
+    def _recency_leg(
+        self, db: sqlite3.Connection, allowed: set[str] | None, depth: int
+    ) -> list[int]:
         rows = db.execute(
             "SELECT c.id AS id, c.filename AS filename FROM chunks c"
             " JOIN notes n ON n.filename = c.filename"
             " WHERE c.ord = 0 ORDER BY n.created DESC, n.filename LIMIT ?",
-            (_LEG_DEPTH * 3,),
+            (depth * 3,),
         )
         return [
             int(r["id"]) for r in rows if allowed is None or str(r["filename"]) in allowed
-        ][:_LEG_DEPTH]
+        ][:depth]
+
+    @staticmethod
+    def _weight_generated(
+        db: sqlite3.Connection, fused: list[tuple[int, float]]
+    ) -> list[tuple[int, float]]:
+        """De-prioritise broad machine-written journals without excluding them."""
+        rows = db.execute(
+            "SELECT c.id, c.filename, n.okf_type FROM chunks c"
+            " JOIN notes n ON n.filename = c.filename"
+        )
+        generated: set[int] = set()
+        for row in rows:
+            name = Path(str(row["filename"])).stem.lower()
+            okf_type = str(row["okf_type"]).strip().lower()
+            if (
+                okf_type in {"journal", "worklog", "checkpoint", "rollup"}
+                or name.startswith("session journal")
+                or name.startswith("worklog ")
+            ):
+                generated.add(int(row["id"]))
+        weighted = [
+            (chunk_id, score * _GENERATED_WEIGHT if chunk_id in generated else score)
+            for chunk_id, score in fused
+        ]
+        return sorted(weighted, key=lambda item: (-item[1], item[0]))
+
+    @staticmethod
+    def _weight_superseded(
+        db: sqlite3.Connection, fused: list[tuple[int, float]]
+    ) -> list[tuple[int, float]]:
+        """De-rank invalidated facts while preserving their searchable history."""
+        notes = list(
+            db.execute("SELECT filename, title, supersedes, superseded_by FROM notes")
+        )
+        aliases: dict[str, str] = {}
+        superseded: set[str] = set()
+        for row in notes:
+            filename = str(row["filename"])
+            aliases[filename.lower()] = filename
+            aliases[Path(filename).stem.lower()] = filename
+            aliases[str(row["title"]).strip().lower()] = filename
+            if str(row["superseded_by"]).strip():
+                superseded.add(filename)
+        for row in notes:
+            target = str(row["supersedes"]).strip()
+            if not target:
+                continue
+            clean = target.strip("[]").split("|", 1)[0].split("#", 1)[0].strip().lower()
+            if resolved := aliases.get(clean):
+                superseded.add(resolved)
+        chunk_owner = {
+            int(row["id"]): str(row["filename"])
+            for row in db.execute("SELECT id, filename FROM chunks")
+        }
+        weighted = [
+            (
+                chunk_id,
+                score * _SUPERSEDED_WEIGHT
+                if chunk_owner.get(chunk_id) in superseded
+                else score,
+            )
+            for chunk_id, score in fused
+        ]
+        return sorted(weighted, key=lambda item: (-item[1], item[0]))
 
     def _listing(
         self, db: sqlite3.Connection, allowed: set[str] | None, limit: int
@@ -771,6 +1079,7 @@ class SearchIndex:
         fused: list[tuple[int, float]],
         ranks: dict[str, dict[int, int]],
         limit: int,
+        excerpt_chars: int,
     ) -> list[Hit]:
         """Best chunk per note, credential-penalised, with a bounded excerpt."""
         from omind import retrieve
@@ -799,7 +1108,9 @@ class SearchIndex:
                 Hit(
                     filename=name,
                     heading=str(row["heading"]),
-                    excerpt=self._excerpt(db, chunk_id, expr, filename=name),
+                    excerpt=self._excerpt(
+                        db, chunk_id, expr, filename=name, max_chars=excerpt_chars
+                    ),
                     score=score,
                     keyword_rank=ranks["keyword"].get(chunk_id, 0),
                     vector_rank=ranks["vector"].get(chunk_id, 0),
@@ -809,7 +1120,15 @@ class SearchIndex:
         hits.sort(key=lambda h: (-h.score, h.filename))
         return hits[:limit]
 
-    def _excerpt(self, db: sqlite3.Connection, chunk_id: int, expr: str, *, filename: str) -> str:
+    def _excerpt(
+        self,
+        db: sqlite3.Connection,
+        chunk_id: int,
+        expr: str,
+        *,
+        filename: str,
+        max_chars: int,
+    ) -> str:
         """FTS5's own snippet around the match, or the chunk's head for a
         vector-only hit (which by definition shares no literal term).
 
@@ -831,8 +1150,8 @@ class SearchIndex:
                 (filename,),
             ).fetchone()
             if summary is not None and str(summary["text"]).strip():
-                return _collapse(str(summary["text"]))
-            return _collapse(str(row["text"]))
+                return _collapse(str(summary["text"]), max_chars)
+            return _collapse(str(row["text"]), max_chars)
         if expr:
             snippet = db.execute(
                 "SELECT snippet(chunks_fts, 3, '', '', '…', 24) AS s FROM chunks_fts"
@@ -840,8 +1159,8 @@ class SearchIndex:
                 (chunk_id, expr),
             ).fetchone()
             if snippet is not None and str(snippet["s"] or "").strip():
-                return _collapse(str(snippet["s"]))
-        return _collapse(str(row["text"]))
+                return _collapse(str(snippet["s"]), max_chars)
+        return _collapse(str(row["text"]), max_chars)
 
     # -- link graph ---------------------------------------------------------
 
@@ -849,7 +1168,7 @@ class SearchIndex:
     def backlinks(self, filename: str, *, title: str = "") -> list[str] | None:
         """Filenames whose ``[[wikilinks]]`` resolve to this note, or ``None``."""
         db = self._connect()
-        if db is None or self.refresh() is None:
+        if db is None or self._refresh_if_needed() is None:
             return None
         try:
             stem = filename[:-3] if filename.endswith(".md") else filename
@@ -869,7 +1188,7 @@ class SearchIndex:
     def notes(self) -> list[_NoteRow] | None:
         """Every indexed note's identity row (filename, title, created, tags)."""
         db = self._connect()
-        if db is None or self.refresh() is None:
+        if db is None or self._refresh_if_needed() is None:
             return None
         return self._notes(db)
 
@@ -884,11 +1203,15 @@ class SearchIndex:
                 title=str(r["title"]),
                 created=str(r["created"]),
                 okf_type=str(r["okf_type"]),
+                supersedes=str(r["supersedes"]),
+                superseded_by=str(r["superseded_by"]),
+                has_title=bool(r["has_title"]),
                 tags=tags.get(str(r["filename"]), []),
                 disabled=bool(r["disabled"]),
             )
             for r in db.execute(
-                "SELECT filename, title, created, okf_type, disabled FROM notes"
+                "SELECT filename, title, created, okf_type, supersedes, superseded_by,"
+                " has_title, disabled FROM notes"
             )
         ]
 
@@ -901,7 +1224,7 @@ class SearchIndex:
         the way the author typed it; resolution lowercases at comparison time.
         """
         db = self._connect()
-        if db is None or self.refresh() is None:
+        if db is None or self._refresh_if_needed() is None:
             return None
         try:
             notes = self._notes(db)
@@ -911,6 +1234,61 @@ class SearchIndex:
             ]
             return notes, links
         except sqlite3.Error:
+            return None
+
+    @_locked
+    def lint_rows(self) -> tuple[list[_NoteRow], list[tuple[str, str]]] | None:
+        """Top-level note identities and fence-stripped links for vault lint."""
+        db = self._connect()
+        if db is None or self._refresh_if_needed() is None:
+            return None
+        try:
+            return (
+                self._notes(db),
+                [
+                    (str(row["src"]), str(row["raw"]))
+                    for row in db.execute("SELECT src, raw FROM links WHERE lint = 1")
+                ],
+            )
+        except sqlite3.Error:
+            return None
+
+    @_locked
+    def duplicate_pairs(self, *, threshold: float = 0.92) -> list[tuple[str, str, float]] | None:
+        """Semantically similar note pairs from mean chunk vectors."""
+        from omind import embed
+
+        if not embed.available():
+            return None
+        db = self._connect()
+        if db is None or self._refresh_if_needed() is None:
+            return None
+        try:
+            import numpy as np
+
+            packed = self._vector_matrix(db)
+            if packed is None:
+                return None
+            ids, matrix, _residuals = packed
+            owners = self._owners(db)
+            grouped: dict[str, list[Any]] = {}
+            for chunk_id, vector in zip(ids, matrix, strict=True):
+                if owner := owners.get(chunk_id):
+                    grouped.setdefault(owner, []).append(vector)
+            names = sorted(grouped)
+            if len(names) < 2:
+                return []
+            centroids = np.vstack([np.mean(grouped[name], axis=0) for name in names])
+            norms = np.linalg.norm(centroids, axis=1, keepdims=True)
+            norms[norms == 0] = 1.0
+            centroids /= norms
+            similarity = centroids @ centroids.T
+            lefts, rights = np.where(np.triu(similarity, k=1) >= threshold)
+            return [
+                (names[int(left)], names[int(right)], float(similarity[left, right]))
+                for left, right in zip(lefts, rights, strict=True)
+            ]
+        except (ImportError, sqlite3.Error, TypeError, ValueError):
             return None
 
     # -- dedup --------------------------------------------------------------
@@ -926,7 +1304,7 @@ class SearchIndex:
         if not embed.available():
             return None
         db = self._connect()
-        if db is None or self.refresh() is None:
+        if db is None or self._refresh_if_needed() is None:
             return None
         try:
             import numpy as np
@@ -935,7 +1313,7 @@ class SearchIndex:
             qv = _query_vector(text)
             if packed is None or qv is None:
                 return None
-            ids, matrix = packed
+            ids, matrix, _residuals = packed
             if int(qv.shape[0]) != int(matrix.shape[1]):
                 return None
             scores = matrix @ qv
@@ -1090,6 +1468,26 @@ def link_targets(md: str) -> list[str]:
     return [targets[key] for key in sorted(targets)]
 
 
+def lint_link_targets(md: str) -> list[str]:
+    """Wikilinks excluding fenced/inline code, for lint's graph view."""
+    from omind.store import _FENCE_RE
+
+    lines: list[str] = []
+    in_fence = False
+    fence_ch = ""
+    for line in md.splitlines():
+        fence = _FENCE_RE.match(line.lstrip())
+        if fence:
+            ch = fence.group(1)[0]
+            if not in_fence:
+                in_fence, fence_ch = True, ch
+            elif ch == fence_ch:
+                in_fence = False
+            continue
+        lines.append("" if in_fence else re.sub(r"`[^`]*`", "", line))
+    return link_targets("\n".join(lines))
+
+
 def _fuse(legs: list[tuple[float, list[int]]]) -> list[tuple[int, float]]:
     """Reciprocal Rank Fusion over weighted ranked lists, best first."""
     scores: dict[int, float] = {}
@@ -1099,6 +1497,6 @@ def _fuse(legs: list[tuple[float, list[int]]]) -> list[tuple[int, float]]:
     return sorted(scores.items(), key=lambda kv: (-kv[1], kv[0]))
 
 
-def _collapse(text: str) -> str:
+def _collapse(text: str, limit: int = EXCERPT_CHARS) -> str:
     flat = " ".join(text.split())
-    return flat if len(flat) <= EXCERPT_CHARS else flat[: EXCERPT_CHARS - 1].rstrip() + "…"
+    return flat if len(flat) <= limit else flat[: limit - 1].rstrip() + "…"

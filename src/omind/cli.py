@@ -15,6 +15,7 @@ Subcommands:
   * ``omind graph`` — query the [[wikilink]] knowledge graph (neighbors, path,
     orphans, dangling links, stats, export).
   * ``omind note`` — safely create/update one OMI note through OmiStore.
+  * ``omind consolidate`` — propose and explicitly apply reviewed note merges.
   * ``omind rollup`` — compact weeks of daily session journals into summaries.
   * ``omind backup`` — encrypted off-machine backup of the OMI folder (restic).
 """
@@ -23,6 +24,7 @@ from __future__ import annotations
 
 import argparse
 import os
+import shlex
 import sys
 from pathlib import Path
 
@@ -320,6 +322,8 @@ def build_parser() -> argparse.ArgumentParser:
     )
     note.add_argument("--tags", default="", help="comma-separated tags (no '#' needed)")
     note.add_argument("--related-to", default="", help="free-text 'related to' line")
+    note.add_argument("--supersedes", default="", help="older note this fact supersedes")
+    note.add_argument("--superseded-by", default="", help="newer note that supersedes this fact")
     note.add_argument("--connections", default="", help="comma-separated note titles to [[link]]")
     note.add_argument(
         "--connection",
@@ -331,6 +335,25 @@ def build_parser() -> argparse.ArgumentParser:
     )
     note.add_argument("--references", default="", help="comma-separated references")
     _add_vault_args(note)
+
+    consolidate = sub.add_parser(
+        "consolidate",
+        help="propose reviewed near-duplicate merges without changing the vault, "
+        "or explicitly apply one edited proposal",
+    )
+    consolidate.add_argument(
+        "--limit",
+        type=int,
+        default=5,
+        help="maximum non-overlapping proposals to create (default: 5)",
+    )
+    consolidate.add_argument(
+        "--apply",
+        metavar="PLAN_ID",
+        default=None,
+        help="apply one reviewed proposal, creating its draft and archiving its sources",
+    )
+    _add_vault_args(consolidate)
 
     search = sub.add_parser("search", help="search OMI notes from the terminal")
     search.add_argument(
@@ -354,6 +377,11 @@ def build_parser() -> argparse.ArgumentParser:
     )
     bench.add_argument(
         "--query", default="", help="query to time (default: a built-in sample set)"
+    )
+    bench.add_argument(
+        "--quality",
+        action="store_true",
+        help="run the labelled retrieval-quality set and report recall@1, recall@5, and MRR",
     )
     bench.add_argument("--json", action="store_true", help="emit measurements as JSON")
     _add_vault_args(bench)
@@ -641,11 +669,106 @@ def _run_quickstart(args: argparse.Namespace) -> int:
 
 
 def _diagnose_with_backup(config: SetupConfig) -> list[CheckResult]:
-    """The agent's wiring checks plus the backup and mesh checks."""
+    """The agent's wiring checks plus index, backup, and mesh checks."""
     from omind.backup import diagnose_backup
     from omind.mesh import diagnose_mesh
 
-    return diagnose_for(config) + diagnose_mesh(config) + diagnose_backup(config)
+    return (
+        diagnose_for(config)
+        + _diagnose_search_index(config)
+        + diagnose_mesh(config)
+        + diagnose_backup(config)
+    )
+
+
+def _diagnose_search_index(config: SetupConfig) -> list[CheckResult]:
+    """Report whether hybrid retrieval is healthy, without mutating its cache."""
+    from omind import embed, searchindex
+
+    omi_dir = (config.vault / config.folder).expanduser()
+    health = searchindex.health(omi_dir)
+    fix = "run `omind reindex --rebuild`"
+    results: list[CheckResult] = []
+
+    if health.fts5:
+        state = "disabled by OMI_INDEX_DISABLE" if health.disabled else "available"
+        results.append(CheckResult("search_fts5", "ok", f"search index: FTS5 {state}"))
+    else:
+        results.append(
+            CheckResult(
+                "search_fts5",
+                "warn",
+                "search index: FTS5 unavailable; retrieval uses the scanning fallback",
+            )
+        )
+
+    semantic = embed.status()
+    if semantic["available"]:
+        results.append(
+            CheckResult(
+                "search_semantic",
+                "ok",
+                f"semantic search: on (model {semantic['model']})",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "search_semantic",
+                "ok",
+                f"semantic search: off (keyword path) — {semantic['reason']}",
+            )
+        )
+
+    if not health.exists:
+        results.append(
+            CheckResult("search_index_file", "warn", f"search index has not been built; {fix}")
+        )
+    elif health.corrupt:
+        results.append(
+            CheckResult(
+                "search_index_file",
+                "warn",
+                f"search index is corrupt or incompatible ({health.corrupt}); {fix}",
+            )
+        )
+    else:
+        age = _human_duration(health.age_seconds or 0.0)
+        size = _human_bytes(health.size_bytes)
+        detail = (
+            f"search index: {size}, {age} old, {health.notes} notes, "
+            f"{health.vectors} vectors"
+        )
+        if health.stale:
+            results.append(
+                CheckResult(
+                    "search_index_file",
+                    "warn",
+                    f"{detail}; {health.stale} stale note(s); {fix}",
+                )
+            )
+        else:
+            results.append(CheckResult("search_index_file", "ok", detail))
+    return results
+
+
+def _human_bytes(size: int) -> str:
+    value = float(size)
+    for unit in ("B", "KiB", "MiB", "GiB"):
+        if value < 1024 or unit == "GiB":
+            return f"{value:.1f} {unit}" if unit != "B" else f"{int(value)} B"
+        value /= 1024
+    raise AssertionError("unreachable")
+
+
+def _human_duration(seconds: float) -> str:
+    if seconds < 60:
+        return f"{int(seconds)}s"
+    if seconds < 3600:
+        return f"{int(seconds // 60)}m"
+    if seconds < 86400:
+        return f"{int(seconds // 3600)}h"
+    return f"{int(seconds // 86400)}d"
 
 
 def _run_doctor(args: argparse.Namespace) -> int:
@@ -956,8 +1079,11 @@ def _run_bench(args: argparse.Namespace) -> int:
     from omind import bench
 
     omi_dir = (args.vault / args.folder).expanduser()
-    queries = (args.query,) if args.query else bench.SAMPLE_QUERIES
-    report = bench.run(omi_dir, queries=queries)
+    if args.quality:
+        report = bench.run_quality(omi_dir)
+    else:
+        queries = (args.query,) if args.query else bench.SAMPLE_QUERIES
+        report = bench.run(omi_dir, queries=queries)
     print(json.dumps(report.to_dict(), indent=2) if args.json else report.format())
     return 0
 
@@ -1139,6 +1265,8 @@ def _run_note(args: argparse.Namespace) -> int:
         details=details.strip(),
         tags=_split_csv(args.tags),
         related_to=args.related_to.strip(),
+        supersedes=args.supersedes.strip(),
+        superseded_by=args.superseded_by.strip(),
         # CSV titles plus any repeatable --connection (exact titles, comma-safe).
         connections=(
             _split_csv(args.connections) + [c.strip() for c in args.connection if c.strip()]
@@ -1217,6 +1345,39 @@ def _run_rollup(args: argparse.Namespace) -> int:
         print(
             f"{result.week}: {len(result.days)} day(s) -> "
             f"{result.rollup_filename} ({fate} dailies)"
+        )
+    return 0
+
+
+def _run_consolidate(args: argparse.Namespace) -> int:
+    from omind.consolidate import ConsolidationError, apply, propose
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    try:
+        if args.apply is not None:
+            result = apply(omi_dir, args.apply)
+            print(f"created {result.filename}")
+            print("archived " + ", ".join(result.archived))
+            return 0
+        proposals = propose(omi_dir, limit=args.limit)
+    except ConsolidationError as exc:
+        print(f"error: {exc}", file=sys.stderr)
+        return 1
+    if not proposals:
+        print("no near-duplicate notes found")
+        return 0
+    print(f"created {len(proposals)} review proposal(s); the vault is unchanged")
+    for proposal in proposals:
+        left, right = proposal.sources
+        print(
+            f"{proposal.plan_id}  {left.filename} + {right.filename}  "
+            f"({proposal.similarity:.0%} similar)"
+        )
+        print(f"  draft: {proposal.draft_path}")
+        print(
+            f"  apply: omind consolidate --apply {proposal.plan_id} "
+            f"--vault {shlex.quote(str(args.vault))} "
+            f"--folder {shlex.quote(args.folder)}"
         )
     return 0
 
@@ -1322,6 +1483,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_convert(args)
     if args.command == "note":
         return _run_note(args)
+    if args.command == "consolidate":
+        return _run_consolidate(args)
     if args.command == "rollup":
         return _run_rollup(args)
     if args.command == "hook":

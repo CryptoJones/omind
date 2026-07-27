@@ -9,8 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 - **A derived hybrid search index (`omind.searchindex`).** One SQLite file per
-  vault, in the state dir, holding FTS5/BM25 over heading-split chunks, packed
-  `float32` chunk embeddings, and the resolved `[[wikilink]]` graph. Queries fuse
+  vault, in the state dir, holding FTS5/BM25 over heading-split chunks, quantized
+  int8 chunk embeddings, and the resolved `[[wikilink]]` graph. Queries fuse
   a keyword leg, a semantic leg, and a weak recency leg with Reciprocal Rank
   Fusion. Notes remain the source of truth; the index is disposable, machine-local,
   never committed and never mesh-synced, and refreshes only the notes whose bytes
@@ -19,11 +19,51 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - `omind bench` — measures index build/refresh, search latency (indexed *and*
   pre-index scan), capsule size, and the token cost of the listing payload, so
   retrieval performance is observed rather than asserted.
+- `omind bench --quality` evaluates a labelled query set and reports recall@1,
+  recall@5, and mean reciprocal rank (MRR), including skipped targets and misses.
 - `omind search --explain` prints the fused score and per-leg ranks behind each
   hit; `omind reindex` gained `--index-only` and `--rebuild`.
 - `OMI_INDEX_DISABLE=1` turns the index off and restores the scanning search path.
+- `omind doctor` reports FTS5 and semantic-search availability, the search
+  index's size and age, and stale, corrupt, or incompatible index files with the
+  `omind reindex --rebuild` repair command.
+- `omind consolidate` writes near-duplicate merge proposals and editable drafts
+  to machine-local state without changing the vault. `--apply PLAN_ID` creates
+  the reviewed note through OmiStore and archives both sources only after their
+  versions are revalidated.
+- The unified MCP `graph` tool selects `path`, `orphans`, `dangling`, or `stats`
+  with an `op` argument; list operations retain bounded pagination.
 
 ### Changed
+- `graph-path`, `graph-orphans`, `graph-dangling`, and `graph-stats` remain as
+  deprecated compatibility aliases for one release while fleet clients migrate
+  to `graph`; their removal is tracked in #181.
+- Hybrid-index reads within the same one-second burst reuse the last successful
+  refresh instead of statting every note again. OmiStore writes invalidate the
+  throttle immediately through the vault's write signal.
+- Auto-generated journal, worklog, checkpoint, and rollup notes receive a modest
+  retrieval-score penalty, so equally relevant hand-curated memories rank first
+  without hiding the generated record.
+- The fused retrieval top 20 are locally reranked against the whole matched
+  chunk body, reducing weak metadata/one-word matches in the result tail. The
+  bounded pass uses the existing embedding backend and fails open to RRF.
+- Retrieval scope now follows query complexity: one-word lookups use fewer
+  candidates, hits, and excerpt characters; multi-hop questions receive a
+  larger search and context budget.
+- Stored chunk embeddings are symmetrically quantized to int8 with per-vector
+  scales, shrinking the derived index; residual quantization error breaks ties
+  between effectively equal cosine scores.
+- Notes can declare `Supersedes:` and `Superseded by:` metadata through
+  Markdown, CLI, or MCP. Superseded facts remain searchable history but rank
+  below current notes; mesh merges preserve the validity relationship.
+- `omind lint` now reads top-level note/link state from the search index,
+  including a fence-stripped link view that preserves the no-false-code-link
+  rule. Near-duplicate detection uses mean chunk-vector similarity, with the
+  original title-Jaccard pass retained as the no-embedding fallback.
+- Actual note reads update machine-local access frequency/recency state.
+  SessionStart promotes at most three recently/frequently recalled notes into a
+  bounded dynamic core and ages them out after 90 days. Generated, archived,
+  credential-looking, missing, and unsafe notes are excluded.
 - **Search is relevance-ranked, not substring-filtered.** `store.search` (and so
   `search-vault`, the web UI, and `omind search`) previously read and parsed every
   note on every query to run `needle in haystack`, then sorted the hits by *date*.
@@ -47,6 +87,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   fact in `## Details` was unreachable), JSON float-list storage, refresh-on-every-
   query, and pure-Python cosine loop are superseded by the chunk vectors in
   `omind.searchindex`; `nearest()` (the create-note dedup hint) moved across.
+
+### Fixed
+- Restore note parsing and strict typing in the hybrid search index after the
+  cyclic-import remediation removed required runtime references.
 
 ## [4.2.3] - 2026-07-21
 
