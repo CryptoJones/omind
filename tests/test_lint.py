@@ -169,7 +169,9 @@ def test_link_into_journal_subfolder_is_not_broken(tmp_path: Path) -> None:
     assert broken == []
 
 
-def test_wikilink_inside_code_fence_is_not_a_link(tmp_path: Path) -> None:
+def test_wikilink_inside_code_fence_is_not_a_link(
+    tmp_path: Path, monkeypatch
+) -> None:  # type: ignore[no-untyped-def]
     """A [[wikilink]] quoted in a fenced code block is documentation, not a link."""
     omi = _omi(tmp_path)
     _write(
@@ -177,6 +179,11 @@ def test_wikilink_inside_code_fence_is_not_a_link(tmp_path: Path) -> None:
         "Docs.md",
         "# Docs\n\n## Details\nExample:\n\n```\nUse [[Some Note]] to link.\n```\n\n"
         "## Connections\n- [[Docs]]\n",
+    )
+    monkeypatch.setattr(
+        lint,
+        "_load",
+        lambda _omi: (_ for _ in ()).throw(AssertionError("index path was not used")),
     )
     broken = [i for i in lint.lint_vault(omi) if i.kind == "broken-link"]
     assert broken == []

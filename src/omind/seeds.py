@@ -115,6 +115,9 @@ node server) is already pointed at that folder.
   If MCP is unavailable, run `omind help <command path>` locally.
 - Search with `search-vault`, then retrieve selected memories with
   `recall-note`. Use `read-note` only for raw Markdown/editing fields.
+- Query graph audits with `graph`: `op=path` (plus `source` and `target`),
+  `op=orphans`, `op=dangling`, or `op=stats`. `graph-neighbors` remains the
+  graph-aware recall tool.
 
 ## Writing memory — always through omind
 

@@ -21,7 +21,7 @@ from typing import Any
 import pytest
 from fastapi import FastAPI
 
-from omind import backup, provision
+from omind import backup, embed, provision
 from omind.cli import main
 
 
@@ -184,6 +184,29 @@ def test_doctor_reports_problems_with_exit_1_on_a_bare_machine(
     assert "problem(s)" in out
     # The agent-independent backup check must ride along with the agent checks.
     assert "backup" in out.lower()
+
+
+def test_doctor_reports_search_index_health(
+    vault: Path,
+    isolate_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    monkeypatch.setattr(
+        embed,
+        "status",
+        lambda: {
+            "available": False,
+            "model": "test/model",
+            "reason": "test backend unavailable",
+        },
+    )
+    main(["doctor", "--vault", str(vault)])
+    out = capsys.readouterr().out
+    assert "search index: FTS5 available" in out
+    assert "semantic search: off (keyword path) — test backend unavailable" in out
+    assert "search index has not been built" in out
+    assert "omind reindex --rebuild" in out
 
 
 # -- backup -------------------------------------------------------------------

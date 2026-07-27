@@ -38,6 +38,7 @@ EXPECTED_TOOLS = {
     "backlinks",
     "list-tags",
     "graph-neighbors",
+    "graph",
     "graph-path",
     "graph-orphans",
     "graph-dangling",
@@ -192,6 +193,8 @@ def test_every_list_tool_is_bounded(server: FastMCP) -> None:
         ("graph-orphans", {"limit": 1}),
         ("graph-dangling", {"limit": 1}),
         ("graph-neighbors", {"name": "Linker", "limit": 1}),
+        ("graph", {"op": "orphans", "limit": 1}),
+        ("graph", {"op": "dangling", "limit": 1}),
     ):
         page = call(server, tool, args)
         assert set(page) >= {"result", "count", "offset", "total", "has_more"}, tool
@@ -283,9 +286,26 @@ def test_graph_tools(server: FastMCP) -> None:
     assert dangling == [{"source": "Lonely.md", "target": "Ghost"}]
     assert call(server, "graph-stats", {})["notes"] == 4
 
+    # New unified surface; legacy names above remain for one compatibility release.
+    assert call(
+        server,
+        "graph",
+        {"op": "path", "source": "A", "target": "C"},
+    )["path"] == ["A.md", "B.md", "C.md"]
+    assert call(server, "graph", {"op": "orphans"})["result"] == ["Lonely.md"]
+    assert call(server, "graph", {"op": "dangling"})["result"] == dangling
+    assert call(server, "graph", {"op": "stats"})["notes"] == 4
+
+
+def test_unified_graph_validates_operation_and_path_arguments(server: FastMCP) -> None:
+    with pytest.raises(ToolError, match="one of"):
+        call(server, "graph", {"op": "unknown"})
+    with pytest.raises(ToolError, match="requires source and target"):
+        call(server, "graph", {"op": "path"})
+
 
 def test_graph_build_is_cached_and_busted_by_a_write(omi_dir: Path, monkeypatch) -> None:  # type: ignore[no-untyped-def]
-    """The 5 graph tools reuse one cached build; a write busts the cache (#130)."""
+    """All graph tools reuse one cached build; a write busts the cache (#130)."""
     from omind import graph as graph_mod
 
     calls = {"n": 0}

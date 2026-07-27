@@ -57,6 +57,7 @@ _TARGET_LIMIT = 80
 # OMI and are recalled just-in-time from the user prompt instead of being copied
 # wholesale into every conversation.
 PRIMING_FILES = ("index.md", "Playbook.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
+_DYNAMIC_CORE_LIMIT = 3
 _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood context
 
 # Dynamic priming: include a session handoff only when its name matches the
@@ -469,6 +470,42 @@ def build_session_start_context(
             digest = _index_digest(body) if name == "index.md" else _note_digest(body, 1_200)
             if digest:
                 sections.append(f"===== OMI capsule: {name} =====\n{digest}")
+
+    # A tiny earned core: actual recent/frequent recalls, never search results.
+    # Fixed operational/persona notes above remain pinned; generated and
+    # credential-looking notes are never promoted into always-on context.
+    try:
+        from omind import access, retrieve
+        from omind.store import OmiStore, parse_note
+
+        pinned = {name.casefold() for name in PRIMING_FILES}
+        store = OmiStore(directory)
+        added = 0
+        for name in access.core_members(directory, limit=_DYNAMIC_CORE_LIMIT * 4):
+            if added >= _DYNAMIC_CORE_LIMIT:
+                break
+            if name.casefold() in pinned or name.casefold().startswith(
+                ("session journal", "worklog ")
+            ):
+                continue
+            try:
+                path = store.safe_name(name)
+            except Exception:
+                continue
+            body = _read_priming_note(path)
+            if body is None:
+                continue
+            fields = parse_note(body)
+            if fields.disabled or retrieve._looks_credential(fields.title, " ".join(fields.tags)):
+                continue
+            digest = _note_digest(body, 800)
+            if digest:
+                sections.append(
+                    f"===== OMI capsule: {name} (dynamic core) =====\n{digest}"
+                )
+                added += 1
+    except Exception:
+        pass
 
     state_path = _select_session_state(directory, cwd)
     if state_path is not None:

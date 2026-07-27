@@ -11,7 +11,7 @@ a disposable cache you can delete at any time.
         ▼
 $XDG_STATE_HOME/omind/searchindex-<id>.sqlite3
         ├── chunks_fts   FTS5 / BM25 over title, heading, tags, text, stems
-        ├── vectors      float32 embeddings, one per chunk (optional)
+        ├── vectors      int8 embeddings + per-vector scale (optional)
         ├── links        resolved [[wikilinks]]
         └── notes        identity, tags, created, archived flag
 ```
@@ -41,6 +41,9 @@ Two rules keep the result honest:
 - **Credential notes are de-prioritised** unless your query is itself about
   credentials — the same rule the consult gate applies. Search must never steer
   an agent toward the secrets notes.
+- **Superseded facts remain history, not current truth.** A note carrying
+  `Superseded by:`—or targeted by another note's `Supersedes:` metadata—stays
+  searchable but receives a strong ranking penalty.
 
 The keyword leg is graded: chunks matching *every* word of your query rank above
 chunks matching only some. That keeps a filler word ("how do I **handle**…")
@@ -57,6 +60,12 @@ Every hit carries a bounded **excerpt** — the matched text, snipped by FTS5
 around your terms. That excerpt is usually enough to answer the question without
 opening the note at all, which is where the token savings come from.
 
+An actual `read-note` or `recall-note` access updates a separate machine-local
+frequency/recency counter. SessionStart uses that derived signal to promote at
+most three earned notes into a bounded dynamic core; notes untouched for 90 days
+age out. This state lives beside the index, never in the vault, and credential
+or generated notes are never promoted.
+
 ## Semantic search is optional
 
 Without the `[embed]` extra, the vector leg is simply skipped: BM25, recency,
@@ -70,6 +79,23 @@ uv tool install --with 'omind[embed]' git+https://github.com/CryptoJones/omind
 The model is `minishlab/potion-base-8M` (a ~30 MB static embedding — no GPU, no
 API, no network at query time). Override with `OMI_EMBED_MODEL`; changing it
 invalidates every stored vector and rebuilds.
+
+## Reviewing near-duplicates
+
+The same chunk vectors power a guarded consolidation workflow:
+
+```bash
+omind consolidate --limit 3
+# edit the reported machine-local .md draft, then:
+omind consolidate --apply 0123456789abcdef
+```
+
+The first command does not edit the vault. It writes a JSON plan and an editable
+Markdown draft under omind's machine-local state directory. Applying a plan
+rechecks opaque content versions for both source notes, creates the reviewed
+draft through `OmiStore`, then archives the originals with `Disabled: true`.
+If either source changed during review, apply refuses the stale plan. It never
+silently merges or hard-deletes memory.
 
 ## Operating it
 
@@ -95,7 +121,7 @@ lock — a broken index degrades search, it never breaks it.
 | --- | --- | --- |
 | `search "nebraska"` | 268 ms | 18 ms |
 | a natural-language question | 276 ms, **0 hits** | 45 ms, 10 ranked hits |
-| full index build | — | 1.5 s (5,678 chunks, 19 MB) |
+| full index build | — | 1.5 s (5,691 chunks, 13 MiB) |
 | incremental refresh | — | 5 ms |
 | `list-notes` tool payload | ~90,800 tokens | 3,136 tokens (one page) |
 

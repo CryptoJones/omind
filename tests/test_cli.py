@@ -61,6 +61,15 @@ def test_reindex_subcommand_parses() -> None:
     assert args.folder == "OMI"
 
 
+def test_consolidate_subcommand_parses() -> None:
+    args = build_parser().parse_args(["consolidate", "--limit", "2"])
+    assert args.command == "consolidate"
+    assert args.limit == 2
+    assert args.apply is None
+    applying = build_parser().parse_args(["consolidate", "--apply", "0123456789abcdef"])
+    assert applying.apply == "0123456789abcdef"
+
+
 def test_reindex_regenerates_index_for_directly_written_note(tmp_path: Path) -> None:
     # Simulate a session that wrote a note file directly (bypassing the store),
     # then ran `omind reindex` to refresh index.md safely.

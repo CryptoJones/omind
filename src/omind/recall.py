@@ -69,6 +69,10 @@ def compact_recall(
     """Read one note without returning raw/parsed duplicate representations."""
     store = OmiStore(omi_dir)
     raw = store.read_note(name)
+    filename = store.safe_name(name).name
+    from omind import access
+
+    access.record(store.omi_dir, filename)
     fields = parse_note(raw)
     selected = _section(raw, section) if section else ""
     content = selected or _memory_text(fields)
@@ -78,8 +82,8 @@ def compact_recall(
         marker = "\n…[truncated; request a section or a larger max_chars value]"
         content = content[: max(0, limit - len(marker))].rstrip() + marker
     return {
-        "filename": store.safe_name(name).name,
-        "title": fields.title or store.safe_name(name).stem,
+        "filename": filename,
+        "title": fields.title or Path(filename).stem,
         "summary": fields.summary,
         "content": content,
         "section": section if selected else "",

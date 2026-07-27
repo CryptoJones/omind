@@ -101,3 +101,13 @@ def sync_signal_path(omi_dir: Path) -> Path:
 def sync_state_path(omi_dir: Path) -> Path:
     """Where `omind mesh sync` records its last outcome (read by doctor)."""
     return state_dir() / f"mesh-sync-{_omi_dir_digest(omi_dir)}.json"
+
+
+def access_state_path(omi_dir: Path) -> Path:
+    """Machine-local access-frequency state for dynamic core-memory selection."""
+    return state_dir() / f"access-{_omi_dir_digest(omi_dir)}.sqlite3"
+
+
+def consolidation_dir(omi_dir: Path) -> Path:
+    """Machine-local proposal/draft storage for one vault's reviewed merges."""
+    return state_dir() / f"consolidate-{_omi_dir_digest(omi_dir)}"
