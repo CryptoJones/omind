@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Aaron K. Clark
-"""Derived hybrid search index over an OMI folder (omind 4.3.0).
+"""Derived hybrid search index over an OMI folder (omind 5.0.0).
 
 The notes on disk stay the single source of truth; **this file is disposable**
 and rebuildable from them at any time. That separation — storage in Markdown,

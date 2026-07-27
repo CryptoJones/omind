@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [5.0.0] - 2026-07-27
+
 ### Added
 - **A derived hybrid search index (`omind.searchindex`).** One SQLite file per
   vault, in the state dir, holding FTS5/BM25 over heading-split chunks, quantized

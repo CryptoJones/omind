@@ -1,6 +1,6 @@
 # SPDX-License-Identifier: Apache-2.0
 # Copyright 2026 Aaron K. Clark
-"""Tests for the derived hybrid search index (omind 4.3.0).
+"""Tests for the derived hybrid search index (omind 5.0.0).
 
 Index mechanics — chunking, incremental refresh, BM25 relevance, RRF fusion with
 the vector leg, dedup, deletion reaping, fail-open — are exercised with a
