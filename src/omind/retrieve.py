@@ -174,7 +174,7 @@ def _indexed_titles(
     task: str, omi_dir: Path | str, *, task_is_cred: bool, limit: int
 ) -> list[str] | None:
     """Hybrid-index ranking of notes against the task — the gate/nudge suggestion
-    path (4.3.0). Better than keyword overlap alone, and it replaces the two full
+    path (5.0.0). Better than keyword overlap alone, and it replaces the two full
     vault listings this used to cost on **every user prompt**: the index answers
     from SQLite. Preserves the credential de-prioritization (never steer to
     secrets unless the task is about them). ``None`` when the index is
