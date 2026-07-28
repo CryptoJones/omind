@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **A genuine preflight miss auto-clears the per-turn gate instead of forcing a
+  manual consult.** Previously, when `retrieve.relevant_titles` found nothing
+  relevant to the turn's task, the gate stayed armed and demanded a
+  `search-vault` + `recall-note` round trip anyway — reading a note that is, by
+  construction, not relevant to the task, purely to satisfy the gate. That's
+  the "read any note to dodge the gate" failure the relevance mapping was built
+  to prevent, reappearing one layer up whenever the vault has nothing on-topic.
+  A miss (vault searched, task non-empty, nothing scored) now clears the gate
+  for that turn instead, saving the forced round trip; the auto-clear is always
+  logged to the compliance log (`rule_id=omi-gate-no-match`), never silent. An
+  *empty* task (nothing captured to search with) still leaves the gate armed —
+  that's "we never looked," not "we looked and found nothing." Opt back into
+  the old strict behavior with `OMI_GATE_MISS_STRICT=1`.
+
 ## [5.0.0] - 2026-07-27
 
 ### Added

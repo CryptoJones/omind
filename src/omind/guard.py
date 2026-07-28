@@ -57,6 +57,18 @@ GATE_MESSAGE = (
     "then call `recall-note` on one result and retry the blocked action. Do not "
     "open credential/auth notes unless the task is explicitly about credentials."
 )
+#: Opt back into the old strict behavior: a preflight MISS (the vault was
+#: searched and nothing scored as relevant to the turn's task) forces a manual
+#: search-vault/recall-note round trip instead of auto-clearing the gate. Default
+#: off, mirroring OMI_VERIFY_REQUIRE's "cheap default, opt-in strictness" shape —
+#: forcing a consult of a note that is, by construction, not relevant to the task
+#: is the exact "read any note to dodge the gate" failure retrieval was built to
+#: prevent; it just reappears one layer up when the vault genuinely has nothing
+#: on-topic. The auto-clear is always logged to the compliance log (never silent)
+#: so a session that's mostly missing is visible in `omind guard log`.
+MISS_STRICT_ENV = "OMI_GATE_MISS_STRICT"
+#: Synthetic rule id for a preflight miss that auto-cleared the gate.
+GATE_NO_MATCH_RULE = "omi-gate-no-match"
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
@@ -1268,11 +1280,23 @@ def run_guard(
     return 0
 
 
+def _miss_strict() -> bool:
+    return bool(os.environ.get(MISS_STRICT_ENV))
+
+
 def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     """Prepare one turn with compact relevant memory and satisfy the soft gate.
 
     Hard policy prerequisites still run before the soft gate, so a general
     preflight memory cannot bypass the specific git-rules/freshness controls.
+
+    A genuine MISS — the vault was searched and nothing scored as relevant to
+    ``task`` — auto-clears the gate instead of forcing a manual consult (unless
+    ``MISS_STRICT_ENV`` opts back in): reading an arbitrary note that is, by
+    construction, not relevant to the turn buys nothing and only costs tokens.
+    An EMPTY task (nothing captured to search with) is not a miss — it means we
+    never ran the search at all, so it stays strict; we can't judge "nothing is
+    relevant" without having looked.
     """
     session = str(data.get("session_id") or data.get("session") or "")
     task = str(data.get("prompt") or data.get("user_prompt") or "")
@@ -1286,6 +1310,23 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     titles = retrieve.relevant_titles(task, omi_dir, limit=1) if task else []
     filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
     if filename is None:
+        if task and not titles and not _miss_strict():
+            record_consult(session, kind="no-match", target="", relevant=False)
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=session,
+                tool="UserPromptSubmit",
+                rule_id=GATE_NO_MATCH_RULE,
+                severity="soft",
+                outcome="auto-clear",
+                detail=f"task={task[:120]!r}",
+            )
+            return (
+                "OMI turn preflight searched the vault and found nothing relevant "
+                "to this turn's task. Consult gate cleared for this turn — "
+                f"proceeding without a forced read (set {MISS_STRICT_ENV}=1 to "
+                "require one anyway)."
+            )
         return (
             "OMI turn preflight found no confident memory match. The consult gate "
             "remains armed. Before any non-memory tool, call OMI MCP `search-vault` "

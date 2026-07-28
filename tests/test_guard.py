@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from omind import guard, paths
+from omind import compliance, guard, paths
 
 #: The omi-guard.sh adapter is a POSIX bash+jq deployment artifact (Claude Code on
 #: Linux/macOS). Its subprocess tests only make sense where a real bash + jq run it —
@@ -504,15 +504,44 @@ def test_turn_preflight_recalls_relevant_memory_and_satisfies_soft_gate(
     assert "compact recall" not in repeated
 
 
-def test_turn_preflight_without_match_leaves_gate_armed(tmp_path: Path) -> None:
+def test_turn_preflight_without_match_auto_clears_gate(tmp_path: Path) -> None:
     omi = tmp_path / "OMI"
     omi.mkdir()
     context = guard.preflight_turn(
         {"session_id": "preflight-none", "prompt": "unmatched subject"},
         omi,
     )
+    assert "found nothing relevant" in context
+    assert guard.MISS_STRICT_ENV in context
+    # Auto-cleared: the next tool call is not blocked demanding an arbitrary read.
+    assert guard.consulted_this_turn("preflight-none")
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_NO_MATCH_RULE
+    assert events[-1]["outcome"] == "auto-clear"
+
+
+def test_turn_preflight_without_match_stays_strict_when_opted_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(guard.MISS_STRICT_ENV, "1")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    context = guard.preflight_turn(
+        {"session_id": "preflight-strict", "prompt": "unmatched subject"},
+        omi,
+    )
     assert "search-vault" in context and "recall-note" in context
-    assert not guard.consulted_this_turn("preflight-none")
+    assert not guard.consulted_this_turn("preflight-strict")
+
+
+def test_turn_preflight_with_empty_task_stays_strict(tmp_path: Path) -> None:
+    # No captured task means the vault was never searched — a miss can't be
+    # distinguished from "we didn't look," so this must not auto-clear.
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    context = guard.preflight_turn({"session_id": "preflight-empty", "prompt": ""}, omi)
+    assert "search-vault" in context and "recall-note" in context
+    assert not guard.consulted_this_turn("preflight-empty")
 
 
 def test_preflight_cli_emits_user_prompt_additional_context(

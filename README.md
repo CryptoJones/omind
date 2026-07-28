@@ -271,9 +271,14 @@ broken hook can never wedge the agent.
   `pre_llm_call` deterministically select and inject one compact relevant memory
   before the model acts. A repeated unchanged note falls back to its summary.
   This satisfies the ordinary consult gate without asking a smaller model to
-  interpret a `PreToolUse` error. When no confident match exists, the gate stays
-  armed and its block response names the exact `search-vault`/`recall-note` call
-  to make. Hard rule-specific prerequisites remain independent.
+  interpret a `PreToolUse` error. When the vault was searched and genuinely has
+  nothing relevant to the task, the gate auto-clears for that turn instead of
+  forcing a manual `search-vault`/`recall-note` round trip on a note that, by
+  construction, wouldn't be relevant — the auto-clear is always logged
+  (`omind guard log`), never silent. An empty/uncaptured task can't be judged as
+  a miss, so it still leaves the gate armed. Set `OMI_GATE_MISS_STRICT=1` to
+  restore the old force-a-consult-on-every-miss behavior. Hard rule-specific
+  prerequisites remain independent.
 - **The verifier.** Clearing the gate by reading *any* note isn't enough, so a
   `PostToolUse` verifier judges whether the consult was actually **relevant** to
   the turn's task — a deterministic keyword-overlap prefilter decides the clear
