@@ -129,11 +129,8 @@ in [BACKLOG.md](BACKLOG.md). Highest leverage first:
    matches at ranks 4–10. Local only; never an API call on the query path.
 3. **#176, #175** — cheap, contained perf/size wins.
 
-**Two items need the user's decision before any code:**
+**One item needs the user's decision before any code:**
 
-- **#177** (fold the four `graph-*` tools into one) renames tools referenced by
-  the OMI vault's `Playbook.md`, the managed `omind` skill, and other fleet
-  machines. Coordinated fleet change, not a local one.
 - **#172** (`omind consolidate`) merges notes. Propose-and-review only — a wrong
   merge destroys memory that exists nowhere else.
 

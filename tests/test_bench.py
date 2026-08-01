@@ -35,6 +35,8 @@ def test_report_covers_latency_and_tokens(tmp_path: Path) -> None:
     report = bench.run(_vault(tmp_path), queries=("nebraska",))
     names = [m.name for m in report.measurements]
     assert "notes in vault" in names
+    assert "MCP tools exposed" in names
+    assert "MCP tool schemas" in names
     assert "index build (from scratch)" in names
     assert "index refresh (no changes)" in names
     assert any(name.startswith("search ") for name in names)
@@ -42,6 +44,13 @@ def test_report_covers_latency_and_tokens(tmp_path: Path) -> None:
     assert "list-notes, one page" in names
     units = {m.unit for m in report.measurements}
     assert {"ms", "tokens", "count"} <= units
+
+
+def test_report_measures_the_reduced_mcp_surface(tmp_path: Path) -> None:
+    report = bench.run(_vault(tmp_path), queries=("nebraska",))
+    by_name = {m.name: m.value for m in report.measurements}
+    assert by_name["MCP tools exposed"] == 13
+    assert by_name["MCP tool schemas"] > 0
 
 
 def test_paging_is_reported_as_a_token_saving(tmp_path: Path) -> None:

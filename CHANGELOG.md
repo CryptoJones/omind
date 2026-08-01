@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- Remove the deprecated `graph-path`, `graph-orphans`, `graph-dangling`, and
+  `graph-stats` MCP compatibility aliases after the 5.0 bridge release. Use the
+  unified `graph(op=path|orphans|dangling|stats)` tool; `graph-neighbors` stays.
+
 ### Changed
+- `omind bench` now reports the exposed MCP tool count and serialized schema
+  token estimate so future surface changes remain measurable.
 - **A genuine preflight miss auto-clears the per-turn gate instead of forcing a
   manual consult.** Previously, when `retrieve.relevant_titles` found nothing
   relevant to the turn's task, the gate stayed armed and demanded a

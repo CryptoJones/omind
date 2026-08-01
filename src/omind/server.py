@@ -137,7 +137,7 @@ async def _fd_stdio_server() -> AsyncIterator[
 #: Default and hard-cap page sizes for every list-shaped tool. Unbounded list
 #: tools were the single largest token leak in the memory layer: `list-notes` on
 #: a 744-note vault returned ~348 KB (~87k tokens) in ONE tool result, and
-#: graph-orphans/graph-dangling returned hundreds of rows nobody paged through.
+#: graph(op=orphans|dangling) returned hundreds of rows nobody paged through.
 #: An agent that needs more asks for the next page; an agent that needed one
 #: note no longer pays for the whole vault.
 DEFAULT_PAGE = 25
@@ -467,49 +467,6 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
         offset: int = 0,
     ) -> dict[str, object]:
         return _graph_query(op, source, target, limit, offset)
-
-    @mcp.tool(
-        name="graph-path",
-        description=(
-            "Shortest [[wikilink]] path between two notes, as a list of filenames; "
-            "`path` is null when no path connects them. Deprecated: use graph "
-            "with op=path; this compatibility name will be removed next release."
-        ),
-    )
-    def graph_path(source: str, target: str) -> dict[str, object]:
-        return _graph_query("path", source, target)
-
-    @mcp.tool(
-        name="graph-orphans",
-        description=(
-            "One page of notes with no inbound or outbound [[wikilinks]]. "
-            "Deprecated: use graph with op=orphans; this compatibility name "
-            "will be removed next release."
-        ),
-    )
-    def graph_orphans(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, object]:
-        return _graph_query("orphans", limit=limit, offset=offset)
-
-    @mcp.tool(
-        name="graph-dangling",
-        description=(
-            "One page of [[wikilinks]] resolving to no existing note, with their "
-            "source. Deprecated: use graph with op=dangling; this compatibility "
-            "name will be removed next release."
-        ),
-    )
-    def graph_dangling(limit: int = DEFAULT_PAGE, offset: int = 0) -> dict[str, object]:
-        return _graph_query("dangling", limit=limit, offset=offset)
-
-    @mcp.tool(
-        name="graph-stats",
-        description=(
-            "Whole-graph counts. Deprecated: use graph with op=stats; this "
-            "compatibility name will be removed next release."
-        ),
-    )
-    def graph_stats() -> dict[str, object]:
-        return _graph_query("stats")
 
     return mcp
 

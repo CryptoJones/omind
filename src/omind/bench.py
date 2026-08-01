@@ -10,9 +10,9 @@ real vault:
 * **latency** — build the index, refresh it incrementally, and run queries both
   through the index and through the pre-index full-vault scan, so the speedup is
   a measurement rather than a claim.
-* **tokens** — the size of what a session actually pays for: the SessionStart
-  capsule, one bounded recall, and the paged-versus-unpaged listing payload that
-  used to be ~87k tokens in a single MCP tool result.
+* **tokens** — the size of what a session actually pays for: the MCP tool schema,
+  SessionStart capsule, one bounded recall, and the paged-versus-unpaged listing
+  payload that used to be ~87k tokens in a single MCP tool result.
 
 Read-only: it never writes a note. It does build/refresh the derived index, which
 is disposable by design.
@@ -20,6 +20,8 @@ is disposable by design.
 
 from __future__ import annotations
 
+import asyncio
+import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -105,6 +107,7 @@ def _timed(call: Any) -> tuple[float, Any]:
 def run(omi_dir: Path | str, *, queries: tuple[str, ...] = SAMPLE_QUERIES) -> Report:
     """Measure retrieval on ``omi_dir`` and return the report."""
     from omind import ai_usage, embed, hooks, recall, searchindex
+    from omind.server import build_server
     from omind.store import OmiStore
 
     omi = Path(omi_dir).expanduser()
@@ -119,6 +122,14 @@ def run(omi_dir: Path | str, *, queries: tuple[str, ...] = SAMPLE_QUERIES) -> Re
         "count",
         str(embed.status()["reason"] or "on"),
     )
+    tools = asyncio.run(build_server(omi).list_tools())
+    tool_schemas = json.dumps(
+        [tool.model_dump(mode="json", exclude_none=True) for tool in tools],
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+    report.add("MCP tools exposed", len(tools), "count")
+    report.add("MCP tool schemas", ai_usage.estimate_tokens(tool_schemas), "tokens")
 
     if not searchindex.available():
         report.add("search index", 0, "count", "unavailable — search scans the vault")
@@ -218,8 +229,6 @@ def run_quality(
 def _listing_tokens(notes: list[Any]) -> tuple[int, int]:
     """``(paged, unpaged)`` token estimate for the listing payload — the tool
     result that was ~87k tokens on a 744-note vault before it was paged."""
-    import json
-
     from omind import ai_usage
     from omind.server import DEFAULT_PAGE
 
