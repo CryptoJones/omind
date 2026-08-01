@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+- **Adopt MCP revision `2026-07-28` (the stateless revision) by moving to the
+  `mcp` 2.x SDK** (`mcp>=2.0.0,<3.0`; the previous `<2.0` cap did its job and
+  held the fleet at 1.x until this was reviewed). `FastMCP` is now `MCPServer`;
+  the tool decorators and every tool's behaviour are unchanged, and a v2 server
+  still serves 2025-era clients from the same process, so existing MCP clients
+  keep working. Verified green against `mcp-conformance` 0.2.0 (17 contracts).
+
+### Fixed
+- **The `omind node` stdio transport went silent under the 2.x SDK.** Our
+  fd-readiness transport parsed lines with
+  `mcp.types.JSONRPCMessage.model_validate_json`, but in 2.x `JSONRPCMessage` is
+  a plain union alias with no such method; the resulting `AttributeError` was
+  swallowed into the read stream and every request hung until timeout. It now
+  parses through the SDK's `jsonrpc_message_adapter`, matching the SDK's own
+  stdio transport.
+- The same transport serialized replies with `exclude_none=True`; switched to
+  `exclude_unset=True` (what the SDK's transport uses), which is what keeps the
+  2026-07-28 envelope fields — `resultType`, `ttlMs`, `cacheScope` — on the wire.
+
 ### Removed
 - Remove the deprecated `graph-path`, `graph-orphans`, `graph-dangling`, and
   `graph-stats` MCP compatibility aliases after the 5.0 bridge release. Use the
