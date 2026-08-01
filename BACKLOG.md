@@ -7,6 +7,30 @@ here so neither side drifts.
 
 ## Open
 
+### From the 2026-08-01 top-to-bottom code review
+
+_A full read-only pass over every module (memory core, retrieval, enforcement, mesh, ops,
+shell hooks, web frontend). The codebase held up unusually well — no correctness or security
+bugs found. What follows are the five findings worth tracking; all are perf, test-coverage,
+hardening, or docs, not defects._
+
+- [ ] **Per-query full-table Python scans in the search weighting passes** ([#186](https://github.com/CryptoJones/omind/issues/186)) — _perf (retrieval)_ —
+  `_weight_generated` / `_weight_superseded` / `_owners` re-scan whole tables and rebuild
+  their maps on every query; key them off the index `generation` like the cached vector
+  matrix. Latency grows with vault size, not with the fused candidate set.
+- [ ] **compliance.py recidivism helpers re-parse the whole append-only log per call** ([#187](https://github.com/CryptoJones/omind/issues/187)) — _perf (enforcement)_ —
+  `summary()` parses twice; `learn.escalate()` runs it N+1 times. mtime/size-keyed memo +
+  a size-based rotation (the log has none, unlike hook-failures.log).
+- [ ] **Append-only hot-path writers flock the data fd after open (TOCTOU hardening)** ([#188](https://github.com/CryptoJones/omind/issues/188)) — _hardening (low)_ —
+  journal/compliance/ai-usage writes open by path then flock the fd; the store closes the
+  same window more strongly. `O_NOFOLLOW` or a stable lockfile fd. Not exploitable on a
+  single-user box — defense-in-depth parity with the store.
+- [ ] **No regression test that run_hook(PostToolUse) invokes the compliance detector** ([#189](https://github.com/CryptoJones/omind/issues/189)) — _testing_ —
+  the compliance module is unit-tested but the *wiring* in `hooks.run_hook` is not; a dropped
+  `record_post_tool` line would fail silently with no breadcrumb. One spy test pins it.
+- [ ] **Document that `omind serve` is an unauthenticated destructive API (localhost-only by design)** ([#190](https://github.com/CryptoJones/omind/issues/190)) — _docs_ —
+  the risk model lives only in a transient stderr warning; put it in `docs/`/`--help`.
+
 _From a 2026-07-24 survey of open-source AI memory layers (Mem0, Zep/Graphiti, Letta/MemGPT,
 Cognee, memvid, Memori) and the 2025–2026 agent-memory literature (Memori arXiv:2603.19935 —
 81.95% LoCoMo at 1,294 tokens/query; SimpleMem arXiv:2601.02553 — 26.4% F1 gain at 30× fewer
