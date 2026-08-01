@@ -21,11 +21,10 @@ _No open items._
 
 ### Efficiency
 
-- [ ] **Remove the deprecated `graph-*` MCP compatibility aliases after one release**
+- [x] **Remove the deprecated `graph-*` MCP compatibility aliases after one release**
   ([#181](https://github.com/CryptoJones/omind/issues/181)) — _chore (tokens)_ —
-  `graph-path`, `graph-orphans`, `graph-dangling`, and `graph-stats` remain for
-  one bridge release while fleet clients refresh; remove them in the following
-  release. `graph-neighbors` stays.
+  Removed `graph-path`, `graph-orphans`, `graph-dangling`, and `graph-stats`
+  after the 5.0 bridge release; `graph-neighbors` stays.
 
 ## Not planned
 

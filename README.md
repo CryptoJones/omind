@@ -405,7 +405,7 @@ questions that previously matched nothing now return ranked answers.
 ```bash
 omind search "why did release signing fail" --explain
 omind reindex --index-only     # refresh the derived index (search does this too)
-omind bench                    # latency and token cost on your own vault
+omind bench                    # latency, MCP schema size, and token cost
 ```
 
 The index lives in the state directory, never in the vault — it is disposable

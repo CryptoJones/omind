@@ -39,10 +39,6 @@ EXPECTED_TOOLS = {
     "list-tags",
     "graph-neighbors",
     "graph",
-    "graph-path",
-    "graph-orphans",
-    "graph-dangling",
-    "graph-stats",
 }
 
 
@@ -190,8 +186,6 @@ def test_every_list_tool_is_bounded(server: FastMCP) -> None:
     for tool, args in (
         ("backlinks", {"name": "Note 00.md", "limit": 1}),
         ("list-tags", {"limit": 1}),
-        ("graph-orphans", {"limit": 1}),
-        ("graph-dangling", {"limit": 1}),
         ("graph-neighbors", {"name": "Linker", "limit": 1}),
         ("graph", {"op": "orphans", "limit": 1}),
         ("graph", {"op": "dangling", "limit": 1}),
@@ -276,24 +270,15 @@ def test_graph_tools(server: FastMCP) -> None:
     nbrs = call(server, "graph-neighbors", {"name": "A", "depth": 2, "direction": "out"})["result"]
     assert [n["filename"] for n in nbrs] == ["B.md", "C.md"]
 
-    assert call(server, "graph-path", {"source": "A", "target": "C"})["path"] == [
-        "A.md",
-        "B.md",
-        "C.md",
-    ]
-    assert call(server, "graph-orphans", {})["result"] == ["Lonely.md"]
-    dangling = call(server, "graph-dangling", {})["result"]
-    assert dangling == [{"source": "Lonely.md", "target": "Ghost"}]
-    assert call(server, "graph-stats", {})["notes"] == 4
-
-    # New unified surface; legacy names above remain for one compatibility release.
     assert call(
         server,
         "graph",
         {"op": "path", "source": "A", "target": "C"},
     )["path"] == ["A.md", "B.md", "C.md"]
     assert call(server, "graph", {"op": "orphans"})["result"] == ["Lonely.md"]
-    assert call(server, "graph", {"op": "dangling"})["result"] == dangling
+    assert call(server, "graph", {"op": "dangling"})["result"] == [
+        {"source": "Lonely.md", "target": "Ghost"}
+    ]
     assert call(server, "graph", {"op": "stats"})["notes"] == 4
 
 
@@ -318,12 +303,12 @@ def test_graph_build_is_cached_and_busted_by_a_write(omi_dir: Path, monkeypatch)
     monkeypatch.setattr(graph_mod, "build_graph", counting)
     server = build_server(omi_dir, node_id="testnode-abc123")
     call(server, "create-note", {"title": "A", "connections": ["B"]})
-    call(server, "graph-stats", {})
-    call(server, "graph-orphans", {})
-    call(server, "graph-dangling", {})
+    call(server, "graph", {"op": "stats"})
+    call(server, "graph", {"op": "orphans"})
+    call(server, "graph", {"op": "dangling"})
     assert calls["n"] == 1  # three graph queries, one build (cached)
     call(server, "create-note", {"title": "B"})  # a write changes the vault
-    call(server, "graph-stats", {})
+    call(server, "graph", {"op": "stats"})
     assert calls["n"] == 2  # cache busted, rebuilt once
 
 
