@@ -38,7 +38,10 @@ dependencies = [
     "fastapi>=0.110,<1.0",
     "uvicorn[standard]>=0.29,<1.0",
     "pyyaml>=6.0,<7.0",
-    "mcp>=1.28.1,<2.0",
+    # Deliberately stepped to the mcp 2.x major (the cap above did its job and
+    # held the fleet at 1.x until this was reviewed): 2.0 implements MCP
+    # revision 2026-07-28, the stateless revision. Re-capped at the next major.
+    "mcp>=2.0.0,<3.0",
     "tomlkit>=0.12,<1.0",
     # Security floors for runtime transitives pulled by fastapi/mcp.
     "cryptography>=48.0.1,<50.0",

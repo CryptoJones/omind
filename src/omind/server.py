@@ -26,7 +26,7 @@ from typing import Any
 import anyio
 import mcp.types as mcp_types
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
-from mcp.server.fastmcp import FastMCP
+from mcp.server.mcpserver import MCPServer
 from mcp.shared.message import SessionMessage
 
 from omind import graph
@@ -63,7 +63,10 @@ async def _fd_stdio_server() -> AsyncIterator[
 
     async def send_line(line: str) -> None:
         try:
-            message = mcp_types.JSONRPCMessage.model_validate_json(line)
+            # mcp 2.x: JSONRPCMessage is a plain union alias, not a RootModel —
+            # it has no .model_validate_json. Parse through the SDK's TypeAdapter,
+            # with the same flags the SDK's own stdio transport uses.
+            message = mcp_types.jsonrpc_message_adapter.validate_json(line, by_name=False)
         except Exception as exc:
             await read_stream_writer.send(exc)
             return
@@ -121,8 +124,12 @@ async def _fd_stdio_server() -> AsyncIterator[
         try:
             async with write_stream_reader:
                 async for session_message in write_stream_reader:
+                    # exclude_unset (not exclude_none) matches the SDK's own
+                    # stdio transport. It is what keeps the 2026-07-28 envelope
+                    # fields the server explicitly set — resultType, ttlMs,
+                    # cacheScope — on the wire.
                     payload = session_message.message.model_dump_json(
-                        by_alias=True, exclude_none=True
+                        by_alias=True, exclude_unset=True
                     )
                     await write_all((payload + "\n").encode("utf-8"))
         except (anyio.ClosedResourceError, BrokenPipeError):  # pragma: no cover
@@ -171,7 +178,7 @@ def _parse_action_items(items: list[str]) -> list[ActionItem]:
     return parsed
 
 
-def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
+def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
     """Build the node MCP server over one OMI folder.
 
     ``node_id`` (from the mesh config, when initialized) turns on Lamport
@@ -182,7 +189,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> FastMCP:
     # the mesh daemon, not just this server's tools.
     store = OmiStore(omi_dir, node_id=node_id)
 
-    mcp = FastMCP(SERVER_NAME, instructions=_INSTRUCTIONS)
+    mcp = MCPServer(SERVER_NAME, instructions=_INSTRUCTIONS)
 
     # The five graph tools each rebuilt the whole [[wikilink]] graph from disk
     # (a full-vault read+parse) on every call. Cache it, invalidated by a cheap
@@ -479,10 +486,10 @@ def run_node(omi_dir: Path, node_id: str | None = None) -> int:
     async def run_stdio() -> None:
         mcp = build_server(omi_dir, node_id=node_id)
         async with _fd_stdio_server() as (read_stream, write_stream):
-            await mcp._mcp_server.run(  # noqa: SLF001 - FastMCP exposes no public lower-level runner.
+            await mcp._lowlevel_server.run(  # noqa: SLF001 - MCPServer exposes no public lower-level runner.
                 read_stream,
                 write_stream,
-                mcp._mcp_server.create_initialization_options(),  # noqa: SLF001
+                mcp._lowlevel_server.create_initialization_options(),  # noqa: SLF001
             )
 
     anyio.run(run_stdio)

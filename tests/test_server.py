@@ -2,7 +2,7 @@
 # Copyright 2026 Aaron K. Clark
 """Tests for omind.server: the `omind node` mesh-node MCP server.
 
-In-process tests drive FastMCP's tool layer directly; one subprocess smoke
+In-process tests drive MCPServer's tool layer directly; one subprocess smoke
 test does a real stdio handshake and asserts the clean-exit-on-EOF contract
 (the regression test for the obsidian-mcp hang class, issue #49).
 """
@@ -19,8 +19,8 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from mcp.server.fastmcp import FastMCP
-from mcp.server.fastmcp.exceptions import ToolError
+from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 
 from omind.paths import sync_signal_path
 from omind.server import build_server
@@ -50,23 +50,26 @@ def omi_dir(tmp_path: Path) -> Path:
 
 
 @pytest.fixture
-def server(omi_dir: Path) -> FastMCP:
+def server(omi_dir: Path) -> MCPServer:
     return build_server(omi_dir, node_id="testnode-abc123")
 
 
-def call(server: FastMCP, name: str, args: dict[str, Any]) -> Any:
-    """Invoke a tool in-process and return its structured result."""
-    _content, structured = asyncio.run(server.call_tool(name, args))
-    return structured
+def call(server: MCPServer, name: str, args: dict[str, Any]) -> Any:
+    """Invoke a tool in-process and return its structured result.
+
+    v2's ``call_tool`` returns a ``CallToolResult`` rather than v1's
+    ``(content, structured)`` tuple.
+    """
+    return asyncio.run(server.call_tool(name, args)).structured_content
 
 
-def test_exposes_exactly_the_designed_tools(server: FastMCP) -> None:
+def test_exposes_exactly_the_designed_tools(server: MCPServer) -> None:
     tools = asyncio.run(server.list_tools())
     assert {t.name for t in tools} == EXPECTED_TOOLS
     assert all(t.description for t in tools)
 
 
-def test_create_read_round_trip(server: FastMCP, omi_dir: Path) -> None:
+def test_create_read_round_trip(server: MCPServer, omi_dir: Path) -> None:
     created = call(
         server,
         "create-note",
@@ -98,7 +101,7 @@ def test_create_read_round_trip(server: FastMCP, omi_dir: Path) -> None:
     assert "fields" not in raw
 
 
-def test_edit_note_partial_update(server: FastMCP) -> None:
+def test_edit_note_partial_update(server: MCPServer) -> None:
     call(server, "create-note", {"title": "Partial", "summary": "old", "tags": ["keep"]})
     edited = call(server, "edit-note", {"name": "Partial.md", "summary": "new"})
     assert edited["filename"] == "Partial.md"
@@ -107,7 +110,7 @@ def test_edit_note_partial_update(server: FastMCP) -> None:
     assert got["fields"]["tags"] == ["keep"]  # omitted fields untouched
 
 
-def test_edit_note_version_conflict(server: FastMCP) -> None:
+def test_edit_note_version_conflict(server: MCPServer) -> None:
     call(server, "create-note", {"title": "Versioned", "summary": "v1"})
     stale = call(server, "read-note", {"name": "Versioned.md"})["version"]
     call(server, "edit-note", {"name": "Versioned.md", "summary": "v2"})
@@ -119,7 +122,7 @@ def test_edit_note_version_conflict(server: FastMCP) -> None:
         )
 
 
-def test_delete_archives_and_restore(server: FastMCP, omi_dir: Path) -> None:
+def test_delete_archives_and_restore(server: MCPServer, omi_dir: Path) -> None:
     call(server, "create-note", {"title": "Archived", "summary": "s"})
     deleted = call(server, "delete-note", {"name": "Archived.md"})
     assert deleted == {"filename": "Archived.md", "status": "archived"}
@@ -136,7 +139,7 @@ def test_delete_archives_and_restore(server: FastMCP, omi_dir: Path) -> None:
     assert "Archived.md" in names
 
 
-def test_search_vault(server: FastMCP) -> None:
+def test_search_vault(server: MCPServer) -> None:
     call(server, "create-note", {"title": "Alpha", "summary": "quantum cats", "tags": ["pets"]})
     call(server, "create-note", {"title": "Beta", "details": "classical dogs", "tags": ["pets"]})
     hits = call(server, "search-vault", {"query": "quantum"})["result"]
@@ -145,7 +148,7 @@ def test_search_vault(server: FastMCP) -> None:
     assert {h["filename"] for h in by_tag} == {"Alpha.md", "Beta.md"}
 
 
-def test_search_vault_is_bounded_and_pageable(server: FastMCP) -> None:
+def test_search_vault_is_bounded_and_pageable(server: MCPServer) -> None:
     for number in range(7):
         call(server, "create-note", {"title": f"Page {number}", "summary": "shared"})
     first = call(server, "search-vault", {"query": "shared", "limit": 2})
@@ -161,7 +164,7 @@ def test_search_vault_is_bounded_and_pageable(server: FastMCP) -> None:
     )
 
 
-def test_every_list_tool_is_bounded(server: FastMCP) -> None:
+def test_every_list_tool_is_bounded(server: MCPServer) -> None:
     """No tool may return the whole vault in one result.
 
     `list-notes` used to: ~348 KB / 87k tokens on a 744-note vault, in a single
@@ -195,7 +198,7 @@ def test_every_list_tool_is_bounded(server: FastMCP) -> None:
         assert page["count"] <= 1, tool
 
 
-def test_search_hits_carry_an_excerpt_of_the_matched_text(server: FastMCP) -> None:
+def test_search_hits_carry_an_excerpt_of_the_matched_text(server: MCPServer) -> None:
     """The excerpt is why a search result is often enough on its own — it shows
     the matched text even when the match is in a section `summary` never shows."""
     call(
@@ -209,7 +212,7 @@ def test_search_hits_carry_an_excerpt_of_the_matched_text(server: FastMCP) -> No
     assert hit["score"] > 0
 
 
-def test_recall_note_returns_one_bounded_representation(server: FastMCP) -> None:
+def test_recall_note_returns_one_bounded_representation(server: MCPServer) -> None:
     call(
         server,
         "create-note",
@@ -243,7 +246,7 @@ def test_recall_note_returns_one_bounded_representation(server: FastMCP) -> None
     assert section["section"] == "Details"
 
 
-def test_help_tool_is_generated_from_live_cli(server: FastMCP) -> None:
+def test_help_tool_is_generated_from_live_cli(server: MCPServer) -> None:
     result = call(server, "help", {"command": "/omind help ai usage"})
     assert result["ok"] is True
     assert result["command"] == "omind ai usage"
@@ -253,7 +256,7 @@ def test_help_tool_is_generated_from_live_cli(server: FastMCP) -> None:
     assert "usage" in unknown["error"]
 
 
-def test_backlinks_and_tags(server: FastMCP) -> None:
+def test_backlinks_and_tags(server: MCPServer) -> None:
     call(server, "create-note", {"title": "Hub", "summary": "s", "tags": ["one"]})
     call(server, "create-note", {"title": "Spoke", "summary": "see [[Hub]]", "tags": ["two"]})
     links = call(server, "backlinks", {"name": "Hub.md"})["result"]
@@ -261,7 +264,7 @@ def test_backlinks_and_tags(server: FastMCP) -> None:
     assert call(server, "list-tags", {})["result"] == ["one", "two"]
 
 
-def test_graph_tools(server: FastMCP) -> None:
+def test_graph_tools(server: MCPServer) -> None:
     call(server, "create-note", {"title": "A", "summary": "s", "connections": ["B"]})
     call(server, "create-note", {"title": "B", "summary": "s", "connections": ["C"]})
     call(server, "create-note", {"title": "C", "summary": "s"})
@@ -282,7 +285,7 @@ def test_graph_tools(server: FastMCP) -> None:
     assert call(server, "graph", {"op": "stats"})["notes"] == 4
 
 
-def test_unified_graph_validates_operation_and_path_arguments(server: FastMCP) -> None:
+def test_unified_graph_validates_operation_and_path_arguments(server: MCPServer) -> None:
     with pytest.raises(ToolError, match="one of"):
         call(server, "graph", {"op": "unknown"})
     with pytest.raises(ToolError, match="requires source and target"):
@@ -312,22 +315,22 @@ def test_graph_build_is_cached_and_busted_by_a_write(omi_dir: Path, monkeypatch)
     assert calls["n"] == 2  # cache busted, rebuilt once
 
 
-def test_graph_neighbors_unknown_note_is_a_tool_error(server: FastMCP) -> None:
+def test_graph_neighbors_unknown_note_is_a_tool_error(server: MCPServer) -> None:
     with pytest.raises(ToolError, match="not found"):
         call(server, "graph-neighbors", {"name": "Nope"})
 
 
-def test_missing_note_is_a_tool_error(server: FastMCP) -> None:
+def test_missing_note_is_a_tool_error(server: MCPServer) -> None:
     with pytest.raises(ToolError, match="not found"):
         call(server, "read-note", {"name": "Nope.md"})
 
 
-def test_traversal_is_a_tool_error(server: FastMCP) -> None:
+def test_traversal_is_a_tool_error(server: MCPServer) -> None:
     with pytest.raises(ToolError, match="path separators"):
         call(server, "read-note", {"name": "../escape.md"})
 
 
-def test_writes_touch_the_sync_signal(server: FastMCP, omi_dir: Path) -> None:
+def test_writes_touch_the_sync_signal(server: MCPServer, omi_dir: Path) -> None:
     signal = sync_signal_path(omi_dir)
     assert not signal.exists()
     call(server, "create-note", {"title": "Trigger", "summary": "s"})
@@ -337,7 +340,7 @@ def test_writes_touch_the_sync_signal(server: FastMCP, omi_dir: Path) -> None:
     assert signal.stat().st_mtime_ns >= first
 
 
-def test_reads_do_not_touch_the_sync_signal(server: FastMCP, omi_dir: Path) -> None:
+def test_reads_do_not_touch_the_sync_signal(server: MCPServer, omi_dir: Path) -> None:
     call(server, "create-note", {"title": "Quiet", "summary": "s"})
     signal = sync_signal_path(omi_dir)
     signal.unlink()
