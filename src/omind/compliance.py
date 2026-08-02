@@ -88,9 +88,11 @@ def log_event(
     #148); it is only written when non-empty, so existing readers see the same
     schema they always did.
 
-    Uses ``O_APPEND`` + an advisory ``flock`` so concurrent hook processes
-    serialize without interleaving a half-written line (same discipline as the
-    journal writer in :mod:`omind.hooks`).
+    Uses :func:`omind.filelock.append_locked` — ``O_APPEND`` + an advisory
+    ``flock`` so concurrent hook processes serialize without interleaving a
+    half-written line, and ``O_NOFOLLOW`` so a symlink at the path can't
+    redirect the append (same discipline as the journal writer in
+    :mod:`omind.hooks`).
     """
     record = {
         "ts": (now or datetime.now()).isoformat(timespec="seconds"),
@@ -107,15 +109,9 @@ def log_event(
     try:
         path = compliance_log_path()
         path.parent.mkdir(parents=True, exist_ok=True)
-        binary = getattr(os, "O_BINARY", 0)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | binary, 0o644)
-        try:
-            filelock.lock_fd(fd)
+        with filelock.append_locked(path) as fd:
             os.write(fd, (json.dumps(record) + "\n").encode("utf-8"))
             oversized = os.fstat(fd).st_size > _LOG_CAP_BYTES
-        finally:
-            filelock.unlock_fd(fd)
-            os.close(fd)
         if oversized:
             _rotate_if_needed(path)
     except OSError:

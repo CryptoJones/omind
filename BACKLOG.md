@@ -27,10 +27,11 @@ hardening, or docs, not defects._
   `read_events()` is memoized against the log's `(mtime_ns, size)`, and `summary()` counts
   the list it already read. The log now rotates at 8 MiB to `compliance.jsonl.1`; readers
   span both generations so escalation counts survive a rotation.
-- [ ] **Append-only hot-path writers flock the data fd after open (TOCTOU hardening)** ([#187](https://github.com/CryptoJones/omind/issues/187)) — _hardening (low)_ —
-  journal/compliance/ai-usage writes open by path then flock the fd; the store closes the
-  same window more strongly. `O_NOFOLLOW` or a stable lockfile fd. Not exploitable on a
-  single-user box — defense-in-depth parity with the store.
+- [x] **Append-only hot-path writers flock the data fd after open (TOCTOU hardening)** ([#187](https://github.com/CryptoJones/omind/issues/187)) — _hardening (low)_ —
+  the journal, compliance, and ai-usage writers now share one
+  `filelock.append_locked` context manager that opens with `O_NOFOLLOW`, so a symlink
+  swapped in at the path cannot redirect the append. One definition of the discipline
+  instead of three hand-copied copies.
 - [ ] **No regression test that run_hook(PostToolUse) invokes the compliance detector** ([#189](https://github.com/CryptoJones/omind/issues/189)) — _testing_ —
   the compliance module is unit-tested but the *wiring* in `hooks.run_hook` is not; a dropped
   `record_post_tool` line would fail silently with no breadcrumb. One spy test pins it.

@@ -250,26 +250,20 @@ def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) ->
 
     Creates the note with :func:`journal_header` on first write (header + bullet
     are written together under the lock, so a torn header can't occur). Uses
-    ``O_APPEND`` + ``flock(LOCK_EX)`` so concurrent hook processes serialize.
+    :func:`omind.filelock.append_locked` — ``O_APPEND`` + ``flock(LOCK_EX)`` so
+    concurrent hook processes serialize, and ``O_NOFOLLOW`` so a symlink at the
+    path can't redirect the append.
     """
     try:
         directory = journal_dir(omi_dir)
         directory.mkdir(parents=True, exist_ok=True)
         name = journal_name(now)
         path = directory / name
-        # O_BINARY: on Windows, os.open defaults to the CRT's text mode, which
-        # would rewrite the \n in our bytes to \r\n mid-write.
-        binary = getattr(os, "O_BINARY", 0)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | binary, 0o644)
-        try:
-            filelock.lock_fd(fd)
+        with filelock.append_locked(path) as fd:
             if os.fstat(fd).st_size == 0:
                 os.write(fd, journal_header(name, now).encode("utf-8"))
             text = line if line.endswith("\n") else line + "\n"
             os.write(fd, text.encode("utf-8"))
-        finally:
-            filelock.unlock_fd(fd)
-            os.close(fd)
     except OSError as exc:
         _record_failure(f"append_entry({omi_dir})", exc)
 

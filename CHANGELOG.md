@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.2.0] - 2026-08-02
+
+### Security
+- **The append-only hot-path writers no longer follow a symlink at their target
+  path** ([#187](https://github.com/CryptoJones/omind/issues/187)). The journal
+  (`hooks.append_entry`), the compliance log (`compliance.log_event`), and the
+  AI-usage log (`ai_usage.log_event`) each resolved their path and *then* locked
+  the resulting fd, leaving a window in which a symlink swapped in at that path
+  would redirect the append. They now open with `O_NOFOLLOW`, which closes it —
+  the same property the store already had from its lockfile discipline. Not
+  exploitable on a single-user box (these paths live under the user's own state
+  dir and vault); this is defense-in-depth parity.
+
+### Changed
+- The three writers above shared one hand-copied open → lock → write → unlock →
+  close sequence. That is now a single `filelock.append_locked` context manager,
+  so the discipline has one definition instead of three. Log files it creates
+  are `0o600`, matching what `tempfile.mkstemp` already gave every note the
+  store writes; the journal's were `0o644` before.
+
 ## [6.1.0] - 2026-08-02
 
 ### Performance
