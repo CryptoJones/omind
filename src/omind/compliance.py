@@ -23,6 +23,7 @@ Like every omind hook path this is best-effort and never raises into the agent.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -111,27 +112,46 @@ def log_event(
         try:
             filelock.lock_fd(fd)
             os.write(fd, (json.dumps(record) + "\n").encode("utf-8"))
-            if os.fstat(fd).st_size > _LOG_CAP_BYTES:
-                _rotate(path)
+            oversized = os.fstat(fd).st_size > _LOG_CAP_BYTES
         finally:
             filelock.unlock_fd(fd)
             os.close(fd)
+        if oversized:
+            _rotate_if_needed(path)
     except OSError:
         return
 
 
-def _rotate(path: Path) -> None:
-    """Move the live log aside so the next write starts a fresh one.
+def _rotate_if_needed(path: Path) -> None:
+    """Move an oversized live log aside so the next write starts a fresh one.
 
-    Called with the write lock held. The rename is atomic, so a concurrent
-    writer that already has the old inode open appends into the archive rather
-    than losing its record. Best-effort: a failed rotation just means the log
+    Runs *after* the writer's own fd is closed, and serializes on a separate
+    lockfile rather than on the log itself: Windows refuses to rename a file
+    that any process still has open, so rotating from inside the write block
+    (where we hold the fd) silently never fired there.
+
+    Best-effort by design. On POSIX the rename is atomic and a concurrent
+    writer holding the old inode keeps appending into the archive, so no record
+    is lost. On Windows a concurrent writer makes the rename fail; the next
+    oversized write retries. A rotation that never succeeds just means the log
     keeps growing, which must never break the hook path.
     """
+    lock_path = path.with_name(path.name + ".lock")
     try:
-        os.replace(path, compliance_archive_path())
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
     except OSError:
         return
+    try:
+        filelock.lock_fd(fd)
+        # Re-check under the lock: another process may have just rotated.
+        if path.stat().st_size > _LOG_CAP_BYTES:
+            os.replace(path, compliance_archive_path())
+    except OSError:
+        return
+    finally:
+        with contextlib.suppress(OSError):
+            filelock.unlock_fd(fd)
+        os.close(fd)
 
 
 def _stat_key(path: Path) -> tuple[int, int]:
