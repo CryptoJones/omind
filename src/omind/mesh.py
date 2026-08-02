@@ -50,6 +50,16 @@ GIT_TIMEOUT = 120.0
 #: Merge-driver routing for the OMI repo. Notes get the field-level omi
 #: driver; generated files are never merged (ours + regenerate); journals and
 #: tombstones are append-only line sets, so git's union driver is exact.
+#:
+#: ``* -text`` is load-bearing, not tidiness. Git for Windows ships
+#: ``core.autocrlf=true`` at the *system* level, so without this line a Windows
+#: peer would get CRLF working-tree checkouts of every note. omind writes LF on
+#: every platform (``store._atomic_write``), so the vault would then disagree
+#: with itself: ``note_version`` digests — raw-byte hashes — would differ across
+#: the fleet for identical notes, and every index would rebuild on that peer.
+#: ``-text`` disables git's translation repo-wide and overrides ``autocrlf``.
+#: Deleting it breaks nothing on Linux or macOS, which is what makes it easy to
+#: delete.
 GITATTRIBUTES = """\
 * -text
 *.md merge=omi
