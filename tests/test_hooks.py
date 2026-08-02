@@ -279,14 +279,14 @@ def test_post_tool_use_invokes_every_downstream_side_effect(
     assert event in called["verify"]["args"]  # type: ignore[operator]
 
 
-def test_post_tool_use_side_effects_are_independent_of_the_policy(
+def test_one_failing_post_tool_use_side_effect_does_not_cancel_the_others(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """One failing side effect must not silently cancel the others.
+    """A failure in one subsystem must degrade only that subsystem (#204).
 
-    They run in sequence inside a single try/except, so an exception in an
-    early one skipped every later one. The hook still returns 0 either way,
-    which is exactly what makes this invisible without a test.
+    They used to share a single try/except, so token accounting going down took
+    the violation detector and the consult verifier with it — exit code 0, no
+    symptom, enforcement silently off.
     """
     from omind import ai_usage, compliance, verify
 
@@ -302,8 +302,31 @@ def test_post_tool_use_side_effects_are_independent_of_the_policy(
 
     stdin = io.StringIO('{"hook_event_name": "PostToolUse", "tool_name": "Bash"}')
     assert hooks.run_hook("PostToolUse", tmp_path, stdin=stdin) == 0
-    assert seen == []  # KNOWN: an early failure cancels the rest — see #204
-    assert hooks.failure_log_path().exists()  # but it does leave a breadcrumb
+    assert seen == ["compliance", "verify"]  # the detector still ran
+    # And the failure is attributable, not just swallowed.
+    trace = hooks.failure_log_path().read_text(encoding="utf-8")
+    assert "PostToolUse/ai_usage.record_mcp_response" in trace
+
+
+def test_a_failing_stop_transcript_still_consults_the_loop_guard(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Same isolation on the Stop branch (#204)."""
+    from omind import ai_usage, loopguard
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("unparseable transcript")
+
+    consulted: list[str] = []
+    monkeypatch.setattr(ai_usage, "record_session_transcript", boom)
+    monkeypatch.setattr(
+        loopguard,
+        "register_block",
+        lambda **_k: (consulted.append("loopguard"), (False, ""))[1],
+    )
+    stdin = io.StringIO('{"hook_event_name": "Stop", "session_id": "s"}')
+    assert hooks.run_hook("Stop", tmp_path, stdin=stdin) == 0
+    assert consulted == ["loopguard"]
 
 
 def test_run_hook_session_start_emits_context_no_journal(tmp_path: Path) -> None:

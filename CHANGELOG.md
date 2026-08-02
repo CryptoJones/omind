@@ -5,6 +5,27 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [7.0.0] - 2026-08-02
+
+_The last of the 2026-08-01 review and 2026-08-02 comparison backlogs, released
+together rather than as another run of point versions._
+
+### Fixed
+- **One failing `PostToolUse` side effect no longer cancels the rest**
+  ([#204](https://github.com/CryptoJones/omind/issues/204), found while writing
+  the #189 test). `hooks.run_hook` ran four independent subsystems — the loop
+  guard, token accounting, the Layer E violation detector, and the Layer C
+  consult verifier — inside a **single** `try/except`. A failure in the first,
+  which is token accounting, the most fragile and least important of the four,
+  silently skipped the enforcement detector and the verifier behind it. The hook
+  still returned 0, by design, so the only trace was an unlabelled breadcrumb.
+
+  Each side effect now runs isolated through `hooks._best_effort`, which records
+  a breadcrumb naming *which* one failed — so `hook-failures.log` distinguishes
+  "it ran and failed" from "it never ran". The `Stop` branch had the same shape,
+  where a transcript-parsing failure meant the loop guard was never consulted;
+  it is isolated too.
+
 ## [6.6.0] - 2026-08-02
 
 ### Added

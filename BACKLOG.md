@@ -38,11 +38,11 @@ hardening, or docs, not defects._
   independently of policy content. The detector was covered only indirectly (via a seed
   rule that a policy change had already forced an edit to); the other two were not covered
   at all.
-- [ ] **One failing PostToolUse side effect silently cancels the rest** ([#204](https://github.com/CryptoJones/omind/issues/204)) — _hardening_ —
-  found while writing the #189 test. The four side effects share a single `try/except`,
-  so a token-accounting failure disables the violation detector and the consult verifier
-  for that call, with exit code 0 and only a `hook-failures.log` breadcrumb. Give each its
-  own handler. Same shape in the `Stop` branch.
+- [x] **One failing PostToolUse side effect silently cancels the rest** ([#204](https://github.com/CryptoJones/omind/issues/204)) — _hardening_ —
+  found while writing the #189 test. Each side effect now runs isolated through
+  `hooks._best_effort`, which leaves a breadcrumb naming which one failed, so
+  `hook-failures.log` tells "it ran and failed" from "it never ran". The `Stop` branch
+  is isolated the same way.
 - [x] **Document that `omind serve` is an unauthenticated destructive API (localhost-only by design)** ([#190](https://github.com/CryptoJones/omind/issues/190)) — _docs_ —
   `docs/serve.md` states the risk model: every route an unauthenticated caller reaches,
   what already protects you and why, how to expose the port safely, and what to check if
