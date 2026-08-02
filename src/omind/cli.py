@@ -778,12 +778,17 @@ def _diagnose_search_index(config: SetupConfig) -> list[CheckResult]:
         # green tick for "your recall is materially worse than it could be" is
         # the same failure mode as an index that silently stopped updating: the
         # honest signal existed and did not read as a problem.
+        # `reason` from embed.status() already carries the install command for
+        # the common cause (model2vec missing), so appending it unconditionally
+        # printed it twice — verified on a real Windows install.
+        reason = str(semantic["reason"])
+        cost = "worth ~20pp of recall@1 on a real vault"
+        hint = "" if "omind[embed]" in reason else "; pip install 'omind[embed]'"
         results.append(
             CheckResult(
                 "search_semantic",
                 "warn",
-                f"semantic search: off (keyword path) — {semantic['reason']}; "
-                "install the extra for ~20pp better recall: pip install 'omind[embed]'",
+                f"semantic search: off (keyword path) — {reason}{hint} ({cost})",
             )
         )
 

@@ -300,4 +300,8 @@ def test_doctor_warns_when_semantic_search_is_off(
     config = SetupConfig(vault=tmp_path, folder="OMI")
     checks = {c.key: c for c in cli._diagnose_search_index(config)}
     assert checks["search_semantic"].level == "warn"
-    assert "omind[embed]" in checks["search_semantic"].message
+    message = checks["search_semantic"].message
+    assert "omind[embed]" in message
+    # The reason already carries the install command; saying it twice is what a
+    # real Windows install actually printed.
+    assert message.count("omind[embed]") == 1
