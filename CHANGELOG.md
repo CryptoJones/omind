@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An in-process failure rolls itself back, so `create_and_disable_sources` needs
   no manual `recover` at all; the journal is for the case where the process dies.
 
+  Pre-images are restored **byte for byte**, through a binary atomic write
+  rather than the store's text-mode one. Routing them through a text writer
+  re-translates line endings: on Windows a `b"old A\r\n"` pre-image came back as
+  `b"old A\r\r\n"`, so every rollback silently grew a blank line in the note it
+  was restoring.
+
   Content identity is hashed over line-ending-normalized text, not raw bytes.
   `_atomic_write` writes in text mode, so on Windows every `\n` reaches the disk
   as `\r\n` — hashing bytes meant a file never matched what had just been written

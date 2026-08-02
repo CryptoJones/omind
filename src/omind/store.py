@@ -1323,7 +1323,7 @@ class OmiStore:
             except BaseException:
                 # Put back what we managed to change before re-raising, so the
                 # in-process failure needs no `omind recover` at all.
-                transaction.rollback(_atomic_write)
+                transaction.rollback()
                 raise
             transaction.commit()
             self._write_index()

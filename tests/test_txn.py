@@ -83,7 +83,7 @@ def test_an_interrupted_apply_is_rolled_back(omi: Path) -> None:
     assert a.read_text() == "new A\n"  # genuinely half-applied
     assert b.read_text() == "old B\n"
 
-    reports = txn.recover(omi, _atomic_write)
+    reports = txn.recover(omi)
     assert len(reports) == 1 and reports[0].clean
     assert a.read_text() == "old A\n"  # rolled back
     assert b.read_text() == "old B\n"  # untouched
@@ -105,7 +105,7 @@ def test_recovery_refuses_to_clobber_an_edit_made_after_the_crash(omi: Path) -> 
 
     a.write_text("a human fixed this by hand\n", encoding="utf-8")
 
-    reports = txn.recover(omi, _atomic_write)
+    reports = txn.recover(omi)
     assert len(reports) == 1
     assert reports[0].conflicts == ["A.md"]
     assert not reports[0].clean
@@ -121,9 +121,9 @@ def test_recovery_is_idempotent(omi: Path) -> None:
     t.prepare()
     t.apply(_atomic_write)
 
-    assert txn.recover(omi, _atomic_write)[0].clean
+    assert txn.recover(omi)[0].clean
     assert a.read_text() == "old A\n"
-    assert txn.recover(omi, _atomic_write) == []  # second pass finds nothing
+    assert txn.recover(omi) == []  # second pass finds nothing
     assert a.read_text() == "old A\n"
 
 
@@ -138,7 +138,7 @@ def test_a_committed_transaction_is_never_rolled_back(omi: Path) -> None:
     t._record(txn.COMMITTED)  # commit record fsynced; cleanup did not run
 
     assert txn.pending(omi) == []
-    assert txn.recover(omi, _atomic_write) == []
+    assert txn.recover(omi) == []
     assert a.read_text() == "new A\n"
 
 
@@ -150,7 +150,7 @@ def test_dry_run_reports_without_changing_anything(omi: Path) -> None:
     t.prepare()
     t.apply(_atomic_write)
 
-    reports = txn.recover(omi, _atomic_write, dry_run=True)
+    reports = txn.recover(omi, dry_run=True)
     assert len(reports) == 1 and reports[0].skipped == ["A.md"]
     assert a.read_text() == "new A\n"  # untouched
     assert txn.pending(omi)  # still pending
@@ -240,7 +240,7 @@ def test_a_corrupt_journal_is_reported_not_silently_skipped(omi: Path) -> None:
 
     assert txn.pending(omi) == []  # unparseable: not claimed as recoverable
     with pytest.raises(txn.TransactionError):
-        txn._rollback_journal(journal.parent, _atomic_write)
+        txn._rollback_journal(journal.parent)
 
 
 def test_prepare_records_every_target_in_the_journal(omi: Path) -> None:
@@ -279,7 +279,41 @@ def test_rollback_recognizes_its_own_write_after_line_ending_translation(
     t.prepare()
     a.write_bytes(b"new A\r\n")  # what the writer leaves on a Windows disk
 
-    report = txn.recover(omi, _atomic_write)[0]
+    report = txn.recover(omi)[0]
     assert report.clean, f"CRLF read as a foreign edit: {report.conflicts}"
     assert report.restored == ["A.md"]
     assert a.read_text().replace("\r\n", "\n") == "old A\n"
+
+
+def test_rollback_never_routes_a_preimage_through_the_text_writer(
+    omi: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A pre-image is bytes and must be restored as bytes (Windows).
+
+    The store's `_atomic_write` is TEXT mode, so on Windows it translates every
+    `\n` to `\r\n`. Restoring a CRLF pre-image through it translated a second
+    time — `b"old A\r\n"` was written back as `b"old A\r\r\n"`, so every
+    rollback silently grew a blank line in the note it was restoring. Both
+    Windows CI legs caught it.
+
+    On Linux the translation is a no-op, so asserting on bytes alone proves
+    nothing here. Instead: install a writer that translates the way Windows
+    does, and assert recovery never touches it.
+    """
+    from omind import store
+
+    def windows_like_text_writer(path: Path, text: str) -> None:
+        Path(path).write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
+
+    a = omi / "A.md"
+    original = b"old A\r\nsecond line\r\n"
+    a.write_bytes(original)
+
+    t = txn.Transaction(omi)
+    t.write(a, "new A\n")
+    t.prepare()
+    a.write_bytes(b"new A\r\n")  # what a Windows writer leaves behind
+
+    monkeypatch.setattr(store, "_atomic_write", windows_like_text_writer)
+    assert txn.recover(omi)[0].clean
+    assert a.read_bytes() == original  # byte-identical, not merely equivalent

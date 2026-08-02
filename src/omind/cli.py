@@ -1242,7 +1242,7 @@ def _run_graph(args: argparse.Namespace) -> int:
 def _run_recover(args: argparse.Namespace) -> int:
     """``omind recover``: roll back interrupted multi-note transactions."""
     from omind import txn
-    from omind.store import OmiStore, _atomic_write
+    from omind.store import OmiStore
 
     omi_dir = (args.vault / args.folder).expanduser()
     store = OmiStore(omi_dir)
@@ -1252,7 +1252,7 @@ def _run_recover(args: argparse.Namespace) -> int:
     # Take the same write lock a normal write takes, so recovery cannot race a
     # concurrent MCP/web/cron writer touching the very notes it is restoring.
     with store.write_lock():
-        reports = txn.recover(omi_dir, _atomic_write, dry_run=args.dry_run)
+        reports = txn.recover(omi_dir, dry_run=args.dry_run)
     conflicts = 0
     for report in reports:
         print(("would roll back " if args.dry_run else "") + report.format())

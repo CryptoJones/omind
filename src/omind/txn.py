@@ -40,6 +40,7 @@ import contextlib
 import hashlib
 import json
 import os
+import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -89,6 +90,31 @@ def _fsync_dir(directory: Path) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
+
+
+def _atomic_write_bytes(path: Path, data: bytes) -> None:
+    """Restore exact bytes: same-dir temp + ``os.replace``, binary mode.
+
+    Deliberately NOT the store's text-mode ``_atomic_write``. A pre-image is
+    bytes, and routing it through a text writer re-translates line endings — on
+    Windows, restoring ``b"old A\r\n"`` that way produced ``b"old A\r\r\n"``,
+    growing a blank line into the note on every rollback. Recovery must put back
+    exactly what was there, byte for byte.
+    """
+    directory = path.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-recover-", suffix=".md")
+    try:
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
+            fh.flush()
+            os.fsync(fh.fileno())
+        os.replace(tmp, path)
+        _fsync_dir(directory)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(tmp)
+        raise
 
 
 class TransactionError(Exception):
@@ -261,9 +287,9 @@ class Transaction:
         with contextlib.suppress(OSError):
             directory.rmdir()
 
-    def rollback(self, writer: Any) -> RecoveryReport:
+    def rollback(self) -> RecoveryReport:
         """Undo a prepared-but-uncommitted transaction in this process."""
-        report = _rollback_journal(self._dir(), writer)
+        report = _rollback_journal(self._dir())
         self.discard()
         return report
 
@@ -290,7 +316,7 @@ def pending(omi_dir: Path | str) -> list[Path]:
     return found
 
 
-def _rollback_journal(directory: Path, writer: Any) -> RecoveryReport:
+def _rollback_journal(directory: Path) -> RecoveryReport:
     """Restore one journal's pre-images. See the module docstring's safety rule."""
     journal = directory / "journal.json"
     try:
@@ -326,8 +352,8 @@ def _rollback_journal(directory: Path, writer: Any) -> RecoveryReport:
         if existed:
             preimage = directory / f"{index:04d}.pre"
             try:
-                writer(path, preimage.read_bytes().decode("utf-8"))
-            except (OSError, UnicodeDecodeError):
+                _atomic_write_bytes(path, preimage.read_bytes())
+            except OSError:
                 report.conflicts.append(path.name)
                 continue
             report.restored.append(path.name)
@@ -338,7 +364,7 @@ def _rollback_journal(directory: Path, writer: Any) -> RecoveryReport:
     return report
 
 
-def recover(omi_dir: Path | str, writer: Any, *, dry_run: bool = False) -> list[RecoveryReport]:
+def recover(omi_dir: Path | str, *, dry_run: bool = False) -> list[RecoveryReport]:
     """Roll back every interrupted transaction for this vault.
 
     A no-op when the journal is clean, which is the normal case. Journals whose
@@ -360,7 +386,7 @@ def recover(omi_dir: Path | str, writer: Any, *, dry_run: bool = False) -> list[
                 )
             )
             continue
-        report = _rollback_journal(directory, writer)
+        report = _rollback_journal(directory)
         reports.append(report)
         if report.clean:
             with contextlib.suppress(OSError):
