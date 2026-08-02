@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.3.0] - 2026-08-02
+
+### Added
+- **A regression test pinning the `PostToolUse` hook's wiring**
+  ([#189](https://github.com/CryptoJones/omind/issues/189)). `run_hook` swallows
+  everything so the agent is never blocked, which means a dropped call in that
+  branch fails *silently* — enforcement and accounting just stop happening, with
+  no exception and exit code 0. The compliance detector's wiring was covered only
+  indirectly, through a test that depends on a seed policy rule still matching;
+  `ai_usage.record_mcp_response` and `verify.verify_consult` were not covered at
+  all. One spy test now pins all four side effects independently of policy content.
+- A second test documents — and marks `KNOWN` against
+  [#204](https://github.com/CryptoJones/omind/issues/204) — that those four side
+  effects share one `try/except`, so a failure in the first silently cancels the
+  rest, including the violation detector.
+
 ## [6.2.0] - 2026-08-02
 
 ### Security
