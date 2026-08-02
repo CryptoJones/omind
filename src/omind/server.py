@@ -471,7 +471,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         if operation == "stats":
             return dict(graph.stats(graph_for()))
         if operation == "frontier":
-            # Paged like every other list-shaped result (invariant 7): the caller
+            # Paged like every other list-shaped result (invariant 8): the caller
             # asks for a page, the ranking is computed over the whole graph.
             ranked = [
                 {

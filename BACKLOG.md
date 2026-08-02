@@ -66,24 +66,14 @@ quantized int8 vectors + RRF beats their JSON BM25 index), on multi-machine repl
 (they have none), on enforcement, and on shipping a real MCP server. What follows are the
 five places their design is genuinely better and the idea transfers._
 
-- [ ] **Journaled plan→apply→recover transactions for multi-note operations** ([#194](https://github.com/CryptoJones/omind/issues/194)) — _enhancement (durability)_ —
-  omind has atomic per-file replace, an advisory write lock, and version
-  preconditions, but no journal and no rollback, so an interrupted multi-note
-  operation leaves partial state. `store.create_and_disable_sources` concedes it in
-  its own docstring ("a process crash can still leave extra recoverable copies").
-  Generalize what `omind consolidate` already prototypes into a store-level
-  primitive plus `omind recover`. Skip their `approved_plan_sha256` handshake.
-- [x] **Typed confidence + symmetric `Conflicts with:` provenance** ([#195](https://github.com/CryptoJones/omind/issues/195)) — _enhancement (memory shape)_ —
-  shipped as two optional note fields that round-trip through Markdown, CLI, MCP, and
-  mesh merge like `Supersedes:`. A conflict binds both notes even when one side declared
-  it; retrieval surfaces the disagreement rather than resolving it; lint flags broken and
-  one-sided claims. No research-grade ledger. Original description follows.
-  their claim ledger types authority, assessment, confidence, and evidence relation
-  (`supports`/`contradicts`/`context`), keeping contradictions visible. omind's
-  `references:` is free text and `Supersedes:` only expresses clean ordered
-  replacement — there is no way to say "these two memories disagree" or "this was
-  never verified". Add two optional fields that round-trip like `Supersedes:` does;
-  do not grow a research-grade ledger.
+- [x] **Journaled plan→apply→recover transactions for multi-note operations** ([#194](https://github.com/CryptoJones/omind/issues/194)) — _enhancement (durability)_ —
+  shipped as `omind.txn` + `omind recover`. Pre-images captured and fsynced before the
+  first write, atomic per-file replace, a commit record, deterministic rollback. Recovery
+  refuses to overwrite a note edited after the crash — that edit is newer than the
+  pre-image — reporting a conflict and keeping the journal instead. In-process failures
+  roll themselves back. `create_and_disable_sources` migrated; the docstring that conceded
+  "a process crash can still leave extra recoverable copies" is gone. Skipped their
+  `approved_plan_sha256` handshake as planned.
 - [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196)) — _hardening_ —
   they declare every capability's tier, read/write scope, network need, and
   destructiveness in `config/capabilities.json`, verify it, and state explicitly

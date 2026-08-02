@@ -53,6 +53,12 @@ reads and writes as long-term memory. `omind` does two things with it:
   French, Arabic, Russian, Chinese), including right-to-left layout for Arabic.
   Its API is unauthenticated by design — the localhost bind is the security
   boundary. Read [docs/serve.md](docs/serve.md) before exposing the port.
+- **`omind recover`** — roll back a multi-note write that was interrupted
+  mid-apply (a killed `consolidate --apply`, a power loss). Multi-file updates
+  can't be truly atomic, so omind journals every target's prior bytes before the
+  first write and can put them back. A note edited *after* the interruption is
+  reported as a conflict and left alone — that edit is newer than anything the
+  journal could restore.
 - **`omind doctor`** — diagnose the wiring in one shot: Claude CLI + git on
   `PATH`, the `omi` MCP server registered at user scope with the right command,
   the OMI folder readable, mesh health (node identity, merge driver, per-peer

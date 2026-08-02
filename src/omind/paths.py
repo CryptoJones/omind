@@ -111,3 +111,12 @@ def access_state_path(omi_dir: Path) -> Path:
 def consolidation_dir(omi_dir: Path) -> Path:
     """Machine-local proposal/draft storage for one vault's reviewed merges."""
     return state_dir() / f"consolidate-{_omi_dir_digest(omi_dir)}"
+
+
+def transaction_dir(omi_dir: Path) -> Path:
+    """Journal + pre-image storage for one vault's multi-note transactions.
+
+    Machine-local and outside the vault: it records what the *filesystem* was
+    doing, is meaningless on another peer, and must never be mesh-synced.
+    """
+    return state_dir() / f"txn-{_omi_dir_digest(omi_dir)}"

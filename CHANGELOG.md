@@ -5,6 +5,52 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.0.0] - 2026-08-02
+
+### Added
+- **Journaled multi-note transactions and `omind recover`**
+  ([#194](https://github.com/CryptoJones/omind/issues/194)). Multi-file updates
+  cannot be truly atomic on the filesystems omind runs on, and this does not
+  pretend otherwise. It provides the contract that *can* be kept: every target's
+  pre-image is captured and fsynced before the first write, the writes go
+  through the store's existing atomic per-file replace, a commit record marks
+  the point of no return, and an interrupted run is rolled back deterministically.
+
+  omind had the first half of this already — same-dir temp + `os.replace`, an
+  advisory write lock, version preconditions — and no journal, so an interrupted
+  multi-note operation left partial state with no recovery path.
+  `store.create_and_disable_sources` (the `omind consolidate --apply` write path)
+  conceded it in its own docstring: *"a process crash can still leave extra
+  recoverable copies."* That fails toward keeping data, but a human still had to
+  notice and reconcile by hand.
+
+  `omind recover` rolls back anything that did not reach its commit record, and
+  is a no-op on a clean journal. `--dry-run` reports without touching the vault.
+
+  **Recovery refuses to clobber a later edit.** A pre-image is restored only when
+  the file still holds either that pre-image (nothing to do) or exactly the bytes
+  the interrupted run intended to write (ours to undo). Anything else means
+  someone edited the note after the crash — newer information than the pre-image
+  — so it is reported as a conflict, left alone, and its journal is kept for
+  inspection. `omind recover` exits 1 when that happens. Blind rollback would be
+  data loss wearing recovery's clothes.
+
+  An in-process failure rolls itself back, so `create_and_disable_sources` needs
+  no manual `recover` at all; the journal is for the case where the process dies.
+
+  Journals live in the state dir, never the vault: they describe this machine's
+  interrupted filesystem work, are meaningless to a mesh peer, and must not
+  replicate (invariant 1).
+
+  Deliberately not copied from the source design: its `approved_plan_sha256`
+  handshake, which would put a hash-copying step in front of routine memory
+  writes. `consolidate` keeps plan/apply; everything else just gets the journal.
+
+### Changed
+- `AGENTS.md` gains invariant 3: any new operation writing several notes must
+  journal through `txn.Transaction` under `store.write_lock()`, or it
+  reintroduces the gap `omind recover` exists to close.
+
 ## [7.0.0] - 2026-08-02
 
 _The last of the 2026-08-01 review and 2026-08-02 comparison backlogs, released

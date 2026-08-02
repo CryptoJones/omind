@@ -66,7 +66,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{help,setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,note,rollup,hook}",
+        metavar="{help,setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,note,rollup,recover,hook}",
     )
 
     help_p = sub.add_parser(
@@ -476,6 +476,27 @@ def build_parser() -> argparse.ArgumentParser:
     )
     for gp in (g_neighbors, g_path, g_orphans, g_dangling, g_stats, g_frontier, g_export):
         _add_vault_args(gp)
+
+    recover = sub.add_parser(
+        "recover",
+        help="roll back a multi-note write that was interrupted mid-apply",
+        description=(
+            "Roll back any journaled multi-note transaction that did not reach its\n"
+            "commit record — an `omind consolidate --apply` killed mid-write, a\n"
+            "power loss, an OOM. A no-op when the journal is clean, which is the\n"
+            "normal case.\n"
+            "\n"
+            "A note whose bytes match neither the pre-image nor what the interrupted\n"
+            "run intended to write was edited after the crash, and is reported as a\n"
+            "conflict and left alone: that edit is newer than anything this could\n"
+            "restore. Its journal is kept so you can inspect it."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
+    recover.add_argument(
+        "--dry-run", action="store_true", help="list what would be rolled back, change nothing"
+    )
+    _add_vault_args(recover)
 
     checkpoint = sub.add_parser(
         "checkpoint",
@@ -1218,6 +1239,38 @@ def _run_graph(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_recover(args: argparse.Namespace) -> int:
+    """``omind recover``: roll back interrupted multi-note transactions."""
+    from omind import txn
+    from omind.store import OmiStore, _atomic_write
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    store = OmiStore(omi_dir)
+    if not txn.pending(omi_dir):
+        print("nothing to recover: no interrupted transactions")
+        return 0
+    # Take the same write lock a normal write takes, so recovery cannot race a
+    # concurrent MCP/web/cron writer touching the very notes it is restoring.
+    with store.write_lock():
+        reports = txn.recover(omi_dir, _atomic_write, dry_run=args.dry_run)
+    conflicts = 0
+    for report in reports:
+        print(("would roll back " if args.dry_run else "") + report.format())
+        for name in report.conflicts:
+            print(f"  CONFLICT: {name} changed after the interruption — left as-is")
+            conflicts += 1
+    if conflicts:
+        print(
+            "\nSome notes were edited after the interrupted write. Their journals are kept;\n"
+            "inspect the notes, then delete the journal directory when you are satisfied.",
+            file=sys.stderr,
+        )
+        return 1
+    if not args.dry_run:
+        store.update_index()
+    return 0
+
+
 def _run_checkpoint(args: argparse.Namespace) -> int:
     from omind import checkpoint
 
@@ -1535,6 +1588,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_bench(args)
     if args.command == "lint":
         return _run_lint(args)
+    if args.command == "recover":
+        return _run_recover(args)
     if args.command == "graph":
         return _run_graph(args)
     if args.command == "checkpoint":

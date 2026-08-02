@@ -27,7 +27,7 @@ from typing import Any
 
 import yaml
 
-from omind import filelock
+from omind import filelock, txn
 from omind.clock import Rev, next_rev
 from omind.paths import (
     INDEX_FILENAME,
@@ -1273,8 +1273,13 @@ class OmiStore:
         The source tuples are ``(filename, expected_version)``. All versions and
         the target's nonexistence are checked before the first write, closing
         the gap where another OmiStore writer could change the second source
-        between a separate create and two archive calls. A process crash can
-        still leave extra recoverable copies, never a hard-deleted source.
+        between a separate create and two archive calls.
+
+        The writes run inside a journaled transaction (:mod:`omind.txn`), so an
+        interrupted apply is rolled back by ``omind recover`` instead of leaving
+        the vault half-merged. This used to concede here that "a process crash
+        can still leave extra recoverable copies" — it fails toward keeping
+        data, but a human still had to notice and reconcile by hand (#194).
         """
         if not fields.title.strip():
             raise NoteError("a note requires a title")
@@ -1305,12 +1310,22 @@ class OmiStore:
             content = render_fields(fields)
             if self.node_id is not None:
                 content = self._stamped(target, content)
-            _atomic_write(target, content)
+            transaction = txn.Transaction(self.omi_dir)
+            transaction.write(target, content)
             for path, _expected in source_paths:
                 archived = _with_disabled(_read_text(path), True)
                 if self.node_id is not None:
                     archived = self._stamped(path, archived)
-                _atomic_write(path, archived)
+                transaction.write(path, archived)
+            transaction.prepare()
+            try:
+                transaction.apply(_atomic_write)
+            except BaseException:
+                # Put back what we managed to change before re-raising, so the
+                # in-process failure needs no `omind recover` at all.
+                transaction.rollback(_atomic_write)
+                raise
+            transaction.commit()
             self._write_index()
         self._signal_write()
         return target.name
