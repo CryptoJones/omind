@@ -869,3 +869,18 @@ def test_partial_edit_does_not_clear_provenance(tmp_path: Path) -> None:
     store.update_note("Keep.md", NoteFields(title="Keep", summary="edited"))
     fields = store.read_fields("Keep.md")
     assert fields.confidence == "high" and fields.conflicts_with == "[[Other]]"
+
+
+def test_notes_are_written_with_lf_on_every_platform(tmp_path: Path) -> None:
+    """Byte-identical notes across OSes — the root of four Windows-only bugs.
+
+    `_atomic_write` used the default newline translation, so the same note was
+    LF on POSIX and CRLF on Windows, and nothing could see it because reads
+    translate back. That broke compliance-log rotation and both halves of the
+    transaction journal, each time passing a green Linux run first.
+    """
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="Newlines", summary="one", details="two"))
+    raw = (tmp_path / "Newlines.md").read_bytes()
+    assert b"\r\n" not in raw
+    assert b"\n" in raw

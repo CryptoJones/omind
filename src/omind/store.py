@@ -61,12 +61,26 @@ def _atomic_write(path: Path, text: str) -> None:
     either the old file or the new one in full — never a half-written file. The
     parent directory is fsynced after the rename so the rename itself is durable
     across a power loss, not just the file's data blocks.
+
+    ``newline="\n"`` is load-bearing. The default (``None``) translates every
+    ``\n`` to ``os.linesep`` on write, so the same note was written as LF on
+    POSIX and CRLF on Windows — and *nothing in the code could see it*, because
+    reads translate back. Four bugs came out of that one property: the
+    compliance log's rotation, and both halves of the transaction journal
+    (identity hashes that never matched what had just been written, and
+    pre-image restores that grew a blank line on every rollback). Every one of
+    them passed a green Linux run and failed only on the Windows legs.
+
+    With an explicit newline the bytes are identical on every OS, which also
+    makes note digests, mesh merges, and git diffs platform-stable. Existing
+    CRLF files keep their bytes until something rewrites them; Obsidian, git,
+    and every parser here read LF fine on Windows.
     """
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".md")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())
