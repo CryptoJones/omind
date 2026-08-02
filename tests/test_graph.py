@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import os
+import time
 from pathlib import Path
 
 import pytest
@@ -101,6 +103,70 @@ def test_stats_counts(store: OmiStore) -> None:
     _chain(store)
     g = graph.build_graph(store.omi_dir)
     assert graph.stats(g) == {"notes": 5, "links": 3, "orphans": 1, "dangling": 1}
+
+
+def test_frontier_ranks_outward_reaching_notes_above_hubs(store: OmiStore) -> None:
+    """A note that points at many and is pointed at by few is the frontier."""
+    store.create_note(NoteFields(title="Hub", summary="everyone links here"))
+    store.create_note(NoteFields(title="Edge", summary="see [[Hub]], [[P1]], [[P2]]"))
+    store.create_note(NoteFields(title="P1", summary="see [[Hub]]"))
+    store.create_note(NoteFields(title="P2", summary="see [[Hub]]"))
+    g = graph.build_graph(store.omi_dir)
+
+    ranked = graph.frontier(g)
+    by_name = {entry.filename: entry for entry in ranked}
+    # Edge: 3 out, 0 in. Hub: 0 out, 3 in.
+    assert ranked[0].filename == "Edge.md"
+    assert by_name["Edge.md"].out_degree == 3 and by_name["Edge.md"].in_degree == 0
+    assert by_name["Hub.md"].score < 0  # an absorbed hub, not a frontier
+    assert ranked[-1].filename == "Hub.md"
+
+
+def test_frontier_decays_with_staleness(store: OmiStore) -> None:
+    """Two identically-shaped notes rank by when they were last touched."""
+    store.create_note(NoteFields(title="Fresh", summary="see [[T1]], [[T2]]"))
+    store.create_note(NoteFields(title="Stale", summary="see [[T1]], [[T2]]"))
+    store.create_note(NoteFields(title="T1", summary="target"))
+    store.create_note(NoteFields(title="T2", summary="target"))
+    stale = store.omi_dir / "Stale.md"
+    old = time.time() - graph.FRONTIER_HALFLIFE_DAYS * 86_400  # exactly one half-life
+    os.utime(stale, (old, old))
+
+    g = graph._from_disk(store.omi_dir)  # mtime, not the index's ingest snapshot
+    by_name = {entry.filename: entry for entry in graph.frontier(g)}
+    assert by_name["Fresh.md"].score > by_name["Stale.md"].score
+    # One half-life back is worth half as much, within a tolerance for the
+    # seconds that elapsed between writing the note and reading the clock.
+    assert by_name["Stale.md"].score == pytest.approx(
+        by_name["Fresh.md"].score / 2, rel=0.01
+    )
+
+
+def test_frontier_excludes_machine_written_notes_by_default(store: OmiStore) -> None:
+    """Journals link outward at everything and would own the whole ranking."""
+    store.create_note(NoteFields(title="Real", summary="see [[T1]]"))
+    store.create_note(NoteFields(title="T1", summary="target"))
+    store.create_note(
+        NoteFields(
+            title="Worklog 2026-08-02",
+            summary="see [[Real]], [[T1]]",
+            okf_type="worklog",
+        )
+    )
+    g = graph.build_graph(store.omi_dir)
+
+    assert "Worklog 2026-08-02.md" not in {e.filename for e in graph.frontier(g)}
+    included = {e.filename for e in graph.frontier(g, include_generated=True)}
+    assert "Worklog 2026-08-02.md" in included
+
+
+def test_frontier_limit_zero_returns_everything_ranked(store: OmiStore) -> None:
+    _chain(store)
+    g = graph.build_graph(store.omi_dir)
+    assert len(graph.frontier(g, limit=0)) == 5
+    assert len(graph.frontier(g, limit=2)) == 2
+    scores = [entry.score for entry in graph.frontier(g, limit=0)]
+    assert scores == sorted(scores, reverse=True)
 
 
 def test_to_json_shape(store: OmiStore) -> None:

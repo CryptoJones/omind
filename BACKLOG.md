@@ -88,7 +88,10 @@ five places their design is genuinely better and the idea transfers._
   where no automated verifier exists. omind's `doctor` checks are hand-written per
   concern with no declaration of what each surface may touch, and nothing fails when
   code and declaration drift. Natural home for the #190 `serve` risk model.
-- [ ] **Frontier/boundary scoring to rank what to consolidate next** ([#197](https://github.com/CryptoJones/omind/issues/197)) — _enhancement (efficiency)_ —
+- [x] **Frontier/boundary scoring to rank what to consolidate next** ([#197](https://github.com/CryptoJones/omind/issues/197)) — _enhancement (efficiency)_ —
+  shipped as `omind graph frontier` and `graph(op="frontier")`:
+  `(out - in) * 0.5 ** (days/30)`, generated notes excluded by default, read-only,
+  no new scan or state. Original description follows.
   `(out_degree - in_degree) * recency_weight` finds notes that point outward, are
   pointed at by few, and were touched recently. Every `omind graph` op answers a
   structural yes/no question; none rank what to work on next. Complements

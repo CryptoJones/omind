@@ -457,13 +457,32 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             return _page(rows, limit, offset)
         if operation == "stats":
             return dict(graph.stats(graph_for()))
-        raise ValueError("graph op must be one of: path, orphans, dangling, stats")
+        if operation == "frontier":
+            # Paged like every other list-shaped result (invariant 7): the caller
+            # asks for a page, the ranking is computed over the whole graph.
+            ranked = [
+                {
+                    "filename": entry.filename,
+                    "title": entry.title,
+                    "score": round(entry.score, 4),
+                    "out_degree": entry.out_degree,
+                    "in_degree": entry.in_degree,
+                    "days_since_updated": round(entry.days_since_updated, 1),
+                }
+                for entry in graph.frontier(graph_for(), limit=0)
+            ]
+            return _page(ranked, limit, offset)
+        raise ValueError(
+            "graph op must be one of: path, orphans, dangling, stats, frontier"
+        )
 
     @mcp.tool(
         name="graph",
         description=(
             "Graph audit/query selected by op: path (requires source + target), "
-            "orphans, dangling, or stats. Orphan/dangling results are paged."
+            "orphans, dangling, stats, or frontier (notes that reach out further "
+            "than anything reaches back — what to consolidate next). List-shaped "
+            "results are paged."
         ),
     )
     def graph_tool(

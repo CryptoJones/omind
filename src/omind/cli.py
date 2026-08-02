@@ -418,11 +418,11 @@ def build_parser() -> argparse.ArgumentParser:
     graph_p = sub.add_parser(
         "graph",
         help="query the [[wikilink]] knowledge graph: neighbors, path, orphans, "
-        "dangling links, stats, export",
+        "dangling links, stats, frontier, export",
     )
     gsub = graph_p.add_subparsers(
         dest="graph_command",
-        metavar="{neighbors,path,orphans,dangling,stats,export}",
+        metavar="{neighbors,path,orphans,dangling,stats,frontier,export}",
         required=True,
     )
     g_neighbors = gsub.add_parser("neighbors", help="notes within N hops of a note")
@@ -442,6 +442,20 @@ def build_parser() -> argparse.ArgumentParser:
     g_orphans = gsub.add_parser("orphans", help="notes with no inbound or outbound links")
     g_dangling = gsub.add_parser("dangling", help="wikilinks pointing at no existing note")
     g_stats = gsub.add_parser("stats", help="counts: notes, links, orphans, dangling")
+    g_frontier = gsub.add_parser(
+        "frontier",
+        help="rank notes by how far they reach out beyond what reaches back (what to "
+        "consolidate next)",
+    )
+    g_frontier.add_argument(
+        "--limit", type=int, default=10, help="how many to show (default: 10; 0 = all)"
+    )
+    g_frontier.add_argument(
+        "--include-generated",
+        action="store_true",
+        help="include journals/worklogs, which link outward at everything by construction",
+    )
+    g_frontier.add_argument("--json", action="store_true", help="emit JSON instead of a table")
     g_export = gsub.add_parser("export", help="dump the whole graph for visualization")
     g_export.add_argument(
         "--format",
@@ -449,7 +463,7 @@ def build_parser() -> argparse.ArgumentParser:
         default="json",
         help="output format (default: json)",
     )
-    for gp in (g_neighbors, g_path, g_orphans, g_dangling, g_stats, g_export):
+    for gp in (g_neighbors, g_path, g_orphans, g_dangling, g_stats, g_frontier, g_export):
         _add_vault_args(gp)
 
     checkpoint = sub.add_parser(
@@ -1125,6 +1139,7 @@ def _run_lint(args: argparse.Namespace) -> int:
 
 def _run_graph(args: argparse.Namespace) -> int:
     import json
+    from dataclasses import asdict
 
     from omind import graph as graphmod
 
@@ -1166,6 +1181,23 @@ def _run_graph(args: argparse.Namespace) -> int:
         return 0
     if cmd == "stats":
         print(json.dumps(graphmod.stats(g), indent=2))
+        return 0
+    if cmd == "frontier":
+        ranked = graphmod.frontier(
+            g, limit=args.limit, include_generated=args.include_generated
+        )
+        if args.json:
+            print(json.dumps([asdict(entry) for entry in ranked], indent=2))
+            return 0
+        if not ranked:
+            print("no notes to rank")
+            return 0
+        print("score\tout\tin\tdays\tnote")
+        for entry in ranked:
+            print(
+                f"{entry.score:+.2f}\t{entry.out_degree}\t{entry.in_degree}\t"
+                f"{entry.days_since_updated:.0f}\t{entry.filename}"
+            )
         return 0
     # cmd == "export"
     if args.format == "dot":

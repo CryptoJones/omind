@@ -6,7 +6,8 @@ Every note is a node; every ``[[wikilink]]`` it makes is a directed edge. The
 store already answers the inbound question (``backlinks``) and ``lint`` already
 flags orphans and broken links one note at a time — this module assembles the
 *whole-graph* view those leave out: forward links, multi-hop neighborhoods,
-the shortest link path between two notes, and a JSON/Graphviz-DOT export.
+the shortest link path between two notes, a frontier ranking of what to
+consolidate next, and a JSON/Graphviz-DOT export.
 
 Resolution mirrors :meth:`OmiStore.backlinks` and ``lint``: a link ``[[Target]]``
 (its ``|alias`` and ``#heading`` stripped) resolves to a note when its lowercased
@@ -43,6 +44,7 @@ class GraphNode:
     okf_type: str = ""  # the note's OKF ``type`` — for grouping/colouring the graph
     out: set[str] = field(default_factory=set)  # filenames this note links to
     inn: set[str] = field(default_factory=set)  # filenames that link to this note
+    mtime_ns: int = 0  # last write; only :func:`frontier` reads it
 
 
 @dataclass
@@ -102,7 +104,12 @@ def _from_index(omi_dir: Path | str) -> Graph | None:
         if row.title.strip():
             id_to_file[row.title.strip().lower()] = filename
     nodes = {
-        filename: GraphNode(filename=filename, title=row.title.strip(), okf_type=row.okf_type)
+        filename: GraphNode(
+            filename=filename,
+            title=row.title.strip(),
+            okf_type=row.okf_type,
+            mtime_ns=row.mtime_ns,
+        )
         for filename, row in live.items()
     }
     dangling: list[tuple[str, str]] = []
@@ -123,7 +130,7 @@ def _from_disk(omi_dir: Path | str) -> Graph:
     omi = Path(omi_dir)
     # (filename, title, raw outbound targets) for each live note, plus an index
     # from every linkable identifier (stem + title, lowercased) to its filename.
-    parsed: list[tuple[str, str, str, set[str]]] = []
+    parsed: list[tuple[str, str, str, set[str], int]] = []
     id_to_file: dict[str, str] = {}
     if omi.is_dir():
         for path in sorted(omi.glob("*.md")):
@@ -141,17 +148,21 @@ def _from_disk(omi_dir: Path | str) -> Graph:
             # same rule render_fields uses — so every node carries a non-empty type.
             okf_type = fields.okf_type.strip() or derive_okf_type(fields.tags)
             targets = {t for t in (_link_target(m) for m in _WIKILINK_RE.findall(text)) if t}
-            parsed.append((path.name, title, okf_type, targets))
+            try:
+                mtime_ns = path.stat().st_mtime_ns
+            except OSError:
+                mtime_ns = 0
+            parsed.append((path.name, title, okf_type, targets, mtime_ns))
             id_to_file[path.stem.strip().lower()] = path.name
             if title:
                 id_to_file[title.lower()] = path.name
 
     nodes = {
-        fn: GraphNode(filename=fn, title=title, okf_type=okf_type)
-        for fn, title, okf_type, _ in parsed
+        fn: GraphNode(filename=fn, title=title, okf_type=okf_type, mtime_ns=mtime_ns)
+        for fn, title, okf_type, _, mtime_ns in parsed
     }
     dangling: list[tuple[str, str]] = []
-    for src, _title, _type, targets in parsed:
+    for src, _title, _type, targets, _mtime in parsed:
         for target in sorted(targets):
             dest = id_to_file.get(target.lower())
             if dest is None:
@@ -231,6 +242,88 @@ def orphans(graph: Graph) -> list[str]:
 def dangling_links(graph: Graph) -> list[tuple[str, str]]:
     """``(source filename, raw target)`` for every link that resolves to no note."""
     return sorted(graph.dangling)
+
+
+#: Half-life of the recency weight, in days: a note untouched for this long
+#: counts half as much as one touched today, and half again after another.
+FRONTIER_HALFLIFE_DAYS = 30.0
+
+#: OKF types written by machines rather than curated. They link outward at
+#: everything by construction, so they would monopolise a frontier ranking.
+#: Mirrors the de-prioritisation in ``searchindex._weight_generated``.
+_GENERATED_TYPES = frozenset({"journal", "worklog", "checkpoint", "rollup"})
+
+
+def _is_generated(node: GraphNode) -> bool:
+    """Whether a node is machine-written (auto-journal, worklog, checkpoint)."""
+    stem = node.filename[:-3].lower() if node.filename.endswith(".md") else node.filename.lower()
+    return (
+        node.okf_type.strip().lower() in _GENERATED_TYPES
+        or stem.startswith("session journal")
+        or stem.startswith("worklog ")
+    )
+
+
+@dataclass(frozen=True)
+class FrontierEntry:
+    """One note's frontier score and the components behind it."""
+
+    filename: str
+    title: str
+    score: float
+    out_degree: int
+    in_degree: int
+    days_since_updated: float
+
+
+def frontier(
+    graph: Graph,
+    limit: int = 10,
+    *,
+    include_generated: bool = False,
+    now: float | None = None,
+) -> list[FrontierEntry]:
+    """Rank notes by how far they reach out beyond what reaches back at them.
+
+    ``(out_degree - in_degree) * 0.5 ** (days_since_updated / half-life)``.
+
+    A high score means the note points at many things, few things point at it,
+    and it was touched recently — memory is actively accumulating there and
+    nothing has pulled it together yet. A low or negative score means a hub: an
+    absorbed note the rest of the vault already refers to.
+
+    This is the ranking question the other graph ops don't answer. ``orphans``
+    finds notes that are *disconnected*; a frontier note is connected but
+    **unabsorbed**, which is a different and more actionable state. It
+    complements ``omind consolidate``, which finds merge candidates by
+    similarity — this finds them by structure, catching "this note has sprawled
+    outward for weeks" rather than "these two notes say the same thing".
+
+    Machine-written notes (journals, worklogs, checkpoints) are excluded by
+    default: they link outward at everything by construction and would fill the
+    whole ranking. Read-only, like every other op here.
+    """
+    import time
+
+    reference = time.time() if now is None else now
+    entries: list[FrontierEntry] = []
+    for node in graph.nodes.values():
+        if not include_generated and _is_generated(node):
+            continue
+        days = max(0.0, (reference - node.mtime_ns / 1_000_000_000) / 86_400.0)
+        weight = 0.5 ** (days / FRONTIER_HALFLIFE_DAYS)
+        entries.append(
+            FrontierEntry(
+                filename=node.filename,
+                title=node.title,
+                score=(len(node.out) - len(node.inn)) * weight,
+                out_degree=len(node.out),
+                in_degree=len(node.inn),
+                days_since_updated=days,
+            )
+        )
+    entries.sort(key=lambda e: (-e.score, e.filename.lower()))
+    return entries[:limit] if limit > 0 else entries
 
 
 def stats(graph: Graph) -> dict[str, int]:
