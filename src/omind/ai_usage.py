@@ -154,14 +154,8 @@ def log_event(
     try:
         path = usage_path(omi_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
-        binary = getattr(os, "O_BINARY", 0)
-        fd = os.open(path, os.O_WRONLY | os.O_APPEND | os.O_CREAT | binary, 0o600)
-        try:
-            filelock.lock_fd(fd)
+        with filelock.append_locked(path) as fd:
             os.write(fd, (json.dumps(record, separators=(",", ":")) + "\n").encode())
-        finally:
-            filelock.unlock_fd(fd)
-            os.close(fd)
     except (OSError, ValueError, TypeError):
         return
 
