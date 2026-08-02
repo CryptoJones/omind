@@ -5,7 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
-## [Unreleased]
+## [6.0.0] - 2026-08-02
+
+### Performance
+- **The search weighting passes no longer re-scan the whole index on every
+  query** ([#186](https://github.com/CryptoJones/omind/issues/186)). `_owners`,
+  `_weight_generated`, and `_weight_superseded` each rebuilt their maps from a
+  full `chunks`/`notes` scan per call, so query latency grew with vault size
+  rather than with the fused candidate set. They now share one map built once
+  per index `generation` and cached per process — the same invalidation contract
+  the packed vector matrix already used, so an external write still takes effect
+  on the next refresh.
 
 ### Changed
 - **Adopt MCP revision `2026-07-28` (the stateless revision) by moving to the

@@ -263,6 +263,24 @@ def test_superseded_notes_remain_searchable_but_rank_lower(omi: Path) -> None:
     assert hits[0].filename == "Release v2.md"
 
 
+def test_weighting_maps_are_built_once_per_generation(omi: Path) -> None:
+    _note(omi, "Handbook", "curated operations", ["ops"], details="zebracorn rollback")
+    idx = searchindex.SearchIndex(omi)
+    idx.search("zebracorn")
+    first = idx._weights
+    assert first is not None
+    idx.search("rollback")
+    assert idx._weights is first  # a second query re-scans nothing
+
+    _note(omi, "Worklog 2026-07-28", "automatic", ["worklog"], details="zebracorn rollback")
+    idx.refresh()
+    idx.search("zebracorn")
+    second = idx._weights
+    assert second is not None and second is not first  # new generation, rebuilt
+    assert "Worklog 2026-07-28.md" in set(second[1].owners.values())
+    assert second[1].generated  # the worklog's chunks are marked generated
+
+
 def test_query_punctuation_cannot_break_the_match_expression(omi: Path) -> None:
     """FTS5 operators in user text are data, not syntax (every term is quoted)."""
     _note(omi, "Quoted", "handling NEAR and OR in queries", ["x"])
