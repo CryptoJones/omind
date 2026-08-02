@@ -138,7 +138,8 @@ def _rotate_if_needed(path: Path) -> None:
     """
     lock_path = path.with_name(path.name + ".lock")
     try:
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        # 0o600: nothing outside this user's own hooks ever takes this lock.
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
     except OSError:
         return
     try:

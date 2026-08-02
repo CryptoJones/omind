@@ -18,6 +18,11 @@ hardening, or docs, not defects._
   `_weight_generated`, `_weight_superseded`, and `_owners` now share one map built once
   per index `generation` and cached per process, like the packed vector matrix. Query
   cost tracks the fused candidate set instead of the vault size.
+- [x] **Compliance-log rotation silently never fired on Windows** ([#202](https://github.com/CryptoJones/omind/issues/202)) — _bug (enforcement)_ —
+  found by CI on the #188 PR, before it shipped. The rotation renamed the log while this
+  process still held its fd; Windows refuses that, and the `PermissionError` was swallowed
+  by the never-raise-into-the-agent handler, so the log would have grown forever there with
+  no breadcrumb. Rotation now runs after the fd is closed, under a separate lockfile.
 - [x] **compliance.py recidivism helpers re-parse the whole append-only log per call** ([#188](https://github.com/CryptoJones/omind/issues/188)) — _perf (enforcement)_ —
   `read_events()` is memoized against the log's `(mtime_ns, size)`, and `summary()` counts
   the list it already read. The log now rotates at 8 MiB to `compliance.jsonl.1`; readers
