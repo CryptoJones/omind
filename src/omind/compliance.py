@@ -23,6 +23,7 @@ Like every omind hook path this is best-effort and never raises into the agent.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -37,6 +38,18 @@ from omind import filelock, paths, policy
 #: corpus can't be bloated by a pathological one-liner.
 _COMMAND_CAP = 400
 
+#: Past this size the live log is rotated to ``compliance.jsonl.1`` and a new
+#: one starts. Unlike ``hook-failures.log``, rotation here must not *discard*
+#: history — recidivism counts drive rule escalation — so the reader spans the
+#: archive and the live file. Two generations bound the parse; the third is
+#: dropped, which at this cap is on the order of 80k events.
+_LOG_CAP_BYTES = 8_388_608
+
+#: Memo for :func:`read_events`, keyed by the (mtime_ns, size) of the archive
+#: and live logs so any writer — this process or another — invalidates it.
+_MemoKey = tuple[str, tuple[int, int], tuple[int, int]]
+_EVENTS_MEMO: tuple[_MemoKey, list[dict[str, Any]]] | None = None
+
 KIND_DECISION = "decision"
 KIND_VIOLATION = "violation"
 
@@ -44,6 +57,11 @@ KIND_VIOLATION = "violation"
 def compliance_log_path() -> Path:
     """The append-only compliance log: ``$XDG_STATE_HOME/omind/compliance.jsonl``."""
     return paths.state_dir() / "compliance.jsonl"
+
+
+def compliance_archive_path() -> Path:
+    """The previous generation of the log, kept so rotation never loses counts."""
+    return paths.state_dir() / "compliance.jsonl.1"
 
 
 def _truncate(text: str, limit: int = _COMMAND_CAP) -> str:
@@ -94,22 +112,64 @@ def log_event(
         try:
             filelock.lock_fd(fd)
             os.write(fd, (json.dumps(record) + "\n").encode("utf-8"))
+            oversized = os.fstat(fd).st_size > _LOG_CAP_BYTES
         finally:
             filelock.unlock_fd(fd)
             os.close(fd)
+        if oversized:
+            _rotate_if_needed(path)
     except OSError:
         return
 
 
-def read_events(limit: int | None = None) -> list[dict[str, Any]]:
-    """Parse the compliance log into records, newest last. Skips bad lines;
-    never raises. ``limit`` keeps only the most recent N records."""
+def _rotate_if_needed(path: Path) -> None:
+    """Move an oversized live log aside so the next write starts a fresh one.
+
+    Runs *after* the writer's own fd is closed, and serializes on a separate
+    lockfile rather than on the log itself: Windows refuses to rename a file
+    that any process still has open, so rotating from inside the write block
+    (where we hold the fd) silently never fired there.
+
+    Best-effort by design. On POSIX the rename is atomic and a concurrent
+    writer holding the old inode keeps appending into the archive, so no record
+    is lost. On Windows a concurrent writer makes the rename fail; the next
+    oversized write retries. A rotation that never succeeds just means the log
+    keeps growing, which must never break the hook path.
+    """
+    lock_path = path.with_name(path.name + ".lock")
+    try:
+        # 0o600: nothing outside this user's own hooks ever takes this lock.
+        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
+    except OSError:
+        return
+    try:
+        filelock.lock_fd(fd)
+        # Re-check under the lock: another process may have just rotated.
+        if path.stat().st_size > _LOG_CAP_BYTES:
+            os.replace(path, compliance_archive_path())
+    except OSError:
+        return
+    finally:
+        with contextlib.suppress(OSError):
+            filelock.unlock_fd(fd)
+        os.close(fd)
+
+
+def _stat_key(path: Path) -> tuple[int, int]:
+    try:
+        st = path.stat()
+    except OSError:
+        return (-1, -1)
+    return (st.st_mtime_ns, st.st_size)
+
+
+def _parse(path: Path) -> list[dict[str, Any]]:
     try:
         # errors="replace": a single torn multibyte sequence (a short os.write
         # under ENOSPC) is a UnicodeDecodeError (a ValueError, NOT an OSError), so
         # strict decoding made read_events raise forever and took down the
         # checkpoint timer / doctor / corpus export until the log was hand-repaired.
-        lines = compliance_log_path().read_text(encoding="utf-8", errors="replace").splitlines()
+        lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
     except OSError:
         return []
     events: list[dict[str, Any]] = []
@@ -123,7 +183,31 @@ def read_events(limit: int | None = None) -> list[dict[str, Any]]:
             continue
         if isinstance(obj, dict):
             events.append(obj)
-    return events[-limit:] if limit is not None else events
+    return events
+
+
+def read_events(limit: int | None = None) -> list[dict[str, Any]]:
+    """Parse the compliance log into records, newest last. Skips bad lines;
+    never raises. ``limit`` keeps only the most recent N records.
+
+    Spans the rotated archive and the live log, and memoizes the parse against
+    both files' ``(mtime_ns, size)``. Several callers ask for the same events
+    within one command — ``summary`` wants totals *and* per-rule counts, and
+    ``omind doctor`` then prints recent entries — and each of those used to
+    re-read and re-parse the whole log.
+    """
+    global _EVENTS_MEMO
+    live, archive = compliance_log_path(), compliance_archive_path()
+    # The path is part of the key: a different state dir (a test, a second
+    # vault) must never see another one's memo just because both were empty.
+    key = (str(live), _stat_key(archive), _stat_key(live))
+    if _EVENTS_MEMO is not None and _EVENTS_MEMO[0] == key:
+        events = _EVENTS_MEMO[1]
+    else:
+        events = _parse(archive) + _parse(live)
+        _EVENTS_MEMO = (key, events)
+    # A copy: the memo is shared, and callers must not be able to mutate it.
+    return list(events[-limit:]) if limit is not None else list(events)
 
 
 def recidivism(rule_id: str) -> int:
@@ -131,11 +215,14 @@ def recidivism(rule_id: str) -> int:
     return sum(1 for e in read_events() if e.get("rule_id") == rule_id)
 
 
-def recidivism_counts() -> Counter[str]:
-    """Per-rule occurrence counts across the whole log (drives escalation)."""
+def recidivism_counts(events: list[dict[str, Any]] | None = None) -> Counter[str]:
+    """Per-rule occurrence counts across the whole log (drives escalation).
+
+    Pass ``events`` to count an already-read log instead of reading it again.
+    """
     return Counter(
         str(e.get("rule_id"))
-        for e in read_events()
+        for e in (read_events() if events is None else events)
         if e.get("rule_id") and e.get("rule_id") != "omi-gate"
     )
 
@@ -143,7 +230,7 @@ def recidivism_counts() -> Counter[str]:
 def summary() -> dict[str, Any]:
     """A compact rollup for ``omind doctor``: totals + the top recidivist rules."""
     events = read_events()
-    counts = recidivism_counts()
+    counts = recidivism_counts(events)
     return {
         "total": len(events),
         "denies": sum(1 for e in events if e.get("outcome") == "deny"),

@@ -6,6 +6,9 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
+
+import pytest
 
 from omind import compliance, guard, hooks, policy
 
@@ -38,6 +41,54 @@ def test_read_events_skips_bad_lines_and_honors_limit() -> None:
     events = compliance.read_events()
     assert [e["rule_id"] for e in events] == ["a", "b", "c"]
     assert [e["rule_id"] for e in compliance.read_events(limit=2)] == ["b", "c"]
+
+
+def test_read_events_parses_once_until_the_log_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    compliance.log_event(compliance.KIND_DECISION, rule_id="a", outcome="deny")
+    compliance.read_events()  # warm the memo
+
+    parses = 0
+    real_parse = compliance._parse
+
+    def counting_parse(path: Path) -> list[dict[str, object]]:
+        nonlocal parses
+        parses += 1
+        return real_parse(path)
+
+    monkeypatch.setattr(compliance, "_parse", counting_parse)
+    compliance.summary()  # totals + per-rule counts, one read
+    compliance.read_events()
+    assert parses == 0  # unchanged log, no re-parse
+
+    compliance.log_event(compliance.KIND_DECISION, rule_id="b", outcome="deny")
+    assert [e["rule_id"] for e in compliance.read_events()] == ["a", "b"]
+    assert parses  # a write invalidates it
+
+
+def test_read_events_returns_a_copy_callers_cannot_corrupt_the_memo() -> None:
+    compliance.log_event(compliance.KIND_DECISION, rule_id="a", outcome="deny")
+    events = compliance.read_events()
+    events.clear()
+    assert [e["rule_id"] for e in compliance.read_events()] == ["a"]
+
+
+def test_the_log_rotates_at_the_cap_without_losing_counts(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(compliance, "_LOG_CAP_BYTES", 200)
+    logged = 0
+    while not compliance.compliance_archive_path().exists():
+        compliance.log_event(compliance.KIND_DECISION, rule_id="r", outcome="deny")
+        logged += 1
+        assert logged < 20, "the log never rotated past the cap"
+    compliance.log_event(compliance.KIND_DECISION, rule_id="r", outcome="deny")
+    logged += 1
+    # The live log restarted, but history spans both generations — escalation
+    # still counts every hit that came before the rotation.
+    assert compliance.compliance_log_path().stat().st_size <= 200
+    assert compliance.recidivism("r") == logged
 
 
 def test_recidivism_counts_exclude_the_gate() -> None:
