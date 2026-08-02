@@ -46,6 +46,8 @@ reads and writes as long-term memory. `omind` does two things with it:
   and add** memory entries in that same folder, without opening Obsidian. Ships
   with five themes and a switchable UI in six languages (English, Spanish,
   French, Arabic, Russian, Chinese), including right-to-left layout for Arabic.
+  Its API is unauthenticated by design — the localhost bind is the security
+  boundary. Read [docs/serve.md](docs/serve.md) before exposing the port.
 - **`omind doctor`** — diagnose the wiring in one shot: Claude CLI + git on
   `PATH`, the `omi` MCP server registered at user scope with the right command,
   the OMI folder readable, mesh health (node identity, merge driver, per-peer

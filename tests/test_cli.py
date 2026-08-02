@@ -22,6 +22,36 @@ def test_version_is_set() -> None:
     assert omind.__version__ == declared.group(1)
 
 
+def test_serve_help_states_the_unauthenticated_risk() -> None:
+    """The `serve` risk model must be reachable without running the server (#190).
+
+    It used to exist only in a stderr warning printed for a non-localhost bind
+    — which the default, correct, localhost user never sees. The person who
+    needs it is the one about to move the port.
+    """
+    parser = build_parser()
+    serve = parser._subparsers._group_actions[0].choices["serve"]  # type: ignore[union-attr]
+    rendered = serve.format_help()
+    assert "UNAUTHENTICATED" in rendered
+    assert "docs/serve.md" in rendered
+    # And the short help, which is what `omind help` and `omind --help` list.
+    assert "unauthenticated" in parser.format_help().lower()
+
+
+def test_serve_risk_doc_exists_and_covers_every_write_route() -> None:
+    """docs/serve.md must not drift behind a newly added destructive route."""
+    doc = (Path(__file__).parent.parent / "docs" / "serve.md").read_text(encoding="utf-8")
+    app_source = (
+        Path(__file__).parent.parent / "src" / "omind" / "web" / "app.py"
+    ).read_text(encoding="utf-8")
+    write_routes = set(
+        re.findall(r'@app\.(?:post|put|delete|patch)\("(/api/[^"]+)"', app_source)
+    )
+    assert write_routes  # the regex still matches the app
+    missing = {route for route in write_routes if route.split("{")[0] not in doc}
+    assert not missing, f"docs/serve.md does not mention write routes: {sorted(missing)}"
+
+
 def test_help_command_uses_live_nested_parser(capsys: pytest.CaptureFixture[str]) -> None:
     assert main(["help", "ai", "usage"]) == 0
     output = capsys.readouterr().out

@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.4.0] - 2026-08-02
+
+### Added
+- **`docs/serve.md` — the `omind serve` risk model**
+  ([#190](https://github.com/CryptoJones/omind/issues/190)). The fact that the
+  web API is unauthenticated and destructive was stated only in a transient
+  stderr warning printed for a *non-localhost* bind — which the default, correct,
+  localhost user never sees. The person who needs it is the one about to move
+  the port. The page enumerates every route an unauthenticated caller can reach,
+  what already protects you (localhost bind, `Host` allowlist and why DNS
+  rebinding makes it matter, `safe_name`, no CORS), how to expose the port
+  safely if you must, and what to check if it was exposed — including that a
+  poisoned note replicates to the rest of the mesh on the next sync.
+- `omind serve --help` now carries the same warning, as does the subcommand
+  listing, the `omind.web.app` module docstring, and the README entry. A
+  startup line points at the doc on every run, not just on a risky bind.
+
+### Changed
+- Two tests keep this honest: one asserts the risk statement is present in
+  `--help`, and one fails if a new destructive `/api/` route is added to
+  `web/app.py` without being documented in `docs/serve.md`.
+
 ## [6.3.0] - 2026-08-02
 
 ### Added
