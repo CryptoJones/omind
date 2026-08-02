@@ -433,3 +433,27 @@ def test_stdio_handshake_and_clean_exit_on_eof(tmp_path: Path) -> None:
         proc.wait()
         if proc.stderr is not None:
             proc.stderr.close()
+
+
+def test_recall_note_warns_about_a_conflicting_memory(server: MCPServer) -> None:
+    """The agent must see the disagreement, not just one side of it (#195)."""
+    call(server, "create-note", {"title": "Older", "summary": "the box has a 1060"})
+    call(
+        server,
+        "create-note",
+        {
+            "title": "Newer",
+            "summary": "the box has a V620",
+            "confidence": "low",
+            "conflicts_with": "[[Older]]",
+        },
+    )
+    recalled = call(server, "recall-note", {"name": "Newer.md"})
+    assert recalled["conflicts_with"] == "[[Older]]"
+    assert recalled["confidence"] == "low"
+    assert "Older" in str(recalled["warning"])
+
+    # A note with neither field pays nothing for them.
+    plain = call(server, "recall-note", {"name": "Older.md"})
+    assert "conflicts_with" not in plain and "confidence" not in plain
+    assert "warning" not in plain

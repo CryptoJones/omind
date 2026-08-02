@@ -51,7 +51,7 @@ _STOP = frozenset(
 class LintIssue:
     """One problem found in the vault."""
 
-    kind: str  # broken-link | missing-title | isolated | near-duplicate
+    kind: str  # broken-link | missing-title | isolated | near-duplicate | conflict-*
     severity: str  # error | warn | info
     note: str  # the offending note's filename (or "A | B" for a pair)
     detail: str
@@ -190,6 +190,7 @@ def _load_indexed(omi_dir: Path | str) -> tuple[list[_Note], set[str], Any] | No
         fields = NoteFields(
             title=row.title if row.has_title else "",
             disabled=row.disabled,
+            conflicts_with=row.conflicts_with,
         )
         path = omi / row.filename
         ids = _note_ids(path, fields)
@@ -242,6 +243,50 @@ def lint_vault(omi_dir: Path | str) -> list[LintIssue]:
         if not n.outbound and n.ids.isdisjoint(linked):
             issues.append(
                 LintIssue("isolated", "info", n.path.name, "no inbound or outbound links")
+            )
+
+    # `Conflicts with:` is symmetric in meaning but written on one note at a
+    # time, so the two ways it goes wrong are a target that does not exist and
+    # a claim the other side never acknowledged. Retrieval treats a one-sided
+    # claim as binding on both notes; lint says so out loud.
+    declared: dict[str, str] = {}
+    ids_to_note: dict[str, str] = {}
+    for n in notes:
+        for note_id in n.ids:
+            ids_to_note[note_id] = n.path.name
+    for n in notes:
+        claim = n.fields.conflicts_with.strip()
+        if not claim:
+            continue
+        target = claim.strip("[]").split("|", 1)[0].split("#", 1)[0].strip().lower()
+        if target in n.ids:
+            issues.append(
+                LintIssue(
+                    "conflict-self", "warn", n.path.name, "`Conflicts with:` points at itself"
+                )
+            )
+            continue
+        if target not in known:
+            issues.append(
+                LintIssue(
+                    "conflict-broken",
+                    "error",
+                    n.path.name,
+                    f"`Conflicts with: [[{claim}]]` resolves to no note",
+                )
+            )
+            continue
+        if resolved := ids_to_note.get(target):
+            declared[n.path.name] = resolved
+    for source, target_name in sorted(declared.items()):
+        if declared.get(target_name) != source:
+            issues.append(
+                LintIssue(
+                    "conflict-one-sided",
+                    "info",
+                    source,
+                    f"{target_name} does not declare the conflict back",
+                )
             )
 
     # Semantic duplicate candidates from the index; title-Jaccard is the

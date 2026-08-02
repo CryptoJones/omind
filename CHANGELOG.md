@@ -5,6 +5,47 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.6.0] - 2026-08-02
+
+### Added
+- **Two optional provenance fields on a note: `Confidence:` and
+  `Conflicts with:`** ([#195](https://github.com/CryptoJones/omind/issues/195)).
+  Until now a note could express exactly one provenance fact — "this replaced
+  that", via `Supersedes:`. That is a *clean ordered replacement*. Real recall
+  failures are messier: two notes that disagree, neither reviewed, and the agent
+  trusts whichever one the ranker happened to surface first. There was no way to
+  say "these disagree" or "this was never verified".
+
+  - `Confidence: high|medium|low` — absent means unknown, which is every note
+    that already exists. An unrecognised value is dropped rather than raising:
+    it arrives from hand-edited Markdown and from mesh peers running older code,
+    and a typo in one note must never make that note unreadable.
+  - `Conflicts with: [[Other]]` — **symmetric in effect even when only one side
+    declares it.** The point of the field is that the agent sees the
+    disagreement, so whichever note retrieval surfaces carries the warning.
+
+  Both round-trip through Markdown, the CLI (`omind note --confidence`,
+  `--conflicts-with`), MCP (`create-note`, `edit-note`), and the mesh merge
+  driver, exactly as `Supersedes:` does. A partial edit no longer clears them.
+
+- `recall-note` returns `confidence`, `conflicts_with`, and a `warning` naming
+  the other note — emitted **only** when the note declares them, so a note
+  without these fields costs the same tokens it did before. `search-vault` hits
+  carry both fields.
+
+- `omind lint` reports `conflict-broken` (a conflict pointing at no note) and
+  `conflict-one-sided` (the other side never acknowledged it) — retrieval treats
+  a one-sided claim as binding on both notes, so lint says so out loud.
+
+### Changed
+- Ranking: `Confidence: low` applies a gentle 0.8 penalty, so a comparable
+  verified note wins a tie. Deliberately nothing like the 0.35 superseded
+  penalty — low confidence is not obsolescence, and a hedged memory is still
+  worth recalling. Conflicts do **not** affect ranking at all: the point is to
+  show the disagreement, not to pick a winner.
+- Search index schema → v5 (the two new columns). The index rebuilds itself
+  automatically on first use; no action needed.
+
 ## [6.5.0] - 2026-08-02
 
 ### Added

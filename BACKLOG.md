@@ -75,7 +75,11 @@ five places their design is genuinely better and the idea transfers._
   its own docstring ("a process crash can still leave extra recoverable copies").
   Generalize what `omind consolidate` already prototypes into a store-level
   primitive plus `omind recover`. Skip their `approved_plan_sha256` handshake.
-- [ ] **Typed confidence + symmetric `Conflicts with:` provenance** ([#195](https://github.com/CryptoJones/omind/issues/195)) — _enhancement (memory shape)_ —
+- [x] **Typed confidence + symmetric `Conflicts with:` provenance** ([#195](https://github.com/CryptoJones/omind/issues/195)) — _enhancement (memory shape)_ —
+  shipped as two optional note fields that round-trip through Markdown, CLI, MCP, and
+  mesh merge like `Supersedes:`. A conflict binds both notes even when one side declared
+  it; retrieval surfaces the disagreement rather than resolving it; lint flags broken and
+  one-sided claims. No research-grade ledger. Original description follows.
   their claim ledger types authority, assessment, confidence, and evidence relation
   (`supports`/`contradicts`/`context`), keeping contradictions visible. omind's
   `references:` is free text and `Supersedes:` only expresses clean ordered

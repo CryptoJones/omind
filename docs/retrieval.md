@@ -44,6 +44,16 @@ Two rules keep the result honest:
 - **Superseded facts remain history, not current truth.** A note carrying
   `Superseded by:`—or targeted by another note's `Supersedes:` metadata—stays
   searchable but receives a strong ranking penalty.
+- **Self-declared low confidence loses a tie, not the race.** `Confidence: low`
+  applies a gentle penalty (0.8) so a comparable verified note wins. Low
+  confidence is not obsolescence, so it is nothing like the superseded penalty.
+- **Conflicts are surfaced, never resolved.** When a note carries
+  `Conflicts with: [[Other]]`, *both* notes come back marked with the other's
+  name — the claim is symmetric even when only one side wrote it down. Ranking
+  does not pick a winner: the agent is told the two memories disagree and can
+  read both. `omind lint` reports a conflict whose target does not exist
+  (`conflict-broken`) and one the other side never acknowledged
+  (`conflict-one-sided`).
 
 The keyword leg is graded: chunks matching *every* word of your query rank above
 chunks matching only some. That keeps a filler word ("how do I **handle**…")

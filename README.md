@@ -222,9 +222,12 @@ can read and write individual fields without stepping on each other:
 
 - a **YAML frontmatter block** — the note's OKF metadata: the required `type`
   plus `title`, `description`, `tags`, and `timestamp`;
-- a `# Title` and a `## Metadata` block (created date, `#tags`, and the mesh
-  `Rev:` Lamport stamp), kept alongside the frontmatter so existing tooling and
-  un-upgraded mesh peers keep reading it unchanged;
+- a `# Title` and a `## Metadata` block (created date, `#tags`, the mesh
+  `Rev:` Lamport stamp, and optional provenance — `Supersedes:` /
+  `Superseded by:`, `Confidence:` (`high`/`medium`/`low`), and `Conflicts with:`
+  for two memories that *disagree* rather than one replacing the other), kept
+  alongside the frontmatter so existing tooling and un-upgraded mesh peers keep
+  reading it unchanged;
 - `## Summary` / `## Details` free text;
 - `## Connections` — `[[wikilinks]]` to related notes (the graph the web UI and
   `omind lint` traverse);

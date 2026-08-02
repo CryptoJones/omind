@@ -825,3 +825,47 @@ def test_disable_ignores_disabled_bullet_in_details(mesh_store: OmiStore) -> Non
     assert not mesh_store.read_fields(name).disabled
     mesh_store.disable_note(name)
     assert mesh_store.read_fields(name).disabled
+
+
+def test_confidence_and_conflicts_round_trip(tmp_path: Path) -> None:
+    """The two provenance fields survive render -> parse (#195)."""
+    store = OmiStore(tmp_path)
+    store.create_note(
+        NoteFields(
+            title="Claim A",
+            summary="the GPU is a 1060",
+            confidence="low",
+            conflicts_with="[[Claim B]]",
+        )
+    )
+    fields = store.read_fields("Claim A.md")
+    assert fields.confidence == "low"
+    assert fields.conflicts_with == "[[Claim B]]"
+    assert "- Confidence: low" in store.read_note("Claim A.md")
+
+
+def test_absent_provenance_fields_render_nothing(tmp_path: Path) -> None:
+    """Every note written before these fields existed must be untouched."""
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="Plain", summary="s"))
+    raw = store.read_note("Plain.md")
+    assert "Confidence:" not in raw
+    assert "Conflicts with:" not in raw
+
+
+def test_unknown_confidence_is_dropped_not_fatal(tmp_path: Path) -> None:
+    """A typo arrives from hand-edited Markdown and from older mesh peers."""
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="Typo", summary="s", confidence="pretty sure"))
+    assert store.read_fields("Typo.md").confidence == ""
+    assert store.read_fields("Typo.md").summary == "s"  # note still readable
+
+
+def test_partial_edit_does_not_clear_provenance(tmp_path: Path) -> None:
+    store = OmiStore(tmp_path)
+    store.create_note(
+        NoteFields(title="Keep", summary="s", confidence="high", conflicts_with="[[Other]]")
+    )
+    store.update_note("Keep.md", NoteFields(title="Keep", summary="edited"))
+    fields = store.read_fields("Keep.md")
+    assert fields.confidence == "high" and fields.conflicts_with == "[[Other]]"

@@ -8,6 +8,7 @@ from pathlib import Path
 
 from omind import lint
 from omind.cli import main
+from omind.store import NoteFields, OmiStore
 
 
 def _omi(tmp_path: Path) -> Path:
@@ -187,3 +188,29 @@ def test_wikilink_inside_code_fence_is_not_a_link(
     )
     broken = [i for i in lint.lint_vault(omi) if i.kind == "broken-link"]
     assert broken == []
+
+
+def test_lint_flags_a_conflict_pointing_at_nothing(tmp_path: Path) -> None:
+    store = OmiStore(_omi(tmp_path))
+    store.create_note(NoteFields(title="A", summary="s", conflicts_with="[[Ghost]]"))
+    codes = {i.kind for i in lint.lint_vault(_omi(tmp_path))}
+    assert "conflict-broken" in codes
+
+
+def test_lint_flags_a_one_sided_conflict(tmp_path: Path) -> None:
+    """Retrieval binds both notes; lint says so when only one declared it."""
+    store = OmiStore(_omi(tmp_path))
+    store.create_note(NoteFields(title="A", summary="s", conflicts_with="[[B]]"))
+    store.create_note(NoteFields(title="B", summary="s"))
+    issues = {i.kind: i for i in lint.lint_vault(_omi(tmp_path))}
+    assert "conflict-one-sided" in issues
+    assert "B.md" in issues["conflict-one-sided"].detail
+
+
+def test_lint_accepts_a_mutual_conflict(tmp_path: Path) -> None:
+    store = OmiStore(_omi(tmp_path))
+    store.create_note(NoteFields(title="A", summary="s", conflicts_with="[[B]]"))
+    store.create_note(NoteFields(title="B", summary="s", conflicts_with="[[A]]"))
+    codes = {i.kind for i in lint.lint_vault(_omi(tmp_path))}
+    assert "conflict-one-sided" not in codes
+    assert "conflict-broken" not in codes
