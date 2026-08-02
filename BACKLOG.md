@@ -43,8 +43,11 @@ hardening, or docs, not defects._
   so a token-accounting failure disables the violation detector and the consult verifier
   for that call, with exit code 0 and only a `hook-failures.log` breadcrumb. Give each its
   own handler. Same shape in the `Stop` branch.
-- [ ] **Document that `omind serve` is an unauthenticated destructive API (localhost-only by design)** ([#190](https://github.com/CryptoJones/omind/issues/190)) — _docs_ —
-  the risk model lives only in a transient stderr warning; put it in `docs/`/`--help`.
+- [x] **Document that `omind serve` is an unauthenticated destructive API (localhost-only by design)** ([#190](https://github.com/CryptoJones/omind/issues/190)) — _docs_ —
+  `docs/serve.md` states the risk model: every route an unauthenticated caller reaches,
+  what already protects you and why, how to expose the port safely, and what to check if
+  it was exposed. Also in `--help`, the module docstring, the README, and a startup line
+  on every run. A test fails if a new destructive route is added without documenting it.
 
 ### From the 2026-08-02 claude-obsidian comparison
 

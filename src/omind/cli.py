@@ -206,7 +206,21 @@ def build_parser() -> argparse.ArgumentParser:
     merge_driver.add_argument("theirs", type=Path)
     merge_driver.add_argument("path_label", nargs="?", default="")
 
-    serve = sub.add_parser("serve", help="run the local web UI over an OMI memory folder")
+    serve = sub.add_parser(
+        "serve",
+        help="run the local web UI over an OMI memory folder (unauthenticated; localhost only)",
+        description=(
+            "Run the local web UI over an OMI memory folder.\n"
+            "\n"
+            "The JSON API this serves is UNAUTHENTICATED and destructive. Anything\n"
+            "that can reach the port can read every memory in the vault and rewrite\n"
+            "or delete any of them, and those writes replicate to the rest of your\n"
+            "mesh. The security boundary is the localhost bind, so keep it: prefer\n"
+            "an SSH tunnel (ssh -L 8765:127.0.0.1:8765 host) over --host 0.0.0.0 to\n"
+            "reach it from another machine. Full risk model: docs/serve.md."
+        ),
+        formatter_class=argparse.RawDescriptionHelpFormatter,
+    )
     _add_vault_args(serve)
     serve.add_argument("--host", default="127.0.0.1", help="bind host (default: 127.0.0.1)")
     serve.add_argument("--port", type=int, default=8765, help="bind port (default: 8765)")
@@ -932,6 +946,11 @@ def _run_serve(args: argparse.Namespace) -> int:
     allowed = _serve_allowed_hosts(args.host)
     print(f"omind serve -> {omi_dir}")
     print(f"open http://{args.host}:{args.port}")
+    # The risk model used to be stated only in the non-localhost warning below,
+    # which the default (and safe) localhost user never sees — so nobody who
+    # needed to understand the boundary before moving the port ever read it (#190).
+    print("  note: the API is unauthenticated — the localhost bind is the boundary "
+          "(docs/serve.md)")
     if args.reload:
         os.environ["OMIND_OMI_DIR"] = str(omi_dir)
         os.environ["OMIND_ALLOWED_HOSTS"] = ",".join(allowed)

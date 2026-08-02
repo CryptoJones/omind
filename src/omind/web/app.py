@@ -5,6 +5,14 @@
 Bound to localhost by the CLI; single-user, no auth. The JSON API is consumed
 by the static Tailwind SPA mounted at ``/``. All note access goes through
 :class:`omind.store.OmiStore`, whose ``safe_name`` blocks path traversal.
+
+**Nothing here checks who is calling.** There is no login, token, session, or
+per-request authorization: anything that can reach the port can read every
+memory and rewrite or delete any of them, and those writes replicate to the
+rest of the mesh. That is deliberate — the security boundary is the loopback
+interface — but it is the *only* boundary. The full risk model, including what
+to do if the port was exposed, is in ``docs/serve.md``; keep it in step with
+any route added here.
 """
 
 from __future__ import annotations
