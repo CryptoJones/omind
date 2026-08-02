@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 _The last of the 2026-08-01 review and 2026-08-02 comparison backlogs, released
 together rather than as another run of point versions._
 
+### Changed
+- The FTS5 `snippet()` call names its column through `_FTS_TEXT_COLUMN` instead
+  of a bare `3`. `snippet()` takes a column *number*, so inserting any column
+  before `text` silently re-points every excerpt at the wrong column rather than
+  erroring — which is exactly what happened while evaluating
+  [#193](https://github.com/CryptoJones/omind/issues/193) (declined; see
+  `BACKLOG.md`). The experiment was reverted; this guardrail is worth keeping.
+
 ### Fixed
 - **A `SCHEMA_VERSION` bump that adds a column no longer wedges an existing
   search index** ([#210](https://github.com/CryptoJones/omind/issues/210)).

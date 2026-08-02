@@ -66,14 +66,6 @@ quantized int8 vectors + RRF beats their JSON BM25 index), on multi-machine repl
 (they have none), on enforcement, and on shipping a real MCP server. What follows are the
 five places their design is genuinely better and the idea transfers._
 
-- [ ] **Contextual-prefix indexed chunks, synthetic tier only** ([#193](https://github.com/CryptoJones/omind/issues/193)) — _enhancement (retrieval)_ —
-  they implement Anthropic's Contextual Retrieval pattern: each chunk gets a 1–2
-  sentence prefix situating it in its page, and the *prefixed* text is what gets
-  indexed and embedded. omind indexes raw heading-split chunks, so a mid-note chunk
-  competes on its own words alone. Take only their zero-egress synthetic tier
-  (`<title> — <summary>. Section: <heading path>.`), not the LLM-written tiers —
-  omind's embeddings stay local. Gate it behind `omind bench --quality` and keep it
-  only if recall moves.
 - [ ] **Journaled plan→apply→recover transactions for multi-note operations** ([#194](https://github.com/CryptoJones/omind/issues/194)) — _enhancement (durability)_ —
   omind has atomic per-file replace, an advisory write lock, and version
   preconditions, but no journal and no rollback, so an interrupted multi-note
@@ -128,6 +120,26 @@ _No open items._
   after the 5.0 bridge release; `graph-neighbors` stays.
 
 ## Not planned
+
+- [ ] **Contextual-prefix indexed chunks (Anthropic Contextual Retrieval)** ([#193](https://github.com/CryptoJones/omind/issues/193), closed not-planned) — _rejected on measurement_ —
+  built behind `OMI_CONTEXTUAL_CHUNKS` and evaluated on the live 784-note vault, both
+  ways, with the semantic leg on. **recall@1 60% → 60%, recall@5 60% → 60%, MRR 0.640 →
+  0.640**, for +31% index size (13,908 → 18,248 KiB) and +20% rebuild time. Of the five
+  labelled cases, three were already rank 1 in both; the two misses went 7→8 and 13→11.
+  Noise, not signal.
+
+  The reason is the part worth remembering: **the issue's premise did not hold for omind.**
+  It assumed a mid-note chunk "competes on its own words alone", which is true of
+  claude-obsidian but not here — `_ingest` has always embedded `title + heading + tags +
+  chunk.text`, and `chunks_fts` has always given BM25 separate title/heading/tags columns.
+  omind already had contextual retrieval without the name. The prefix's only genuine
+  addition is the note's `Summary`, which on descriptive titles is largely a restatement
+  of a signal already indexed. The upstream 35–49% figure is measured against a baseline
+  that indexes bare chunks; omind is not that baseline.
+
+  Caveat kept honest: the labelled set is only 5 cases, so each is worth 20pp and an
+  effect under ~15% could hide. A 25–40 case set is worth building for retrieval work in
+  general — and would be the thing that could reopen this.
 
 - [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
 - [ ] **claude-obsidian's source capture, Canvas/Bases emitters, and methodology filing modes** — _rejected_ —

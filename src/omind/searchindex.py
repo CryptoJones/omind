@@ -81,6 +81,13 @@ _SUPERSEDED_WEIGHT = 0.35
 #: just should not outrank a comparable one that was actually verified. Much
 #: gentler than the superseded penalty — low confidence is not obsolescence.
 _LOW_CONFIDENCE_WEIGHT = 0.8
+#: 0-based position of `text` in ``chunks_fts`` — FTS5's snippet() takes a
+#: column NUMBER, not a name, so inserting any column before `text` silently
+#: re-points every excerpt at the wrong column instead of erroring. That is not
+#: hypothetical: the #193 experiment added a column ahead of it and excerpts
+#: started returning the note's title line. Keep in step with the CREATE VIRTUAL
+#: TABLE below.
+_FTS_TEXT_COLUMN = 3
 #: Only the fused head pays the extra local embedding pass.
 _RERANK_DEPTH = 20
 #: How many candidates each leg contributes before fusion.
@@ -1274,7 +1281,8 @@ class SearchIndex:
             return _collapse(str(row["text"]), max_chars)
         if expr:
             snippet = db.execute(
-                "SELECT snippet(chunks_fts, 3, '', '', '…', 24) AS s FROM chunks_fts"
+                f"SELECT snippet(chunks_fts, {_FTS_TEXT_COLUMN}, '', '', '…', 24) AS s"
+                " FROM chunks_fts"
                 " WHERE rowid = ? AND chunks_fts MATCH ?",
                 (chunk_id, expr),
             ).fetchone()
