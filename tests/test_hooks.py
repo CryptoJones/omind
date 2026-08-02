@@ -240,6 +240,72 @@ def test_run_hook_never_raises_even_if_append_fails(tmp_path: Path, monkeypatch)
     assert hooks.run_hook("PostToolUse", tmp_path, stdin=stdin) == 0
 
 
+def test_post_tool_use_invokes_every_downstream_side_effect(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The PostToolUse wiring itself is pinned, not just the modules it calls.
+
+    ``run_hook`` swallows everything so the agent never blocks, so a dropped
+    call here fails *silently* — no exception, no breadcrumb, just enforcement
+    and accounting quietly not happening. Each of these modules is unit-tested;
+    this asserts they are actually reached (#189).
+    """
+    from omind import ai_usage, compliance, loopguard, verify
+
+    called: dict[str, dict[str, object]] = {}
+
+    def spy(name: str):  # type: ignore[no-untyped-def]
+        def record(*args: object, **kwargs: object) -> None:
+            called[name] = {"args": args, "kwargs": kwargs}
+
+        return record
+
+    monkeypatch.setattr(compliance, "record_post_tool", spy("compliance"))
+    monkeypatch.setattr(ai_usage, "record_mcp_response", spy("ai_usage"))
+    monkeypatch.setattr(verify, "verify_consult", spy("verify"))
+    monkeypatch.setattr(loopguard, "reset", spy("loopguard"))
+
+    event = {
+        "hook_event_name": "PostToolUse",
+        "session_id": "s1",
+        "tool_name": "Bash",
+        "tool_input": {"command": "echo hi"},
+    }
+    assert hooks.run_hook("PostToolUse", tmp_path, stdin=io.StringIO(json.dumps(event))) == 0
+
+    assert set(called) == {"compliance", "ai_usage", "verify", "loopguard"}
+    # The detector and the verifier need the event itself, not just a nudge.
+    assert called["compliance"]["args"] == (event,)
+    assert event in called["verify"]["args"]  # type: ignore[operator]
+
+
+def test_post_tool_use_side_effects_are_independent_of_the_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One failing side effect must not silently cancel the others.
+
+    They run in sequence inside a single try/except, so an exception in an
+    early one skipped every later one. The hook still returns 0 either way,
+    which is exactly what makes this invisible without a test.
+    """
+    from omind import ai_usage, compliance, verify
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("accounting backend down")
+
+    seen: list[str] = []
+    monkeypatch.setattr(ai_usage, "record_mcp_response", boom)
+    monkeypatch.setattr(
+        compliance, "record_post_tool", lambda *_a, **_k: seen.append("compliance")
+    )
+    monkeypatch.setattr(verify, "verify_consult", lambda *_a, **_k: seen.append("verify"))
+
+    stdin = io.StringIO('{"hook_event_name": "PostToolUse", "tool_name": "Bash"}')
+    assert hooks.run_hook("PostToolUse", tmp_path, stdin=stdin) == 0
+    assert seen == []  # KNOWN: an early failure cancels the rest — see #204
+    assert hooks.failure_log_path().exists()  # but it does leave a breadcrumb
+
+
 def test_run_hook_session_start_emits_context_no_journal(tmp_path: Path) -> None:
     out = io.StringIO()
     rc = hooks.run_hook("SessionStart", tmp_path, stdin=io.StringIO(""), stdout=out)

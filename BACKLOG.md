@@ -32,9 +32,17 @@ hardening, or docs, not defects._
   `filelock.append_locked` context manager that opens with `O_NOFOLLOW`, so a symlink
   swapped in at the path cannot redirect the append. One definition of the discipline
   instead of three hand-copied copies.
-- [ ] **No regression test that run_hook(PostToolUse) invokes the compliance detector** ([#189](https://github.com/CryptoJones/omind/issues/189)) — _testing_ —
-  the compliance module is unit-tested but the *wiring* in `hooks.run_hook` is not; a dropped
-  `record_post_tool` line would fail silently with no breadcrumb. One spy test pins it.
+- [x] **No regression test that run_hook(PostToolUse) invokes the compliance detector** ([#189](https://github.com/CryptoJones/omind/issues/189)) — _testing_ —
+  one spy test now pins all four side effects of that branch — `loopguard.reset`,
+  `ai_usage.record_mcp_response`, `compliance.record_post_tool`, `verify.verify_consult` —
+  independently of policy content. The detector was covered only indirectly (via a seed
+  rule that a policy change had already forced an edit to); the other two were not covered
+  at all.
+- [ ] **One failing PostToolUse side effect silently cancels the rest** ([#204](https://github.com/CryptoJones/omind/issues/204)) — _hardening_ —
+  found while writing the #189 test. The four side effects share a single `try/except`,
+  so a token-accounting failure disables the violation detector and the consult verifier
+  for that call, with exit code 0 and only a `hook-failures.log` breadcrumb. Give each its
+  own handler. Same shape in the `Stop` branch.
 - [ ] **Document that `omind serve` is an unauthenticated destructive API (localhost-only by design)** ([#190](https://github.com/CryptoJones/omind/issues/190)) — _docs_ —
   the risk model lives only in a transient stderr warning; put it in `docs/`/`--help`.
 
