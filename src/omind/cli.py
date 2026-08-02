@@ -772,11 +772,18 @@ def _diagnose_search_index(config: SetupConfig) -> list[CheckResult]:
             )
         )
     else:
+        # WARN, not ok. This reads as a supported configuration, and it is —
+        # retrieval works. But on a real 784-note vault, turning the semantic
+        # leg on moved recall@1 from 40% to 60% and MRR from 0.42 to 0.64. A
+        # green tick for "your recall is materially worse than it could be" is
+        # the same failure mode as an index that silently stopped updating: the
+        # honest signal existed and did not read as a problem.
         results.append(
             CheckResult(
                 "search_semantic",
-                "ok",
-                f"semantic search: off (keyword path) — {semantic['reason']}",
+                "warn",
+                f"semantic search: off (keyword path) — {semantic['reason']}; "
+                "install the extra for ~20pp better recall: pip install 'omind[embed]'",
             )
         )
 

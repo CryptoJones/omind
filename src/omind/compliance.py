@@ -69,6 +69,27 @@ def _truncate(text: str, limit: int = _COMMAND_CAP) -> str:
     return collapsed if len(collapsed) <= limit else collapsed[: limit - 1] + "…"
 
 
+def _breadcrumb(context: str, exc: BaseException) -> None:
+    """Leave a trace when this module swallows an error. Never raises.
+
+    Every failure path here returns silently so the guard hook can never raise
+    into the agent — correct, but it also meant "the compliance log is being
+    written" and "every write has failed for a week" looked identical from the
+    outside. That is exactly how the Windows rotation bug (#202) hid: a
+    PermissionError absorbed by a bare `except OSError: return`, with nothing
+    anywhere to read.
+
+    Routed through the hooks failure log, which is size-capped and already the
+    place `omind doctor` looks. Imported lazily: hooks imports this module.
+    """
+    try:
+        from omind.hooks import _record_failure
+
+        _record_failure(f"compliance.{context}", exc)
+    except Exception:
+        return
+
+
 def log_event(
     kind: str,
     *,
@@ -114,8 +135,10 @@ def log_event(
             oversized = os.fstat(fd).st_size > _LOG_CAP_BYTES
         if oversized:
             _rotate_if_needed(path)
-    except OSError:
-        return
+    except OSError as exc:
+        # A dropped compliance record is a hole in the audit trail, not a
+        # nuisance: the recidivism ladder counts what is in this file.
+        _breadcrumb("log_event", exc)
 
 
 def _rotate_if_needed(path: Path) -> None:
@@ -136,14 +159,17 @@ def _rotate_if_needed(path: Path) -> None:
     try:
         # 0o600: nothing outside this user's own hooks ever takes this lock.
         fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o600)
-    except OSError:
+    except OSError as exc:
+        _breadcrumb("rotate_lock", exc)
         return
     try:
         filelock.lock_fd(fd)
         # Re-check under the lock: another process may have just rotated.
         if path.stat().st_size > _LOG_CAP_BYTES:
             os.replace(path, compliance_archive_path())
-    except OSError:
+    except OSError as exc:
+        # This is the exact swallow that hid #202 on Windows for a full release.
+        _breadcrumb("rotate", exc)
         return
     finally:
         with contextlib.suppress(OSError):
@@ -166,7 +192,10 @@ def _parse(path: Path) -> list[dict[str, Any]]:
         # strict decoding made read_events raise forever and took down the
         # checkpoint timer / doctor / corpus export until the log was hand-repaired.
         lines = path.read_text(encoding="utf-8", errors="replace").splitlines()
-    except OSError:
+    except FileNotFoundError:
+        return []  # no log yet is the normal state on a fresh machine
+    except OSError as exc:
+        _breadcrumb("read_events", exc)
         return []
     events: list[dict[str, Any]] = []
     for line in lines:

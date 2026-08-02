@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [8.1.0] - 2026-08-02
 
+### Changed
+- **`omind doctor` no longer reports a degraded search as healthy.**
+  `semantic search: off (keyword path)` was severity `ok` — a green tick. On a
+  real 784-note vault, turning the semantic leg on moved **recall@1 from 40% to
+  60% and MRR from 0.42 to 0.64**, so the tick was reporting "materially worse
+  recall than you could have" as fine. It is now a warning that names the fix
+  (`pip install 'omind[embed]'`). Same failure shape as an index that silently
+  stopped updating: the honest signal existed and did not read as a problem.
+- **The retrieval eval set went from 5 labelled cases to 30.** Five sounds
+  adequate until you notice each case is worth 20 percentage points: a change
+  that genuinely improved recall by 10% could not register at all — and did not.
+  The contextual-prefix experiment ([#193](https://github.com/CryptoJones/omind/issues/193))
+  scored *identically* on five cases while individual ranks moved underneath.
+  Five cases cannot distinguish "no effect" from "an effect this instrument
+  cannot see."
+
+  Queries are phrased the way an agent actually asks and deliberately avoid
+  echoing their target's title words, so no case is winnable by literal title
+  matching. They were authored from note contents *before* anything was
+  measured. Baseline on the reference vault: **recall@1 60.0%, recall@5 83.3%,
+  MRR 0.704** — note recall@5 is far higher than the 5-case set implied (60%),
+  which is the underpowering made visible.
+
+  Two known misses are kept rather than relabelled: one where a near-duplicate
+  note outranks the target (a *vault* problem, which `consolidate` and
+  `graph frontier` exist to find), and one genuine retrieval gap where the note
+  says "production-grade, hardened, fault-tolerant" and the query says "quality
+  bar" — no lexical overlap, and the semantic leg does not bridge it.
+
+### Fixed
+- **`compliance.py` leaves a breadcrumb when it swallows an error.** Every
+  failure path returned silently so the guard hook can never raise into the
+  agent — correct, but it made "the compliance log is being written" and "every
+  write has failed for a week" look identical from outside. That is exactly how
+  the Windows rotation bug ([#202](https://github.com/CryptoJones/omind/issues/202))
+  hid for a full release: a `PermissionError` absorbed by a bare
+  `except OSError: return`, with nothing anywhere to read. Failures now route to
+  the size-capped hook failure log that `omind doctor` already reads. A missing
+  log on a fresh machine is still silent, because that one is not a failure.
+
 ### Added
 - **`Transaction.remove()` — journaled, recoverable deletion.** The journal
   could only express writes, so a multi-note operation that *moves* notes could

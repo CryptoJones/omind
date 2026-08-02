@@ -279,3 +279,25 @@ def test_dedup_hint_warns_about_a_similar_existing_note(
     err = capsys.readouterr().err
     assert "Release Guide" in err and "similar" in err
     embed.reset()
+
+
+def test_doctor_warns_when_semantic_search_is_off(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A degraded search must not report as a green tick.
+
+    `semantic search: off` was severity "ok". On a real 784-note vault, turning
+    the semantic leg on moved recall@1 40% -> 60% and MRR 0.42 -> 0.64, so the
+    green tick reported "materially worse recall than you could have" as
+    healthy — the same shape as an index that silently stopped updating.
+    """
+    from omind import cli, embed
+    from omind.provision import SetupConfig
+
+    monkeypatch.setattr(
+        embed, "status", lambda: {"available": False, "reason": "model2vec not importable"}
+    )
+    config = SetupConfig(vault=tmp_path, folder="OMI")
+    checks = {c.key: c for c in cli._diagnose_search_index(config)}
+    assert checks["search_semantic"].level == "warn"
+    assert "omind[embed]" in checks["search_semantic"].message

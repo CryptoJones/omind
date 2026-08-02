@@ -36,22 +36,164 @@ SAMPLE_QUERIES = (
     "mesh sync conflict",
 )
 
-#: Small labelled set drawn from the durable notes present in CryptoJones's
-#: reference vault. It is intentionally human-readable and version-controlled:
-#: ranking changes should move these metrics, not merely "look better."
+#: Labelled query→note pairs scored by ``--quality``, drawn from the durable
+#: (non-generated) notes in CryptoJones's reference vault. Version-controlled
+#: and human-readable on purpose: ranking changes should move these numbers,
+#: not merely "look better."
+#:
+#: **Thirty cases, not five.** The original set was five, which sounds fine
+#: until you notice each case is worth 20 percentage points — a change that
+#: genuinely improved recall by 10% could not register at all, and did not:
+#: the contextual-prefix experiment (#193) scored *identically* on five cases
+#: while two of them moved several ranks underneath. Five cases cannot tell
+#: "no effect" from "an effect this instrument cannot see."
+#:
+#: Queries are written the way an agent actually asks — "may I stop when I
+#: reach a natural stopping point" — and deliberately avoid echoing their
+#: target's title words, so a case cannot be won by literal title matching
+#: alone. They were authored from note *contents* before anything was measured,
+#: so the set is not tuned to what already ranks well.
+#:
+#: Two cases are known misses and are kept on purpose:
+#:   * "sign in to Claude Code with a Max subscription" — a near-duplicate note
+#:     outranks the labelled target. That is a *vault* problem (one fact in two
+#:     notes), which is what ``consolidate`` and ``graph frontier`` are for.
+#:   * "what quality bar must the code I write meet" — the note says
+#:     "production-grade by default, hardened, fault-tolerant" and the query
+#:     says "quality bar". No lexical overlap, and the semantic leg does not
+#:     bridge it. A real retrieval gap, left visible rather than relabelled.
 QUALITY_CASES = (
-    ("where does long-term assistant memory live", "Omi Is The Memory.md"),
     (
-        "how does CryptoJones want the assistant to work",
-        "Working Preferences - How CryptoJones Wants Me to Operate.md",
+        'where does long-term assistant memory live',
+        'Omi Is The Memory.md',
     ),
-    ("what voice and persona should Dix use", "Voice and Persona - Dix and Shelly.md"),
     (
-        "rules for working in git repos and handling secrets",
-        "Operational Rules - Git Repos and Secrets.md",
+        'how does CryptoJones want the assistant to work',
+        'Working Preferences - How CryptoJones Wants Me to Operate.md',
     ),
-    ("how should durable memory notes be created", "Memory Workflow.md"),
+    (
+        'what voice and persona should Dix use',
+        'Voice and Persona - Dix and Shelly.md',
+    ),
+    (
+        'rules for working in git repos and handling secrets',
+        'Operational Rules - Git Repos and Secrets.md',
+    ),
+    (
+        'how should durable memory notes be created',
+        'Memory Workflow.md',
+    ),
+    (
+        'how do I sign in to Claude Code with a Max subscription',
+        'Claude Code auth Claude Max Pro subscriptions require OAuth.md',
+    ),
+    (
+        'what colour theme did we build for the terminal CLI',
+        'Cyberdeck — Claude Code custom theme (~ .claude themes cyberdeck.json).md',
+    ),
+    (
+        'which repo do I clone to start a new MCP server',
+        'mcp-server-baseline — private consulting repo for building MCP servers 2026-06-14.md',
+    ),
+    (
+        'how many pull requests before Codeberg throttles me',
+        'project-codeberg-rate-limit.md',
+    ),
+    (
+        'what is GayHydra',
+        'project-gayhydra.md',
+    ),
+    (
+        'should I hand over commands or run them myself',
+        "CJ preference — run commands yourself, don't hand them off 2026-06-13.md",
+    ),
+    (
+        'who starts the Windows test virtual machine',
+        'Win11 QEMU VM on pluto — Claude launches it (standing procedure).md',
+    ),
+    (
+        'what quality bar must the code I write meet',
+        'Engineering Standards - Scripts and Code.md',
+    ),
+    (
+        'may I stop when I reach a natural stopping point',
+        "CryptoJones operating mode — never stop at 'natural stopping points'; standing full "
+        'pre-authorization to act.md',
+    ),
+    (
+        'what should I do immediately after bouncing audio',
+        'CJ music production ALWAYS auto-open renders in VLC + DRIVE the work (proactive, '
+        "don't offload). 2026-07-04 (dix).md",
+    ),
+    (
+        'is adding tests unprompted considered scope creep',
+        'feedback-proactive-ci-testing.md',
+    ),
+    (
+        'what art direction was locked for the sequel',
+        'Flatline Sessions sequel art style LOCKED — heavy rotoscope plus retro 35mm sci-fi '
+        'grammar (2026-07-02).md',
+    ),
+    (
+        'how do I derive scales by dividing the octave equally',
+        'Slonimsky — Thesaurus of Scales and Melodic Patterns (systematic-composition '
+        'distillation).md',
+    ),
+    (
+        'how does human memory map onto musical time scales',
+        'Bob Snyder — Music and Memory An Introduction (psychoacoustics distillation).md',
+    ),
+    (
+        'what decides whether a downbeat feels early or late',
+        'Christopher Hasty — Meter as Rhythm (distillation).md',
+    ),
+    (
+        'where is the public website hosted',
+        'Web presence — www.cryptojones.dev cryptojones.dev.md',
+    ),
+    (
+        'which machine runs the dedicated game server',
+        'XSpaceWar-AI dedicated server — running it on makemake.md',
+    ),
+    (
+        'do the course pipelines share one virtualenv',
+        "Course render pipelines SHARE one venv assets models via symlinks — don't delete the "
+        'anchor (2026-06-19).md',
+    ),
+    (
+        'which local coding model won the benchmark',
+        'MacminiM2Pro_ModelShowdown — benchmark matrix run + dedicated-machine protocol '
+        '(2026-07-01).md',
+    ),
+    (
+        'are there better uncensored models for the V620 yet',
+        'Model re-sweep 2026-06-27 — late-June uncensored ≤32GB V620 candidates; incumbents '
+        'still hold.md',
+    ),
+    (
+        'which old game are we remaking in Godot',
+        'Neuromancer Godot remake — contributors to credit + project basics.md',
+    ),
+    (
+        'is the lora explainer translated into other languages',
+        'lora-for-hackers-scope.md',
+    ),
+    (
+        'when did the consult gate become graduated',
+        'omind 2.45.0 — graduated consult-gate (warn-then-enforce, #98); fleet converged '
+        '(2026-06-22).md',
+    ),
+    (
+        'what visual style did UNSDF move to',
+        'UNSDF — modern 2D JRPG art overhaul shipped to main (2026-06-30).md',
+    ),
+    (
+        'how is rhythm modelled as interference of periodicities',
+        'Schillinger — The Schillinger System of Musical Composition (systematic-composition '
+        'distillation).md',
+    ),
 )
+
 
 
 @dataclass
