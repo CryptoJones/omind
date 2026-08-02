@@ -2,4 +2,4 @@
 # Copyright 2026 Aaron K. Clark
 """omind — OMI/Obsidian memory tooling for AI agents."""
 
-__version__ = "5.0.1"
+__version__ = "6.0.0"

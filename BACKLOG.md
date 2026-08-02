@@ -14,10 +14,10 @@ shell hooks, web frontend). The codebase held up unusually well — no correctne
 bugs found. What follows are the five findings worth tracking; all are perf, test-coverage,
 hardening, or docs, not defects._
 
-- [ ] **Per-query full-table Python scans in the search weighting passes** ([#186](https://github.com/CryptoJones/omind/issues/186)) — _perf (retrieval)_ —
-  `_weight_generated` / `_weight_superseded` / `_owners` re-scan whole tables and rebuild
-  their maps on every query; key them off the index `generation` like the cached vector
-  matrix. Latency grows with vault size, not with the fused candidate set.
+- [x] **Per-query full-table Python scans in the search weighting passes** ([#186](https://github.com/CryptoJones/omind/issues/186)) — _perf (retrieval)_ —
+  `_weight_generated`, `_weight_superseded`, and `_owners` now share one map built once
+  per index `generation` and cached per process, like the packed vector matrix. Query
+  cost tracks the fused candidate set instead of the vault size.
 - [ ] **compliance.py recidivism helpers re-parse the whole append-only log per call** ([#188](https://github.com/CryptoJones/omind/issues/188)) — _perf (enforcement)_ —
   `summary()` parses twice; `learn.escalate()` runs it N+1 times. mtime/size-keyed memo +
   a size-based rotation (the log has none, unlike hook-failures.log).

@@ -176,6 +176,20 @@ class _Chunk:
     end_line: int
 
 
+@dataclass(frozen=True)
+class _Weights:
+    """Per-generation derived maps the weighting passes need on every query.
+
+    Building these costs a full scan of ``chunks`` (and ``notes``), so they are
+    computed once per index generation instead of once per query — the same
+    caching contract the packed vector matrix uses.
+    """
+
+    owners: dict[int, str]
+    generated: frozenset[int]
+    superseded: frozenset[str]
+
+
 @dataclass
 class _NoteRow:
     filename: str
@@ -461,6 +475,8 @@ class SearchIndex:
         # Per-process cache of the packed vector matrix, keyed by the index
         # generation so a refresh (here or in another process) invalidates it.
         self._matrix: tuple[str, list[int], Any, Any] | None = None
+        # Same contract for the chunk-owner map and the weighting-pass sets.
+        self._weights: tuple[str, _Weights] | None = None
         self._last_refresh_at = 0.0
         self._last_signature: tuple[int, int] | None = None
         # One connection shared across threads (the web app serves requests on a
@@ -617,6 +633,7 @@ class SearchIndex:
             db.execute("COMMIT")
             stats.seconds = time.perf_counter() - started
             self._matrix = None
+            self._weights = None
             self._last_signature = self._cheap_signature()
             self._last_refresh_at = time.monotonic()
             return stats
@@ -974,8 +991,60 @@ class SearchIndex:
             return fused
 
     def _owners(self, db: sqlite3.Connection) -> dict[int, str]:
-        rows = db.execute("SELECT id, filename FROM chunks")
-        return {int(r["id"]): str(r["filename"]) for r in rows}
+        return self._weighting(db).owners
+
+    def _weighting(self, db: sqlite3.Connection) -> _Weights:
+        """Chunk owners plus the generated/superseded sets, cached per generation.
+
+        One pass over ``chunks``/``notes`` serves the vector leg's owner filter
+        and both weighting passes, instead of three full scans per query.
+        """
+        generation = self._meta(db, "generation")
+        if self._weights is not None and self._weights[0] == generation:
+            return self._weights[1]
+        owners: dict[int, str] = {}
+        generated: set[int] = set()
+        aliases: dict[str, str] = {}
+        superseded: set[str] = set()
+        note_rows = list(
+            db.execute("SELECT filename, title, okf_type, supersedes, superseded_by FROM notes")
+        )
+        generated_notes: set[str] = set()
+        for row in note_rows:
+            filename = str(row["filename"])
+            aliases[filename.lower()] = filename
+            aliases[Path(filename).stem.lower()] = filename
+            aliases[str(row["title"]).strip().lower()] = filename
+            if str(row["superseded_by"]).strip():
+                superseded.add(filename)
+            name = Path(filename).stem.lower()
+            if (
+                str(row["okf_type"]).strip().lower()
+                in {"journal", "worklog", "checkpoint", "rollup"}
+                or name.startswith("session journal")
+                or name.startswith("worklog ")
+            ):
+                generated_notes.add(filename)
+        for row in note_rows:
+            target = str(row["supersedes"]).strip()
+            if not target:
+                continue
+            clean = target.strip("[]").split("|", 1)[0].split("#", 1)[0].strip().lower()
+            if resolved := aliases.get(clean):
+                superseded.add(resolved)
+        for row in db.execute("SELECT id, filename FROM chunks"):
+            chunk_id = int(row["id"])
+            filename = str(row["filename"])
+            owners[chunk_id] = filename
+            if filename in generated_notes:
+                generated.add(chunk_id)
+        weights = _Weights(
+            owners=owners,
+            generated=frozenset(generated),
+            superseded=frozenset(superseded),
+        )
+        self._weights = (generation, weights)
+        return weights
 
     def _recency_leg(
         self, db: sqlite3.Connection, allowed: set[str] | None, depth: int
@@ -990,59 +1059,24 @@ class SearchIndex:
             int(r["id"]) for r in rows if allowed is None or str(r["filename"]) in allowed
         ][:depth]
 
-    @staticmethod
     def _weight_generated(
-        db: sqlite3.Connection, fused: list[tuple[int, float]]
+        self, db: sqlite3.Connection, fused: list[tuple[int, float]]
     ) -> list[tuple[int, float]]:
         """De-prioritise broad machine-written journals without excluding them."""
-        rows = db.execute(
-            "SELECT c.id, c.filename, n.okf_type FROM chunks c"
-            " JOIN notes n ON n.filename = c.filename"
-        )
-        generated: set[int] = set()
-        for row in rows:
-            name = Path(str(row["filename"])).stem.lower()
-            okf_type = str(row["okf_type"]).strip().lower()
-            if (
-                okf_type in {"journal", "worklog", "checkpoint", "rollup"}
-                or name.startswith("session journal")
-                or name.startswith("worklog ")
-            ):
-                generated.add(int(row["id"]))
+        generated = self._weighting(db).generated
         weighted = [
             (chunk_id, score * _GENERATED_WEIGHT if chunk_id in generated else score)
             for chunk_id, score in fused
         ]
         return sorted(weighted, key=lambda item: (-item[1], item[0]))
 
-    @staticmethod
     def _weight_superseded(
-        db: sqlite3.Connection, fused: list[tuple[int, float]]
+        self, db: sqlite3.Connection, fused: list[tuple[int, float]]
     ) -> list[tuple[int, float]]:
         """De-rank invalidated facts while preserving their searchable history."""
-        notes = list(
-            db.execute("SELECT filename, title, supersedes, superseded_by FROM notes")
-        )
-        aliases: dict[str, str] = {}
-        superseded: set[str] = set()
-        for row in notes:
-            filename = str(row["filename"])
-            aliases[filename.lower()] = filename
-            aliases[Path(filename).stem.lower()] = filename
-            aliases[str(row["title"]).strip().lower()] = filename
-            if str(row["superseded_by"]).strip():
-                superseded.add(filename)
-        for row in notes:
-            target = str(row["supersedes"]).strip()
-            if not target:
-                continue
-            clean = target.strip("[]").split("|", 1)[0].split("#", 1)[0].strip().lower()
-            if resolved := aliases.get(clean):
-                superseded.add(resolved)
-        chunk_owner = {
-            int(row["id"]): str(row["filename"])
-            for row in db.execute("SELECT id, filename FROM chunks")
-        }
+        weights = self._weighting(db)
+        superseded = weights.superseded
+        chunk_owner = weights.owners
         weighted = [
             (
                 chunk_id,
