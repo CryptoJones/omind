@@ -192,6 +192,7 @@ def test_every_list_tool_is_bounded(server: MCPServer) -> None:
         ("graph-neighbors", {"name": "Linker", "limit": 1}),
         ("graph", {"op": "orphans", "limit": 1}),
         ("graph", {"op": "dangling", "limit": 1}),
+        ("graph", {"op": "frontier", "limit": 1}),
     ):
         page = call(server, tool, args)
         assert set(page) >= {"result", "count", "offset", "total", "has_more"}, tool
@@ -283,6 +284,12 @@ def test_graph_tools(server: MCPServer) -> None:
         {"source": "Lonely.md", "target": "Ghost"}
     ]
     assert call(server, "graph", {"op": "stats"})["notes"] == 4
+
+    ranked = call(server, "graph", {"op": "frontier"})["result"]
+    # A links B, B links C, and nothing links A: A is the frontier, C the sink.
+    assert ranked[0]["filename"] == "A.md"
+    assert ranked[0]["out_degree"] == 1 and ranked[0]["in_degree"] == 0
+    assert ranked[-1]["filename"] == "C.md"
 
 
 def test_unified_graph_validates_operation_and_path_arguments(server: MCPServer) -> None:

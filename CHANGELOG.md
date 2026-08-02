@@ -5,6 +5,34 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.5.0] - 2026-08-02
+
+### Added
+- **Frontier scoring: `omind graph frontier` and `graph(op="frontier")`**
+  ([#197](https://github.com/CryptoJones/omind/issues/197)). Every existing graph
+  op answers a structural yes/no question — is this note connected, is that link
+  broken, how big is the graph. None answered the *ranking* question: of
+  everything in the vault, what should be worked on next?
+
+  `(out_degree - in_degree) * 0.5 ** (days_since_updated / 30)`. A high score
+  means the note points at many things, few point at it, and it was touched
+  recently — memory is accumulating there and consolidation has not caught up. A
+  negative score is a hub the vault has already absorbed. An *orphan* is
+  disconnected; a *frontier* note is connected but **unabsorbed**, which is the
+  more actionable state.
+
+  Complements `omind consolidate`, which finds merge candidates by similarity:
+  this finds them by structure, catching "this note has sprawled outward for
+  weeks" rather than "these two notes say the same thing". Read-only, with no
+  write path by design. Machine-written notes (journals, worklogs, checkpoints)
+  are excluded by default — they link outward at everything by construction and
+  would otherwise fill the entire ranking — with `--include-generated` to see
+  them. Costs no new scan or state: the `links` table was already built.
+
+### Changed
+- The search index's note rows carry `mtime_ns` (already stored in the `notes`
+  table, previously not surfaced), which is what the recency decay reads.
+
 ## [6.4.0] - 2026-08-02
 
 ### Added

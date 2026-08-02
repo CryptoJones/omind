@@ -20,6 +20,11 @@ OMI/Obsidian memory tooling for AI agents: reproduce the integration on any mach
 
 *`omind graph` over an OMI vault — every note a node **coloured by its OKF `type`** (and sized by link degree), every `[[wikilink]]` an edge. Rendered from `omind graph export` (see [docs/graph-demo](docs/graph-demo/)).*
 
+`omind graph frontier` ranks that same graph by what to work on next: notes that
+reach out to many others, that few reach back to, and that were touched recently
+— memory is accumulating there and nothing has pulled it together yet. An
+*orphan* is disconnected; a *frontier* note is connected but unabsorbed.
+
 ## What it does
 
 **OMI** ("Open Mind Interface") is a folder of Markdown notes that an AI agent

@@ -201,6 +201,9 @@ class _NoteRow:
     has_title: bool = True
     tags: list[str] = field(default_factory=list)
     disabled: bool = False
+    #: Last write time recorded at ingest. Only the graph's frontier scoring
+    #: reads it; retrieval ranks on content and the `created` field.
+    mtime_ns: int = 0
 
 
 _SCHEMA = """
@@ -1242,10 +1245,11 @@ class SearchIndex:
                 has_title=bool(r["has_title"]),
                 tags=tags.get(str(r["filename"]), []),
                 disabled=bool(r["disabled"]),
+                mtime_ns=int(r["mtime_ns"]),
             )
             for r in db.execute(
                 "SELECT filename, title, created, okf_type, supersedes, superseded_by,"
-                " has_title, disabled FROM notes"
+                " has_title, disabled, mtime_ns FROM notes"
             )
         ]
 
