@@ -11,6 +11,23 @@ _The last of the 2026-08-01 review and 2026-08-02 comparison backlogs, released
 together rather than as another run of point versions._
 
 ### Fixed
+- **A `SCHEMA_VERSION` bump that adds a column no longer wedges an existing
+  search index** ([#210](https://github.com/CryptoJones/omind/issues/210)).
+  `_wipe` cleared the index with `DELETE FROM`, rows only — but `_SCHEMA` is
+  entirely `CREATE TABLE IF NOT EXISTS` and runs *before* the wipe, so on an
+  existing index file the **old column shape survived**. 6.6.0 added two columns
+  to `notes` and bumped the schema 4 → 5, after which every ingest INSERT failed
+  with `no such column: confidence`, `refresh()` and `search()` returned `None`
+  on every call, and the only repair was a manual `omind reindex --rebuild`.
+
+  Quiet by construction: retrieval fell back to the pre-index substring scan
+  (invariant 2 held), so the symptom was silently worse recall rather than an
+  error. Measured on a live 784-note vault: **recall@1 0% wedged → 60% rebuilt**,
+  MRR **0.00 → 0.64**. `_wipe` now drops the tables and re-runs `_SCHEMA`.
+
+  Latent since `SCHEMA_VERSION` was introduced — earlier bumps happened to be
+  shape-compatible. `SCHEMA_VERSION` promised a migration it never performed,
+  and nothing tested the upgrade path from a previous shape; now something does.
 - **One failing `PostToolUse` side effect no longer cancels the rest**
   ([#204](https://github.com/CryptoJones/omind/issues/204), found while writing
   the #189 test). `hooks.run_hook` ran four independent subsystems — the loop

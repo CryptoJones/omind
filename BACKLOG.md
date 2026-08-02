@@ -18,6 +18,12 @@ hardening, or docs, not defects._
   `_weight_generated`, `_weight_superseded`, and `_owners` now share one map built once
   per index `generation` and cached per process, like the packed vector matrix. Query
   cost tracks the fused candidate set instead of the vault size.
+- [x] **A `SCHEMA_VERSION` bump that adds a column wedged an existing search index** ([#210](https://github.com/CryptoJones/omind/issues/210)) — _bug (retrieval)_ —
+  shipped in 6.6.0 and caught while setting up the #193 eval gate: the baseline read
+  `recall@1 = 0%`. `_wipe` deleted rows but never dropped tables, so a new column never
+  materialised and every ingest failed silently forever. Retrieval fell back to the
+  substring scan, so it degraded quietly instead of erroring. `_wipe` now drops and
+  recreates; a test exercises the upgrade path from the previous shape.
 - [x] **Compliance-log rotation silently never fired on Windows** ([#202](https://github.com/CryptoJones/omind/issues/202)) — _bug (enforcement)_ —
   found by CI on the #188 PR, before it shipped. The rotation renamed the log while this
   process still held its fd; Windows refuses that, and the `PermissionError` was swallowed
