@@ -30,22 +30,29 @@ replication (`mesh.py`, `merge.py`). Know which subsystem you are in.
    and the caller falls back to the older, dumber path. A missing model, a
    corrupt index, a locked database, a missing FTS5 build — all degrade search;
    none may break it. Test the failure branch, not just the happy one.
-3. **All note writes go through `OmiStore`** (`notes.upsert_note` for external
+3. **Multi-note writes go through `omind.txn`.** One note at a time is already
+   atomic (same-dir temp + `os.replace`). Two or more is not, and a crash
+   between them used to leave partial state with no way back. Any new operation
+   that writes several notes must journal its pre-images through
+   `txn.Transaction` under `store.write_lock()`, or it reintroduces the gap
+   `omind recover` exists to close. Recovery refuses to overwrite a note edited
+   after the crash — that edit is newer than the pre-image.
+4. **All note writes go through `OmiStore`** (`notes.upsert_note` for external
    writers) — flock, atomic rename, Lamport `Rev:` stamping, soft delete.
    Deletes archive (`Disabled: true`); only `omind mesh purge` truly removes.
-4. **`OmiStore.safe_name` guards every read and write.** Path traversal must stay
+5. **`OmiStore.safe_name` guards every read and write.** Path traversal must stay
    impossible; there are tests enforcing this. Don't route around them.
-5. **`store.py` stays framework-free.** No FastAPI, no MCP. The CLI and the web
+6. **`store.py` stays framework-free.** No FastAPI, no MCP. The CLI and the web
    app both build on it.
-6. **Credential notes are de-prioritised** in search and in the gate's
+7. **Credential notes are de-prioritised** in search and in the gate's
    suggestions unless the query is itself about credentials
    (`retrieve._CREDENTIAL_PENALTY`). The gate must never steer an agent into the
    secrets notes. This is load-bearing, not decoration.
-7. **No MCP tool may return unbounded output.** Every list-shaped tool pages
+8. **No MCP tool may return unbounded output.** Every list-shaped tool pages
    (`limit`, `offset`, `total`, `has_more`) via `server._page`. `list-notes` once
    returned ~90,800 tokens in a single result; `tests/test_server.py::
    test_every_list_tool_is_bounded` exists so a new tool cannot regress that.
-8. **Reserved files are not memories.** `index.md` and `Memory Template.md` are
+9. **Reserved files are not memories.** `index.md` and `Memory Template.md` are
    scaffolding; reading one does *not* clear the consult gate
    (`paths.NON_CONSULT_FILENAMES` — an anti-dodge measure, issue #109).
 
