@@ -55,8 +55,21 @@ PREPARED = "prepared"
 COMMITTED = "committed"
 
 
-def _sha(data: bytes) -> str:
-    return hashlib.sha256(data).hexdigest()
+def _sha(text: str) -> str:
+    """Identity of a note's *content*, independent of line-ending translation.
+
+    ``_atomic_write`` writes in text mode, so on Windows every ``\n`` reaches
+    the disk as ``\r\n``. Hashing the raw bytes therefore never matched what we
+    had just written, every file looked like somebody else's edit, and recovery
+    refused to roll back anything at all — the feature was inert on Windows and
+    silent about it. Normalise, then hash.
+    """
+    return hashlib.sha256(text.replace("\r\n", "\n").encode("utf-8")).hexdigest()
+
+
+def _sha_bytes(data: bytes) -> str:
+    """Content identity for bytes read back off disk."""
+    return _sha(data.decode("utf-8", errors="replace"))
 
 
 def _fsync_path(path: Path) -> None:
@@ -200,7 +213,7 @@ class Transaction:
         directory = self._dir()
         directory.mkdir(parents=True, exist_ok=True)
         for index, entry in enumerate(self._entries):
-            entry.new_sha = _sha(entry.content.encode("utf-8"))
+            entry.new_sha = _sha(entry.content)
             try:
                 prior = entry.path.read_bytes()
             except FileNotFoundError:
@@ -209,7 +222,7 @@ class Transaction:
             except OSError as exc:
                 raise TransactionError(f"cannot read {entry.path.name}: {exc}") from exc
             entry.existed = True
-            entry.prior_sha = _sha(prior)
+            entry.prior_sha = _sha_bytes(prior)
             preimage = self._preimage_path(index)
             preimage.write_bytes(prior)
             _fsync_path(preimage)
@@ -292,7 +305,7 @@ def _rollback_journal(directory: Path, writer: Any) -> RecoveryReport:
         existed = bool(raw.get("existed"))
         try:
             current = path.read_bytes()
-            current_sha = _sha(current)
+            current_sha = _sha_bytes(current)
         except FileNotFoundError:
             current_sha = ""
         except OSError:

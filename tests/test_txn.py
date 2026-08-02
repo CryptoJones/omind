@@ -257,3 +257,29 @@ def test_prepare_records_every_target_in_the_journal(omi: Path) -> None:
     assert entries["A.md"]["existed"] is True and entries["A.md"]["prior_sha"]
     assert entries["B.md"]["existed"] is False and not entries["B.md"]["prior_sha"]
     assert all(e["new_sha"] for e in payload["entries"])  # the undo proof
+
+
+def test_rollback_recognizes_its_own_write_after_line_ending_translation(
+    omi: Path,
+) -> None:
+    """CRLF on disk must not read as "somebody else edited this" (Windows).
+
+    `_atomic_write` writes in text mode, so on Windows every `\\n` lands as
+    `\\r\\n`. Hashing raw bytes made the file we had just written match neither
+    the pre-image nor our intended content, so recovery classified *everything*
+    as a conflict and rolled back nothing — the feature was inert on Windows and
+    said nothing about it. Both Windows CI legs caught it.
+
+    Reproduced here on any platform by writing the translated bytes directly.
+    """
+    a = omi / "A.md"
+    a.write_bytes(b"old A\r\n")
+    t = txn.Transaction(omi)
+    t.write(a, "new A\n")
+    t.prepare()
+    a.write_bytes(b"new A\r\n")  # what the writer leaves on a Windows disk
+
+    report = txn.recover(omi, _atomic_write)[0]
+    assert report.clean, f"CRLF read as a foreign edit: {report.conflicts}"
+    assert report.restored == ["A.md"]
+    assert a.read_text().replace("\r\n", "\n") == "old A\n"

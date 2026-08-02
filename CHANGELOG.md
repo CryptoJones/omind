@@ -38,6 +38,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   An in-process failure rolls itself back, so `create_and_disable_sources` needs
   no manual `recover` at all; the journal is for the case where the process dies.
 
+  Content identity is hashed over line-ending-normalized text, not raw bytes.
+  `_atomic_write` writes in text mode, so on Windows every `\n` reaches the disk
+  as `\r\n` — hashing bytes meant a file never matched what had just been written
+  to it, every note read as a foreign edit, and recovery rolled back *nothing*.
+  Both Windows CI legs caught it before merge.
+
   Journals live in the state dir, never the vault: they describe this machine's
   interrupted filesystem work, are meaningless to a mesh peer, and must not
   replicate (invariant 1).
