@@ -541,11 +541,22 @@ class SearchIndex:
         return str(row["value"]) if row else ""
 
     def _wipe(self, db: sqlite3.Connection) -> None:
-        """Drop everything: the schema or the embedding model changed, so every
-        stored vector and every FTS row is suspect."""
+        """Drop and recreate everything: the schema or the embedding model
+        changed, so every stored vector and every FTS row is suspect.
+
+        This must ``DROP``, not ``DELETE``. ``_SCHEMA`` is all
+        ``CREATE TABLE IF NOT EXISTS``, so deleting rows leaves the *old column
+        shape* in place — and a ``SCHEMA_VERSION`` bump that adds a column then
+        made every INSERT fail with "no such column" forever. The index stayed
+        empty, `refresh()` and `search()` returned ``None`` on every call, and
+        the only repair was a manual `omind reindex --rebuild`. Retrieval fell
+        back to the pre-index substring scan (invariant 2 held), so the symptom
+        was silently worse results rather than an error.
+        """
         for table in ("notes", "note_tags", "chunks", "chunks_fts", "vectors", "links", "meta"):
             with contextlib.suppress(sqlite3.Error):
-                db.execute(f"DELETE FROM {table}")
+                db.execute(f"DROP TABLE IF EXISTS {table}")
+        db.executescript(_SCHEMA)
         db.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?), ('model', ?)",
             (str(SCHEMA_VERSION), self.model),

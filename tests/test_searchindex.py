@@ -10,6 +10,7 @@ Real embedding quality is covered by test_embed.py.
 
 from __future__ import annotations
 
+import sqlite3
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -507,3 +508,34 @@ def test_a_conflict_is_surfaced_on_both_notes(omi: Path) -> None:
     by_name = {hit.filename: hit for hit in hits}
     assert by_name["Claim A.md"].conflicts_with == "Claim B.md"
     assert by_name["Claim B.md"].conflicts_with == "Claim A.md"  # symmetric
+
+
+def test_a_schema_bump_that_adds_a_column_rebuilds_the_index(omi: Path) -> None:
+    """A SCHEMA_VERSION bump must survive an existing index file.
+
+    `_SCHEMA` is all CREATE TABLE IF NOT EXISTS, so wiping by DELETE left the
+    old *column shape* in place: every INSERT then failed with "no such column"
+    and the index stayed empty forever — refresh() and search() returning None
+    on every call, repairable only by a manual `omind reindex --rebuild`.
+    Retrieval fell back to the substring scan, so the symptom was quietly worse
+    results rather than an error.
+    """
+    _note(omi, "Handbook", "curated operations", ["ops"], details="zebracorn rollback")
+    index = searchindex.SearchIndex(omi)
+    assert index.refresh() is not None
+    path = index.path()
+    index.close()
+
+    # Age the file into the shape a previous release wrote: two fewer columns,
+    # and the schema number that shipped with them.
+    db = sqlite3.connect(path)
+    db.execute("ALTER TABLE notes DROP COLUMN confidence")
+    db.execute("ALTER TABLE notes DROP COLUMN conflicts_with")
+    db.execute("INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', '4')")
+    db.commit()
+    db.close()
+
+    upgraded = searchindex.SearchIndex(omi)
+    stats = upgraded.refresh()
+    assert stats is not None and stats.notes == 1  # rebuilt, not wedged
+    assert [hit.filename for hit in (upgraded.search("zebracorn") or [])] == ["Handbook.md"]
