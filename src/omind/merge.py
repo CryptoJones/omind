@@ -40,6 +40,7 @@ from omind.store import (
     TEMPLATE_SECTIONS,
     ActionItem,
     NoteFields,
+    _atomic_write,
     parse_note,
     render_fields,
     split_sections,
@@ -384,7 +385,11 @@ def run_merge_driver(
         ours_md = ours_path.read_text(encoding="utf-8")
         theirs_md = theirs_path.read_text(encoding="utf-8")
         merged, clean, messages = merge_note_texts(base_md, ours_md, theirs_md)
-        ours_path.write_text(merged, encoding="utf-8")
+        # Atomic, not a journaled transaction: git hands the driver exactly one
+        # file (%A), so there is no multi-note window to roll back. The gap that
+        # DID exist here was `write_text` truncating in place — a crash mid-merge
+        # left a torn note *and* git believing the merge succeeded (#194).
+        _atomic_write(ours_path, merged)
     except (OSError, UnicodeError) as exc:
         print(f"omind merge-driver: {label}: {exc}", file=sys.stderr)
         return 1

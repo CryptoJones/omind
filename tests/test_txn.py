@@ -317,3 +317,31 @@ def test_rollback_never_routes_a_preimage_through_the_text_writer(
     monkeypatch.setattr(store, "_atomic_write", windows_like_text_writer)
     assert txn.recover(omi)[0].clean
     assert a.read_bytes() == original  # byte-identical, not merely equivalent
+
+
+def test_a_journaled_removal_is_rolled_back(omi: Path) -> None:
+    """Deleting is journaled like writing, so an interrupted move is undone."""
+    doomed = omi / "Stray.md"
+    doomed.write_bytes(b"# Stray\n\n- entry one\n")
+    keeper = omi / "Target.md"
+    keeper.write_bytes(b"# Target\n")
+
+    t = txn.Transaction(omi)
+    t.write(keeper, "# Target\n\n- entry one\n")
+    t.remove(doomed)
+    t.prepare()
+    t.apply(_atomic_write)
+    assert not doomed.exists()  # the move happened
+
+    assert txn.recover(omi)[0].clean  # ...then the process died before commit
+    assert doomed.read_bytes() == b"# Stray\n\n- entry one\n"  # back, byte-exact
+    assert keeper.read_bytes() == b"# Target\n"
+
+
+def test_removing_a_file_that_never_existed_is_not_a_conflict(omi: Path) -> None:
+    t = txn.Transaction(omi)
+    t.remove(omi / "Ghost.md")
+    t.prepare()
+    t.apply(_atomic_write)
+    report = txn.recover(omi)[0]
+    assert report.clean and report.skipped == ["Ghost.md"]

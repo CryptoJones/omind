@@ -26,7 +26,7 @@ from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from omind import paths
+from omind import paths, txn
 from omind.hooks import JOURNAL_TAGS, action_bullets, journal_dir
 from omind.store import NoteFields, OmiStore, _atomic_write, render_fields, today
 
@@ -106,20 +106,36 @@ def migrate_journals(omi_dir: Path | str) -> list[str]:
     # Same-package use of the store's private lock/index helpers: the move plus
     # index regeneration must be one critical section against other writers.
     with store._write_lock():
-        for stray in find_stray_journals(store.omi_dir):
+        strays = find_stray_journals(store.omi_dir)
+        if not strays:
+            return moved
+        # Journaled: this appends to one note and deletes another, per stray. A
+        # crash between the two used to lose a day of journal entries outright,
+        # with no way back (#194). Now an interrupted run is undone by
+        # `omind recover`.
+        transaction = txn.Transaction(store.omi_dir)
+        target_dir.mkdir(parents=True, exist_ok=True)
+        for stray in strays:
             target = target_dir / stray.name
+            stray_text = stray.read_text(encoding="utf-8", errors="replace")
             if target.is_file():
-                bullets = action_bullets(stray.read_text(encoding="utf-8", errors="replace"))
+                bullets = action_bullets(stray_text)
+                existing = target.read_text(encoding="utf-8", errors="replace")
                 if bullets:
-                    with target.open("a", encoding="utf-8") as fh:
-                        fh.write("\n".join(bullets) + "\n")
-                stray.unlink()
+                    merged = existing.rstrip("\n") + "\n" + "\n".join(bullets) + "\n"
+                    transaction.write(target, merged)
             else:
-                target_dir.mkdir(parents=True, exist_ok=True)
-                stray.rename(target)
+                transaction.write(target, stray_text)
+            transaction.remove(stray)
             moved.append(stray.name)
-        if moved:
-            store._write_index()
+        transaction.prepare()
+        try:
+            transaction.apply(_atomic_write)
+        except BaseException:
+            transaction.rollback()
+            raise
+        transaction.commit()
+        store._write_index()
     return moved
 
 
