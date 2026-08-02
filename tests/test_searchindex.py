@@ -471,3 +471,39 @@ def test_stats_reports_what_is_indexed(omi: Path) -> None:
     stats = idx.stats()
     assert stats is not None
     assert stats["notes"] == 1 and int(str(stats["chunks"])) >= 1
+
+
+def test_low_confidence_ranks_below_a_verified_note(omi: Path) -> None:
+    detail = "zebracorn cluster failover procedure"
+    _note(omi, "Verified", "checked", ["ops"], details=detail)
+    hedged = _note(omi, "Hedged", "unchecked", ["ops"], details=detail)
+    hedged.write_text(
+        hedged.read_text(encoding="utf-8").replace(
+            "- Tags: #ops", "- Tags: #ops\n- Confidence: low"
+        ),
+        encoding="utf-8",
+    )
+    hits = searchindex.SearchIndex(omi).search("zebracorn failover") or []
+    by_name = {hit.filename: hit for hit in hits}
+    assert set(by_name) == {"Verified.md", "Hedged.md"}
+    assert by_name["Verified.md"].score > by_name["Hedged.md"].score
+    # Still recalled — low confidence is not obsolescence.
+    assert by_name["Hedged.md"].score > 0
+    assert by_name["Hedged.md"].confidence == "low"
+
+
+def test_a_conflict_is_surfaced_on_both_notes(omi: Path) -> None:
+    """Only one side declares it; both sides must carry the warning (#195)."""
+    detail = "zebracorn gpu model"
+    a = _note(omi, "Claim A", "says 1060", ["hw"], details=detail)
+    _note(omi, "Claim B", "says V620", ["hw"], details=detail)
+    a.write_text(
+        a.read_text(encoding="utf-8").replace(
+            "- Tags: #hw", "- Tags: #hw\n- Conflicts with: [[Claim B]]"
+        ),
+        encoding="utf-8",
+    )
+    hits = searchindex.SearchIndex(omi).search("zebracorn gpu") or []
+    by_name = {hit.filename: hit for hit in hits}
+    assert by_name["Claim A.md"].conflicts_with == "Claim B.md"
+    assert by_name["Claim B.md"].conflicts_with == "Claim A.md"  # symmetric

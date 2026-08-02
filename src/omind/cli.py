@@ -338,6 +338,17 @@ def build_parser() -> argparse.ArgumentParser:
     note.add_argument("--related-to", default="", help="free-text 'related to' line")
     note.add_argument("--supersedes", default="", help="older note this fact supersedes")
     note.add_argument("--superseded-by", default="", help="newer note that supersedes this fact")
+    note.add_argument(
+        "--confidence",
+        default="",
+        choices=("", "high", "medium", "low"),
+        help="how well established this memory is (default: unstated)",
+    )
+    note.add_argument(
+        "--conflicts-with",
+        default="",
+        help="a note this memory DISAGREES with (use --supersedes when it cleanly replaces it)",
+    )
     note.add_argument("--connections", default="", help="comma-separated note titles to [[link]]")
     note.add_argument(
         "--connection",
@@ -1317,6 +1328,8 @@ def _run_note(args: argparse.Namespace) -> int:
         tags=_split_csv(args.tags),
         related_to=args.related_to.strip(),
         supersedes=args.supersedes.strip(),
+        confidence=args.confidence.strip(),
+        conflicts_with=args.conflicts_with.strip(),
         superseded_by=args.superseded_by.strip(),
         # CSV titles plus any repeatable --connection (exact titles, comma-safe).
         connections=(

@@ -264,7 +264,10 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         name="create-note",
         description=(
             "Create a memory note. Lists: tags (no leading #), connections "
-            "([[wikilink]] targets), references, action_items ('[x] text' = done)."
+            "([[wikilink]] targets), references, action_items ('[x] text' = done). "
+            "confidence: high|medium|low, omit if unknown. conflicts_with: a "
+            "[[wikilink]] to a memory this one DISAGREES with (use supersedes "
+            "instead when this cleanly replaces the older fact)."
         ),
     )
     def create_note(
@@ -275,6 +278,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         related_to: str = "",
         supersedes: str = "",
         superseded_by: str = "",
+        confidence: str = "",
+        conflicts_with: str = "",
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
@@ -287,6 +292,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             related_to=related_to,
             supersedes=supersedes,
             superseded_by=superseded_by,
+            confidence=confidence,
+            conflicts_with=conflicts_with,
             connections=connections or [],
             action_items=_parse_action_items(action_items or []),
             references=references or [],
@@ -311,6 +318,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         related_to: str | None = None,
         supersedes: str | None = None,
         superseded_by: str | None = None,
+        confidence: str | None = None,
+        conflicts_with: str | None = None,
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
@@ -331,6 +340,10 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             fields.supersedes = supersedes
         if superseded_by is not None:
             fields.superseded_by = superseded_by
+        if confidence is not None:
+            fields.confidence = confidence
+        if conflicts_with is not None:
+            fields.conflicts_with = conflicts_with
         if connections is not None:
             fields.connections = connections
         if action_items is not None:

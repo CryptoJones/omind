@@ -180,6 +180,12 @@ class NoteFields:
     related_to: str = ""
     supersedes: str = ""
     superseded_by: str = ""
+    # Two optional provenance fields (#195). `Supersedes:` can only express a
+    # clean ordered replacement; real recall failures are messier — two notes
+    # that disagree, neither reviewed. Absent means "unknown", which is every
+    # note written before these existed, so absence must stay the default.
+    confidence: str = ""  # "high" | "medium" | "low"; see CONFIDENCE_LEVELS
+    conflicts_with: str = ""  # a [[wikilink]], symmetric like Supersedes
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
@@ -227,6 +233,8 @@ class NoteFields:
             related_to=str(data.get("related_to", "")).strip(),
             supersedes=str(data.get("supersedes", "")).strip(),
             superseded_by=str(data.get("superseded_by", "")).strip(),
+            confidence=_clean_confidence(data.get("confidence", "")),
+            conflicts_with=str(data.get("conflicts_with", "")).strip(),
             connections=[str(c).strip() for c in (data.get("connections") or []) if str(c).strip()],
             action_items=items,
             references=[str(r).strip() for r in (data.get("references") or []) if str(r).strip()],
@@ -257,10 +265,32 @@ class NoteSummary:
     #: so a listing entry costs no more than it did before.
     excerpt: str = ""
     score: float = 0.0
+    #: Search-only provenance (#195): the note this one is in conflict with
+    #: (either side may declare it), and its self-declared confidence. Both
+    #: empty unless the note carries the field, so nothing changes for the
+    #: notes that don't.
+    conflicts_with: str = ""
+    confidence: str = ""
 
 
 def _clean_tag(tag: object) -> str:
     return str(tag).lstrip("#").strip()
+
+
+#: The closed vocabulary for a note's ``Confidence:``. Absent — every note
+#: written before the field existed — means unknown, and is not an error.
+CONFIDENCE_LEVELS = ("high", "medium", "low")
+
+
+def _clean_confidence(value: object) -> str:
+    """Normalise a confidence to the closed vocabulary, or ``""``.
+
+    Unrecognised values are dropped rather than raising: this arrives from
+    hand-edited Markdown and from mesh peers running older code, and a typo in
+    one note must never make the note unreadable.
+    """
+    level = str(value).strip().lower()
+    return level if level in CONFIDENCE_LEVELS else ""
 
 
 def today() -> str:
@@ -465,6 +495,8 @@ def parse_note(md: str) -> NoteFields:
     related_to = ""
     supersedes = ""
     superseded_by = ""
+    confidence = ""
+    conflicts_with = ""
     rev = ""
     disabled = False
     tags: list[str] = []
@@ -479,6 +511,10 @@ def parse_note(md: str) -> NoteFields:
             supersedes = m.group(1).strip()
         elif m := re.match(r"^\s*-\s*Superseded by:\s*(.*)$", line):
             superseded_by = m.group(1).strip()
+        elif m := re.match(r"^\s*-\s*Confidence:\s*(.*)$", line):
+            confidence = _clean_confidence(m.group(1))
+        elif m := re.match(r"^\s*-\s*Conflicts with:\s*(.*)$", line):
+            conflicts_with = m.group(1).strip()
         elif m := _REV_LINE_RE.match(line):
             rev = m.group(1).strip()
         elif _DISABLED_LINE_RE.match(line):
@@ -528,6 +564,8 @@ def parse_note(md: str) -> NoteFields:
         related_to=related_to,
         supersedes=supersedes,
         superseded_by=superseded_by,
+        confidence=confidence,
+        conflicts_with=conflicts_with,
         connections=[c.strip() for c in connections if c.strip()],
         action_items=action_items,
         references=references,
@@ -566,6 +604,10 @@ def render_fields(f: NoteFields) -> str:
         out.append(f"- Supersedes: {f.supersedes}")
     if f.superseded_by:
         out.append(f"- Superseded by: {f.superseded_by}")
+    if f.confidence:
+        out.append(f"- Confidence: {f.confidence}")
+    if f.conflicts_with:
+        out.append(f"- Conflicts with: {f.conflicts_with}")
     if f.rev:
         out.append(f"- Rev: {f.rev}")
     if f.disabled:
@@ -995,7 +1037,15 @@ class OmiStore:
             if summary is None:
                 continue  # indexed a note that has since been deleted
             # replace(), not mutation: ``summary`` is the shared cached instance.
-            results.append(replace(summary, excerpt=hit.excerpt, score=round(hit.score, 6)))
+            results.append(
+                replace(
+                    summary,
+                    excerpt=hit.excerpt,
+                    score=round(hit.score, 6),
+                    conflicts_with=hit.conflicts_with,
+                    confidence=hit.confidence,
+                )
+            )
         return results
 
     def _scan_search(
@@ -1303,6 +1353,13 @@ class OmiStore:
                 fields.supersedes = current.supersedes
             if not fields.superseded_by:
                 fields.superseded_by = current.superseded_by
+            # Same inheritance for the provenance fields (#195): a partial edit
+            # that carries neither must not silently clear a note's confidence
+            # or drop a recorded conflict.
+            if not fields.confidence:
+                fields.confidence = current.confidence
+            if not fields.conflicts_with:
+                fields.conflicts_with = current.conflicts_with
             # A multi-section body supplied through `details` (the only such
             # field the MCP/CLI API exposes) carries ## H2s that read back as
             # extras. Hoist them now so they REPLACE the same-named inherited

@@ -59,7 +59,7 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 from omind import paths
 
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
-SCHEMA_VERSION = 4
+SCHEMA_VERSION = 5
 
 
 #: RRF constant. 60 is the value from the original TREC paper and what every
@@ -77,6 +77,10 @@ _W_RECENCY = 0.25
 _GENERATED_WEIGHT = 0.75
 #: Superseded notes remain searchable history, but should not present as current.
 _SUPERSEDED_WEIGHT = 0.35
+#: A note that declares ``Confidence: low`` is still a memory worth having; it
+#: just should not outrank a comparable one that was actually verified. Much
+#: gentler than the superseded penalty — low confidence is not obsolescence.
+_LOW_CONFIDENCE_WEIGHT = 0.8
 #: Only the fused head pays the extra local embedding pass.
 _RERANK_DEPTH = 20
 #: How many candidates each leg contributes before fusion.
@@ -131,6 +135,12 @@ class Hit:
     keyword_rank: int = 0
     vector_rank: int = 0
     recency_rank: int = 0
+    #: The note this one declares (or is declared to be) in conflict with, if
+    #: any. Surfaced so an agent sees a disagreement instead of silently
+    #: trusting whichever side the ranker happened to put first (#195).
+    conflicts_with: str = ""
+    #: "high" | "medium" | "low"; "" when the note declares none.
+    confidence: str = ""
 
 
 @dataclass
@@ -188,6 +198,10 @@ class _Weights:
     owners: dict[int, str]
     generated: frozenset[int]
     superseded: frozenset[str]
+    low_confidence: frozenset[str]
+    #: filename -> the filename it declares a conflict with, resolved through
+    #: the same alias map ``superseded`` uses. Symmetric: both sides are keyed.
+    conflicts: dict[str, str]
 
 
 @dataclass
@@ -198,6 +212,8 @@ class _NoteRow:
     okf_type: str = ""
     supersedes: str = ""
     superseded_by: str = ""
+    confidence: str = ""
+    conflicts_with: str = ""
     has_title: bool = True
     tags: list[str] = field(default_factory=list)
     disabled: bool = False
@@ -214,6 +230,8 @@ CREATE TABLE IF NOT EXISTS notes (
     okf_type TEXT NOT NULL DEFAULT '',
     supersedes TEXT NOT NULL DEFAULT '',
     superseded_by TEXT NOT NULL DEFAULT '',
+    confidence TEXT NOT NULL DEFAULT '',
+    conflicts_with TEXT NOT NULL DEFAULT '',
     has_title INTEGER NOT NULL DEFAULT 1,
     disabled INTEGER NOT NULL DEFAULT 0,
     mtime_ns INTEGER NOT NULL DEFAULT 0,
@@ -674,6 +692,8 @@ class SearchIndex:
             okf_type=fields.okf_type.strip() or derive_okf_type(fields.tags),
             supersedes=fields.supersedes,
             superseded_by=fields.superseded_by,
+            confidence=fields.confidence,
+            conflicts_with=fields.conflicts_with,
             has_title=bool(fields.title),
             tags=fields.tags,
             disabled=fields.disabled,
@@ -681,7 +701,8 @@ class SearchIndex:
         self._forget(db, path.name)
         db.execute(
             "INSERT INTO notes(filename, title, created, okf_type, supersedes, superseded_by,"
-            " has_title, disabled, mtime_ns, size, sha) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " confidence, conflicts_with, has_title, disabled, mtime_ns, size, sha)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.filename,
                 row.title,
@@ -689,6 +710,8 @@ class SearchIndex:
                 row.okf_type,
                 row.supersedes,
                 row.superseded_by,
+                row.confidence,
+                row.conflicts_with,
                 int(row.has_title),
                 int(row.disabled),
                 st.st_mtime_ns,
@@ -812,6 +835,7 @@ class SearchIndex:
             fused = self._rerank(db, query, fused)
             fused = self._weight_generated(db, fused)
             fused = self._weight_superseded(db, fused)
+            fused = self._weight_confidence(db, fused)
             if not fused:
                 return []
             ranks = {
@@ -1010,8 +1034,13 @@ class SearchIndex:
         aliases: dict[str, str] = {}
         superseded: set[str] = set()
         note_rows = list(
-            db.execute("SELECT filename, title, okf_type, supersedes, superseded_by FROM notes")
+            db.execute(
+                "SELECT filename, title, okf_type, supersedes, superseded_by,"
+                " confidence, conflicts_with FROM notes"
+            )
         )
+        low_confidence: set[str] = set()
+        conflict_claims: list[tuple[str, str]] = []
         generated_notes: set[str] = set()
         for row in note_rows:
             filename = str(row["filename"])
@@ -1020,6 +1049,10 @@ class SearchIndex:
             aliases[str(row["title"]).strip().lower()] = filename
             if str(row["superseded_by"]).strip():
                 superseded.add(filename)
+            if str(row["confidence"]).strip().lower() == "low":
+                low_confidence.add(filename)
+            if claim := str(row["conflicts_with"]).strip():
+                conflict_claims.append((filename, claim))
             name = Path(filename).stem.lower()
             if (
                 str(row["okf_type"]).strip().lower()
@@ -1035,6 +1068,17 @@ class SearchIndex:
             clean = target.strip("[]").split("|", 1)[0].split("#", 1)[0].strip().lower()
             if resolved := aliases.get(clean):
                 superseded.add(resolved)
+        # A conflict is symmetric even when only one side declares it: the
+        # point of the field is that the agent sees the disagreement, and
+        # whichever note the ranker surfaced must carry the warning.
+        conflicts: dict[str, str] = {}
+        for filename, claim in conflict_claims:
+            clean = claim.strip("[]").split("|", 1)[0].split("#", 1)[0].strip().lower()
+            other = aliases.get(clean)
+            if other is None or other == filename:
+                continue  # dangling or self-referential; lint reports it
+            conflicts.setdefault(filename, other)
+            conflicts.setdefault(other, filename)
         for row in db.execute("SELECT id, filename FROM chunks"):
             chunk_id = int(row["id"])
             filename = str(row["filename"])
@@ -1045,6 +1089,8 @@ class SearchIndex:
             owners=owners,
             generated=frozenset(generated),
             superseded=frozenset(superseded),
+            low_confidence=frozenset(low_confidence),
+            conflicts=conflicts,
         )
         self._weights = (generation, weights)
         return weights
@@ -1091,6 +1137,28 @@ class SearchIndex:
         ]
         return sorted(weighted, key=lambda item: (-item[1], item[0]))
 
+    def _weight_confidence(
+        self, db: sqlite3.Connection, fused: list[tuple[int, float]]
+    ) -> list[tuple[int, float]]:
+        """Nudge self-declared low-confidence notes below verified ones.
+
+        Deliberately gentle: a low-confidence memory is still a memory worth
+        recalling, it just should not beat a comparable one that was checked.
+        Unlike superseded, this is not obsolescence.
+        """
+        weights = self._weighting(db)
+        low, owners = weights.low_confidence, weights.owners
+        if not low:
+            return fused
+        weighted = [
+            (
+                chunk_id,
+                score * _LOW_CONFIDENCE_WEIGHT if owners.get(chunk_id) in low else score,
+            )
+            for chunk_id, score in fused
+        ]
+        return sorted(weighted, key=lambda item: (-item[1], item[0]))
+
     def _listing(
         self, db: sqlite3.Connection, allowed: set[str] | None, limit: int
     ) -> list[Hit]:
@@ -1122,11 +1190,13 @@ class SearchIndex:
         from omind import retrieve
 
         task_is_cred = bool(retrieve._tokens(query) & retrieve._CREDENTIAL_STEMS)
+        weights = self._weighting(db)
         hits: list[Hit] = []
         seen: set[str] = set()
         for chunk_id, score in fused:
             row = db.execute(
                 "SELECT c.filename AS filename, c.heading AS heading, n.title AS title,"
+                " n.confidence AS confidence,"
                 " (SELECT group_concat(tag, ' ') FROM note_tags t WHERE t.filename = c.filename)"
                 " AS tags FROM chunks c JOIN notes n ON n.filename = c.filename WHERE c.id = ?",
                 (chunk_id,),
@@ -1149,6 +1219,8 @@ class SearchIndex:
                         db, chunk_id, expr, filename=name, max_chars=excerpt_chars
                     ),
                     score=score,
+                    conflicts_with=weights.conflicts.get(name, ""),
+                    confidence=str(row["confidence"] or ""),
                     keyword_rank=ranks["keyword"].get(chunk_id, 0),
                     vector_rank=ranks["vector"].get(chunk_id, 0),
                 )
@@ -1241,6 +1313,8 @@ class SearchIndex:
                 created=str(r["created"]),
                 okf_type=str(r["okf_type"]),
                 supersedes=str(r["supersedes"]),
+                confidence=str(r["confidence"]),
+                conflicts_with=str(r["conflicts_with"]),
                 superseded_by=str(r["superseded_by"]),
                 has_title=bool(r["has_title"]),
                 tags=tags.get(str(r["filename"]), []),
@@ -1249,7 +1323,7 @@ class SearchIndex:
             )
             for r in db.execute(
                 "SELECT filename, title, created, okf_type, supersedes, superseded_by,"
-                " has_title, disabled, mtime_ns FROM notes"
+                " confidence, conflicts_with, has_title, disabled, mtime_ns FROM notes"
             )
         ]
 

@@ -81,7 +81,7 @@ def compact_recall(
     if truncated:
         marker = "\n…[truncated; request a section or a larger max_chars value]"
         content = content[: max(0, limit - len(marker))].rstrip() + marker
-    return {
+    payload: dict[str, Any] = {
         "filename": filename,
         "title": fields.title or Path(filename).stem,
         "summary": fields.summary,
@@ -90,6 +90,19 @@ def compact_recall(
         "truncated": truncated,
         "version": store.note_version(name),
     }
+    # Provenance, emitted only when the note declares it, so a note without
+    # these fields costs exactly the tokens it did before (#195). The conflict
+    # is the load-bearing one: without it the agent reads one side of a
+    # disagreement and has no way to know the other side exists.
+    if fields.confidence:
+        payload["confidence"] = fields.confidence
+    if fields.conflicts_with:
+        payload["conflicts_with"] = fields.conflicts_with
+        payload["warning"] = (
+            f"This memory is recorded as conflicting with {fields.conflicts_with}. "
+            "Read that note before acting on this one."
+        )
+    return payload
 
 
 def filename_for_title(omi_dir: Path | str, title: str) -> str | None:
