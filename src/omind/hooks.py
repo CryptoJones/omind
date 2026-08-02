@@ -34,11 +34,15 @@ from __future__ import annotations
 import json
 import os
 import sys
+from collections.abc import Callable
 from datetime import datetime
 from pathlib import Path
-from typing import Any, TextIO
+from typing import Any, TextIO, TypeVar
 
 from omind import filelock, paths
+
+#: Return type of one isolated hook side effect (see :func:`_best_effort`).
+_T = TypeVar("_T")
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
@@ -105,6 +109,24 @@ def _record_failure(context: str, exc: BaseException) -> None:
             fh.write(f"{stamp} {context}: {exc!r}\n")
     except Exception:
         return
+
+
+def _best_effort(label: str, call: Callable[[], _T]) -> _T | None:
+    """Run one hook side effect, absorbing its failure with a labelled breadcrumb.
+
+    The hook branches below run several *independent* subsystems in sequence —
+    accounting, the violation detector, the consult verifier. Sharing one
+    ``try/except`` meant a failure in the first silently cancelled every later
+    one: token accounting going down took the enforcement detector with it, exit
+    code 0, no symptom (#204). Each one now degrades only itself, and the
+    breadcrumb names *which*, so `hook-failures.log` distinguishes "it ran and
+    failed" from "it never ran".
+    """
+    try:
+        return call()
+    except Exception as exc:
+        _record_failure(label, exc)
+        return None
 
 
 def _now(now: datetime | None) -> datetime:
@@ -676,37 +698,58 @@ def run_hook(
         if line:
             append_entry(omi_dir, line)
         if event_name == "Stop":
-            from omind import ai_usage
+            from omind import ai_usage, loopguard
 
-            ai_usage.record_session_transcript(
-                omi_dir,
-                event.get("transcript_path"),
-                session_id=str(event.get("session_id") or ""),
+            # Isolated for the same reason as PostToolUse (#204): transcript
+            # parsing is the failure-prone half, and it must not stop the loop
+            # guard below from being consulted at all.
+            _best_effort(
+                "Stop/ai_usage.record_session_transcript",
+                lambda: ai_usage.record_session_transcript(
+                    omi_dir,
+                    event.get("transcript_path"),
+                    session_id=str(event.get("session_id") or ""),
+                ),
             )
             # Loop guard: while an autonomous loop is ARMED, refuse the stop so the
             # agent keeps working (operator switch — `omind loop arm/disarm`). Fails
             # open to allowing the stop on any error (a broken guard must never trap).
-            from omind import loopguard
-
-            blocked, reason = loopguard.register_block(session=event.get("session_id"))
+            blocked, reason = _best_effort(
+                "Stop/loopguard.register_block",
+                lambda: loopguard.register_block(session=event.get("session_id")),
+            ) or (False, "")
             if blocked:
                 sink = stdout if stdout is not None else sys.stdout
                 sink.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
                 return 0
         if event_name == "PostToolUse":
-            # Real work happened: reset the loop guard's no-work spin counter.
-            from omind import loopguard
+            from omind import ai_usage, compliance, loopguard, verify
 
-            loopguard.reset(session=event.get("session_id"))
+            # Four independent subsystems. Each is isolated (#204) so a failure
+            # in one — accounting is the most fragile, and the least important —
+            # cannot silently disable the enforcement detector behind it.
+            #
+            # Real work happened: reset the loop guard's no-work spin counter.
+            _best_effort(
+                "PostToolUse/loopguard.reset",
+                lambda: loopguard.reset(session=event.get("session_id")),
+            )
+            _best_effort(
+                "PostToolUse/ai_usage.record_mcp_response",
+                lambda: ai_usage.record_mcp_response(omi_dir, event),
+            )
             # Layer E: scan the command that actually ran against the policy and
             # record any rule match into the compliance log (the learning corpus).
-            from omind import ai_usage, compliance, verify
-
-            ai_usage.record_mcp_response(omi_dir, event)
-            compliance.record_post_tool(event)
+            _best_effort(
+                "PostToolUse/compliance.record_post_tool",
+                lambda: compliance.record_post_tool(event),
+            )
             # Layer C: if this action was an OMI consult, judge its relevance to
             # the turn's task (off the synchronous PreToolUse hot path).
-            verify.verify_consult(event, omi_dir)
+            _best_effort(
+                "PostToolUse/verify.verify_consult",
+                lambda: verify.verify_consult(event, omi_dir),
+            )
     except Exception as exc:
         _record_failure(f"run_hook({event_name}, {omi_dir})", exc)
         return 0
