@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [6.1.0] - 2026-08-02
+
+### Performance
+- **The compliance log is parsed once per change instead of once per caller**
+  ([#188](https://github.com/CryptoJones/omind/issues/188)). `read_events()`
+  re-read and re-parsed the entire append-only log on every call, and several
+  callers ask for the same events inside one command — `summary()` parsed twice
+  (totals, then per-rule counts) and `omind doctor` parsed again to print recent
+  entries. The parse is now memoized against the log's `(mtime_ns, size)`, so
+  any writer — this process or another — invalidates it, and
+  `recidivism_counts()` accepts an already-read list.
+
+### Added
+- **The compliance log rotates at 8 MiB** (`compliance.jsonl.1`), which it never
+  did before, unlike `hook-failures.log`. Rotation must not lose history —
+  recidivism counts drive rule escalation — so readers span the archive and the
+  live file, and the rename happens under the same write lock, meaning a
+  concurrent writer holding the old inode appends into the archive rather than
+  losing its record.
+
 ## [6.0.0] - 2026-08-02
 
 ### Performance

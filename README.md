@@ -295,7 +295,9 @@ broken hook can never wedge the agent.
 - **The compliance log + learning loop.** Every guard-relevant action is appended
   to `compliance.jsonl`; a `PostToolUse` detector records soft-rule matches as
   evidence, and recidivism escalates a rule (soft → hard → verifier) over time
-  (`omind guard learn` / `escalate`).
+  (`omind guard learn` / `escalate`). The log rotates once past 8 MiB
+  (`compliance.jsonl.1`); readers span both generations, so escalation counts
+  survive a rotation.
 
 **Cross-harness by construction.** Each harness is described as data — a
 `HarnessSpec` (can it hard-block? which block-output format?) — and its hook pipes
