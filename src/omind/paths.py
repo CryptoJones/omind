@@ -53,12 +53,17 @@ def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None
     means every tool call is denied. The temp file + rename makes a concurrent
     reader see either the old file or the new one in full, and the directory
     fsync makes the rename itself durable across a power loss.
+
+    ``newline="\n"`` for the same reason as ``store._atomic_write``: the default
+    rewrites every ``\n`` to ``os.linesep``. That matters more here than there —
+    this function writes ``omi-guard.sh``, and a shell script whose shebang line
+    ends ``\r\n`` is not a shell script.
     """
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=path.suffix or ".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8") as fh:
+        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
             fh.write(text)
             fh.flush()
             os.fsync(fh.fileno())

@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.1.0] - 2026-08-02
+
+### Fixed
+- **Notes are written with LF on every platform.** `store._atomic_write` and
+  `paths.atomic_write_text` opened in text mode with the default newline
+  translation, so the same note was written as LF on POSIX and CRLF on Windows —
+  and nothing in the code could see the difference, because reads translate
+  back. **Four bugs came out of that one property**, every one of them passing a
+  green Linux run and failing only on the Windows legs: the compliance log's
+  rotation ([#202](https://github.com/CryptoJones/omind/issues/202)), and both
+  halves of the transaction journal — identity hashes that never matched what
+  had just been written, and pre-image restores that grew a blank line on each
+  rollback.
+
+  An explicit `newline="\n"` makes the bytes identical everywhere, which also
+  makes note digests, mesh merges, and git diffs platform-stable. It matters
+  most in `paths.atomic_write_text`, which writes `omi-guard.sh` — a shell
+  script whose shebang ends `\r\n` is not a shell script. Existing CRLF files
+  keep their bytes until something rewrites them.
+
 ## [8.0.0] - 2026-08-02
 
 ### Added
