@@ -18,10 +18,10 @@ hardening, or docs, not defects._
   `_weight_generated` / `_weight_superseded` / `_owners` re-scan whole tables and rebuild
   their maps on every query; key them off the index `generation` like the cached vector
   matrix. Latency grows with vault size, not with the fused candidate set.
-- [ ] **compliance.py recidivism helpers re-parse the whole append-only log per call** ([#187](https://github.com/CryptoJones/omind/issues/187)) — _perf (enforcement)_ —
+- [ ] **compliance.py recidivism helpers re-parse the whole append-only log per call** ([#188](https://github.com/CryptoJones/omind/issues/188)) — _perf (enforcement)_ —
   `summary()` parses twice; `learn.escalate()` runs it N+1 times. mtime/size-keyed memo +
   a size-based rotation (the log has none, unlike hook-failures.log).
-- [ ] **Append-only hot-path writers flock the data fd after open (TOCTOU hardening)** ([#188](https://github.com/CryptoJones/omind/issues/188)) — _hardening (low)_ —
+- [ ] **Append-only hot-path writers flock the data fd after open (TOCTOU hardening)** ([#187](https://github.com/CryptoJones/omind/issues/187)) — _hardening (low)_ —
   journal/compliance/ai-usage writes open by path then flock the fd; the store closes the
   same window more strongly. `O_NOFOLLOW` or a stable lockfile fd. Not exploitable on a
   single-user box — defense-in-depth parity with the store.
@@ -30,6 +30,52 @@ hardening, or docs, not defects._
   `record_post_tool` line would fail silently with no breadcrumb. One spy test pins it.
 - [ ] **Document that `omind serve` is an unauthenticated destructive API (localhost-only by design)** ([#190](https://github.com/CryptoJones/omind/issues/190)) — _docs_ —
   the risk model lives only in a transient stderr warning; put it in `docs/`/`--help`.
+
+### From the 2026-08-02 claude-obsidian comparison
+
+_A read of [`AgriciDaniel/claude-obsidian`](https://github.com/AgriciDaniel/claude-obsidian)
+v2.1.0 (~23k lines of Python, MIT) against omind, working from its source rather than its
+README. It is the closest serious analogue to omind — plain-Markdown Obsidian vault, Claude
+Code host, local-first, no service to run — but aimed at a research wiki built from external
+sources rather than at durable agent memory. omind is ahead on retrieval mechanics (FTS5 +
+quantized int8 vectors + RRF beats their JSON BM25 index), on multi-machine replication
+(they have none), on enforcement, and on shipping a real MCP server. What follows are the
+five places their design is genuinely better and the idea transfers._
+
+- [ ] **Contextual-prefix indexed chunks, synthetic tier only** ([#193](https://github.com/CryptoJones/omind/issues/193)) — _enhancement (retrieval)_ —
+  they implement Anthropic's Contextual Retrieval pattern: each chunk gets a 1–2
+  sentence prefix situating it in its page, and the *prefixed* text is what gets
+  indexed and embedded. omind indexes raw heading-split chunks, so a mid-note chunk
+  competes on its own words alone. Take only their zero-egress synthetic tier
+  (`<title> — <summary>. Section: <heading path>.`), not the LLM-written tiers —
+  omind's embeddings stay local. Gate it behind `omind bench --quality` and keep it
+  only if recall moves.
+- [ ] **Journaled plan→apply→recover transactions for multi-note operations** ([#194](https://github.com/CryptoJones/omind/issues/194)) — _enhancement (durability)_ —
+  omind has atomic per-file replace, an advisory write lock, and version
+  preconditions, but no journal and no rollback, so an interrupted multi-note
+  operation leaves partial state. `store.create_and_disable_sources` concedes it in
+  its own docstring ("a process crash can still leave extra recoverable copies").
+  Generalize what `omind consolidate` already prototypes into a store-level
+  primitive plus `omind recover`. Skip their `approved_plan_sha256` handshake.
+- [ ] **Typed confidence + symmetric `Conflicts with:` provenance** ([#195](https://github.com/CryptoJones/omind/issues/195)) — _enhancement (memory shape)_ —
+  their claim ledger types authority, assessment, confidence, and evidence relation
+  (`supports`/`contradicts`/`context`), keeping contradictions visible. omind's
+  `references:` is free text and `Supersedes:` only expresses clean ordered
+  replacement — there is no way to say "these two memories disagree" or "this was
+  never verified". Add two optional fields that round-trip like `Supersedes:` does;
+  do not grow a research-grade ledger.
+- [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196)) — _hardening_ —
+  they declare every capability's tier, read/write scope, network need, and
+  destructiveness in `config/capabilities.json`, verify it, and state explicitly
+  where no automated verifier exists. omind's `doctor` checks are hand-written per
+  concern with no declaration of what each surface may touch, and nothing fails when
+  code and declaration drift. Natural home for the #190 `serve` risk model.
+- [ ] **Frontier/boundary scoring to rank what to consolidate next** ([#197](https://github.com/CryptoJones/omind/issues/197)) — _enhancement (efficiency)_ —
+  `(out_degree - in_degree) * recency_weight` finds notes that point outward, are
+  pointed at by few, and were touched recently. Every `omind graph` op answers a
+  structural yes/no question; none rank what to work on next. Complements
+  `consolidate`, which finds candidates by similarity — this finds them by structure.
+  Cheap: the `links` table is already built. Read-only, no write path.
 
 _From a 2026-07-24 survey of open-source AI memory layers (Mem0, Zep/Graphiti, Letta/MemGPT,
 Cognee, memvid, Memori) and the 2025–2026 agent-memory literature (Memori arXiv:2603.19935 —
@@ -53,6 +99,15 @@ _No open items._
 ## Not planned
 
 - [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
+- [ ] **claude-obsidian's source capture, Canvas/Bases emitters, and methodology filing modes** — _rejected_ —
+  evaluated during the 2026-08-02 comparison. Their `capture` (immutable content-addressed
+  copies of PDFs/images/URLs under `.raw/`), their Obsidian Canvas and `.base` emitters, and
+  their PARA/LYT/Zettelkasten routing modes are all well built, and all solve a problem omind
+  does not have. omind's notes are written *by an agent about its own work*, not ingested from
+  external documents, so there is no source to retain and no filing taxonomy to pick. The
+  Canvas/Bases emitters are Obsidian-presentation features; omind already ships a web graph
+  view and leaves presentation to Obsidian itself. Revisit only if omind ever grows an ingest
+  path for external material.
 - [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
