@@ -126,9 +126,10 @@ class _Entry:
     """One file this transaction will replace, and how to undo that."""
 
     path: Path
-    #: Bytes to write. ``None`` means "this file should not exist afterwards",
-    #: which recovery reads as "delete it on rollback if we created it".
-    content: str
+    #: Text to write, or ``None`` to remove the file. A removal is journaled
+    #: exactly like a write — the pre-image is captured first — so rolling one
+    #: back puts the file back.
+    content: str | None
     #: sha256 of the file's bytes before we touched it; "" when it did not exist.
     prior_sha: str = ""
     existed: bool = False
@@ -142,6 +143,7 @@ class _Entry:
             "prior_sha": self.prior_sha,
             "existed": self.existed,
             "new_sha": self.new_sha,
+            "removed": self.content is None,
         }
 
 
@@ -199,6 +201,18 @@ class Transaction:
             raise TransactionError("cannot add writes after prepare()")
         self._entries.append(_Entry(path=Path(path), content=content))
 
+    def remove(self, path: Path) -> None:
+        """Queue ``path`` for deletion, recoverably.
+
+        The pre-image is captured like any other entry, so an interrupted run
+        that deleted a file gets it back. Without this, a multi-note operation
+        that *moves* notes — `omind migrate` relocating stray journals — could
+        only journal half of what it does.
+        """
+        if self._prepared:
+            raise TransactionError("cannot add writes after prepare()")
+        self._entries.append(_Entry(path=Path(path), content=None))
+
     # -- storage ------------------------------------------------------------
 
     def _dir(self) -> Path:
@@ -239,7 +253,7 @@ class Transaction:
         directory = self._dir()
         directory.mkdir(parents=True, exist_ok=True)
         for index, entry in enumerate(self._entries):
-            entry.new_sha = _sha(entry.content)
+            entry.new_sha = _sha(entry.content) if entry.content is not None else ""
             try:
                 prior = entry.path.read_bytes()
             except FileNotFoundError:
@@ -262,7 +276,11 @@ class Transaction:
         if not self._prepared:
             raise TransactionError("apply() before prepare()")
         for entry in self._entries:
-            writer(entry.path, entry.content)
+            if entry.content is None:
+                with contextlib.suppress(FileNotFoundError):
+                    entry.path.unlink()
+            else:
+                writer(entry.path, entry.content)
 
     def commit(self) -> None:
         """Mark the transaction complete and drop the journal.
@@ -338,6 +356,16 @@ def _rollback_journal(directory: Path) -> RecoveryReport:
             report.conflicts.append(path.name)
             continue
 
+        removal = not str(raw.get("new_sha") or "") and bool(raw.get("removed"))
+        if removal and existed and current_sha == "":
+            # We deleted it; put it back from the pre-image.
+            try:
+                _atomic_write_bytes(path, (directory / f"{index:04d}.pre").read_bytes())
+            except OSError:
+                report.conflicts.append(path.name)
+                continue
+            report.restored.append(path.name)
+            continue
         if existed and current_sha == prior_sha:
             report.skipped.append(path.name)  # never written, or already undone
             continue

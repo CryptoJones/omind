@@ -213,3 +213,53 @@ def test_rollup_late_daily_keeps_archived_days(tmp_path: Path) -> None:
     journal.rollup_journals(tmp_path, week="2026-W23")
     text = (journal_dir / journal.rollup_name("2026-W23")).read_text(encoding="utf-8")
     assert "2026-06-01" in text and "2026-06-02" in text and "2026-06-03" in text
+
+
+def test_interrupted_migration_loses_no_journal_entries(tmp_path: Path) -> None:
+    """A crash mid-migration used to lose a day of entries outright (#194).
+
+    `migrate_journals` appends a stray's bullets to the relocated journal and
+    then unlinks the stray. Between those two steps the entries existed in one
+    place only; a crash after the unlink and before the append lost them with no
+    way back. It is journaled now, so an interrupted run is recoverable.
+    """
+    from omind import txn
+
+    _write_daily(tmp_path, "2026-06-01", _BULLETS[:1])
+    stray = tmp_path / "Session Journal 2026-06-01.md"
+    original = stray.read_bytes()
+
+    real_apply = txn.Transaction.apply
+
+    def dying_apply(self: txn.Transaction, writer: object) -> None:
+        def half(path: Path, content: str) -> None:
+            raise KeyboardInterrupt("power loss")
+
+        real_apply(self, half)
+
+    import pytest as _pytest
+
+    with _pytest.MonkeyPatch.context() as mp:
+        mp.setattr(txn.Transaction, "apply", dying_apply)
+        with _pytest.raises(KeyboardInterrupt):
+            journal.migrate_journals(tmp_path)
+
+    # In-process rollback already put it back; nothing left for `omind recover`.
+    assert stray.read_bytes() == original
+    assert txn.pending(tmp_path) == []
+
+
+def test_migration_merges_a_same_day_journal_without_losing_either_trail(
+    tmp_path: Path,
+) -> None:
+    """One session wrote before the layout change, another after."""
+    _write_daily(tmp_path, "2026-06-01", _BULLETS[:1])
+    _write_daily(tmp_path / "Journal", "2026-06-01", _BULLETS[1:2])
+
+    assert journal.migrate_journals(tmp_path) == ["Session Journal 2026-06-01.md"]
+    merged = (tmp_path / "Journal" / "Session Journal 2026-06-01.md").read_text(
+        encoding="utf-8"
+    )
+    for bullet in _BULLETS[:2]:
+        assert bullet in merged
+    assert not (tmp_path / "Session Journal 2026-06-01.md").exists()

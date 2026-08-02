@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
+from omind import merge
 from omind.merge import (
     CONFLICT_TAG,
     merge_fields,
@@ -348,3 +349,24 @@ def test_run_merge_driver_exits_one_on_unreadable_input(tmp_path: Path) -> None:
     bad = tmp_path / "bad.md"
     bad.write_bytes(b"\xff\xfe invalid utf-8 \xff")
     assert run_merge_driver(b, bad, t) == 1
+
+
+def test_merge_driver_writes_atomically(tmp_path: Path) -> None:
+    """A crash mid-merge must not leave a torn note git believes is merged.
+
+    The driver used `write_text`, which truncates in place, so an interrupted
+    write left a half-written note *and* an exit code git read as success. It is
+    one file (git's %A), so this is an atomic write rather than a transaction —
+    there is no multi-note window to roll back.
+    """
+    base = tmp_path / "base.md"
+    ours = tmp_path / "ours.md"
+    theirs = tmp_path / "theirs.md"
+    for path, summary in ((base, "base"), (ours, "ours"), (theirs, "theirs")):
+        path.write_text(f"# N\n\n## Summary\n{summary}\n", encoding="utf-8")
+
+    assert merge.run_merge_driver(base, ours, theirs) == 0
+    text = ours.read_text(encoding="utf-8")
+    assert "## Summary" in text
+    # No leftover temp files beside the target.
+    assert [p.name for p in tmp_path.glob(".tmp-*")] == []

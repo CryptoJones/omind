@@ -7,7 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [8.1.0] - 2026-08-02
 
+### Added
+- **`Transaction.remove()` — journaled, recoverable deletion.** The journal
+  could only express writes, so a multi-note operation that *moves* notes could
+  journal half of what it did. (The `_Entry` docstring claimed `None` meant
+  "delete on rollback"; the field was typed `str` and nothing implemented it.
+  The docstring is now true rather than deleted.)
+
 ### Fixed
+- **`omind migrate` no longer loses a day of journal entries to a crash**
+  ([#194](https://github.com/CryptoJones/omind/issues/194) follow-up).
+  `migrate_journals` appended a stray journal's bullets to the relocated note
+  and then unlinked the stray. Between those two steps the entries existed in
+  exactly one place, and a crash there lost them outright with no way back. The
+  whole migration is now one journaled transaction.
+- **The git merge driver writes atomically.** It used `write_text`, which
+  truncates in place, so an interrupted merge left a **torn note** *and* an exit
+  code git reads as success — the note is then committed and syncs to every
+  peer. It is deliberately *not* a transaction: git hands the driver exactly one
+  file (`%A`), so there is no multi-note window to roll back, and saying so in
+  the code is more useful than wrapping it in machinery it doesn't need.
 - **Notes are written with LF on every platform.** `store._atomic_write` and
   `paths.atomic_write_text` opened in text mode with the default newline
   translation, so the same note was written as LF on POSIX and CRLF on Windows —
