@@ -623,8 +623,14 @@ _STRONG_ACTION_AUTH_RE = re.compile(
     r"i give you (?:explicit )?(?:permission|authorization))\b",
     re.IGNORECASE,
 )
+#: "Can/could you ...?" asks whether something is POSSIBLE — the honest answer is
+#: an answer, not an action. "Would you ...?" is a polite imperative in practice
+#: ("would you add a button", "would you push that"), so it is NOT treated as
+#: interrogatory; it falls through to the ordinary verb-based auth check, which
+#: still requires a real authorizing verb ("add"/"fix"/"change"/...) that isn't
+#: negated. So "would you mind not touching that" does not become authorization.
 _CAPABILITY_QUESTION_RE = re.compile(
-    r"^\s*(?:\w+[,:]\s+)?(?:hey[, ]+|please[, ]+)?(?:can|could|would|will)\s+you\b",
+    r"^\s*(?:\w+[,:]\s+)?(?:hey[, ]+|please[, ]+)?(?:can|could|will)\s+you\b",
     re.IGNORECASE,
 )
 # A REAL output redirect to a file: ``> f`` / ``>> f`` — but NOT ``2>&1`` (fd
