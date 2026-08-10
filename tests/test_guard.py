@@ -1340,3 +1340,43 @@ def test_guard_status_flags_agent_writable_config(capsys: pytest.CaptureFixture[
     assert guard.run_guard("status") == 0
     out = capsys.readouterr().out
     assert "self-protection" in out and "AGENT-WRITABLE" in out
+
+
+def test_would_you_is_a_polite_imperative_not_a_capability_question() -> None:
+    """"Would you <verb> ...?" authorizes; "Can you ...?" still does not."""
+    allowed = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh issue create --title x",
+            "prompt": "Would you please add an issue for that?",
+            "session": "wouldq",
+        }
+    )
+    assert allowed.rule_id != "capability-question-explicit-auth"
+
+    blocked = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh issue create --title x",
+            "prompt": "Can you please add an issue for that?",
+            "session": "wouldq",
+        }
+    )
+    assert not blocked.allow
+    assert blocked.rule_id == "capability-question-explicit-auth"
+    guard.clear_gate("wouldq")
+
+
+def test_would_you_without_an_authorizing_verb_still_blocks_side_effects() -> None:
+    """Dropping "would" from the interrogatory set must not blanket-authorize:
+    the verb-based check still has to find a non-negated authorizing verb."""
+    blocked = guard.decide(
+        {
+            "tool": "Write",
+            "file_path": str(Path.home() / ".codex" / "AGENTS.md"),
+            "prompt": "Would you mind not touching the global bootstrap?",
+            "session": "wouldneg",
+        }
+    )
+    assert not blocked.allow
+    guard.clear_gate("wouldneg")
