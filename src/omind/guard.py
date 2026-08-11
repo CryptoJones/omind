@@ -467,6 +467,13 @@ def reset_offtopic(session: str) -> None:
 #: self-heals within the hour.
 _DEFAULT_PAUSE_SECONDS = 1800
 
+#: Hard ceiling on a single `omind guard pause --for`. A pause is meant to be a
+#: work-burst window; past a few hours it is indistinguishable from disabling the
+#: gate, and it silently masks doctor's enforcement check for the duration. One
+#: box was found paused for 185h, which is how that failure mode was discovered.
+#: Re-pausing is always allowed — the cap forces the operator to mean it.
+_MAX_PAUSE_SECONDS = 4 * 3600
+
 
 def _pause_path() -> Path:
     """The OPERATOR pause sentinel. While it exists and is unexpired, the consult
@@ -1552,6 +1559,10 @@ def _fmt_secs(secs: int) -> str:
     return f"{secs}s"
 
 
+#: Public alias: the SessionStart priming banner formats the remaining pause.
+fmt_secs = _fmt_secs
+
+
 def _run_pause(duration: str) -> int:
     """``omind guard pause [--for 30m]``: skip the consult-gate + verifier for a
     time-boxed fast window (mission-critical speed / token savings). The HARD
@@ -1564,6 +1575,13 @@ def _run_pause(duration: str) -> int:
         resume_gate()
         sys.stdout.write("consult-gate re-armed (pause duration was 0).\n")
         return 0
+    capped = min(seconds, _MAX_PAUSE_SECONDS)
+    if capped != seconds:
+        sys.stdout.write(
+            f"guard pause: {_fmt_secs(seconds)} exceeds the {_fmt_secs(_MAX_PAUSE_SECONDS)} "
+            f"cap — pausing for {_fmt_secs(capped)} instead.\n"
+        )
+        seconds = capped
     pause_gate(seconds)
     compliance.log_event(
         compliance.KIND_DECISION,

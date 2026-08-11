@@ -27,9 +27,13 @@ from omind.provision import ProvisionError, SetupConfig
 @pytest.fixture(autouse=True)
 def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
-    # agents._omind_hook_command resolves omind via agents.shutil — patch it too
-    # so the hook/bootstrap wiring is deterministic regardless of the test host.
-    monkeypatch.setattr(agents.shutil, "which", lambda name: f"/usr/bin/{name}")
+    # Every harness now resolves omind through provision.canonical_omind_exe(),
+    # which prefers ~/.local/bin/omind and only falls back to which(). Point the
+    # canonical path at a location that cannot exist so these tests keep
+    # exercising the which() fallback instead of the test host's real install.
+    monkeypatch.setattr(
+        provision, "CANONICAL_OMIND_EXE", Path("/nonexistent/.local/bin/omind")
+    )
 
 
 @pytest.fixture(autouse=True)

@@ -20,7 +20,6 @@ import os
 import re
 import secrets
 import shlex
-import shutil
 import socket
 import subprocess
 import sys
@@ -886,7 +885,10 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
     omi_dir = (vault / folder).expanduser()
     if load_node_config(omi_dir) is None:
         raise MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
-    omind_exe = shutil.which("omind") or "omind"
+    # Imported lazily: provision imports mesh, so a module-level import cycles.
+    from omind.provision import canonical_omind_exe
+
+    omind_exe = canonical_omind_exe()
     # Quoted like the hook command: systemd ExecStart and schtasks both
     # word-split an unquoted folder name containing a space.
     daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder "{folder}"'

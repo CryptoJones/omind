@@ -884,3 +884,34 @@ def test_notes_are_written_with_lf_on_every_platform(tmp_path: Path) -> None:
     raw = (tmp_path / "Newlines.md").read_bytes()
     assert b"\r\n" not in raw
     assert b"\n" in raw
+
+
+def test_safe_name_resolves_a_title_whose_filename_was_sanitized(tmp_path: Path) -> None:
+    """The guard names notes by TITLE in its block messages, and a title may hold
+    characters `filename_for_title` strips. Rejecting the title outright made the
+    guard's own remediation loop impossible to satisfy: it demanded a recall of
+    "NEVER offer to end/pause the session …" and then refused the `/`."""
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="NEVER offer to end/pause the session", summary="s"))
+    assert (tmp_path / "NEVER offer to end pause the session.md").is_file()
+    resolved = store.safe_name("NEVER offer to end/pause the session")
+    assert resolved.name == "NEVER offer to end pause the session.md"
+    assert store.read_note("NEVER offer to end/pause the session")
+
+
+def test_safe_name_title_fallback_never_enables_traversal(tmp_path: Path) -> None:
+    """The fallback sanitizes separators away and requires the note to exist, so
+    it can only ever land on a real note directly inside the OMI dir."""
+    store = OmiStore(tmp_path)
+    (tmp_path.parent / "outside.md").write_text("secret", encoding="utf-8")
+    for hostile in ("../outside", "../../etc/passwd", "/etc/passwd", "a/../../b"):
+        with pytest.raises(NoteError):
+            store.safe_name(hostile)
+
+
+def test_safe_name_still_rejects_a_title_with_no_matching_note(tmp_path: Path) -> None:
+    """Creates must keep failing loudly — the fallback is a read-side convenience,
+    not a licence to invent filenames."""
+    store = OmiStore(tmp_path)
+    with pytest.raises(NoteError):
+        store.safe_name("no/such/note")

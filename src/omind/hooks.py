@@ -374,6 +374,28 @@ def _update_nudge_line() -> str | None:
     return f"⚠️ {nudge}" if nudge else None
 
 
+def _paused_gate_line() -> str | None:
+    """A loud banner while the consult-gate is paused, or ``None``.
+
+    A pause is easy to engage and easy to forget: its only visible trace was
+    `omind guard status`, which nobody runs unprompted, so a box sat paused for
+    185h with the enforcement check reading as broken rather than disabled.
+    Surfacing it in every session's priming makes the degraded state impossible
+    to miss. Defensive: never break priming over a status read."""
+    try:
+        from omind import guard
+
+        remaining = guard.pause_remaining()
+    except Exception:
+        return None
+    if remaining <= 0:
+        return None
+    return (
+        f"⚠️ OMI consult-gate + verifier are PAUSED for another {guard.fmt_secs(remaining)} "
+        "(hard destructive blocks stay ON). Run `omind guard resume` to re-arm."
+    )
+
+
 def _clip(text: str, limit: int) -> str:
     clean = text.strip()
     if len(clean) <= limit:
@@ -550,7 +572,8 @@ def build_session_start_context(
     # node startup) so the update prompt is reliably visible. Defensive: a
     # version check must never break priming.
     nudge = _update_nudge_line()
-    prefix = f"{nudge}\n\n" if nudge else ""
+    banners = [line for line in (_paused_gate_line(), nudge) if line]
+    prefix = "\n\n".join(banners) + "\n\n" if banners else ""
 
     header = (
         "OMI is the durable-memory source of truth. This is a compact session "
