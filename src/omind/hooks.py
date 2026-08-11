@@ -266,6 +266,20 @@ def format_entry(
     return f"- {timestamp} [session {session}] {label} {tool} ({outcome})"
 
 
+def _emit_unwritten(omi_dir: Path | str, session_id: object) -> None:
+    """Write the unwritten-work nudge to stderr, if there is one (#221).
+
+    Matches on :func:`short_session_id` because that is what the journal line
+    actually carries — matching on the raw id would silently find nothing and
+    the detector would look like it was working while never firing.
+    """
+    from omind import unwritten
+
+    message = unwritten.check(omi_dir, short_session_id(session_id))
+    if message:
+        sys.stderr.write(message + "\n")
+
+
 def append_entry(omi_dir: Path | str, line: str, now: datetime | None = None) -> None:
     """Append one bullet to today's journal (in ``Journal/``) under an exclusive
     lock. Never raises.
@@ -722,6 +736,15 @@ def run_hook(
                 sink = stdout if stdout is not None else sys.stdout
                 sink.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
                 return 0
+            # Unwritten-work detector (#221). Isolated like the two above: a
+            # nudge that could break the ability to STOP would be a far worse
+            # failure than the silent omission it reports. Emitted on stderr and
+            # only when the loop guard did not already block, so a single turn
+            # never carries two competing messages.
+            _best_effort(
+                "Stop/unwritten.check",
+                lambda: _emit_unwritten(omi_dir, event.get("session_id")),
+            )
         if event_name == "PostToolUse":
             from omind import ai_usage, compliance, loopguard, verify
 
