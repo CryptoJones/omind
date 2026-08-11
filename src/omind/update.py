@@ -200,11 +200,43 @@ def detect_install() -> InstallInfo:
     return InstallInfo("unknown", loc)
 
 
+def installed_extras() -> list[str]:
+    """Extras the current `uv tool` install was created with (``[]`` if none).
+
+    ``uv tool install --force --from <ref> omind`` installs the BARE package, so
+    any extra the user chose is silently dropped on update. That quietly disabled
+    semantic relevance on a box running ``omind[embed]``: search fell back to the
+    keyword path with no error, only a doctor warning nobody was watching for. uv
+    records the original request in its receipt, so read the extras back and
+    reinstate them. Fail-open — no receipt, no extras, behaviour unchanged.
+    """
+    receipt = Path.home() / ".local" / "share" / "uv" / "tools" / "omind" / "uv-receipt.toml"
+    try:
+        import tomllib
+
+        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ModuleNotFoundError):
+        return []
+    requirements = data.get("tool", {}).get("requirements")
+    if not isinstance(requirements, list):
+        return []
+    for entry in requirements:
+        if isinstance(entry, dict) and entry.get("name") == "omind":
+            extras = entry.get("extras")
+            if isinstance(extras, list):
+                return [str(e) for e in extras if isinstance(e, str)]
+    return []
+
+
 def update_command(install: InstallInfo, version: str) -> list[str] | None:
     """The argv that installs ``version``, or None when it can't be automated."""
     ref = f"git+https://github.com/{GITHUB_REPO}@v{version}"
     if install.method == "uv-tool":
-        return ["uv", "tool", "install", "--force", "--from", ref, "omind"]
+        extras = installed_extras()
+        # The PEP 508 `omind[embed] @ git+…` form, so uv keeps the extras it was
+        # originally installed with instead of silently downgrading to bare.
+        spec = f"omind[{','.join(extras)}] @ {ref}" if extras else ref
+        return ["uv", "tool", "install", "--force", "--from", spec, "omind"]
     if install.method == "pip":
         return [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", ref]
     return None  # editable -> git pull; unknown -> manual

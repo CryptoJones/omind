@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.2] - 2026-08-11
+
+### Fixed
+- **`self-update` no longer drops installed extras.** `uv tool install --force
+  --from <git ref> omind` installs the BARE package, so a machine running
+  `omind[embed]` lost it on every update: semantic relevance silently reverted to
+  the keyword path — no error, no failure, just ~20pp of recall@1 gone and a
+  doctor warning nobody was watching for. The extras are now read back from uv's
+  own receipt and reinstated via the PEP 508 `omind[embed] @ git+…` form.
+  Fail-open: no receipt or no extras leaves the previous behaviour untouched.
+
+### Changed
+- **`guard suggest` says what it is.** It is the hook's message *generator*: it
+  reads a hook event from stdin and prints `BLOCKED by omi-gate: …` to stdout for
+  the adapter to emit. Run bare in a terminal it prints that same line as its
+  normal output, which reads exactly as though the command had been refused —
+  costing two wrong diagnoses before the mistake was spotted. The `--help` text
+  and docstring now name it a generator and point at `guard learn` /
+  `guard escalate` for the learning loop.
+
 ## [8.2.1] - 2026-08-11
 
 ### Fixed

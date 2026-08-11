@@ -1445,7 +1445,14 @@ def _action_intent(event: dict[str, Any]) -> str:
 def _run_suggest(data: dict[str, Any], omi_dir: Path | None) -> int:
     """``omind guard suggest``: print the gate-deny message naming the notes
     relevant to this turn's task (Phase 3.2). Prints to STDOUT and exits 0 so the
-    bash adapter can capture it and emit the actual exit-2 deny itself."""
+    bash adapter can capture it and emit the actual exit-2 deny itself.
+
+    NOTE for anyone reading a terminal: this is the hook's message *generator*,
+    not a rule suggester and not a thing that can be blocked. Run bare, it reads
+    an empty event from stdin and prints "BLOCKED by omi-gate: …" as its normal
+    output — which reads exactly like the command itself was refused. It is not.
+    The learning loop's commands are ``guard learn`` and ``guard escalate``.
+    """
     session = str(data.get("session_id") or data.get("session") or "")
     # The non-Bash gate-block path (Read/Edit/Write/…) reaches the core only here;
     # record what the agent was about to do (#96) so the verifier can judge the next
