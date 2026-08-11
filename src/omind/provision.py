@@ -1477,10 +1477,17 @@ def _diagnose_enforcement() -> list[CheckResult]:
             f"({rate:.0f}%), {summary['violations']} violation(s); top: {top}"
         )
         if status == "warn":
+            # Deliberately does NOT name a "tune it down" command, because none
+            # exists: `guard learn` ADDS a deny rule and `guard escalate`
+            # promotes soft rules to hard — both tighten the gate, so pointing a
+            # reader at either while telling them it over-fires makes it worse.
+            # (`guard suggest` is the hook's message generator, not a tuner.)
             detail += (
                 f" — deny rate over {_DENY_RATE_WARN_PCT}%: the gate is likely "
-                "over-firing; review with `omind guard log` and tune via "
-                "`omind guard suggest`"
+                "over-firing. Inspect what is being denied with `omind guard log`, "
+                "review active rules with `omind guard policy`, and check that "
+                "semantic search is on above (the consult-gate share is "
+                "relevance-driven; the keyword path over-fires)"
             )
         results.append(CheckResult("compliance_log", status, detail))
     else:

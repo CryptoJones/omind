@@ -5,6 +5,21 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.3] - 2026-08-11
+
+### Fixed
+- **The deny-rate warning no longer recommends a command that makes it worse.**
+  8.2.1 added the warning and told the reader to "tune via `omind guard
+  suggest`". That was wrong twice over: `guard suggest` is the hook's message
+  generator, not a tuner, and the two commands that *are* the learning loop both
+  tighten the gate — `guard learn` ADDS a deny rule, `guard escalate` promotes
+  soft rules to hard. Anyone following that advice on an over-firing gate would
+  have made it fire more. No single "tune it down" command exists, so the
+  warning now stops pretending otherwise: inspect with `omind guard log`, review
+  active rules with `omind guard policy`, and check semantic search is on, since
+  the consult-gate share of denials is relevance-driven and the keyword path
+  over-fires.
+
 ## [8.2.2] - 2026-08-11
 
 ### Fixed
