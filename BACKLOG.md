@@ -74,12 +74,6 @@ five places their design is genuinely better and the idea transfers._
   roll themselves back. `create_and_disable_sources` migrated; the docstring that conceded
   "a process crash can still leave extra recoverable copies" is gone. Skipped their
   `approved_plan_sha256` handshake as planned.
-- [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196)) — _hardening_ —
-  they declare every capability's tier, read/write scope, network need, and
-  destructiveness in `config/capabilities.json`, verify it, and state explicitly
-  where no automated verifier exists. omind's `doctor` checks are hand-written per
-  concern with no declaration of what each surface may touch, and nothing fails when
-  code and declaration drift. Natural home for the #190 `serve` risk model.
 - [x] **Frontier/boundary scoring to rank what to consolidate next** ([#197](https://github.com/CryptoJones/omind/issues/197)) — _enhancement (efficiency)_ —
   shipped as `omind graph frontier` and `graph(op="frontier")`:
   `(out - in) * 0.5 ** (days/30)`, generated notes excluded by default, read-only,
@@ -109,7 +103,40 @@ _No open items._
   Removed `graph-path`, `graph-orphans`, `graph-dangling`, and `graph-stats`
   after the 5.0 bridge release; `graph-neighbors` stays.
 
+### From the 2026-08-10 ten-model hive review
+
+_Ten ephemeral lanes, one per model family, compared omind's feature set against Mem0,
+Zep/Graphiti, Letta/MemGPT, LangMem, Cognee, Memary, txtai and Basic Memory. Two of the
+review's headline recommendations are deliberately NOT tracked here: temporal validity
+already shipped (#169), and adopting an external memory framework as the storage layer is
+already rejected below._
+
+- [ ] **Capture the agent's own work without requiring it to remember a tool call** ([#221](https://github.com/CryptoJones/omind/issues/221)) — _enhancement (memory)_ —
+  7 of 10 lanes named this the largest gap. Every write needs the agent to *decide* to call
+  `create-note`; a forgotten call loses the memory silently, with no error and no warning.
+  Explicitly NOT the external-document ingest rejected below — this captures the agent's own
+  work, which is what omind's notes already are. Open question is whether it belongs here or
+  in the harness; a cheaper middle option is a detector that flags "this session wrote no
+  notes" without omind ever reading a transcript.
+- [ ] **Flat note namespace: every agent on every machine sees every note** ([#222](https://github.com/CryptoJones/omind/issues/222)) — _enhancement (mesh)_ —
+  single-lane finding. Two axes: retrieval precision (unrelated notes compete in every
+  search, where Mem0/LangMem/Letta all partition by user/agent/run) and blast radius (no way
+  to scope a note to a project, machine, or agent). Distinct from #196, which covered the
+  scope of the MCP *surfaces* rather than of the notes. May well not be worth it for a
+  single-operator vault — if so, record that rather than leaving it to be re-proposed.
+
 ## Not planned
+
+- [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
+  they declare every capability's tier, read/write scope, network need, and
+  destructiveness in `config/capabilities.json`, verify it, and state explicitly
+  where no automated verifier exists. omind's `doctor` checks are hand-written per
+  concern with no declaration of what each surface may touch, and nothing fails when
+  code and declaration drift. Natural home for the #190 `serve` risk model.
+  **Closed not-planned 2026-08-02.** The concrete gap it named — nothing states which
+  surfaces can destroy a memory — was closed by other work rather than by a declaration
+  file: `docs/serve.md` (v6.4.0) states the risk model for the unauthenticated destructive
+  API this issue called out as its natural home.
 
 - [ ] **Contextual-prefix indexed chunks (Anthropic Contextual Retrieval)** ([#193](https://github.com/CryptoJones/omind/issues/193), closed not-planned) — _rejected on measurement_ —
   built behind `OMI_CONTEXTUAL_CHUNKS` and evaluated on the live 784-note vault, both
