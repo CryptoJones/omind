@@ -539,3 +539,124 @@ def test_a_schema_bump_that_adds_a_column_rebuilds_the_index(omi: Path) -> None:
     stats = upgraded.refresh()
     assert stats is not None and stats.notes == 1  # rebuilt, not wedged
     assert [hit.filename for hit in (upgraded.search("zebracorn") or [])] == ["Handbook.md"]
+
+
+# --- retrieval budget, separation, and paging (2026-08-11) -------------------
+#
+# These three came out of a nine-model review of a talk on context rot. The
+# through-line: retrieval quality is not the binding constraint. Even with the
+# right passage located, accuracy falls as surrounding context grows, so better
+# ranking only decides how large the bill is. What was missing was any way for a
+# caller to see the bill, bound it, or tell a confident hit from a coin flip.
+
+
+def test_annotate_reports_gap_to_next_hit() -> None:
+    """separation is the margin the ranker used to discard."""
+    hits = [
+        searchindex.Hit(filename="a", heading="", excerpt="x" * 40, score=1.0),
+        searchindex.Hit(filename="b", heading="", excerpt="x" * 40, score=0.4),
+        searchindex.Hit(filename="c", heading="", excerpt="x" * 40, score=0.3),
+    ]
+    searchindex._annotate(hits)
+    assert hits[0].separation == pytest.approx(0.6)  # clear winner
+    assert hits[1].separation == pytest.approx(0.1)  # near-tie with the next
+    assert hits[-1].separation == 0.0  # nothing follows the last hit
+
+
+def test_pack_edge_first_puts_the_best_at_both_ends() -> None:
+    """Attention over long context is U-shaped, so rank 2 goes LAST, not second."""
+    hits = [
+        searchindex.Hit(filename=f"n{i}", heading="", excerpt="x" * 40, score=1.0 - i / 10)
+        for i in range(5)
+    ]
+    searchindex._annotate(hits)
+    packed = searchindex._pack_edge_first(hits, 10_000)
+    assert packed[0].filename == "n0"   # best first
+    assert packed[-1].filename == "n1"  # second best last
+    assert packed[2].filename == "n4"   # weakest buried in the middle
+    assert sorted(h.filename for h in packed) == sorted(h.filename for h in hits)
+
+
+def test_pack_respects_the_budget() -> None:
+    hits = [
+        searchindex.Hit(filename=f"n{i}", heading="", excerpt="x" * 400, score=1.0 - i / 10)
+        for i in range(5)
+    ]
+    searchindex._annotate(hits)
+    assert all(h.tokens == 100 for h in hits)
+    assert len(searchindex._pack_edge_first(hits, 250)) == 2
+
+
+def test_pack_always_returns_the_top_hit_even_when_it_busts_the_budget() -> None:
+    """Returning nothing is strictly worse than returning the one match."""
+    hits = [searchindex.Hit(filename="huge", heading="", excerpt="x" * 4000, score=1.0)]
+    searchindex._annotate(hits)
+    assert [h.filename for h in searchindex._pack_edge_first(hits, 1)] == ["huge"]
+
+
+def test_search_page_cursor_walks_the_results(omi: Path) -> None:
+    _note(omi, "Release One", "release checklist alpha", ["release"])
+    _note(omi, "Release Two", "release checklist beta", ["release"])
+    _note(omi, "Release Three", "release checklist gamma", ["release"])
+    idx = searchindex.SearchIndex(omi)
+    idx.refresh()
+
+    first = idx.search_page("release", limit=1)
+    assert first is not None and first.hits
+    assert first.tokens_returned == sum(h.tokens for h in first.hits)
+    assert first.next_cursor is not None  # three notes, one per page
+
+    second = idx.search_page("release", limit=1, cursor=first.next_cursor)
+    assert second is not None and second.hits
+    # A cursor must advance. A page that returns the same note forever is worse
+    # than no paging, because it looks like progress.
+    assert [h.filename for h in second.hits] != [h.filename for h in first.hits]
+
+
+def test_search_page_without_budget_matches_plain_search(omi: Path) -> None:
+    """The new surface must not change what the old one returns."""
+    _note(omi, "Release One", "release checklist alpha", ["release"])
+    _note(omi, "Release Two", "release checklist beta", ["release"])
+    idx = searchindex.SearchIndex(omi)
+    idx.refresh()
+
+    plain = idx.search("release", limit=5)
+    page = idx.search_page("release", limit=5)
+    assert plain is not None and page is not None
+    assert [h.filename for h in page.hits] == [h.filename for h in plain[:5]]
+    assert page.next_cursor is None  # everything fit
+
+
+def test_search_page_budget_signals_there_is_more(omi: Path) -> None:
+    """A budget that truncates must still report next_cursor, or the caller
+    silently believes it saw everything."""
+    for i in range(4):
+        _note(omi, f"Release {i}", "release checklist " + ("word " * 200), ["release"])
+    idx = searchindex.SearchIndex(omi)
+    idx.refresh()
+
+    page = idx.search_page("release", limit=4, max_tokens=60)
+    assert page is not None and page.hits
+    assert len(page.hits) < 4  # the budget cut it short
+    assert page.next_cursor is not None  # ...and said so
+    assert page.tokens_returned == sum(h.tokens for h in page.hits)
+
+
+def test_separation_reaches_the_search_vault_payload(omi: Path) -> None:
+    """The margin must survive Hit -> NoteSummary, or the MCP tool never sees it.
+
+    This is the whole point of the field: search-vault serialises NoteSummary,
+    so a value that stops at the index layer is a value no agent can act on.
+    """
+    from omind.store import OmiStore
+
+    _note(omi, "Release One", "release checklist alpha", ["release"])
+    _note(omi, "Release Two", "release checklist beta", ["release"])
+    searchindex.SearchIndex(omi).refresh()
+
+    results = OmiStore(omi).search("release")
+    assert results, "expected indexed hits"
+    assert hasattr(results[0], "separation")
+    assert hasattr(results[0], "tokens")
+    assert results[0].tokens > 0  # an excerpt was returned, so it cost something
+    assert results[-1].separation == 0.0  # nothing follows the last result
