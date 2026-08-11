@@ -1030,3 +1030,43 @@ def test_ensure_omi_guard_prunes_stale_temp_allow_rules(
     assert stale not in allow  # temp-dir Read rule pruned (the 2.40.1 litter)
     assert real in allow  # a real OMI Read rule is kept
     assert "Bash(ls:*)" in allow  # unrelated rules untouched
+
+
+def test_cross_session_inbound_set_to_fleet_default_when_absent(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    """A fresh machine (no key) gets crossSessionInbound=accept."""
+    prov = Provisioner(_config(tmp_path), log=_quiet)
+    prov.ensure_cross_session_inbound()
+    data = json.loads(isolate_settings.read_text())
+    assert data["crossSessionInbound"] == "accept"
+
+
+def test_cross_session_inbound_preserves_explicit_local_choice(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    """An explicit 'refuse'/'hold' is a default, not an override — leave it alone."""
+    isolate_settings.write_text(json.dumps({"crossSessionInbound": "refuse"}))
+    prov = Provisioner(_config(tmp_path), log=_quiet)
+    prov.ensure_cross_session_inbound()
+    data = json.loads(isolate_settings.read_text())
+    assert data["crossSessionInbound"] == "refuse"
+
+
+def test_cross_session_inbound_force_overrides(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    """--force re-asserts the fleet default even over an explicit choice."""
+    isolate_settings.write_text(json.dumps({"crossSessionInbound": "refuse"}))
+    prov = Provisioner(_config(tmp_path, force=True), log=_quiet)
+    prov.ensure_cross_session_inbound()
+    data = json.loads(isolate_settings.read_text())
+    assert data["crossSessionInbound"] == "accept"
+
+
+def test_cross_session_inbound_dry_run_writes_nothing(
+    tmp_path: Path, isolate_settings: Path
+) -> None:
+    prov = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)
+    prov.ensure_cross_session_inbound()
+    assert not isolate_settings.exists()
