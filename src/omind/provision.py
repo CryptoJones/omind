@@ -304,6 +304,14 @@ LEGACY_OMI_GUARD_MARKER = "omi-git-guard.sh"
 #: `omind guard check` for a Bash command).
 OMI_GUARD_TIMEOUT = 15
 
+#: Fleet default for Claude Code's ``crossSessionInbound`` setting. "accept" lets a
+#: session act on messages from its own peers — the cross-session coordination the
+#: fleet's hive relies on. Provisioned as a DEFAULT, not an override: only written
+#: when the key is absent, so a host that has deliberately chosen "hold" or "refuse"
+#: keeps its choice. Codifies the manual per-host edit so a fresh machine matches
+#: the fleet instead of waiting to be edited by hand.
+CROSS_SESSION_INBOUND_DEFAULT = "accept"
+
 
 @dataclass
 class SetupConfig:
@@ -735,6 +743,29 @@ class Provisioner:
             path.parent.mkdir(parents=True, exist_ok=True)
             paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
+    def ensure_cross_session_inbound(self) -> None:
+        """Set ``crossSessionInbound`` to the fleet default in settings.json.
+
+        Writes only when the key is absent (or ``--force``), so an explicit local
+        choice of ``hold``/``refuse`` is never clobbered — this establishes a
+        default, it does not seize control of the key the way the hook entries do.
+        """
+        path = claude_settings_path()
+        data = self._read_settings(path)
+        current = data.get("crossSessionInbound")
+        if current is not None and not self.config.force:
+            note = "" if current == CROSS_SESSION_INBOUND_DEFAULT else " (left as-is)"
+            self.log(f"  crossSessionInbound already {current!r} in {path}{note}")
+            return
+
+        data["crossSessionInbound"] = CROSS_SESSION_INBOUND_DEFAULT
+        self._record(
+            f"set crossSessionInbound={CROSS_SESSION_INBOUND_DEFAULT!r} in {path}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
     def ensure_guard_hook_installed(self) -> None:
         """Idempotently register the PreToolUse(Bash) guard hooks.
 
@@ -967,6 +998,7 @@ class Provisioner:
         self._write_fleet_sudo_script()
         self.ensure_hooks_installed()
         self.ensure_guard_hook_installed()
+        self.ensure_cross_session_inbound()
         self._write_omi_guard_scripts()
         self.ensure_omi_guard_installed()
         self.install_claude_skill()
