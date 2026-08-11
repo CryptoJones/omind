@@ -212,12 +212,17 @@ def installed_extras() -> list[str]:
     """
     receipt = Path.home() / ".local" / "share" / "uv" / "tools" / "omind" / "uv-receipt.toml"
     try:
-        import tomllib
+        # tomlkit, not tomllib: the latter is 3.11+ and this project floors at
+        # 3.10. tomlkit is already a runtime dependency.
+        import tomlkit
 
-        data = tomllib.loads(receipt.read_text(encoding="utf-8"))
+        data = tomlkit.parse(receipt.read_text(encoding="utf-8"))
     except (OSError, ValueError, ModuleNotFoundError):
         return []
-    requirements = data.get("tool", {}).get("requirements")
+    tool = data.get("tool")
+    if not isinstance(tool, dict):
+        return []
+    requirements = tool.get("requirements")
     if not isinstance(requirements, list):
         return []
     for entry in requirements:
