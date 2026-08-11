@@ -285,6 +285,13 @@ class NoteSummary:
     #: notes that don't.
     conflicts_with: str = ""
     confidence: str = ""
+    #: Search-only: the score gap to the next result, and this entry's rough
+    #: token cost. The ranker computed the margin and used to discard it, which
+    #: left a caller unable to tell a clear winner from a coin flip between
+    #: near-duplicates — precisely when a plausible-but-wrong note does harm.
+    #: Zero on listings, so nothing changes for browsing.
+    separation: float = 0.0
+    tokens: int = 0
 
 
 def _clean_tag(tag: object) -> str:
@@ -1058,6 +1065,8 @@ class OmiStore:
                     score=round(hit.score, 6),
                     conflicts_with=hit.conflicts_with,
                     confidence=hit.confidence,
+                    separation=round(hit.separation, 6),
+                    tokens=hit.tokens,
                 )
             )
         return results

@@ -130,6 +130,18 @@ def available() -> bool:
 
 
 @dataclass
+class SearchPage:
+    """One page of hits, with what the caller needs to decide whether to go on."""
+
+    hits: list[Hit]
+    #: Pass back as ``cursor`` to get the next page; ``None`` means this was all.
+    next_cursor: int | None = None
+    #: Summed estimate for this page, so context spend is a number the caller
+    #: can act on rather than something it discovers after the fact.
+    tokens_returned: int = 0
+
+
+@dataclass
 class Hit:
     """One ranked chunk. ``excerpt`` is the matched text, not the whole note."""
 
@@ -148,6 +160,18 @@ class Hit:
     conflicts_with: str = ""
     #: "high" | "medium" | "low"; "" when the note declares none.
     confidence: str = ""
+    #: Score gap to the NEXT hit (0.0 on the last one). The ranker already
+    #: computes these scores and then throws the margin away, leaving the caller
+    #: unable to tell a clear winner from a coin-flip between near-duplicates —
+    #: which is exactly when a plausible-but-wrong passage does its damage. A
+    #: large gap means "trust the top hit"; a gap near zero means "these are
+    #: interchangeable, consider asking a narrower question".
+    separation: float = 0.0
+    #: Rough token cost of this hit's excerpt, ``len // 4``. Deliberately an
+    #: estimate and not a tokenizer: the point is a budget the caller can sum
+    #: and act on, and a real tokenizer would add a dependency for accuracy
+    #: nobody needs when deciding whether to fetch a fourth chunk.
+    tokens: int = 0
 
 
 @dataclass
@@ -810,6 +834,49 @@ class SearchIndex:
     # -- query --------------------------------------------------------------
 
     @_locked
+    def search_page(
+        self,
+        query: str,
+        *,
+        tag: str | None = None,
+        limit: int = 25,
+        include_disabled: bool = False,
+        max_tokens: int | None = None,
+        cursor: int = 0,
+    ) -> SearchPage | None:
+        """One bounded page of results, plus the cursor needed to ask for more.
+
+        Why a cursor rather than a bigger ``limit``: under load a model tends to
+        conclude before it has exhausted what it was given — it stops early and
+        answers from what it has. A page that ends with an explicit
+        ``next_cursor`` makes continuing a deliberate act rather than something
+        the model has to remember to keep doing, and makes "there was more" a
+        fact the caller can see instead of one it has to infer.
+
+        ``max_tokens`` bounds the page by estimated cost and reorders it
+        edge-first; see :func:`_pack_edge_first`. ``None`` leaves both off.
+        """
+        hits = self.search(
+            query,
+            tag=tag,
+            limit=limit + cursor + 1,  # +1 so we can tell "more" from "exactly full"
+            include_disabled=include_disabled,
+        )
+        if hits is None:
+            return None
+        window = hits[cursor : cursor + limit]
+        has_more = len(hits) > cursor + limit
+        if max_tokens is not None and window:
+            window = _pack_edge_first(window, max_tokens)
+            # Packing can drop the tail, so "more" is now also true when the
+            # budget — not the page size — is what cut the results short.
+            has_more = has_more or len(window) < len(hits[cursor : cursor + limit])
+        return SearchPage(
+            hits=window,
+            next_cursor=(cursor + len(window)) if has_more else None,
+            tokens_returned=sum(h.tokens for h in window),
+        )
+
     def search(
         self,
         query: str,
@@ -1245,7 +1312,9 @@ class SearchIndex:
             )
         # The credential penalty is applied after fusion, so re-sort before cutting.
         hits.sort(key=lambda h: (-h.score, h.filename))
-        return hits[:limit]
+        hits = hits[:limit]
+        _annotate(hits)
+        return hits
 
     def _excerpt(
         self,
@@ -1617,6 +1686,57 @@ def lint_link_targets(md: str) -> list[str]:
             continue
         lines.append("" if in_fence else re.sub(r"`[^`]*`", "", line))
     return link_targets("\n".join(lines))
+
+
+def _estimate_tokens(text: str) -> int:
+    """Rough token count, ``len // 4``.
+
+    Deliberately not a tokenizer. The caller is deciding "can I afford another
+    chunk", and a dependency-free estimate that is consistently within ~25% is
+    enough for that; being exactly right would cost a model download.
+    """
+    return len(text) // 4
+
+
+def _annotate(hits: list[Hit]) -> None:
+    """Fill in ``separation`` and ``tokens`` on an already-sorted hit list."""
+    for i, hit in enumerate(hits):
+        hit.tokens = _estimate_tokens(hit.excerpt)
+        hit.separation = hit.score - hits[i + 1].score if i + 1 < len(hits) else 0.0
+
+
+def _pack_edge_first(hits: list[Hit], max_tokens: int) -> list[Hit]:
+    """Greedily fit hits into ``max_tokens``, then order them best-outward.
+
+    Two separate jobs, and the second is the interesting one.
+
+    The budget exists because retrieval quality is not the binding constraint:
+    even with the right passage located, accuracy falls as the surrounding
+    context grows. Better ranking only decides how large the bill is; it cannot
+    stop the caller from paying it. So cap what leaves this function.
+
+    The ORDER exists because attention over a long context is U-shaped — the
+    beginning and end are read well and the middle thins out. Emitting
+    best-first / second-best-LAST / weakest-in-the-middle puts the strongest
+    evidence where it is actually read. Note this only pays off once a caller
+    concatenates enough text to have a "middle" at all; below that it is
+    harmless reordering, which is why the budget is opt-in rather than default.
+    """
+    kept: list[Hit] = []
+    spent = 0
+    for hit in hits:
+        cost = hit.tokens or _estimate_tokens(hit.excerpt)
+        # Always keep the best hit, even if it alone busts the budget: returning
+        # nothing is strictly worse than returning the one thing that matched.
+        if kept and spent + cost > max_tokens:
+            break
+        kept.append(hit)
+        spent += cost
+    head: list[Hit] = []
+    tail: list[Hit] = []
+    for i, hit in enumerate(kept):
+        (head if i % 2 == 0 else tail).append(hit)
+    return head + tail[::-1]
 
 
 def _fuse(legs: list[tuple[float, list[int]]]) -> list[tuple[int, float]]:
