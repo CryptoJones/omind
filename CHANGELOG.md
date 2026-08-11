@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.0] - 2026-08-11
+
+### Added
+- **Retrieval budget and score separation** (#224). `Hit.separation` surfaces the
+  score gap to the next hit — a margin the ranker already computed and then
+  discarded, leaving a caller unable to tell a clear winner from a coin flip
+  between near-duplicates. Carried through to the `search-vault` payload.
+  `SearchIndex.search_page(max_tokens=...)` bounds a page by estimated cost and
+  emits it edge-first (best first, second-best last, weakest in the middle),
+  and `SearchPage.next_cursor` makes continuing a deliberate act rather than
+  something the caller has to remember. All opt-in: `search()` is unchanged.
+- **Unwritten-work detector** (#221). Notices when a session did real work and
+  recorded none of it, and says so on stderr at `Stop`. Reads omind's own
+  journal — never a transcript — so it adds no ingest path. Deliberately hard to
+  trigger: silent if anything was written, below 12 actions, or if the session
+  only read. `OMIND_NO_UNWRITTEN=1` disables it.
+- **Optional note scope** (#222). A `Scope:` metadata field plus a `scope=`
+  filter on `OmiStore.search`, for narrowing retrieval in a flat namespace that
+  `omind mesh` replicates to every peer. **Not a security boundary** — the note
+  is still plain Markdown on disk. Unscoped notes always survive a filtered
+  query, so an existing vault never goes invisible.
+
 ## [8.1.1] - 2026-08-02
 
 ### Fixed
