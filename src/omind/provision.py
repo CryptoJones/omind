@@ -20,7 +20,6 @@ import importlib.resources
 import json
 import os
 import re
-import shlex
 import shutil
 import subprocess
 import sys
@@ -305,6 +304,11 @@ def _entry_command_text(entry: object) -> str:
     return " ".join(parts)
 
 
+#: The executable token immediately preceding ``hook <Event>`` in an installed
+#: hook command — the omind binary that entry actually runs.
+_HOOK_EXE_RE = re.compile(r"(?P<exe>\S+)\s+hook\s+\S")
+
+
 def _hook_exe_path(command_text: str) -> str | None:
     """The omind executable an installed hook command actually runs, if absolute.
 
@@ -312,13 +316,16 @@ def _hook_exe_path(command_text: str) -> str | None:
     token before ``hook`` is the binary. A bare ``omind`` (no directory) resolves
     through PATH at run time and so cannot go stale — only absolute paths pin a
     specific install, so those are all we report on.
+
+    Both separators are checked, not just ``os.sep``: settings.json is portable
+    data, and a POSIX-style pin read on Windows (or the reverse) is precisely the
+    stale-install case this exists to catch. Matched with a regex rather than
+    ``shlex`` for the same reason — POSIX-mode ``shlex`` treats the backslashes in
+    ``C:\\venv\\Scripts\\omind`` as escapes and silently flattens the path away.
     """
-    try:
-        tokens = shlex.split(command_text)
-    except ValueError:  # unbalanced quotes in a hand-edited settings.json
-        return None
-    for token, following in zip(tokens, tokens[1:], strict=False):
-        if following == "hook" and os.sep in token:
+    for match in _HOOK_EXE_RE.finditer(command_text):
+        token = match.group("exe").strip("\"'")
+        if "/" in token or "\\" in token:
             return token
     return None
 

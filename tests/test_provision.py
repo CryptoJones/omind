@@ -1094,10 +1094,18 @@ def test_canonical_omind_exe_falls_back_when_absent(
 
 
 def test_hook_exe_path_reads_only_absolute_pins() -> None:
-    """A bare `omind` resolves through PATH at run time and cannot go stale."""
+    """A bare `omind` resolves through PATH at run time and cannot go stale.
+
+    Both separators count on every platform: settings.json is portable data, so a
+    POSIX-style pin must still be recognised when doctor runs on Windows.
+    """
     assert (
         provision._hook_exe_path('/venv/bin/omind hook Stop --vault "/v" --folder "OMI"')
         == "/venv/bin/omind"
+    )
+    assert (
+        provision._hook_exe_path(r'C:\venv\Scripts\omind hook Stop --vault "C:\v" --folder "OMI"')
+        == r"C:\venv\Scripts\omind"
     )
     assert provision._hook_exe_path('omind hook Stop --vault "/v" --folder "OMI"') is None
     assert provision._hook_exe_path("python3 /home/x/.claude/hooks/omi-enforce.py") is None
