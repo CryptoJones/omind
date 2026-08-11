@@ -174,3 +174,34 @@ def test_self_update_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:
     out: list[str] = []
     assert self_update(log=out.append) == 0
     assert any("up to date" in line for line in out)
+
+
+def test_update_command_preserves_installed_extras(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """`uv tool install --from <git ref> omind` installs the BARE package, so an
+    update silently dropped `omind[embed]` and disabled semantic relevance with no
+    error — only a doctor warning nobody was watching for."""
+    receipt = tmp_path / ".local" / "share" / "uv" / "tools" / "omind" / "uv-receipt.toml"
+    receipt.parent.mkdir(parents=True)
+    receipt.write_text(
+        '[tool]\nrequirements = [{ name = "omind", extras = ["embed"], '
+        'git = "https://github.com/CryptoJones/omind?rev=v8.2.1" }]\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(update.Path, "home", classmethod(lambda _cls: tmp_path))
+    assert update.installed_extras() == ["embed"]
+    cmd = update.update_command(update.InstallInfo("uv-tool", "x"), "8.2.2")
+    assert cmd is not None
+    assert cmd[cmd.index("--from") + 1].startswith("omind[embed] @ git+")
+
+
+def test_update_command_without_extras_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """No receipt / no extras must leave the bare-ref behaviour exactly as it was."""
+    monkeypatch.setattr(update.Path, "home", classmethod(lambda _cls: tmp_path))
+    assert update.installed_extras() == []
+    cmd = update.update_command(update.InstallInfo("uv-tool", "x"), "8.2.2")
+    assert cmd is not None
+    assert cmd[cmd.index("--from") + 1].startswith("git+https://")

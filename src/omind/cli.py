@@ -640,7 +640,10 @@ def build_parser() -> argparse.ArgumentParser:
             "resume",
             "repair",
         ),
-        help="check/reset/preflight the gate; learn/escalate rules; verify/suggest; adapter "
+        help="check/reset/preflight the gate; learn/escalate rules (the learning loop); "
+        "verify judges a consult; suggest is the hook's message GENERATOR (run bare it "
+        "prints a 'BLOCKED by omi-gate' line as normal output — that is its product, "
+        "not a refusal of your command); adapter "
         "normalizes another harness's event; selftest replays canned events; "
         "export-corpus emits fine-tuning JSONL; log/policy/status inspect the "
         "compliance log, active rules, and guardable harnesses; explain dry-runs a "
