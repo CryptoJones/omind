@@ -200,6 +200,17 @@ class NoteFields:
     # note written before these existed, so absence must stay the default.
     confidence: str = ""  # "high" | "medium" | "low"; see CONFIDENCE_LEVELS
     conflicts_with: str = ""  # a [[wikilink]], symmetric like Supersedes
+    #: Optional retrieval scope (#222): a free-form label such as a project or a
+    #: machine. The vault is one flat namespace and `omind mesh` gives every peer
+    #: a full copy, so every agent on every machine sees every note — fine for
+    #: precision when the vault is small, less so as it grows.
+    #:
+    #: NOT A SECURITY BOUNDARY, and must never be described as one. The note is
+    #: still plain Markdown on disk, still replicated to every peer, still
+    #: readable by anything with the file. This narrows what RETRIEVAL returns,
+    #: nothing more. Absent (the default, and every note ever written) means
+    #: unscoped, which stays visible to every query.
+    scope: str = ""
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
@@ -249,6 +260,7 @@ class NoteFields:
             superseded_by=str(data.get("superseded_by", "")).strip(),
             confidence=_clean_confidence(data.get("confidence", "")),
             conflicts_with=str(data.get("conflicts_with", "")).strip(),
+            scope=_clean_scope(data.get("scope", "")),
             connections=[str(c).strip() for c in (data.get("connections") or []) if str(c).strip()],
             action_items=items,
             references=[str(r).strip() for r in (data.get("references") or []) if str(r).strip()],
@@ -285,6 +297,10 @@ class NoteSummary:
     #: notes that don't.
     conflicts_with: str = ""
     confidence: str = ""
+    #: The note's declared retrieval scope (#222), or "" for unscoped. Present on
+    #: listings as well as searches, because a caller filtering by scope needs to
+    #: see what it filtered on. NOT a security boundary — see Note.scope.
+    scope: str = ""
     #: Search-only: the score gap to the next result, and this entry's rough
     #: token cost. The ranker computed the margin and used to discard it, which
     #: left a caller unable to tell a clear winner from a coin flip between
@@ -301,6 +317,19 @@ def _clean_tag(tag: object) -> str:
 #: The closed vocabulary for a note's ``Confidence:``. Absent — every note
 #: written before the field existed — means unknown, and is not an error.
 CONFIDENCE_LEVELS = ("high", "medium", "low")
+
+
+#: Scope labels are lowercased and stripped of a leading '#', so "Buzz", "buzz"
+#: and "#buzz" are one scope. Anything else is taken verbatim: the vocabulary is
+#: the operator's (project names, machine names), not omind's.
+def _clean_scope(value: object) -> str:
+    """Normalise a scope label, or ``""``.
+
+    Never raises and never rejects: this arrives from hand-edited Markdown and
+    from mesh peers running older code, and an unfamiliar label must leave the
+    note readable rather than unparseable.
+    """
+    return str(value).strip().lstrip("#").strip().lower()
 
 
 def _clean_confidence(value: object) -> str:
@@ -518,6 +547,7 @@ def parse_note(md: str) -> NoteFields:
     superseded_by = ""
     confidence = ""
     conflicts_with = ""
+    scope = ""
     rev = ""
     disabled = False
     tags: list[str] = []
@@ -532,6 +562,8 @@ def parse_note(md: str) -> NoteFields:
             supersedes = m.group(1).strip()
         elif m := re.match(r"^\s*-\s*Superseded by:\s*(.*)$", line):
             superseded_by = m.group(1).strip()
+        elif m := re.match(r"^\s*-\s*Scope:\s*(.*)$", line):
+            scope = _clean_scope(m.group(1))
         elif m := re.match(r"^\s*-\s*Confidence:\s*(.*)$", line):
             confidence = _clean_confidence(m.group(1))
         elif m := re.match(r"^\s*-\s*Conflicts with:\s*(.*)$", line):
@@ -587,6 +619,7 @@ def parse_note(md: str) -> NoteFields:
         superseded_by=superseded_by,
         confidence=confidence,
         conflicts_with=conflicts_with,
+        scope=scope,
         connections=[c.strip() for c in connections if c.strip()],
         action_items=action_items,
         references=references,
@@ -629,6 +662,8 @@ def render_fields(f: NoteFields) -> str:
         out.append(f"- Confidence: {f.confidence}")
     if f.conflicts_with:
         out.append(f"- Conflicts with: {f.conflicts_with}")
+    if f.scope:
+        out.append(f"- Scope: {f.scope}")
     if f.rev:
         out.append(f"- Rev: {f.rev}")
     if f.disabled:
@@ -987,6 +1022,7 @@ class OmiStore:
             created=fields.created,
             summary=_collapse(fields.summary or fields.details, 200),
             disabled=fields.disabled,
+            scope=fields.scope,
         )
 
     def list_notes(self, include_disabled: bool = False) -> list[NoteSummary]:
@@ -1024,8 +1060,23 @@ class OmiStore:
                 self._index = None
         return self._index
 
+    @staticmethod
+    def _in_scope(summary: NoteSummary, scope: str) -> bool:
+        """Whether ``summary`` should survive a ``scope``-filtered query.
+
+        Unscoped notes ALWAYS survive. That asymmetry is the whole design: a
+        vault written before this field existed must not become invisible the
+        moment someone filters, and a fact that is genuinely global should not
+        need re-labelling for every project that asks about it.
+        """
+        return not summary.scope or summary.scope == scope
+
     def search(
-        self, query: str, tag: str | None = None, include_disabled: bool = False
+        self,
+        query: str,
+        tag: str | None = None,
+        include_disabled: bool = False,
+        scope: str | None = None,
     ) -> list[NoteSummary]:
         """Notes relevant to ``query``, best first (BM25 + semantic + recency).
 
@@ -1034,9 +1085,17 @@ class OmiStore:
         unavailable, disabled, or mid-rebuild, so search never depends on it.
         """
         indexed = self._indexed_search(query, tag, include_disabled)
-        if indexed is not None:
-            return indexed
-        return self._scan_search(query, tag, include_disabled)
+        results = indexed if indexed is not None else self._scan_search(
+            query, tag, include_disabled
+        )
+        # Filtered after ranking, not before: scope narrows what the caller is
+        # shown, it does not change how well anything matched. Applied to both
+        # the indexed and the fallback path, or the filter would silently stop
+        # working exactly when the index is unavailable.
+        clean = _clean_scope(scope) if scope else ""
+        if clean:
+            results = [s for s in results if self._in_scope(s, clean)]
+        return results
 
     def _indexed_search(
         self, query: str, tag: str | None, include_disabled: bool
