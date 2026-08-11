@@ -5,6 +5,54 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.1] - 2026-08-11
+
+### Fixed
+- **Hooks are pinned to a canonical omind** (#229). Hook commands baked
+  `shutil.which("omind")` into `settings.json` as an absolute path frozen at
+  setup time, so whichever install happened to sit first on PATH captured the
+  wiring permanently. On a dev box that was an editable checkout's venv:
+  `omind self-update` upgraded `~/.local/bin` while all five hooks kept running
+  a months-old build, silently, because the wiring still looked correct. They
+  now resolve `~/.local/bin/omind` — on a `uv tool install` box a symlink uv
+  retargets on every upgrade, so the pin is absolute (fires in a shell without
+  `~/.local/bin` on PATH) *and* stable (an update never strands it). Applied to
+  every harness, not just Claude Code, and `doctor` now fails on a
+  non-canonical pin.
+- **`recall-note` accepts a note title containing `/`** (#229). The guard names
+  notes by title in its block messages, but `filename_for_title` strips `/`
+  when writing, so the literal title was rejected as a path separator — the
+  guard would block an action, demand a recall of
+  "NEVER offer to end/pause the session …", and then refuse it. An impossible
+  remediation loop affecting 73 of 831 notes on the vault that surfaced it.
+  `safe_name` now falls back to the sanitized title when the note exists;
+  traversal stays impossible and creates still fail loudly.
+- **`self-update` re-provisions the wiring and warms the index** (#229). A
+  release that changes a hook script, the MCP entry, or the skill previously
+  landed only on machines where someone re-ran `omind setup` by hand. The index
+  step is not a rebuild — opening it runs the existing `SCHEMA_VERSION`/model
+  check, so a format migration is paid during the update the user is already
+  waiting on instead of ambushing the next search. Both fail-open; opt out with
+  the existing `OMIND_NO_AUTOHEAL`.
+- **`guard pause` is capped at 4h** (#229). A pause is a work-burst window;
+  past a few hours it is indistinguishable from disabling the gate and it
+  silently masks doctor's enforcement check. One machine was found paused for
+  185h. The paused state is now also banner-ed in every session's priming
+  rather than living only in `guard status` output.
+
+### Changed
+- **`doctor` reports the compliance deny *rate*** (#229), warning above 25%.
+  Raw counts hid the thing that matters: a gate denying one action in two has
+  stopped carrying signal, and no amount of totals says so.
+
+### Added
+- **`docs/install-verification.md`** (#229) — an agent-executable acceptance
+  matrix for a new install: ~70 rows across binary, wiring, hook behavior,
+  guard policy, MCP surface, write path, retrieval, mesh, and scheduled work,
+  each with a machine-checkable pass criterion. Behavioral, not by inspection —
+  every deny-set row dry-runs through `guard explain`, so no destructive
+  command ever executes and write tests go to a throwaway vault.
+
 ## [8.2.0] - 2026-08-11
 
 ### Added
