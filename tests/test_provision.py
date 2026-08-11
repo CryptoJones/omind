@@ -1070,3 +1070,43 @@ def test_cross_session_inbound_dry_run_writes_nothing(
     prov = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)
     prov.ensure_cross_session_inbound()
     assert not isolate_settings.exists()
+def test_canonical_omind_exe_prefers_the_stable_user_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """which() returns whatever sits first on PATH at setup time and that path is
+    then frozen into settings.json forever — which is how a dev venv captured a
+    production hook-set and kept running a stale build across every self-update."""
+    canonical = tmp_path / ".local" / "bin" / "omind"
+    canonical.parent.mkdir(parents=True)
+    canonical.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(provision, "CANONICAL_OMIND_EXE", canonical)
+    monkeypatch.setattr(provision.shutil, "which", lambda _n: "/some/venv/bin/omind")
+    assert provision.canonical_omind_exe() == str(canonical)
+
+
+def test_canonical_omind_exe_falls_back_when_absent(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """System/pipx installs have no stable path to pin."""
+    monkeypatch.setattr(provision, "CANONICAL_OMIND_EXE", tmp_path / "nope")
+    monkeypatch.setattr(provision.shutil, "which", lambda _n: "/usr/bin/omind")
+    assert provision.canonical_omind_exe() == "/usr/bin/omind"
+
+
+def test_hook_exe_path_reads_only_absolute_pins() -> None:
+    """A bare `omind` resolves through PATH at run time and cannot go stale.
+
+    Both separators count on every platform: settings.json is portable data, so a
+    POSIX-style pin must still be recognised when doctor runs on Windows.
+    """
+    assert (
+        provision._hook_exe_path('/venv/bin/omind hook Stop --vault "/v" --folder "OMI"')
+        == "/venv/bin/omind"
+    )
+    assert (
+        provision._hook_exe_path(r'C:\venv\Scripts\omind hook Stop --vault "C:\v" --folder "OMI"')
+        == r"C:\venv\Scripts\omind"
+    )
+    assert provision._hook_exe_path('omind hook Stop --vault "/v" --folder "OMI"') is None
+    assert provision._hook_exe_path("python3 /home/x/.claude/hooks/omi-enforce.py") is None
+    assert provision._hook_exe_path('unbalanced "quote') is None

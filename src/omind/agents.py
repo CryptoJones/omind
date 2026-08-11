@@ -25,7 +25,6 @@ import importlib.resources
 import json
 import os
 import shlex
-import shutil
 import sys
 from pathlib import Path
 from typing import Any, ClassVar
@@ -45,6 +44,7 @@ from omind.provision import (
     SetupConfig,
     _diagnose_omi_folder,
     _diagnose_tools,
+    canonical_omind_exe,
     diagnose,
 )
 
@@ -339,7 +339,7 @@ class AgentProvisioner(Provisioner):
         Both folder values are quoted so a path like ``My Vault`` cannot
         word-split into a stray positional.
         """
-        omind_exe = shutil.which("omind") or "omind"
+        omind_exe = canonical_omind_exe()
         return (
             f'{omind_exe} hook {event} --vault "{self.config.vault}" '
             f'--folder "{self.config.folder}"'
@@ -506,7 +506,7 @@ class HermesProvisioner(AgentProvisioner):
         except Exception as exc:
             self.log(f"  WARNING: could not read omi-guard-hermes.sh from package data: {exc}")
             return
-        omind_exe = shutil.which("omind") or "omind"
+        omind_exe = canonical_omind_exe()
         content = content.replace("__OMIND_BIN__", omind_exe).replace(
             "__OMI_DIR__", str(self.config.omi_dir)
         )
@@ -735,7 +735,7 @@ class OpenClawProvisioner(AgentProvisioner):
         """
         path = openclaw_config_path()
         data = self._read_settings(path)
-        command = f"{shutil.which('omind') or 'omind'} guard adapter --harness openclaw"
+        command = f"{canonical_omind_exe()} guard adapter --harness openclaw"
         desired = {"event": "pre_tool", "command": command, "enabled": True}
         hooks = data.get("hooks")
         if not isinstance(hooks, dict):
@@ -805,7 +805,7 @@ class GeminiProvisioner(AgentProvisioner):
     def _guard_hook_group(self) -> dict[str, Any]:
         """One ``BeforeTool`` matcher group running the omind gemini adapter on
         every tool. Gemini pipes the event JSON on stdin; the adapter reads it."""
-        omind = shutil.which("omind") or "omind"
+        omind = canonical_omind_exe()
         return {
             "matcher": ".*",
             "hooks": [
@@ -899,7 +899,7 @@ class OpenCodeProvisioner(AgentProvisioner):
 
     def desired_server_entry(self) -> dict[str, Any]:
         # OpenCode local MCP server: a `type: local` + command array.
-        omind = shutil.which("omind") or "omind"
+        omind = canonical_omind_exe()
         return {
             "type": "local",
             "command": [
@@ -952,7 +952,7 @@ class OpenCodeProvisioner(AgentProvisioner):
         except Exception as exc:
             self.log(f"  WARNING: could not read omi-guard.opencode.js from package data: {exc}")
             return
-        omind_exe = shutil.which("omind") or "omind"
+        omind_exe = canonical_omind_exe()
         content = content.replace("__OMIND_BIN__", omind_exe).replace(
             "__OMI_DIR__", str(self.config.omi_dir)
         )
@@ -1010,7 +1010,7 @@ class CodexProvisioner(AgentProvisioner):
     def _guard_hook_group(self) -> dict[str, Any]:
         """One Claude-schema matcher group running the omind codex adapter on all
         tools. Codex pipes the event JSON on stdin; the adapter reads it directly."""
-        omind = shutil.which("omind") or "omind"
+        omind = canonical_omind_exe()
         return {
             "hooks": [
                 {
@@ -1412,7 +1412,7 @@ class CodexProvisioner(AgentProvisioner):
             ) from exc
 
     def desired_mcp_entry(self) -> dict[str, Any]:
-        omind = shutil.which("omind") or "omind"
+        omind = canonical_omind_exe()
         return {
             "command": omind,
             "args": ["node", "--vault", str(self.config.vault), "--folder", self.config.folder],
@@ -1492,7 +1492,7 @@ class McpOnlyProvisioner(AgentProvisioner):
         return server if isinstance(server, dict) else None
 
     def desired_server_entry(self) -> dict[str, Any]:
-        omind = shutil.which("omind") or "omind"
+        omind = canonical_omind_exe()
         entry: dict[str, Any] = {}
         if self.STDIO_TYPE:
             entry["type"] = "stdio"

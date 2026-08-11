@@ -39,6 +39,35 @@ from omind.proc import run_command
 #: Identifies enforce-hook commands inside hook entries.
 ENFORCE_HOOK_MARKER = "omi-enforce.py"
 
+#: Deny-rate threshold (percent of all logged actions) above which `doctor` calls
+#: the consult-gate over-firing. Precision, not volume, decides whether the guard
+#: is helping — see the compliance_log check.
+_DENY_RATE_WARN_PCT = 25
+
+#: The stable user-install path for the omind executable. On a `uv tool install`
+#: box this is a symlink into the tool env that uv retargets on every upgrade,
+#: which is exactly the indirection hooks want: absolute (so it fires in a shell
+#: without ~/.local/bin on PATH) *and* stable (so an update never strands it).
+CANONICAL_OMIND_EXE = Path.home() / ".local" / "bin" / "omind"
+
+
+def canonical_omind_exe() -> str:
+    """The omind path to bake into hook commands and the MCP server entry.
+
+    Deliberately NOT ``shutil.which("omind")``. which() returns whichever install
+    happens to sit first on PATH when `omind setup` runs, and that path is then
+    frozen into settings.json forever. On a dev box that captured an editable
+    checkout's venv binary, so `omind self-update` upgraded ~/.local/bin while
+    every hook kept executing a months-old build — silently, because the wiring
+    still "looked" correct.
+
+    Falls back to which() only when the canonical path is absent (system or pipx
+    installs, which genuinely have no stable path to pin; `doctor` warns there).
+    """
+    if CANONICAL_OMIND_EXE.exists():
+        return str(CANONICAL_OMIND_EXE)
+    return shutil.which("omind") or "omind"
+
 
 def _enforce_hook_dest() -> Path:
     """Where omind writes the enforcement hook script on this machine."""
@@ -275,6 +304,32 @@ def _entry_command_text(entry: object) -> str:
     return " ".join(parts)
 
 
+#: The executable token immediately preceding ``hook <Event>`` in an installed
+#: hook command — the omind binary that entry actually runs.
+_HOOK_EXE_RE = re.compile(r"(?P<exe>\S+)\s+hook\s+\S")
+
+
+def _hook_exe_path(command_text: str) -> str | None:
+    """The omind executable an installed hook command actually runs, if absolute.
+
+    Hook commands look like ``<exe> hook <Event> --vault "…" --folder "…"``; the
+    token before ``hook`` is the binary. A bare ``omind`` (no directory) resolves
+    through PATH at run time and so cannot go stale — only absolute paths pin a
+    specific install, so those are all we report on.
+
+    Both separators are checked, not just ``os.sep``: settings.json is portable
+    data, and a POSIX-style pin read on Windows (or the reverse) is precisely the
+    stale-install case this exists to catch. Matched with a regex rather than
+    ``shlex`` for the same reason — POSIX-mode ``shlex`` treats the backslashes in
+    ``C:\\venv\\Scripts\\omind`` as escapes and silently flattens the path away.
+    """
+    for match in _HOOK_EXE_RE.finditer(command_text):
+        token = match.group("exe").strip("\"'")
+        if "/" in token or "\\" in token:
+            return token
+    return None
+
+
 #: The retired 1.x server registration (obsidian-mcp); setup removes it.
 LEGACY_SERVER_NAME = "obsidian"
 
@@ -484,10 +539,11 @@ class Provisioner:
     def _server_command(self) -> list[str]:
         """The `omind node` invocation the agent runs as its MCP server.
 
-        Absolute omind path when resolvable: the agent's spawn environment may
-        lack ~/.local/bin on PATH.
+        Canonical omind path (see :func:`canonical_omind_exe`): the agent's spawn
+        environment may lack ~/.local/bin on PATH, and the entry must survive an
+        update without re-registration.
         """
-        omind_exe = shutil.which("omind") or "omind"
+        omind_exe = canonical_omind_exe()
         return [
             omind_exe,
             "node",
@@ -551,11 +607,11 @@ class Provisioner:
     def _hook_command(self, event: str) -> str:
         """The shell command Claude Code runs for one hook event.
 
-        Uses the absolute path to the ``omind`` executable when resolvable, so
-        the hook fires even if the shell Claude Code spawns lacks ``~/.local/bin``
-        on PATH. Falls back to bare ``omind`` (still contains ``HOOK_MARKER``).
+        Uses :func:`canonical_omind_exe` so the hook fires even if the shell
+        Claude Code spawns lacks ``~/.local/bin`` on PATH, *and* keeps firing
+        after an update.
         """
-        omind_exe = shutil.which("omind") or "omind"
+        omind_exe = canonical_omind_exe()
         # The "<exe> hook" prefix always contains HOOK_MARKER ("omind hook"),
         # which provision uses to find/replace omind's own entries.
         # Both values are quoted: the hook string goes through a shell, and an
@@ -836,7 +892,7 @@ class Provisioner:
         retires the legacy prototype adapter and stamps the provision manifest so
         upgrades can detect hook-set drift (#86/#87)."""
         self._remove_legacy_omi_guard()
-        omind_exe = shutil.which("omind") or "omind"
+        omind_exe = canonical_omind_exe()
         omi_dir = str(self.config.omi_dir)
         for resource, dest in (
             ("omi-guard.sh", _omi_guard_dest()),
@@ -1237,8 +1293,10 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         )
 
     expected_vault = str(config.vault)
+    canonical = canonical_omind_exe()
     missing: list[str] = []
     path_mismatch = False
+    stale_exes: set[str] = set()
     for event in HANDLED_EVENTS:
         entries = hooks_cfg.get(event)
         found = None
@@ -1246,8 +1304,16 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             found = next((e for e in entries if _entry_has_omind_marker(e)), None)
         if found is None:
             missing.append(event)
-        elif expected_vault not in _entry_command_text(found):
+            continue
+        command_text = _entry_command_text(found)
+        if expected_vault not in command_text:
             path_mismatch = True
+        baked = _hook_exe_path(command_text)
+        # A hook pinned to some *other* omind install keeps running that build
+        # forever: self-update moves the canonical path, never this one. The
+        # wiring still looks correct, so only an explicit comparison catches it.
+        if baked and baked != canonical:
+            stale_exes.add(baked)
 
     if missing:
         return CheckResult(
@@ -1261,6 +1327,14 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             "warn",
             f"auto-memory hooks point at a different vault than {expected_vault!r}; "
             "run `omind setup`",
+        )
+    if stale_exes:
+        return CheckResult(
+            "hooks",
+            "fail",
+            "auto-memory hooks run a non-canonical omind "
+            f"({', '.join(sorted(stale_exes))}, not {canonical}) — self-update will "
+            "never reach them; run `omind setup`",
         )
     # Check the enforcement hook is present and the script exists on disk.
     enforce_dest = _enforce_hook_dest()
@@ -1391,14 +1465,24 @@ def _diagnose_enforcement() -> list[CheckResult]:
     summary = compliance.summary()
     if summary["total"]:
         top = ", ".join(f"{rid}×{n}" for rid, n in summary["top_rules"][:3]) or "none"
-        results.append(
-            CheckResult(
-                "compliance_log",
-                "ok",
-                f"compliance log: {summary['total']} event(s), {summary['denies']} deny, "
-                f"{summary['violations']} violation(s); top: {top}",
-            )
+        # The deny *rate*, not just the count. A gate that stops a large share of
+        # all actions stops carrying signal — agents learn to treat blocks as a
+        # toll booth to route around rather than a warning to read — and the raw
+        # totals hid that: 1107 denies looks like diligence until you notice it
+        # is one action in two.
+        rate = 100.0 * summary["denies"] / summary["total"]
+        status = "warn" if rate >= _DENY_RATE_WARN_PCT else "ok"
+        detail = (
+            f"compliance log: {summary['total']} event(s), {summary['denies']} deny "
+            f"({rate:.0f}%), {summary['violations']} violation(s); top: {top}"
         )
+        if status == "warn":
+            detail += (
+                f" — deny rate over {_DENY_RATE_WARN_PCT}%: the gate is likely "
+                "over-firing; review with `omind guard log` and tune via "
+                "`omind guard suggest`"
+            )
+        results.append(CheckResult("compliance_log", status, detail))
     else:
         results.append(
             CheckResult("compliance_log", "ok", "compliance log: no violations recorded yet")

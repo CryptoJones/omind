@@ -1380,3 +1380,19 @@ def test_would_you_without_an_authorizing_verb_still_blocks_side_effects() -> No
     )
     assert not blocked.allow
     guard.clear_gate("wouldneg")
+def test_guard_pause_is_capped(capsys: pytest.CaptureFixture[str]) -> None:
+    """A week-long pause is a disable with extra steps: it silently masks the
+    enforcement check for the duration. One box was found paused for 185h."""
+    assert guard.run_guard("pause", duration="185h") == 0
+    out = capsys.readouterr().out
+    assert "cap" in out
+    remaining = guard.pause_remaining()
+    assert 0 < remaining <= guard._MAX_PAUSE_SECONDS
+    guard.resume_gate()
+
+
+def test_guard_pause_under_the_cap_is_untouched(capsys: pytest.CaptureFixture[str]) -> None:
+    assert guard.run_guard("pause", duration="30m") == 0
+    assert 0 < guard.pause_remaining() <= 1800
+    assert "cap" not in capsys.readouterr().out
+    guard.resume_gate()

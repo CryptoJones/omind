@@ -931,7 +931,41 @@ class OmiStore:
         Raises :class:`NoteError` on anything that looks like traversal: path
         separators, `..` segments, empty names, or a resolved path whose parent
         is not the OMI dir.
+
+        Callers routinely pass a note *title* rather than its filename — the
+        guard's block message names the note to recall, ``[[wikilinks]]`` carry
+        titles, and search results show titles. A title may legally contain
+        characters (``/``, ``:``, ``?``, …) that :meth:`filename_for_title`
+        strips when the file is written, so the literal title is not a valid
+        filename and used to hard-fail here. That broke the guard's own
+        remediation loop: it blocked an action, told the agent to recall
+        "NEVER offer to end/pause the session …", and the recall was rejected
+        for the ``/`` in "end/pause" — an instruction impossible to satisfy.
+
+        So when the raw name is rejected, fall back to the sanitized title, and
+        accept it only if that note actually exists. Traversal stays impossible:
+        the sanitizer strips separators outright, and the fallback re-runs the
+        full validation below on its result. Creates are unaffected — a
+        nonexistent note still raises.
         """
+        try:
+            return self._validated_name(name)
+        except NoteError:
+            fallback = self._name_from_title(name)
+            if fallback is not None:
+                return fallback
+            raise
+
+    def _name_from_title(self, name: str) -> Path | None:
+        """The existing note whose filename this *title* sanitizes to, if any."""
+        try:
+            candidate = self._validated_name(self.filename_for_title(name))
+        except NoteError:
+            return None
+        return candidate if candidate.exists() else None
+
+    def _validated_name(self, name: str) -> Path:
+        """Strict filename validation, with no title fallback (see safe_name)."""
         name = (name or "").strip()
         if not name or name in {".", ".."}:
             raise NoteError("empty or invalid note name")

@@ -210,6 +210,49 @@ def update_command(install: InstallInfo, version: str) -> list[str] | None:
     return None  # editable -> git pull; unknown -> manual
 
 
+#: Shared opt-out with the `omind node` startup self-heal — one switch for
+#: "I manage my own hooks", not two.
+_NO_AUTOHEAL_ENV = "OMIND_NO_AUTOHEAL"
+
+
+def _post_update_heal(*, log: Callable[[str], object] = print) -> None:
+    """Re-provision the wiring and pay any index migration, after an update.
+
+    Both steps are fail-open: a successful update must never be reported as a
+    failure because a follow-up chore didn't work.
+    """
+    if os.environ.get(_NO_AUTOHEAL_ENV):
+        return
+    from omind.provision import Provisioner, SetupConfig, default_vault_path
+
+    vault = default_vault_path()
+    # Hook scripts, the MCP entry, and the skill are all rewritten by the new
+    # binary — otherwise a release that changes any of them lands only on boxes
+    # where someone remembered to re-run `omind setup` by hand.
+    try:
+        actions = Provisioner(config=SetupConfig(vault=vault), log=lambda _m: None).run()
+        if actions:
+            log(f"re-provisioned wiring ({len(actions)} change(s)).")
+    except Exception as exc:  # noqa: BLE001 — never fail a good update
+        log(f"warning: re-provision failed ({exc}); run `omind setup` by hand.")
+    # Not a rebuild: opening the index runs the existing SCHEMA_VERSION/model
+    # check, which wipes and repopulates only when the format actually changed.
+    # Doing it here pays that cost in the update the user is already waiting on,
+    # instead of surprising the next search with it.
+    try:
+        from omind import searchindex
+
+        index = searchindex.shared(vault / "OMI")
+        done = index.refresh() if index is not None else None
+        if done is not None and (done.reindexed or done.removed):
+            log(
+                f"search index refreshed: {done.reindexed} note(s) reindexed, "
+                f"{done.removed} removed ({done.seconds:.1f}s)."
+            )
+    except Exception:  # noqa: BLE001 — an index chore must never break an update
+        pass
+
+
 def self_update(
     *, check_only: bool = False, force: bool = False, log: Callable[[str], object] = print
 ) -> int:
@@ -253,7 +296,9 @@ def self_update(
         log(f"update failed to launch: {exc}")
         return 1
     if result.returncode == 0:
-        log(f"updated to {status.latest}. Restart the MCP server / agent session to load it.")
+        log(f"updated to {status.latest}.")
+        _post_update_heal(log=log)
+        log("Restart the MCP server / agent session to load it.")
         return 0
     log(f"update command exited {result.returncode}.")
     return result.returncode
