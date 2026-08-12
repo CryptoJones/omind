@@ -1121,16 +1121,20 @@ def test_immutable_hint_explains_how_to_unlock(monkeypatch: pytest.MonkeyPatch) 
     machine ran months-stale hooks behind exactly that silence.
     """
     monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
-    hint = provision._immutable_hint(Path("/home/u/.claude/settings.json"), PermissionError(1))
+    target = Path.home() / ".claude" / "settings.json"
+    hint = provision._immutable_hint(target, PermissionError(1))
     assert "IMMUTABLE" in hint
-    assert "chattr -i /home/u/.claude/settings.json" in hint
+    # Built from the same Path so the separator matches the host platform.
+    assert f"chattr -i {target}" in hint
     assert "omind setup" in hint
-    assert "chattr +i" in hint
+    assert f"chattr +i {target}" in hint
 
 
 def test_immutable_hint_falls_back_for_ordinary_permission_errors(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setattr(provision, "is_immutable", lambda _p: False)
-    hint = provision._immutable_hint(Path("/x"), PermissionError("denied"))
-    assert "IMMUTABLE" not in hint and "cannot write /x" in hint
+    target = Path.home() / "x"
+    hint = provision._immutable_hint(target, PermissionError("denied"))
+    assert "IMMUTABLE" not in hint
+    assert f"cannot write {target}" in hint
