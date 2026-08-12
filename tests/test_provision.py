@@ -1110,3 +1110,27 @@ def test_hook_exe_path_reads_only_absolute_pins() -> None:
     assert provision._hook_exe_path('omind hook Stop --vault "/v" --folder "OMI"') is None
     assert provision._hook_exe_path("python3 /home/x/.claude/hooks/omi-enforce.py") is None
     assert provision._hook_exe_path('unbalanced "quote') is None
+
+
+def test_immutable_hint_explains_how_to_unlock(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A lock that blocks the fix must at least say how to lift it.
+
+    Hardened installs make the guard config root-owned + immutable, which is a
+    good control with one sharp edge: `omind setup` then dies on a raw
+    PermissionError while `doctor` keeps advising "run `omind setup`". One
+    machine ran months-stale hooks behind exactly that silence.
+    """
+    monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
+    hint = provision._immutable_hint(Path("/home/u/.claude/settings.json"), PermissionError(1))
+    assert "IMMUTABLE" in hint
+    assert "chattr -i /home/u/.claude/settings.json" in hint
+    assert "omind setup" in hint
+    assert "chattr +i" in hint
+
+
+def test_immutable_hint_falls_back_for_ordinary_permission_errors(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provision, "is_immutable", lambda _p: False)
+    hint = provision._immutable_hint(Path("/x"), PermissionError("denied"))
+    assert "IMMUTABLE" not in hint and "cannot write /x" in hint

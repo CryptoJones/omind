@@ -5,6 +5,38 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.4] - 2026-08-11
+
+### Fixed
+- **The capability-question gate no longer stops legitimate work.** It counted
+  every `Write`/`Edit`, every `cp`/`mv`/`touch`/`tee`, and any `>` redirect as a
+  "side effect", so phrasing a request as "can you …" blocked ordinary tasks —
+  `mkdir -p … && cp …` and a `sed -i` on a scratch HTML file were both denied on
+  a real machine. It is now scoped to what a user cannot casually undo: reaching
+  outside the box (`git push`, `gh pr/issue/release create`), restarting
+  services (systemctl/service/kubectl/docker), destroying data (`rm`, `dd`,
+  `truncate`), changing permissions (`chmod`, `chown`), and global agent-config
+  edits. Local reversible work is the task itself, and it is still covered by
+  the destructive deny-set and the consult gate. A gate that stops real work
+  teaches people to route around it, which costs more safety than it buys.
+- **`omind setup` explains an immutable file instead of dying on a traceback.**
+  Hardened installs make the guard's own config root-owned + `chattr +i` so an
+  agent cannot disable its own enforcement — a good control with one sharp edge:
+  setup then failed with a raw `PermissionError` while `doctor` kept advising
+  "run `omind setup`", a repair that could not possibly work. One machine ran
+  months-stale hooks behind that silence. Setup now names the immutable file and
+  prints the clear/re-run/restore sequence, and `doctor` warns that wiring
+  cannot be repaired *before* recommending the command.
+
+### Changed
+- **The deny-rate warning counts refusals, not ceremonies.** `guard log` records
+  a deny each time the consult gate or the fresh-base check asks the agent to do
+  something first — prompts that are satisfied seconds later, after which the
+  work proceeds. Counting them as blocked work put a real machine at "51%
+  denied" when the true refusal rate was 5% (115 of 1120; the other 1005 were
+  consult/fetch prompts). The two are now reported separately, so the headline
+  number means "work the guard refused to let happen".
+
 ## [8.2.3] - 2026-08-11
 
 ### Fixed

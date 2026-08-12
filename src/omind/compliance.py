@@ -252,13 +252,36 @@ def recidivism_counts(events: list[dict[str, Any]] | None = None) -> Counter[str
     )
 
 
+#: Rules that ask the agent to do something FIRST and then proceed — fetch a
+#: fresh base, read the governing note, consult OMI. Each logs a deny, is
+#: satisfied seconds later, and the work completes. They are friction, not
+#: refusals, and counting them as blocked work made the deny rate read ~51% on a
+#: machine where almost nothing was actually being stopped. Reported separately
+#: so the headline number means "work the guard refused to let happen".
+CEREMONY_RULES = frozenset(
+    {
+        "repo-work-fresh-base",
+        "repo-work-read-git-rules",
+        "off-topic-consult",
+        "omi-gate",
+        "verify-reclose-floor",
+    }
+)
+
+
 def summary() -> dict[str, Any]:
     """A compact rollup for ``omind doctor``: totals + the top recidivist rules."""
     events = read_events()
     counts = recidivism_counts(events)
+    denies = [e for e in events if e.get("outcome") == "deny"]
+    ceremony = [e for e in denies if str(e.get("rule_id") or "") in CEREMONY_RULES]
     return {
         "total": len(events),
-        "denies": sum(1 for e in events if e.get("outcome") == "deny"),
+        "denies": len(denies),
+        # Denials that actually refused work, i.e. excluding the consult/fetch
+        # ceremonies the agent satisfies and retries within the same turn.
+        "blocking_denies": len(denies) - len(ceremony),
+        "ceremony_denies": len(ceremony),
         "violations": sum(1 for e in events if e.get("kind") == KIND_VIOLATION),
         "last_ts": events[-1].get("ts") if events else None,
         "top_rules": counts.most_common(5),

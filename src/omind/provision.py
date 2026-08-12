@@ -309,6 +309,48 @@ def _entry_command_text(entry: object) -> str:
 _HOOK_EXE_RE = re.compile(r"(?P<exe>\S+)\s+hook\s+\S")
 
 
+def is_immutable(path: Path) -> bool:
+    """True when ``chattr +i`` (or the BSD equivalent) is set on ``path``.
+
+    Best-effort and Linux-first: any failure reports False, because this only
+    ever *improves* an error message.
+    """
+    try:
+        result = subprocess.run(
+            ["lsattr", "-d", str(path)], capture_output=True, text=True, timeout=5
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode != 0:
+        return False
+    flags = result.stdout.split(maxsplit=1)
+    return "i" in flags[0] if flags else False
+
+
+def _immutable_hint(path: Path, exc: BaseException) -> str:
+    """Explain a provisioning PermissionError instead of dying on a traceback.
+
+    Hardened installs make the guard's own config root-owned + immutable so an
+    agent cannot disable its own enforcement. That is a good control with one
+    sharp edge: `omind setup` then cannot repair anything, and for months the
+    only symptom was a raw PermissionError while `doctor` kept advising "run
+    `omind setup`" — a repair that could not possibly work. One machine ran
+    months-stale hooks behind that silence. If a lock stops the fix, it must at
+    least say how to lift it.
+    """
+    if not is_immutable(path):
+        return f"cannot write {path}: {exc}"
+    return (
+        f"{path} is IMMUTABLE (chattr +i), so setup cannot repair it.\n"
+        "  This is deliberate hardening: it stops an agent disabling its own guard.\n"
+        "  To re-provision, clear the flag, re-run setup, then restore it:\n"
+        f"    fleet-sudo chattr -i {path}\n"
+        "    omind setup\n"
+        f"    fleet-sudo chattr +i {path}\n"
+        "  (Use sudo directly if this machine has no fleet-sudo wrapper.)"
+    )
+
+
 def _hook_exe_path(command_text: str) -> str | None:
     """The omind executable an installed hook command actually runs, if absolute.
 
@@ -446,7 +488,10 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, content, mode=mode)
+            try:
+                paths.atomic_write_text(path, content, mode=mode)
+            except PermissionError as exc:
+                raise ProvisionError(_immutable_hint(path, exc)) from exc
 
     # -- steps --------------------------------------------------------------
 
@@ -1328,6 +1373,18 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             f"auto-memory hooks point at a different vault than {expected_vault!r}; "
             "run `omind setup`",
         )
+    # Surfaced BEFORE any "run `omind setup`" advice below: on a hardened box
+    # that command cannot run at all, and saying so is the difference between a
+    # known ritual and a machine silently stuck on stale hooks.
+    locked = [p for p in (settings_path, *_managed_guard_hooks().values()) if is_immutable(p)]
+    if locked:
+        return CheckResult(
+            "hooks",
+            "warn",
+            f"{len(locked)} managed file(s) are IMMUTABLE (chattr +i), so `omind setup` "
+            f"cannot repair wiring: {', '.join(str(p) for p in locked)} — clear with "
+            "`fleet-sudo chattr -i <file>`, re-run setup, then restore the flag",
+        )
     if stale_exes:
         return CheckResult(
             "hooks",
@@ -1470,11 +1527,17 @@ def _diagnose_enforcement() -> list[CheckResult]:
         # toll booth to route around rather than a warning to read — and the raw
         # totals hid that: 1107 denies looks like diligence until you notice it
         # is one action in two.
-        rate = 100.0 * summary["denies"] / summary["total"]
+        # Rate the BLOCKING denials, not the ceremonies. The consult/fresh-base
+        # gates log a deny, get satisfied, and the work proceeds — counting them
+        # put a machine at "51%" where almost nothing was actually refused, which
+        # is a metric that cries wolf until nobody reads it.
+        blocking = summary["blocking_denies"]
+        rate = 100.0 * blocking / summary["total"]
         status = "warn" if rate >= _DENY_RATE_WARN_PCT else "ok"
         detail = (
-            f"compliance log: {summary['total']} event(s), {summary['denies']} deny "
-            f"({rate:.0f}%), {summary['violations']} violation(s); top: {top}"
+            f"compliance log: {summary['total']} event(s), {blocking} blocking deny "
+            f"({rate:.0f}%), {summary['ceremony_denies']} consult/fetch prompt(s), "
+            f"{summary['violations']} violation(s); top: {top}"
         )
         if status == "warn":
             # Deliberately does NOT name a "tune it down" command, because none
