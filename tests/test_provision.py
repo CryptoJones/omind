@@ -1245,3 +1245,71 @@ def test_guard_hook_install_keeps_our_entry_in_place(
     entries = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
     assert entries[0] == _guard_entry()  # refreshed, still first
     assert entries[1]["matcher"] == "Read"  # user's hook untouched
+
+
+def _wired_settings(tmp_path: Path) -> Path:
+    """A settings.json with correct auto-memory + enforcement wiring."""
+    vault = "/v"
+    cmd = f'{provision.canonical_omind_exe()} hook %s --vault "{vault}" --folder "OMI"'
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": cmd % "PostToolUse"},
+                                {
+                                    "type": "command",
+                                    "command": f"python3 {provision._enforce_hook_dest()}",
+                                },
+                            ]
+                        }
+                    ],
+                    "Stop": [{"hooks": [{"type": "command", "command": cmd % "Stop"}]}],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": cmd % "SessionStart"}]}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    return settings
+
+
+def test_immutable_config_is_healthy_not_a_warning(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A locked config is the HARDENED state, not a fault.
+
+    Warning merely because the flag is set puts a permanent alarm on every
+    properly-secured machine — the always-on-about-nothing pattern that makes
+    people stop reading doctor output.
+    """
+    settings = _wired_settings(tmp_path)
+    enforce = provision._enforce_hook_dest()
+    enforce.parent.mkdir(parents=True, exist_ok=True)
+    enforce.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+    monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
+
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=Path("/v")))
+    assert result.level == "ok"
+    assert "hardened" in result.message
+
+
+def test_immutable_note_is_attached_to_a_real_finding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """When a repair IS needed, the lock is exactly what the reader must know:
+    the recommended `omind setup` cannot apply it until the flag is cleared."""
+    settings = _wired_settings(tmp_path)  # wired, but enforcement script absent
+    enforce = provision._enforce_hook_dest()
+    if enforce.exists():
+        enforce.unlink()
+    monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
+
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=Path("/v")))
+    assert result.level == "warn"
+    assert "IMMUTABLE" in result.message and "chattr -i" in result.message

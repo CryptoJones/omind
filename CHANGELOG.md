@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.7] - 2026-08-12
+
+### Changed
+- **A locked guard config reads as hardened, not broken.** 8.2.4 added a warning
+  whenever `settings.json` or a managed hook carried `chattr +i`. Correct in
+  substance, wrong as a permanent state: every properly-secured machine then
+  showed a standing `[!]`, which is the always-on-about-nothing pattern that
+  teaches people to skim past doctor output — the same failure as the 51% deny
+  rate. The immutability of the config now appears as `[hardened: N config
+  file(s) immutable]` on an otherwise-healthy check, and the clear/re-run/restore
+  instructions are attached to a *real* finding instead, where they answer the
+  question the reader actually has: the recommended `omind setup` cannot apply
+  this repair until the flag is cleared.
+
 ## [8.2.6] - 2026-08-12
 
 ### Fixed
