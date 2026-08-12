@@ -1400,22 +1400,29 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     # Surfaced BEFORE any "run `omind setup`" advice below: on a hardened box
     # that command cannot run at all, and saying so is the difference between a
     # known ritual and a machine silently stuck on stale hooks.
+    # A locked config is the HARDENED state, not a fault. Warning merely because
+    # the flag is set puts a permanent alarm on every properly-secured machine —
+    # the always-on-about-nothing pattern this release series has been removing.
+    # The lock only matters when a repair is actually needed, so it is reported
+    # as a note appended to a real finding, and otherwise as healthy.
     locked = [p for p in (settings_path, *_managed_guard_hooks().values()) if is_immutable(p)]
-    if locked:
-        return CheckResult(
-            "hooks",
-            "warn",
-            f"{len(locked)} managed file(s) are IMMUTABLE (chattr +i), so `omind setup` "
-            f"cannot repair wiring: {', '.join(str(p) for p in locked)} — clear with "
-            "`fleet-sudo chattr -i <file>`, re-run setup, then restore the flag",
+    lock_note = (
+        (
+            f" NOTE: {len(locked)} managed file(s) are IMMUTABLE (chattr +i), so setup "
+            f"cannot apply this repair until you clear them: "
+            f"{', '.join(str(p) for p in locked)} — `fleet-sudo chattr -i <file>`, "
+            "re-run setup, then restore the flag"
         )
+        if locked
+        else ""
+    )
     if stale_exes:
         return CheckResult(
             "hooks",
             "fail",
             "auto-memory hooks run a non-canonical omind "
             f"({', '.join(sorted(stale_exes))}, not {canonical}) — self-update will "
-            "never reach them; run `omind setup`",
+            f"never reach them; run `omind setup`.{lock_note}",
         )
     # Check the enforcement hook is present and the script exists on disk.
     enforce_dest = _enforce_hook_dest()
@@ -1432,17 +1439,20 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         return CheckResult(
             "hooks",
             "warn",
-            "enforcement hook not in PostToolUse (run `omind setup`)",
+            f"enforcement hook not in PostToolUse (run `omind setup`).{lock_note}",
         )
     if not enforce_dest.is_file():
         return CheckResult(
             "hooks",
             "warn",
-            f"enforcement hook script missing at {enforce_dest} (run `omind setup`)",
+            f"enforcement hook script missing at {enforce_dest} "
+            f"(run `omind setup`).{lock_note}",
         )
+    hardened = f" [hardened: {len(locked)} config file(s) immutable]" if locked else ""
     return CheckResult(
         "hooks", "ok",
-        "auto-memory hooks installed (PostToolUse, Stop, SessionStart) + enforcement hook"
+        "auto-memory hooks installed (PostToolUse, Stop, SessionStart) + enforcement "
+        f"hook{hardened}"
     )
 
 
