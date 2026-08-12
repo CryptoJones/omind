@@ -20,8 +20,15 @@ that catch real drift.
    ```sh
    export TESTVAULT="$(mktemp -d)/vault"; mkdir -p "$TESTVAULT/OMI"
    ```
+   Then **`omind mesh init --vault "$TESTVAULT" --folder OMI`** — not optional.
+   Several behaviors are *mode-aware*: a bare `mkdir` vault is not a mesh node,
+   so `delete_note` takes the 1.x hard `purge_note` path instead of the
+   soft-delete every production vault uses. Skip it and F5 looks like data loss
+   when the code is behaving exactly as documented.
+
    Pass `--vault "$TESTVAULT" --folder OMI` on every write/index/mesh row.
-   Rows marked **RO** are read-only and may run against the live vault.
+   Rows marked **RO** are read-only and may run against the live vault. Delete
+   the temp vaults when finished.
 3. **Do not `omind guard pause`** as part of testing, and do not leave the guard
    paused. If `guard status` reports PAUSED, that is a finding (see D0), not a
    precondition to satisfy.
@@ -89,7 +96,8 @@ worse than no guard, because it reads as protection.
 | D7 | `omind guard explain --command 'curl -X DELETE https://api.github.com/repos/o/r'` | `DENY`, rule `curl-api-repo-delete` |
 | D8 | `omind guard explain --command 'gh auth setup-git'` | `DENY`, rule `gh-auth-setup-git` |
 | D9 | **False-positive anchors.** `omind guard explain` on each of: `grep -rn sudo .`, `cat /var/log/sudo.log`, `git commit -m "fix sudo"`, `pass show sudo/akclark`, `fleet-sudo whoami`, `man su`, `tmux new -s run0`, `gh pr view` | `ALLOW` on **all**. These are command-position-anchoring regressions that make the guard unusable if they break |
-| D10 | `OMI_SUDO_OK=1 omind guard explain --command 'sudo ls'` | Allowed — the documented opt-in escape hatch still works |
+| D9a | **Quoting.** A command containing a quoted string with `\|sudo` inside it — e.g. `grep -cE 'gh-auth\|sudo-use\|privesc' file` | `ALLOW`. **Known live false positive:** the static parser does not respect quoting, reads the `\|` inside the quoted regex as a command separator, and blocks on `sudo` at "command position". Hit while running this very matrix. Record it; it is a real gap, not a test artifact |
+| D10 | `omind guard explain --command 'OMI_SUDO_OK=1 sudo ls'` | `ALLOW`. Note the form: the opt-in is a **leading assignment inside the command**, not an ambient env var. `OMI_SUDO_OK=1 omind guard explain --command 'sudo ls'` still denies, correctly — exporting it in your shell must not disarm the rule |
 | D11 | `omind guard log --limit 20` | Recent decisions are being written; `deny` and `violation` events both appear over the install's history |
 | D12 | `omind doctor` line "policy engine allowed an unconsulted action" | Absent. If present, the block path is broken — cross-check with D0/D1 before concluding it's a code fault |
 
@@ -117,7 +125,7 @@ All against `$TESTVAULT`.
 | F2 | Re-run F1 with an edit + a stale `expected_version` | Rejected as a concurrent-write conflict. Silent overwrite = data-loss bug |
 | F3 | `test -f "$TESTVAULT/OMI/.omi.lock"` and run two `omind note` writes concurrently | Single-writer lock holds; both writes land, neither corrupts |
 | F4 | `omind recover --vault "$TESTVAULT" --folder OMI` with no pending txn | Reports nothing to recover, exits 0 |
-| F5 | `mcp__omi__delete-note` then `restore-note` on a scratch note | Delete is a soft archive (file still on disk); restore brings it back |
+| F5 | `delete-note` then `restore-note` on a scratch note **in the mesh-initialized vault** | Delete is a soft archive — file still on disk with `Disabled: true` — and restore clears the flag. Mode-aware: in a **non-mesh** folder `delete_note` hard-unlinks by design (a hard delete would be resurrected by the next peer sync, hence the split). Testing this in a bare `mkdir` vault reports false data loss |
 | F6 | `omind convert --vault "$TESTVAULT" --folder OMI` run twice | Idempotent — second run reports no changes |
 | F7 | `omind lint --vault "$TESTVAULT" --folder OMI` | Exits cleanly; on the real vault **RO**, review broken wikilinks / orphans / dupes as findings rather than failures |
 
@@ -139,12 +147,12 @@ Skip with a reason if the install is standalone (no peers).
 
 | ID | Command | Pass criterion |
 |----|---------|----------------|
-| H1 | `omind mesh status` | Node identity present; each peer reports ahead/behind counts with a recent fetch |
+| H1 | `omind doctor` peer lines | Node identity present; each peer reports ahead/behind counts with a recent fetch. (There is no `omind mesh status` — `mesh` takes init/add-peer/add-seed/remove-peer/sync/daemon/install-service/clone/purge. Peer state is a doctor check) |
 | H2 | `omind doctor` line "last sync" | Recent relative to the sync interval. Hours-old sync on an active mesh = a broken timer |
 | H3 | `omind doctor` line "no unresolved conflict markers" | `[✓]`. Any `<<<<<<<` in a note means the omi merge driver (B11) isn't doing its job |
 | H4 | `omind mesh sync` (dry-run first if supported) | Completes without conflict |
 | H5 | `omind backup` status / `omind doctor` "last backup succeeded" | Succeeded recently, to the intended destination. A backup that has never run on a new install is expected — verify the *schedule* exists |
-| H6 | `omind export --vault "$TESTVAULT" --folder OMI` → `omind import` into a second temp vault | Round-trips: note count and content match the source |
+| H6 | `omind export --vault "$TESTVAULT" --folder OMI --out bundle.json` → `omind import --vault "$DEST" --folder OMI bundle.json` | Round-trips: note count and content match the source. The bundle path is **positional** on import (there is no `--in`), and `import` reports `+N added, … conflict(s) skipped` |
 
 ## I. Scheduled / ancillary features
 
@@ -154,7 +162,7 @@ Skip with a reason if the install is standalone (no peers).
 | I2 | `systemctl --user list-timers \| grep -i omind` (or the platform equivalent) | The checkpoint timer is installed and scheduled if `install-timer` was intended |
 | I3 | `omind rollup --vault "$TESTVAULT" --folder OMI` | Compacts dailies; default archives rather than deletes |
 | I4 | `omind consolidate --vault "$TESTVAULT" --folder OMI` | Proposes merges **without mutating** the vault (verify with `git -C status`/checksums before and after) |
-| I5 | `omind ai` | Reports token usage and the active model-expense profile |
+| I5 | `omind ai usage` | Reports token usage and the active model-expense profile. (`omind ai` alone is a parser error — it requires the `profile` or `usage` subcommand) |
 | I6 | `omind serve` on the throwaway vault | Binds **localhost only**, unauthenticated by design. A non-loopback bind is a security finding, not a config preference |
 
 ---
@@ -174,3 +182,30 @@ SKIP G2 — omind[embed] not installed; keyword path only
 Group D failures are release-blocking. Groups B/C failures are usually repaired
 by re-running `omind setup`; re-run the failed rows afterward rather than
 assuming the repair took.
+
+## First full run — Ronin28, omind 8.2.3, 2026-08-11
+
+```
+A: 5/5   B: 13/13  C: 7/7   D: 13/13  E: 5/5 (E5 SKIP)
+F: 7/7   G: 7/7    H: 5/5 (H4 SKIP)   I: 6/6
+```
+
+Everything passed. Four rows in this document were wrong and were corrected
+from what the run showed — F5 (mode-aware delete), H1 (`mesh status` does not
+exist), H6 (`import` takes a positional path), I5 (`ai` needs a subcommand) —
+plus the new D9a, a live guard false positive the run triggered against itself.
+
+That ratio is the point worth keeping: on an install already repaired and
+released three times the same day, the matrix found nothing wrong with the
+software and five things wrong with the matrix. A verification document is only
+as trustworthy as its last execution, so run it rather than reading it.
+
+Two findings that are real and remain open:
+
+- **51% deny rate, 0 learned rules across 2198 events** (D11). Not a
+  misconfiguration — a gate that denies one action in two has stopped carrying
+  signal. Diagnose with `guard log` + `guard policy` now that semantic
+  relevance is on.
+- **`guard status` reports the config AGENT-WRITABLE** (D0). Consequence of
+  clearing `chattr +i` so `omind setup` could run at all. The tool is right to
+  complain; the tradeoff is deliberate and needs an operator decision.
