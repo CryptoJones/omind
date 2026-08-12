@@ -1247,9 +1247,13 @@ def test_guard_hook_install_keeps_our_entry_in_place(
     assert entries[1]["matcher"] == "Read"  # user's hook untouched
 
 
-def _wired_settings(tmp_path: Path) -> Path:
-    """A settings.json with correct auto-memory + enforcement wiring."""
-    vault = "/v"
+def _wired_settings(tmp_path: Path, vault: Path) -> Path:
+    """A settings.json with correct auto-memory + enforcement wiring.
+
+    The vault is stringified from the SAME Path the caller passes to
+    SetupConfig, so the hook commands match on every platform — a literal "/v"
+    renders as "\\v" on Windows and trips the vault-mismatch check instead.
+    """
     cmd = f'{provision.canonical_omind_exe()} hook %s --vault "{vault}" --folder "OMI"'
     settings = tmp_path / "settings.json"
     settings.write_text(
@@ -1288,13 +1292,14 @@ def test_immutable_config_is_healthy_not_a_warning(
     properly-secured machine — the always-on-about-nothing pattern that makes
     people stop reading doctor output.
     """
-    settings = _wired_settings(tmp_path)
+    vault = tmp_path / "v"
+    settings = _wired_settings(tmp_path, vault)
     enforce = provision._enforce_hook_dest()
     enforce.parent.mkdir(parents=True, exist_ok=True)
     enforce.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
     monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
 
-    result = provision._diagnose_hooks(settings, SetupConfig(vault=Path("/v")))
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
     assert result.level == "ok"
     assert "hardened" in result.message
 
@@ -1304,12 +1309,13 @@ def test_immutable_note_is_attached_to_a_real_finding(
 ) -> None:
     """When a repair IS needed, the lock is exactly what the reader must know:
     the recommended `omind setup` cannot apply it until the flag is cleared."""
-    settings = _wired_settings(tmp_path)  # wired, but enforcement script absent
+    vault = tmp_path / "v"
+    settings = _wired_settings(tmp_path, vault)  # wired, enforcement script absent
     enforce = provision._enforce_hook_dest()
     if enforce.exists():
         enforce.unlink()
     monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
 
-    result = provision._diagnose_hooks(settings, SetupConfig(vault=Path("/v")))
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
     assert result.level == "warn"
     assert "IMMUTABLE" in result.message and "chattr -i" in result.message
