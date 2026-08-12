@@ -1138,3 +1138,26 @@ def test_immutable_hint_falls_back_for_ordinary_permission_errors(
     hint = provision._immutable_hint(target, PermissionError("denied"))
     assert "IMMUTABLE" not in hint
     assert f"cannot write {target}" in hint
+
+
+def test_every_provisioning_write_explains_an_immutable_target(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The first cut wrapped only `_write_managed`, so settings.json — written
+    directly by the hook-installing steps, and the file a hardened box actually
+    locks — still died on a raw traceback. Locking a machine down exposed it.
+    Assert the primitive is what explains, and that no caller bypasses it."""
+    monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise PermissionError(1)
+
+    monkeypatch.setattr(provision.paths, "atomic_write_text", boom)
+    with pytest.raises(provision.ProvisionError) as excinfo:
+        provision.write_or_explain(tmp_path / "settings.json", "{}")
+    assert "IMMUTABLE" in str(excinfo.value)
+
+    source = Path(provision.__file__).read_text(encoding="utf-8")
+    body = source.split("def write_or_explain", 1)[1].split("\ndef ", 1)[0]
+    # Exactly one direct use of the raw primitive: inside the wrapper itself.
+    assert source.count("paths.atomic_write_text(") == body.count("paths.atomic_write_text(")

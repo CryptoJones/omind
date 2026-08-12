@@ -150,7 +150,7 @@ def write_provision_manifest() -> None:
     with contextlib.suppress(OSError):
         _guard_test_isolation(path)
         path.parent.mkdir(parents=True, exist_ok=True)
-        paths.atomic_write_text(path, json.dumps(payload, indent=2) + "\n")
+        write_or_explain(path, json.dumps(payload, indent=2) + "\n")
 
 
 def read_provision_manifest() -> dict[str, Any]:
@@ -327,6 +327,22 @@ def is_immutable(path: Path) -> bool:
     return "i" in flags[0] if flags else False
 
 
+def write_or_explain(path: Path, content: str, *, mode: int | None = None) -> None:
+    """``paths.atomic_write_text`` that explains an immutable target.
+
+    EVERY provisioning write goes through here, not just managed hook scripts.
+    The first cut of this guidance wrapped only :meth:`Provisioner._write_managed`
+    and so missed ``settings.json`` — which the hook-installing steps write
+    directly, and which is precisely the file a hardened box locks. Locking a
+    machine down was what exposed the gap: setup still died on a raw traceback
+    at the one file that matters most. Wrap the primitive, not one caller.
+    """
+    try:
+        paths.atomic_write_text(path, content, mode=mode)
+    except PermissionError as exc:
+        raise ProvisionError(_immutable_hint(path, exc)) from exc
+
+
 def _immutable_hint(path: Path, exc: BaseException) -> str:
     """Explain a provisioning PermissionError instead of dying on a traceback.
 
@@ -457,7 +473,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, content, mode=mode)
+            write_or_explain(path, content, mode=mode)
 
     def _write_managed(self, path: Path, content: str, *, mode: int | None = None) -> None:
         """Write a Managed-by-omind file, refreshing it whenever its content drifts.
@@ -488,10 +504,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            try:
-                paths.atomic_write_text(path, content, mode=mode)
-            except PermissionError as exc:
-                raise ProvisionError(_immutable_hint(path, exc)) from exc
+            write_or_explain(path, content, mode=mode)
 
     # -- steps --------------------------------------------------------------
 
@@ -842,7 +855,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+            write_or_explain(path, json.dumps(data, indent=2) + "\n")
 
     def ensure_cross_session_inbound(self) -> None:
         """Set ``crossSessionInbound`` to the fleet default in settings.json.
@@ -865,7 +878,7 @@ class Provisioner:
         )
         if not self.config.dry_run:
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+            write_or_explain(path, json.dumps(data, indent=2) + "\n")
 
     def ensure_guard_hook_installed(self) -> None:
         """Idempotently register the PreToolUse(Bash) guard hooks.
@@ -918,7 +931,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+            write_or_explain(path, json.dumps(data, indent=2) + "\n")
 
     def _remove_legacy_omi_guard(self) -> None:
         """Delete the retired hand-rolled ``omi-git-guard.sh`` prototype if present,
@@ -1058,7 +1071,7 @@ class Provisioner:
         if not self.config.dry_run:
             _guard_test_isolation(path)
             path.parent.mkdir(parents=True, exist_ok=True)
-            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+            write_or_explain(path, json.dumps(data, indent=2) + "\n")
 
     def verify(self) -> None:
         if self.config.dry_run:

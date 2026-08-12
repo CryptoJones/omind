@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.5] - 2026-08-12
+
+### Fixed
+- **The immutable-file guidance now covers `settings.json`.** 8.2.4 wrapped only
+  `_write_managed`, so managed hook scripts explained themselves while
+  `settings.json` — written directly by the hook-installing steps, and the file
+  a hardened machine actually locks — still died on a raw `PermissionError`.
+  Locking a box down is what exposed it: setup failed with a traceback at the
+  one file that matters most, which is exactly the silence 8.2.4 set out to end.
+  Every provisioning write now goes through `write_or_explain`, and a test
+  asserts no caller bypasses it, because fixing one call site is what caused
+  this in the first place.
+
 ## [8.2.4] - 2026-08-11
 
 ### Fixed
