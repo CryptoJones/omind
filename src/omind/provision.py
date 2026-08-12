@@ -913,13 +913,24 @@ class Provisioner:
         }
         existing = hooks_cfg.get("PreToolUse")
         existing_list = existing if isinstance(existing, list) else []
-        kept = [
-            e
-            for e in existing_list
-            if GUARD_HOOK_MARKER not in _entry_command_text(e)
-            and SECRET_OUTPUT_GUARD_MARKER not in _entry_command_text(e)
-        ]
-        merged = kept + [desired]
+
+        def _is_ours(entry: object) -> bool:
+            text = _entry_command_text(entry)
+            return GUARD_HOOK_MARKER in text or SECRET_OUTPUT_GUARD_MARKER in text
+
+        # Replace omind's entry WHERE IT ALREADY SITS; only append when absent.
+        # Appending unconditionally made the equality check below order-sensitive:
+        # with our entry first in the file (the shipped layout, guards ahead of
+        # the '*' matcher), `kept + [desired]` never equalled the existing list,
+        # so setup always wanted to rewrite. Self-correcting on a normal box —
+        # but a hardened one with `chattr +i` can never take that write, so every
+        # `self-update` reported a re-provision failure for a no-op change.
+        slot = next((i for i, e in enumerate(existing_list) if _is_ours(e)), None)
+        if slot is None:
+            merged = [*existing_list, desired]
+        else:
+            merged = [e for i, e in enumerate(existing_list) if not _is_ours(e) or i == slot]
+            merged[merged.index(existing_list[slot])] = desired
 
         if merged == existing_list and not self.config.force:
             self.log(f"  PreToolUse(Bash) guard hooks already installed in {path}")
