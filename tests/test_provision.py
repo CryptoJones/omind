@@ -1161,3 +1161,87 @@ def test_every_provisioning_write_explains_an_immutable_target(
     body = source.split("def write_or_explain", 1)[1].split("\ndef ", 1)[0]
     # Exactly one direct use of the raw primitive: inside the wrapper itself.
     assert source.count("paths.atomic_write_text(") == body.count("paths.atomic_write_text(")
+
+
+def _guard_entry() -> dict[str, object]:
+    return {
+        "matcher": "Bash",
+        "hooks": [
+            {
+                "type": "command",
+                "command": str(provision._secret_output_guard_dest()),
+                "timeout": provision.SECRET_OUTPUT_GUARD_TIMEOUT,
+            },
+            {
+                "type": "command",
+                "command": str(provision._guard_hook_dest()),
+                "timeout": provision.GUARD_HOOK_TIMEOUT,
+            },
+        ],
+    }
+
+
+def test_guard_hook_install_is_idempotent_when_our_entry_is_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Setup must want NO write when the wiring already matches, whatever the
+    order. It rebuilt the list as `kept + [desired]`, appending our entry, so
+    with it first in the file — the shipped layout — the equality check failed
+    on ordering alone and setup always wanted to rewrite. Self-correcting on a
+    normal box; on a `chattr +i` one it can never converge, so every
+    self-update reported a re-provision failure for a no-op change.
+    """
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PreToolUse": [
+                        _guard_entry(),
+                        {
+                            "matcher": "*",
+                            "hooks": [
+                                {
+                                    "type": "command",
+                                    "command": str(provision._omi_guard_dest()),
+                                    "timeout": 15,
+                                }
+                            ],
+                        },
+                    ]
+                }
+            },
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(provision, "claude_settings_path", lambda: settings)
+    before = settings.read_text(encoding="utf-8")
+
+    prov = provision.Provisioner(config=SetupConfig(vault=tmp_path / "v"), log=lambda _m: None)
+    prov.ensure_guard_hook_installed()
+
+    assert settings.read_text(encoding="utf-8") == before
+    assert not prov.actions  # nothing recorded == nothing to write
+
+
+def test_guard_hook_install_keeps_our_entry_in_place(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A stale entry is refreshed where it sits, not moved to the end, and the
+    user's own PreToolUse hooks keep their positions."""
+    stale = _guard_entry()
+    stale["hooks"][0]["timeout"] = 1  # type: ignore[index]
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps({"hooks": {"PreToolUse": [stale, {"matcher": "Read", "hooks": []}]}}),
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(provision, "claude_settings_path", lambda: settings)
+
+    prov = provision.Provisioner(config=SetupConfig(vault=tmp_path / "v"), log=lambda _m: None)
+    prov.ensure_guard_hook_installed()
+
+    entries = json.loads(settings.read_text(encoding="utf-8"))["hooks"]["PreToolUse"]
+    assert entries[0] == _guard_entry()  # refreshed, still first
+    assert entries[1]["matcher"] == "Read"  # user's hook untouched

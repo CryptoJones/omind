@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.2.6] - 2026-08-12
+
+### Fixed
+- **`omind setup` is idempotent when its guard entry is first in
+  `settings.json`.** `ensure_guard_hook_installed` rebuilt the PreToolUse list
+  as `kept + [desired]`, appending omind's entry, so with that entry already
+  first — the shipped layout, guards ahead of the `*` matcher — the
+  "did anything change?" comparison failed on ordering alone and setup always
+  wanted to rewrite a file that was already correct. Harmless on an ordinary
+  machine, where one write reorders and converges. On a hardened one it is not:
+  `chattr +i` means that write can never land, so `omind setup` fails every time
+  and every `self-update` reports a re-provision failure for a no-op change —
+  an alarm that is always on, about nothing. The entry is now refreshed where it
+  already sits, and is only appended when genuinely absent, so re-runs are true
+  no-ops and a user's own PreToolUse hooks keep their positions.
+
 ## [8.2.5] - 2026-08-12
 
 ### Fixed
