@@ -181,3 +181,19 @@ def test_read_events_survives_a_torn_non_utf8_line() -> None:
     path.write_bytes(good.encode() + b"\n\xff\xfe torn\n" + good.encode() + b"\n")
     events = compliance.read_events()  # must not raise
     assert [e.get("rule_id") for e in events] == ["ok", "ok"]
+
+
+def test_summary_separates_ceremony_from_blocking_denials() -> None:
+    """The consult/fresh-base gates log a deny, get satisfied, and the work
+    proceeds. Counting them as refusals put a machine at "51% denied" where
+    almost nothing was actually stopped — a metric that cries wolf until nobody
+    reads it."""
+    compliance.log_event(compliance.KIND_DECISION, rule_id="repo-work-fresh-base", outcome="deny")
+    compliance.log_event(compliance.KIND_DECISION, rule_id="off-topic-consult", outcome="deny")
+    compliance.log_event(compliance.KIND_DECISION, rule_id="sudo-use-fleet-sudo", outcome="deny")
+
+    rollup = compliance.summary()
+    assert rollup["denies"] == 3
+    assert rollup["ceremony_denies"] == 2
+    assert rollup["blocking_denies"] == 1  # only the real refusal
+    assert "sudo-use-fleet-sudo" not in compliance.CEREMONY_RULES

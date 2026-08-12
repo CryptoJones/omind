@@ -666,6 +666,25 @@ _SHELL_SIDE_EFFECT_RE = re.compile(
     r")\b"
 )
 
+#: The subset of :data:`_SHELL_SIDE_EFFECT_RE` that actually needs an explicit
+#: go-ahead when the request was phrased as a capability question — things that
+#: leave this machine, restart something, destroy data, or change permissions.
+#: Notably ABSENT, and deliberately so: `cp`, `mv`, `touch`, `tee`, `install`,
+#: `mkdir`, and local `git add`/`commit`/`checkout`. Those are reversible local
+#: work, and gating them denied real tasks on a real machine (see
+#: :func:`_is_side_effect_action`). `git push` stays — it is the outward one.
+_RISKY_SIDE_EFFECT_RE = re.compile(
+    rf"(?:^|[;&|\n(]\s*)(?:"
+    rf"gh\s+(?:issue\s+create|pr\s+(?:create|merge)|release\s+create)|"
+    rf"git\s+{_GIT_GLOBAL_OPTS}push|"
+    r"systemctl\s+(?:restart|reload|stop|start)|"
+    r"service\s+\S+\s+(?:restart|reload|stop|start)|"
+    r"kubectl\s+(?:apply|delete|rollout\s+restart|scale)|"
+    r"docker\s+(?:compose\s+)?(?:up|down|restart|rm)|"
+    r"chmod|chown|dd|rm|truncate"
+    r")\b"
+)
+
 
 # Provably-inert inspection commands, exempt from the consult-gate (#147): no
 # filesystem read/write, no repo, no network, no side effect — a memory consult
@@ -1014,14 +1033,26 @@ def _turn_has_explicit_global_auth(action: dict[str, Any], session: str) -> bool
 
 
 def _is_side_effect_action(action: dict[str, Any]) -> bool:
-    tool = str(action.get("tool") or "")
-    if tool in _WRITE_TOOLS:
-        return True
+    """Does this action carry a consequence worth an explicit go-ahead?
+
+    Deliberately NARROWER than "has any effect". This gate previously counted
+    every Write/Edit, every `cp`/`mv`/`touch`/`tee`, and any `>` redirect as a
+    side effect, so phrasing a request as "can you …" blocked ordinary work:
+    `mkdir -p … && cp …` and a `sed -i` on a scratch file were both denied on a
+    real machine. A gate that stops legitimate work teaches people to route
+    around it, which costs more safety than it buys.
+
+    What still requires explicit authorization is what a user cannot casually
+    undo: reaching OUTSIDE this machine (opening a PR, pushing, cutting a
+    release), restarting services, destroying data, changing permissions, or
+    editing global agent config. Local, reversible edits are the work itself —
+    they are covered by the destructive deny-set and the consult gate, not here.
+    """
     if _is_global_config_mutation(action):
         return True
     command = str(action.get("command") or "")
-    if tool == "Bash" or command:
-        return bool(_SHELL_SIDE_EFFECT_RE.search(command) or _FILE_REDIRECT_RE.search(command))
+    if str(action.get("tool") or "") == "Bash" or command:
+        return bool(_RISKY_SIDE_EFFECT_RE.search(command))
     return False
 
 

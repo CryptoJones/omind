@@ -1396,3 +1396,54 @@ def test_guard_pause_under_the_cap_is_untouched(capsys: pytest.CaptureFixture[st
     assert 0 < guard.pause_remaining() <= 1800
     assert "cap" not in capsys.readouterr().out
     guard.resume_gate()
+
+
+def test_capability_question_allows_ordinary_local_work() -> None:
+    """A gate that stops legitimate work teaches people to route around it.
+
+    Phrasing a request as "can you …" used to block `mkdir && cp` and a `sed -i`
+    on a scratch file, because every Write/Edit and every `cp`/`touch`/redirect
+    counted as a side effect. Local reversible work is the task itself.
+    """
+    for command in (
+        "mkdir -p ~/x && cp a b",
+        "sed -i 's/a/b/' scratch.html",
+        "touch f",
+        "git add -A",
+        "git commit -m 'x'",
+        "echo hi > f",
+    ):
+        verdict = guard.decide(
+            {
+                "tool": "Bash",
+                "command": command,
+                "prompt": "can you set that up for me?",
+                "session": "capallow",
+            }
+        )
+        assert verdict.rule_id != "capability-question-explicit-auth", command
+    guard.clear_gate("capallow")
+
+
+def test_capability_question_still_gates_the_irreversible() -> None:
+    """Narrower must not mean toothless: outward, destructive, and permission
+    changes still need an explicit go-ahead."""
+    for command in (
+        "git push origin main",
+        "gh pr create -t x",
+        "rm -rf /tmp/x",
+        "chmod 777 /etc/x",
+        "systemctl restart nginx",
+        "docker compose down",
+    ):
+        verdict = guard.decide(
+            {
+                "tool": "Bash",
+                "command": command,
+                "prompt": "can you set that up for me?",
+                "session": "capblock",
+            }
+        )
+        assert not verdict.allow, command
+        assert verdict.rule_id == "capability-question-explicit-auth", command
+    guard.clear_gate("capblock")
