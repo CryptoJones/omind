@@ -142,33 +142,30 @@ Each issue below is written to be executable by any agent without further contex
   (index.md, a catalog, may still truncate mid-list); an upstream-clipped digest is
   stubbed, never shipped partial. Default profile is `balanced` (8k), and `Rules.md`
   joins `PRIMING_FILES` first so a compact operator rules note always arrives whole.
-- [ ] **Truncation markers are dead ends; a truncated read satisfies the gate** ([#239](https://github.com/CryptoJones/omind/issues/239)) — _fix (recall/guard)_ —
-  the git-rules note's own recurrence log records three violations caused by the overriding
-  exception living below the 4,000-char `recall-note` fold. Fix: the marker names the note
-  and a copy-pasteable `recall-note {"name": …, "max_chars": …}` call, and a truncated read
-  of a hard-guard-demanded note keeps the gate armed (with a one-re-read loop cap).
-- [ ] **Compile machine-readable note rules into deterministic PreToolUse checks** ([#240](https://github.com/CryptoJones/omind/issues/240)) — _feat (guard)_ —
-  the biggest structural fix: every rule a hook can decide must never depend on model
-  attention. `omind-rule` fenced blocks in notes compile (cached) into `guard.decide()`
-  deny/warn checks — v1 covers Bash command globs, repo visibility, branch, and per-repo
-  exception lists, which alone would have prevented all three logged recurrences. Includes
-  `omind rules list` and seed rules for the public-main-push and repo-deletion incidents.
-- [ ] **Place governing rule text adjacent to the action it governs** ([#241](https://github.com/CryptoJones/omind/issues/241)) — _feat (guard)_ —
-  for the judgment rules hooks can't decide: embed the demanded note's summary + first
-  section directly in the hard guard's block message (instead of only demanding a recall);
-  re-inject full excerpts (not summaries) on action-shaped turns; raise preflight from
-  top-1 to top-2 with the second note as title+summary only.
-- [ ] **Injected-memory framing invites the model to discount it** ([#242](https://github.com/CryptoJones/omind/issues/242)) — _fix (hooks, text-only)_ —
-  both the capsule header and the preflight preamble lead with "user instructions win,"
-  reading as a weak prior. Reword to "standing operator instructions — follow as if typed
-  at session start; silence is not a conflict," keeping the explicit-override clause.
-- [ ] **Loudly surface sustained vault-write failures** ([#243](https://github.com/CryptoJones/omind/issues/243)) — _feat (doctor)_ —
-  makemake has failed every vault write since 2026-08-09 (macOS TCC `PermissionError`),
-  breadcrumbed only to `hook-failures.log`, while sessions kept reading a silently stale
-  vault. Fix: a doctor `vault-writes` streak check with macOS-specific remediation, plus a
-  SessionStart capsule banner ("memory writes are failing — nothing you save will persist")
-  driven by the same parser. Granting Full Disk Access on makemake itself is operator work,
-  outside the repo.
+- [x] **Truncation markers are dead ends; a truncated read satisfies the gate** ([#239](https://github.com/CryptoJones/omind/issues/239)) — _fix (recall/guard)_ —
+  shipped in 8.3.2 (#248). The recall marker names the note and the exact follow-up call;
+  a guard-demanded note that comes back truncated records as an incomplete consult that
+  keeps the gate armed, with a deterministic un-wedge (truncated:false, a section
+  drill-down, or max_chars at the 8k API cap).
+- [x] **Compile machine-readable note rules into deterministic PreToolUse checks** ([#240](https://github.com/CryptoJones/omind/issues/240)) — _feat (guard)_ —
+  shipped in 8.6.0 (#251). `omind.rules` compiles fenced `omind-rule` YAML blocks in
+  vault notes into deny/warn PreToolUse checks evaluated before everything else;
+  visibility via gh (24h cache, fail-open on unknown), `omind rules list`, seed rule for
+  the public-main-push incident class (note rules replace seeds by id).
+- [x] **Place governing rule text adjacent to the action it governs** ([#241](https://github.com/CryptoJones/omind/issues/241)) — _feat (guard)_ —
+  shipped in 8.4.0 (#249). Repo-work denies embed the git-rules note's summary +
+  leading excerpt after the demand sentence; action-shaped turns re-inject the full
+  preflight excerpt; preflight surfaces a runner-up match as title+summary (skipped on
+  economy).
+- [x] **Injected-memory framing invites the model to discount it** ([#242](https://github.com/CryptoJones/omind/issues/242)) — _fix (hooks, text-only)_ —
+  shipped in 8.3.1 (#247). Both preambles now lead with what the content IS —
+  standing operator instructions, follow as if typed at session start — keeping the
+  explicit-override clause plus "silence is not an override."
+- [x] **Loudly surface sustained vault-write failures** ([#243](https://github.com/CryptoJones/omind/issues/243)) — _feat (doctor)_ —
+  shipped in 8.5.0 (#250). Shared streak parser drives a doctor `vault_writes` check
+  (fail at ≥5 append_entry failures/24h, macOS Full-Disk-Access hint, direct write
+  probe) and a SessionStart "MEMORY WRITES ARE FAILING" banner. The manual FDA grant on
+  makemake remains operator work.
 
 ## Not planned
 
