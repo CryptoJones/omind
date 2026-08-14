@@ -20,8 +20,8 @@ def test_profile_default_saved_and_environment_override(
 ) -> None:
     omi = tmp_path / "OMI"
     assert ai_usage.profile_info(omi) == {
-        "saved": "economy",
-        "effective": "economy",
+        "saved": "balanced",
+        "effective": "balanced",
         "source": "default",
     }
     assert ai_usage.set_profile(omi, "medium")["effective"] == "balanced"

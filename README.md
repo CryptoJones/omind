@@ -443,18 +443,24 @@ credentials.
 
 ```bash
 omind ai profile                         # show saved/effective profile
-omind ai profile economy                 # default: 4k priming, deterministic checks
-omind ai profile balanced                # 8k priming, deterministic checks
+omind ai profile economy                 # 4k priming, deterministic checks
+omind ai profile balanced                # default: 8k priming, deterministic checks
 omind ai profile full                    # 24k priming, optional model checks enabled
 omind ai usage --since 7d                # 24h, 7d, 30d, or all
 omind ai usage --since all --json        # machine-readable report
 ```
 
 Profiles describe OMI overhead; they do not select the parent agent's model.
-`economy` is the default and caps session priming at 4,000 characters, proactive
-recall at 1,500, and disables optional model subprocesses. `balanced` uses
-8,000/2,500 characters and remains deterministic. `full` uses 24,000/4,000 and
-enables verifier/checkpoint model calls. Legacy `high`/`medium`/`low` values map
+`balanced` is the default: 8,000 characters of session priming, 2,500 of
+proactive recall, deterministic checks only. `economy` caps priming at 4,000
+characters, recall at 1,500, and disables optional model subprocesses. `full`
+uses 24,000/4,000 and enables verifier/checkpoint model calls. Whatever the
+profile, a priming note is injected **whole or not at all** — an oversized note
+becomes a one-line stub naming the exact `recall-note` call instead of a
+misleading partial body (`index.md`, a catalog, may still truncate mid-list).
+An optional operator-maintained `Rules.md` in the OMI folder is first-priority
+priming: keep it under ~3,500 characters of imperative one-liners and it is
+guaranteed to arrive whole on every profile. Legacy `high`/`medium`/`low` values map
 to `economy`/`balanced`/`full`. Set `OMI_AI_EXPENSE` for a temporary override.
 The CLI and web app show cache-inclusive OMI share, average priming, exact versus
 estimated usage, per-operation totals, and estimated avoided tokens.

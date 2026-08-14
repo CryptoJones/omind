@@ -374,7 +374,47 @@ def test_session_start_caps_runaway_note(tmp_path: Path) -> None:
         "x" * (hooks._PRIMING_FILE_CHAR_CAP + 500), encoding="utf-8"
     )
     ctx = hooks.build_session_start_context(tmp_path)
-    assert "…[truncated]" in ctx
+    # A runaway note is omitted with a fetch pointer, never a partial body (#238).
+    assert "Playbook.md (omitted" in ctx
+    assert '"name": "Playbook"' in ctx
+    assert "xxxx" not in ctx
+
+
+def test_session_start_whole_note_or_omitted_stub_never_partial(tmp_path: Path) -> None:
+    """#238 headline scenario: 4k cap + 8k Playbook → whole note or stub, no shred."""
+    playbook = "RULE-START " + "r" * 8_000 + " RULE-END"
+    (tmp_path / "Playbook.md").write_text(playbook, encoding="utf-8")
+    (tmp_path / "Memory Workflow.md").write_text("OMI is the source", encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path, _context_cap=4_000)
+    if "RULE-START" in ctx:
+        assert "RULE-END" in ctx  # included whole
+    else:
+        assert "Playbook.md (omitted" in ctx
+        assert '"name": "Playbook"' in ctx
+    # The small note still gets in whole after the big one is stubbed.
+    assert "OMI is the source" in ctx
+
+
+def test_session_start_rules_note_is_first_and_whole(tmp_path: Path) -> None:
+    """Rules.md is first-priority priming and always injected whole (#238)."""
+    assert hooks.PRIMING_FILES[0] == "Rules.md"
+    (tmp_path / "Rules.md").write_text(
+        "- HARD RULE ONE\n- HARD RULE " + "z" * 1_800, encoding="utf-8"
+    )
+    for name in hooks.PRIMING_FILES[1:]:
+        (tmp_path / name).write_text("f" * hooks._PRIMING_FILE_CHAR_CAP, encoding="utf-8")
+    ctx = hooks.build_session_start_context(tmp_path, _context_cap=4_000)
+    assert "HARD RULE ONE" in ctx
+    assert "z" * 1_800 in ctx  # whole, not clipped
+
+
+def test_allocate_sections_index_may_still_truncate() -> None:
+    index = "===== OMI capsule: index.md =====\n" + "- [[Note]] line\n" * 400
+    fitted = hooks._allocate_sections([index], 2_000, minimum=400)
+    assert len(fitted) == 1
+    assert fitted[0].startswith("===== OMI capsule: index.md =====")
+    assert fitted[0].endswith(hooks._TRUNCATION_MARKER)
+    assert len(fitted[0]) <= 2_000
 
 
 def test_session_start_falls_back_when_no_notes(tmp_path: Path) -> None:
@@ -514,9 +554,13 @@ def test_session_start_total_cap_truncates_dynamic_first(tmp_path: Path) -> None
     ctx = hooks.build_session_start_context(tmp_path, cwd="/work/repos/omind")
     assert len(ctx) <= hooks._TOTAL_CONTEXT_CHAR_CAP
     for name in hooks.PRIMING_FILES:
-        assert f"===== OMI capsule: {name} =====" in ctx
-    assert "dddd" in ctx  # matched handoff keeps a bounded capsule section
-    assert "…[truncated]" in ctx
+        # Every priming note is either included whole or named in an omitted
+        # stub pointing at recall-note — never a partial body (#238).
+        assert (
+            f"===== OMI capsule: {name} =====" in ctx
+            or f"OMI capsule: {name} (omitted" in ctx
+        )
+    assert "OMI capsule: Session State omind 2026-06-09.md" in ctx
 
 
 def test_session_start_reserves_dynamic_when_static_fills_cap(tmp_path: Path) -> None:
@@ -541,7 +585,10 @@ def test_session_start_expense_profiles_apply_hard_caps(tmp_path: Path) -> None:
         context = hooks.build_session_start_context(tmp_path)
         assert len(context) <= cap
         for priming in hooks.PRIMING_FILES:
-            assert f"===== OMI capsule: {priming} =====" in context
+            assert (
+                f"===== OMI capsule: {priming} =====" in context
+                or f"OMI capsule: {priming} (omitted" in context
+            )
     hooks.emit_session_start_context(tmp_path, out=io.StringIO())
     event = ai_usage.read_events(tmp_path)[-1]
     assert event["profile"] == "economy"

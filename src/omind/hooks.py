@@ -33,6 +33,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sys
 from collections.abc import Callable
 from datetime import datetime
@@ -60,7 +61,13 @@ _TARGET_LIMIT = 80
 # Notes compiled into a concise SessionStart capsule. Rich note bodies stay in
 # OMI and are recalled just-in-time from the user prompt instead of being copied
 # wholesale into every conversation.
-PRIMING_FILES = ("index.md", "Playbook.md", "Memory Workflow.md", "CLAUDE CODE PERSONALITY.md")
+PRIMING_FILES = (
+    "Rules.md",  # optional operator-maintained hard rules; injected whole or not at all
+    "index.md",
+    "Playbook.md",
+    "Memory Workflow.md",
+    "CLAUDE CODE PERSONALITY.md",
+)
 _DYNAMIC_CORE_LIMIT = 3
 _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood context
 
@@ -467,38 +474,68 @@ def _select_session_state(directory: Path, cwd: Path | str | None) -> Path | Non
     return selected if score > 0 else None
 
 
+#: Section headers look like ``===== OMI capsule: <name>[ (suffix)] =====``.
+_SECTION_HEADER_RE = re.compile(
+    r"^===== OMI capsule: (.+?)(?: \((?:dynamic core|project handoff)\))? =====$"
+)
+_INDEX_SECTION_PREFIX = "===== OMI capsule: index.md"
+
+
+def _omitted_stub(section: str) -> str:
+    """A pointer-only replacement for a section that cannot be included whole.
+
+    A partial rule body reads as complete and creates false confidence, so an
+    oversized note is replaced by an explicit fetch instruction instead of a
+    mid-body cut (#238).
+    """
+    header, _, _body = section.partition("\n")
+    match = _SECTION_HEADER_RE.match(header)
+    name = match.group(1) if match else header.strip("= ").strip()
+    title = name[:-3] if name.endswith(".md") else name
+    return (
+        f"===== OMI capsule: {name} (omitted, {len(section)} chars) =====\n"
+        "Too large for this profile's capsule. Call OMI MCP recall-note "
+        f'{{"name": "{title}", "max_chars": {len(section) + 1_000}}} '
+        "before acting on this topic."
+    )
+
+
 def _allocate_sections(
     sections: list[str], budget: int, *, minimum: int = 1_000
 ) -> list[str]:
-    """Fit sections into ``budget`` while giving every section a useful floor.
+    """Fit whole sections into ``budget`` in priority order; drop, don't shred.
 
-    The floor prevents a long index from consuming the whole context before the
-    Playbook/workflow/persona sections get a voice. Unused space is then handed
-    out in priority order (the caller's order).
+    Splitting the budget pro-rata produced preamble-only stubs — an 8k Playbook
+    arrived as ~400 chars of "re-read these rules" with zero rules, which reads
+    as complete and gets "ignored" (#238). Now a section is included whole or
+    replaced by an :func:`_omitted_stub` naming the exact recall-note call.
+    ``index.md`` is the one exception: a partial catalog is still useful, so it
+    may truncate mid-list (down to ``minimum``). A section whose digest was
+    already clipped upstream (ends with the truncation marker) is stubbed too —
+    it is a partial body by construction.
     """
     if not sections or budget <= len(_TRUNCATION_MARKER):
         return []
-    allocations = [min(len(section), minimum) for section in sections]
-    total = sum(allocations)
-    if total > budget:
-        share = max(0, budget // len(sections))
-        allocations = [min(len(section), share) for section in sections]
-    remaining = max(0, budget - sum(allocations))
-    for index, section in enumerate(sections):
-        extra = min(remaining, len(section) - allocations[index])
-        allocations[index] += extra
-        remaining -= extra
-        if remaining <= 0:
-            break
     fitted: list[str] = []
-    for section, size in zip(sections, allocations, strict=True):
-        if size <= len(_TRUNCATION_MARKER):
+    remaining = budget
+    for section in sections:
+        separator = 2 if fitted else 0
+        already_partial = section.endswith(_TRUNCATION_MARKER)
+        if not already_partial and len(section) + separator <= remaining:
+            fitted.append(section)
+            remaining -= len(section) + separator
             continue
-        fitted.append(
-            section
-            if size >= len(section)
-            else section[: size - len(_TRUNCATION_MARKER)] + _TRUNCATION_MARKER
-        )
+        if section.startswith(_INDEX_SECTION_PREFIX):
+            room = remaining - separator
+            if room >= minimum or room >= len(section):
+                clipped = _clip(section, room)
+                fitted.append(clipped)
+                remaining -= len(clipped) + separator
+                continue
+        stub = _omitted_stub(section)
+        if len(stub) + separator <= remaining:
+            fitted.append(stub)
+            remaining -= len(stub) + separator
     return fitted
 
 
@@ -519,7 +556,11 @@ def build_session_start_context(
     for name in PRIMING_FILES:
         body = _read_priming_note(directory / name)
         if body is not None:
-            digest = _index_digest(body) if name == "index.md" else _note_digest(body, 1_200)
+            digest = (
+                _index_digest(body)
+                if name == "index.md"
+                else _note_digest(body, _PRIMING_FILE_CHAR_CAP)
+            )
             if digest:
                 sections.append(f"===== OMI capsule: {name} =====\n{digest}")
 
