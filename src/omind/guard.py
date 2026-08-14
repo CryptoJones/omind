@@ -72,8 +72,9 @@ GATE_NO_MATCH_RULE = "omi-gate-no-match"
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
-    '`{"name":"Operational Rules - Git Repos and Secrets"}`, then retry. '
-    "Repo work requires that specific memory this turn."
+    '`{"name":"Operational Rules - Git Repos and Secrets", "max_chars": 8000}`, '
+    "then retry. Repo work requires that specific memory this turn — read it "
+    "in full: a truncated read does not clear this gate."
 )
 GIT_FRESHNESS_MESSAGE = (
     "a git commit requires a same-turn freshness check — refresh the local base "
@@ -174,6 +175,7 @@ def begin_turn(session: str, task: str) -> None:
     _clear_pending(session)
     _clear_git_freshness(session)
     _clear_demanded(session)
+    clear_incomplete_consult(session)
     with contextlib.suppress(OSError):
         path = _turn_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -223,6 +225,33 @@ def demanded_note(session: str) -> str:
     """The note a guard block demanded this turn, or ``""``. Never raises."""
     try:
         return _demanded_path(session).read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _incomplete_path(session: str) -> Path:
+    """Notes whose *demanded* read came back truncated this turn (#239)."""
+    return paths.state_dir() / f"incomplete-{_safe_sid(session)}.txt"
+
+
+def record_incomplete_consult(session: str, note: str) -> None:
+    """Mark a demanded note as read-but-truncated; the gate stays armed until a
+    full read (or a best-possible one) lands. Best-effort, never raises."""
+    with contextlib.suppress(OSError):
+        path = _incomplete_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(note.strip().lower(), encoding="utf-8")
+
+
+def clear_incomplete_consult(session: str) -> None:
+    with contextlib.suppress(OSError):
+        _incomplete_path(session).unlink()
+
+
+def incomplete_consult(session: str) -> str:
+    """The demanded note whose only read this turn was truncated, or ``""``."""
+    try:
+        return _incomplete_path(session).read_text(encoding="utf-8").strip()
     except OSError:
         return ""
 
@@ -928,7 +957,10 @@ def _has_consulted_git_rules(session: str) -> bool:
     for consult in consults(session):
         target = str(consult.get("target") or "").lower()
         if needle in target:
-            return True
+            # A truncated read of the demanded note is not a consult of it —
+            # the overriding exceptions live below the fold (#239). The marker
+            # in the tool result names the exact re-read that clears this.
+            return incomplete_consult(session) != needle
     return False
 
 

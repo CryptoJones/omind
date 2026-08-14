@@ -27,6 +27,7 @@ reuses :mod:`omind.retrieve`, which de-prioritizes them).
 
 from __future__ import annotations
 
+import json
 import os
 import re
 import shutil
@@ -109,6 +110,49 @@ def _always_relevant(target: str) -> bool:
         if pat and pat in low:
             return True
     return False
+
+
+def _update_demanded_completeness(
+    event: dict[str, Any], session: str, target: str, out: Any = None
+) -> None:
+    """Keep the gate armed when the *demanded* note came back truncated (#239).
+
+    The recurrence log on the git-rules note records three real violations
+    caused by the overriding exception living below the recall fold: the read
+    "satisfied" the gate while the rule that mattered was cut off. A truncated
+    read of the demanded note now records as incomplete, which
+    ``_has_consulted_git_rules`` refuses to credit. Deterministic un-wedge: a
+    read with ``truncated: false``, a ``section`` drill-down, or a request at
+    ``MAX_RECALL_CHARS`` (the API's best possible ask) always counts as
+    complete. Ordinary reads of non-demanded notes are never touched.
+    Best-effort: any parsing surprise counts the read as complete (fail open).
+    """
+    try:
+        from omind import recall
+
+        blob = json.dumps(event.get("tool_response"), default=str)
+        truncated = '"truncated": true' in blob or '\\"truncated\\": true' in blob
+        ti = event.get("tool_input")
+        ti = ti if isinstance(ti, dict) else {}
+        section = str(ti.get("section") or "").strip()
+        try:
+            asked = int(ti.get("max_chars") or recall.DEFAULT_RECALL_CHARS)
+        except (TypeError, ValueError):
+            asked = recall.DEFAULT_RECALL_CHARS
+        if truncated and not section and asked < recall.MAX_RECALL_CHARS:
+            guard.record_incomplete_consult(session, guard.demanded_note(session))
+            sink = out if out is not None else sys.stderr
+            print(
+                f"The demanded note came back TRUNCATED at max_chars={asked}; "
+                "the consult gate stays armed. Re-call OMI MCP recall-note with "
+                f'{{"name": "{guard.demanded_note(session)}", '
+                f'"max_chars": {recall.MAX_RECALL_CHARS}}} before retrying.',
+                file=sink,
+            )
+        else:
+            guard.clear_incomplete_consult(session)
+    except Exception:
+        guard.clear_incomplete_consult(session)
 
 
 def _guard_demanded(session: str, target: str) -> bool:
@@ -439,6 +483,8 @@ def verify_consult(
         guard.record_consult(session, kind=kind, target=target, relevant=True)
         guard.reset_offtopic(session)
         return "relevant"
+    if kind == "read" and _guard_demanded(session, target):
+        _update_demanded_completeness(event, session, target, out=out)
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=now)
     # #96/#97: the gate-blocked action (path noise stripped) — the agent's freshest intent.

@@ -688,3 +688,73 @@ def test_semantic_blend_rescues_a_keyword_poor_consult(monkeypatch: pytest.Monke
     # with a semantic backend rating them close, the blend lifts it to relevant
     monkeypatch.setattr(verify.embed, "similarity", lambda a, b: 0.82)
     assert verify.judge(task, text) is True
+
+
+# -- #239: truncated reads of the DEMANDED note keep the gate armed -----------
+
+
+def _demanded_read_event(session: str, *, truncated: bool, max_chars: int = 4_000) -> dict:
+    body = json.dumps({"title": guard.GIT_RULES_NOTE, "truncated": truncated})
+    return {
+        "session_id": session,
+        "tool_name": "mcp__omi__recall-note",
+        "tool_input": {"name": guard.GIT_RULES_NOTE, "max_chars": max_chars},
+        "tool_response": {"content": [{"type": "text", "text": body}]},
+    }
+
+
+def test_truncated_demanded_recall_records_incomplete_and_names_the_fix(
+    tmp_path: Path,
+) -> None:
+    omi = _omi(tmp_path)
+    session = "tr-dem"
+    guard.begin_turn(session, "commit and push the repo work")
+    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+    out = io.StringIO()
+    verdict = verify.verify_consult(
+        _demanded_read_event(session, truncated=True), omi, require=True, out=out
+    )
+    assert verdict == "relevant"  # obeying the guard is relevant by definition
+    assert not guard._has_consulted_git_rules(session)  # ...but doesn't count yet
+    assert '"max_chars": 8000' in out.getvalue()  # the fix is named verbatim
+    # A full re-read clears it.
+    verify.verify_consult(
+        _demanded_read_event(session, truncated=False), omi, require=True, out=io.StringIO()
+    )
+    assert guard._has_consulted_git_rules(session)
+
+
+def test_truncated_demanded_recall_at_max_chars_still_counts(tmp_path: Path) -> None:
+    from omind import recall
+
+    omi = _omi(tmp_path)
+    session = "tr-max"
+    guard.begin_turn(session, "commit and push the repo work")
+    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+    verify.verify_consult(
+        _demanded_read_event(session, truncated=True, max_chars=recall.MAX_RECALL_CHARS),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    # The API's best possible ask counts as complete even if still truncated —
+    # the deterministic un-wedge (#239).
+    assert guard._has_consulted_git_rules(session)
+
+
+def test_truncated_read_of_non_demanded_note_changes_no_gate_state(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    note = omi / "Sidebar.md"
+    note.write_text("# Sidebar\n\ncommit push repo work context\n", encoding="utf-8")
+    session = "tr-free"
+    guard.begin_turn(session, "commit and push the repo work")
+    event = {
+        "session_id": session,
+        "tool_name": "mcp__omi__recall-note",
+        "tool_input": {"name": "Sidebar", "max_chars": 500},
+        "tool_response": {
+            "content": [{"type": "text", "text": json.dumps({"truncated": True})}]
+        },
+    }
+    verify.verify_consult(event, omi, require=True, out=io.StringIO())
+    assert guard.incomplete_consult(session) == ""
