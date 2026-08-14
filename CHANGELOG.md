@@ -5,6 +5,14 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.1] - 2026-08-14
+
+### Security
+- **cryptography 49.0.0 → 50.0.0**, clearing the open high-severity Dependabot
+  alert (vulnerable range `>= 44.0.0, < 50.0.0`). Floor raised to
+  `cryptography>=50.0.0,<51.0`; lockfile regenerated. Dependabot cannot open
+  PRs against `uv.lock`, hence the manual bump.
+
 ## [8.6.0] - 2026-08-14
 
 ### Added
