@@ -70,7 +70,7 @@ def test_list_empty(client: WebClient) -> None:
 def test_ai_profile_and_usage_api(client: WebClient, omi_dir: Path) -> None:
     profile = client.get("/api/ai/profile")
     assert profile.status_code == 200
-    assert profile.json()["effective"] == "economy"
+    assert profile.json()["effective"] == "balanced"
     changed = client.put("/api/ai/profile", json={"profile": "high"})
     assert changed.status_code == 200
     assert changed.json()["effective"] == "economy"

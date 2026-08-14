@@ -5,6 +5,28 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.3.0] - 2026-08-14
+
+### Changed
+- **Priming notes are injected whole or not at all — the capsule no longer
+  shreds them into preamble-only stubs** (#238). On the `economy` profile the
+  4,000-char capsule was pro-rated across ~8 sections, so an 8k `Playbook.md`
+  arrived as ~400 chars of "re-read these rules" with zero rules — the agent
+  was then blamed for ignoring rules that were never in its context. The
+  allocator now fits sections whole in priority order; an oversized note is
+  replaced by a one-line stub naming the exact `recall-note` call (name and
+  `max_chars`) to fetch it. `index.md` — a catalog, still useful partial — is
+  the one section that may truncate mid-list.
+- **The default expense profile is `balanced` (8k priming), not `economy`.**
+  Two of three fleet machines were silently running 4k capsules because
+  `economy` was the shipped default.
+
+### Added
+- **`Rules.md` as first-priority priming.** An optional operator-maintained
+  note of imperative one-line rules, ordered before every other priming file so
+  it is guaranteed to be injected whole on any profile (keep it under ~3,500
+  chars).
+
 ## [8.2.7] - 2026-08-12
 
 ### Changed

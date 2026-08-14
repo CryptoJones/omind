@@ -26,7 +26,9 @@ PROFILES = ("economy", "balanced", "full")
 PROFILE_ALIASES = {"high": "economy", "medium": "balanced", "low": "full"}
 ACCEPTED_PROFILES = (*PROFILES, *PROFILE_ALIASES)
 PROFILE_ENV = "OMI_AI_EXPENSE"
-DEFAULT_PROFILE = "economy"
+# economy's 4k capsule shredded priming notes into preamble-only stubs (#238);
+# balanced fits the standing rules whole while still bounding cost.
+DEFAULT_PROFILE = "balanced"
 
 
 @dataclass(frozen=True)
