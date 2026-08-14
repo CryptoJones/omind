@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.0] - 2026-08-14
+
+### Added
+- **Machine-readable note rules compile into deterministic PreToolUse checks**
+  (#240). Fenced ```` ```omind-rule ```` YAML blocks in vault notes (`id`,
+  `tool`, `match` glob, `when: {repo_visibility, branch}`, `except_repos`,
+  `action: deny|warn`, `message`) are parsed (cached per file mtime/size,
+  invalid blocks skipped with a breadcrumb) and evaluated in
+  `guard.check_action` before everything else — every rule a hook can decide
+  never depends on model attention. The cryptojones.github.io exception was
+  violated three times *while the governing note was force-recalled*; a
+  ten-line deterministic check makes that class of recurrence impossible.
+  Repo visibility via `gh repo view` (24h on-disk cache) **fails open** to
+  unknown; `warn` and unknown-visibility hits log compliance decisions without
+  blocking; every deny logs like any other hard rule. `omind rules list`
+  prints the compiled table including skipped blocks. Ships one seed rule
+  (deny direct `git push` on a public repo's checked-out main/master) that a
+  vault note with the same `id` replaces to add exceptions; the repo-deletion
+  incident class was already covered by `policy.SEED_RULES`.
+
 ## [8.5.0] - 2026-08-14
 
 ### Added
