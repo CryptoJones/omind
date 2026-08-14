@@ -36,7 +36,7 @@ import os
 import re
 import sys
 from collections.abc import Callable
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any, TextIO, TypeVar
 
@@ -116,6 +116,73 @@ def _record_failure(context: str, exc: BaseException) -> None:
             fh.write(f"{stamp} {context}: {exc!r}\n")
     except Exception:
         return
+
+
+#: A vault-write failure streak this size within the window is a FAIL (#243).
+WRITE_FAILURE_FAIL_AT = 5
+#: How far back the streak looks.
+WRITE_FAILURE_WINDOW_HOURS = 24
+#: The banner/doctor read at most this much of the failure log's tail — the
+#: banner runs on every session start and must stay fast.
+_FAILURE_LOG_TAIL_BYTES = 65_536
+
+
+def vault_write_failure_streak(now: datetime | None = None) -> dict[str, str | int]:
+    """Recent ``append_entry`` failures from the hook-failure log (#243).
+
+    On makemake every vault write failed for five days (macOS TCC
+    ``PermissionError``) with the only trace a breadcrumb log nobody reads,
+    while sessions kept reading a silently stale vault. This is the one shared
+    parser behind the doctor check and the session-start banner. Returns
+    ``{"count", "first", "last", "last_error"}``; zeros/empties on any problem
+    (never raises). Tolerates a mid-stream log restart and garbage lines.
+    """
+    empty: dict[str, str | int] = {"count": 0, "first": "", "last": "", "last_error": ""}
+    try:
+        path = failure_log_path()
+        with open(path, "rb") as fh:
+            fh.seek(0, 2)
+            size = fh.tell()
+            fh.seek(max(0, size - _FAILURE_LOG_TAIL_BYTES))
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return empty
+    cutoff = _now(now) - timedelta(hours=WRITE_FAILURE_WINDOW_HOURS)
+    count = 0
+    first = last = last_error = ""
+    for line in tail.splitlines():
+        stamp, _, rest = line.partition(" ")
+        if not rest.startswith("append_entry("):
+            continue
+        try:
+            when = datetime.fromisoformat(stamp)
+        except ValueError:
+            continue
+        if when < cutoff:
+            continue
+        count += 1
+        if not first:
+            first = stamp
+        last = stamp
+        _, _, last_error = rest.partition(": ")
+    return {"count": count, "first": first, "last": last, "last_error": last_error.strip()}
+
+
+def _write_failure_banner_line() -> str | None:
+    """The session-start banner when memory writes are failing, else ``None``."""
+    try:
+        streak = vault_write_failure_streak()
+    except Exception:
+        return None
+    count = int(streak.get("count") or 0)
+    if count < WRITE_FAILURE_FAIL_AT:
+        return None
+    return (
+        f"⚠️ MEMORY WRITES ARE FAILING on this machine ({count} failures since "
+        f"{streak.get('first')}; last: {streak.get('last_error')}). Nothing you "
+        "save will persist until this is fixed — run `omind doctor` and tell "
+        "the operator NOW."
+    )
 
 
 def _best_effort(label: str, call: Callable[[], _T]) -> _T | None:
@@ -613,7 +680,11 @@ def build_session_start_context(
     # node startup) so the update prompt is reliably visible. Defensive: a
     # version check must never break priming.
     nudge = _update_nudge_line()
-    banners = [line for line in (_paused_gate_line(), nudge) if line]
+    banners = [
+        line
+        for line in (_write_failure_banner_line(), _paused_gate_line(), nudge)
+        if line
+    ]
     prefix = "\n\n".join(banners) + "\n\n" if banners else ""
 
     # Framing matters (#242): leading with the hedge taught the model to read

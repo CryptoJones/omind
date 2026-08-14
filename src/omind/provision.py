@@ -1329,6 +1329,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
     results.append(_diagnose_claude_skill())
 
     results.append(_diagnose_hook_failures())
+    results.append(_diagnose_vault_writes(config))
 
     return results
 
@@ -1639,6 +1640,61 @@ def _diagnose_hook_failures() -> CheckResult:
         f"hook failure(s) recorded in the last {_HOOK_FAILURE_FRESH_DAYS} days — "
         f"journaling may be silently failing; see {path}",
     )
+
+
+_MACOS_TCC_HINT = (
+    "On macOS this is usually TCC: grant Full Disk Access to the python3 "
+    "binary that runs omind hooks (System Settings → Privacy & Security → "
+    "Full Disk Access), or move the vault outside ~/Documents; then verify "
+    "with `omind doctor`."
+)
+
+
+def _diagnose_vault_writes(config: SetupConfig) -> CheckResult:
+    """FAIL loudly when memory writes are silently failing (#243).
+
+    A machine can lose every vault write (makemake: five days of macOS TCC
+    ``PermissionError``) with the only trace a breadcrumb log nobody reads.
+    Streak from the shared :func:`omind.hooks.vault_write_failure_streak`
+    parser — the same one that drives the session-start banner — plus a direct
+    writability probe of the vault directory.
+    """
+    from omind import hooks as _hooks
+
+    streak = _hooks.vault_write_failure_streak()
+    count = int(streak.get("count") or 0)
+    hint = f" {_MACOS_TCC_HINT}" if sys.platform == "darwin" else ""
+    detail = (
+        f"{count} append_entry failure(s) in the last "
+        f"{_hooks.WRITE_FAILURE_WINDOW_HOURS}h "
+        f"(first {streak.get('first')}, last {streak.get('last')}; "
+        f"{streak.get('last_error')})"
+    )
+    if count >= _hooks.WRITE_FAILURE_FAIL_AT:
+        return CheckResult(
+            "vault_writes", "fail", f"vault writes are FAILING — {detail}.{hint}"
+        )
+    if count > 0:
+        return CheckResult(
+            "vault_writes", "warn", f"recent vault write failure(s) — {detail}.{hint}"
+        )
+    # Streak clean: also probe writability directly, so a freshly-broken
+    # machine fails here before five journal writes have died.
+    if not Path(config.omi_dir).is_dir():
+        # A missing folder is _diagnose_omi_folder's finding, not a write issue.
+        return CheckResult("vault_writes", "ok", "vault writes healthy (no recent failures)")
+    probe = Path(config.omi_dir) / ".omind-doctor-write-probe"
+    try:
+        fd = os.open(probe, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+        os.close(fd)
+        os.unlink(probe)
+    except OSError as exc:
+        return CheckResult(
+            "vault_writes",
+            "fail",
+            f"vault directory is not writable ({exc!r}).{hint}",
+        )
+    return CheckResult("vault_writes", "ok", "vault writes healthy (no recent failures)")
 
 
 def _doctor_symbols() -> dict[str, str]:

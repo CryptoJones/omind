@@ -217,3 +217,24 @@ blocked Bash hook to break the loop:
 
 Because the fixed hook self-heals on a jq-less host, after step 2's `omind setup`
 no manual `settings.json` edit is needed on subsequent fresh machines.
+
+## Memory writes are silently failing (`vault_writes` doctor check)
+
+A machine can keep *reading* the vault while every *write* fails — on macOS the
+usual cause is TCC denying the hooks' `python3` access to `~/Documents`
+(`append_entry(...): PermissionError(1, 'Operation not permitted')` in
+`~/.local/state/omind/hook-failures.log`). Sessions then quietly stop saving
+memory: later sessions "don't remember" work that was never written.
+
+`omind doctor` now runs a `vault_writes` check: **fail** at five or more
+`append_entry` failures inside 24 hours (or a direct write-probe failure),
+**warn** on one to four. The same streak drives a session-start capsule banner
+("MEMORY WRITES ARE FAILING…") so the agent itself reports it immediately.
+
+Remediation:
+
+- **macOS (TCC):** grant Full Disk Access to the `python3` binary that runs the
+  omind hooks (System Settings → Privacy & Security → Full Disk Access), or
+  move the vault outside `~/Documents`/`~/Desktop`. Then re-run `omind doctor`.
+- **Anywhere else:** check ownership/permissions of the vault directory and the
+  filesystem (read-only mounts, disk full), fix, and re-run `omind doctor`.

@@ -1319,3 +1319,66 @@ def test_immutable_note_is_attached_to_a_real_finding(
     result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
     assert result.level == "warn"
     assert "IMMUTABLE" in result.message and "chattr -i" in result.message
+
+
+# -- #243: doctor vault-writes check ------------------------------------------
+
+
+def _seed_write_failures(count: int) -> None:
+    from datetime import datetime
+
+    from omind import hooks
+
+    path = hooks.failure_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now().replace(microsecond=0).isoformat()
+    path.write_text(
+        "".join(
+            f"{stamp} append_entry(/v/OMI): PermissionError(1, 'Operation not permitted')\n"
+            for _ in range(count)
+        ),
+        encoding="utf-8",
+    )
+
+
+def test_doctor_vault_writes_fails_on_streak_with_macos_hint(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import hooks
+
+    cfg = SetupConfig(vault=tmp_path / "vault")
+    cfg.omi_dir.mkdir(parents=True)
+    _seed_write_failures(hooks.WRITE_FAILURE_FAIL_AT)
+    monkeypatch.setattr(provision.sys, "platform", "darwin")
+    result = provision._diagnose_vault_writes(cfg)
+    assert result.level == "fail"
+    assert "FAILING" in result.message
+    assert "Full Disk Access" in result.message
+
+
+def test_doctor_vault_writes_warns_below_threshold_and_ok_when_clean(
+    tmp_path: Path,
+) -> None:
+    cfg = SetupConfig(vault=tmp_path / "vault")
+    cfg.omi_dir.mkdir(parents=True)
+    _seed_write_failures(1)
+    assert provision._diagnose_vault_writes(cfg).level == "warn"
+    _seed_write_failures(0)
+    result = provision._diagnose_vault_writes(cfg)
+    assert result.level == "ok"
+    assert not list(cfg.omi_dir.glob(".omind-doctor-write-probe"))  # no residue
+
+
+def test_doctor_vault_writes_probe_fails_on_readonly_vault(tmp_path: Path) -> None:
+    import os as _os
+
+    cfg = SetupConfig(vault=tmp_path / "vault")
+    cfg.omi_dir.mkdir(parents=True)
+    _os.chmod(cfg.omi_dir, 0o500)
+    try:
+        result = provision._diagnose_vault_writes(cfg)
+    finally:
+        _os.chmod(cfg.omi_dir, 0o700)
+    if _os.name != "nt":  # chmod is advisory on Windows
+        assert result.level == "fail"
+        assert "not writable" in result.message

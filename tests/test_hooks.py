@@ -739,3 +739,54 @@ def test_session_start_context_survives_nudge_failure(
     ctx = hooks.build_session_start_context(tmp_path)  # must never raise
     assert "OMI is the durable-memory source of truth" in ctx
     assert "⚠️" not in ctx
+
+
+# -- #243: vault-write failure streak + session-start banner ------------------
+
+
+def _write_failure_log(lines: list[str]) -> None:
+    path = hooks.failure_log_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+
+
+def test_vault_write_failure_streak_counts_recent_append_entries() -> None:
+    now = datetime(2026, 8, 14, 12, 0, 0)
+    _write_failure_log(
+        [
+            "2026-08-01T09:00:00 append_entry(/v/OMI): PermissionError(1, 'old')",  # aged out
+            "2026-08-14T08:00:00 append_entry(/v/OMI): PermissionError(1, 'op')",
+            "2026-08-14T09:00:00 other_context(/v/OMI): OSError(5, 'io')",  # filtered
+            "not a log line at all",  # garbage tolerated
+            "2026-08-14T10:00:00 append_entry(/v/OMI): PermissionError(1, 'op')",
+        ]
+    )
+    streak = hooks.vault_write_failure_streak(now)
+    assert streak["count"] == 2
+    assert streak["first"] == "2026-08-14T08:00:00"
+    assert streak["last"] == "2026-08-14T10:00:00"
+    assert "PermissionError" in str(streak["last_error"])
+
+
+def test_vault_write_failure_streak_empty_on_missing_log() -> None:
+    assert hooks.vault_write_failure_streak()["count"] == 0
+
+
+def test_session_start_banner_on_write_failure_streak(tmp_path: Path) -> None:
+    (tmp_path / "index.md").write_text("- [[A Memory]] — x\n", encoding="utf-8")
+    stamp = datetime.now().replace(microsecond=0).isoformat()
+    _write_failure_log(
+        [f"{stamp} append_entry(/v/OMI): PermissionError(1, 'op')"]
+        * hooks.WRITE_FAILURE_FAIL_AT
+    )
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "MEMORY WRITES ARE FAILING" in ctx
+    assert "omind doctor" in ctx
+
+
+def test_session_start_no_banner_below_threshold(tmp_path: Path) -> None:
+    (tmp_path / "index.md").write_text("- [[A Memory]] — x\n", encoding="utf-8")
+    stamp = datetime.now().replace(microsecond=0).isoformat()
+    _write_failure_log([f"{stamp} append_entry(/v/OMI): PermissionError(1, 'op')"])
+    ctx = hooks.build_session_start_context(tmp_path)
+    assert "MEMORY WRITES ARE FAILING" not in ctx
