@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.6.2] - 2026-08-14
+
+### Fixed
+- **The #240 branch condition judges the pushed refspec, not just the
+  checked-out branch.** Caught live within an hour of 8.6.0: a tag push
+  (`git push origin v8.6.1`) and a compound `git checkout -b X && git push -u
+  origin X` were both denied by the public-main seed rule because HEAD was
+  still `main` at evaluation time. `evaluate()` now parses explicit push
+  refspecs — tags and `--tags` never match a branch condition, a named branch
+  refspec is judged as its destination (so `git push origin main` denies from
+  any checkout, which is stricter and correct), and only a bare `git push`
+  falls back to the checked-out branch.
+
 ## [8.6.1] - 2026-08-14
 
 ### Security

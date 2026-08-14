@@ -120,7 +120,9 @@ def test_no_fire_on_private_or_feature_branch(tmp_path: Path, repo: Path, monkey
     assert rules.evaluate(_action("git push origin main"), omi, repo) is None
     monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
     monkeypatch.setattr(rules, "_repo_branch", lambda r: "feature/x")
-    assert rules.evaluate(_action("git push origin main"), omi, repo) is None
+    # Bare push falls back to the checked-out branch; explicit `origin main`
+    # would (correctly) deny regardless of checkout — covered below.
+    assert rules.evaluate(_action("git push"), omi, repo) is None
 
 
 def test_unknown_visibility_fails_open(tmp_path: Path, repo: Path, monkeypatch) -> None:
@@ -151,6 +153,33 @@ def test_guard_check_action_denies_via_note_rule(
     assert not verdict.allow
     assert verdict.rule_id == "note-rule:no-direct-push-public-main"
     assert "branch + PR required" in verdict.reason
+
+
+def test_pushed_refspec_wins_over_checked_out_branch(
+    tmp_path: Path, repo: Path, monkeypatch
+) -> None:
+    """#240 v1 false positives: a tag push or feature-branch push issued while
+    main is checked out must not match a main/master branch condition."""
+    omi = tmp_path / "OMI"
+    _note_with_rule(omi)
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    for command in (
+        "git push -q origin v8.6.1",  # tag push
+        "git push --tags",
+        "git push -q -u origin security/cryptography-50",  # feature branch
+        "git checkout -q -b f && git push -q -u origin f",
+        "git push origin HEAD:refs/heads/feature-x",
+    ):
+        assert rules.evaluate(_action(command), omi, repo) is None, command
+    for command in (
+        "git push origin main",
+        "git push -q -u origin main",
+        "git push",  # bare: falls back to the checked-out branch (main)
+        "git push origin HEAD:main",
+    ):
+        hit = rules.evaluate(_action(command), omi, repo)
+        assert hit is not None and hit.outcome == "deny", command
 
 
 def test_format_rules_lists_seeds_and_invalids(tmp_path: Path) -> None:

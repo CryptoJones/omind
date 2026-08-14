@@ -274,6 +274,42 @@ def _repo_branch(repo: Path) -> str:
         return ""
 
 
+_PUSH_ARGS_RE = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-c\s+\S+\s+)*push\b(?P<rest>[^;|&`\n]*)")
+
+
+def _pushed_branches(command: str) -> list[str] | None:
+    """Branch names a ``git push`` explicitly targets, or ``None`` for a bare
+    push (no refspec — the checked-out branch is what gets pushed).
+
+    A tag push (``git push origin v8.6.1`` / ``--tags``) from a checked-out
+    main matched the branch condition via HEAD and got denied (#240 v1 false
+    positive): when the command names refspecs, judge those instead of HEAD.
+    Refspecs like ``HEAD:main`` count as their destination.
+    """
+    match = _PUSH_ARGS_RE.search(command)
+    if not match:
+        return None
+    refs: list[str] = []
+    tokens = [t for t in match.group("rest").split() if t]
+    positional: list[str] = []
+    for token in tokens:
+        if token == "--tags":
+            refs.append("(tags)")
+            continue
+        if token.startswith("-"):
+            continue
+        positional.append(token)
+    # First positional token is the remote; the rest are refspecs.
+    for token in positional[1:]:
+        dest = token.rsplit(":", 1)[-1]
+        dest = dest.removeprefix("refs/heads/")
+        if dest.startswith("refs/tags/") or re.fullmatch(r"v?\d+[\w.\-]*", dest):
+            refs.append("(tags)")
+        else:
+            refs.append(dest)
+    return refs or None
+
+
 @dataclass(frozen=True)
 class RuleHit:
     rule: NoteRule
@@ -312,8 +348,11 @@ def evaluate(
                 continue
             if rule.except_repos and _repo_name(repo) in rule.except_repos:
                 continue
-            if rule.when_branch and _repo_branch(repo) not in rule.when_branch:
-                continue
+            if rule.when_branch:
+                pushed = _pushed_branches(command)
+                branches = pushed if pushed is not None else [_repo_branch(repo)]
+                if not any(branch in rule.when_branch for branch in branches):
+                    continue
             if rule.conditioned_on_visibility():
                 visibility = _repo_visibility(repo)
                 if visibility == _VISIBILITY_UNKNOWN:
