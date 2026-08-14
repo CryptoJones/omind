@@ -136,13 +136,12 @@ ceremony rather than compliance, rules injected 200 turns away from the action t
 self-discounting framing, and one box silently failing every vault write since 2026-08-09.
 Each issue below is written to be executable by any agent without further context._
 
-- [ ] **Capsule budget shreds priming notes into preamble-only stubs** ([#238](https://github.com/CryptoJones/omind/issues/238)) — _fix (hooks)_ —
-  the primary mechanism. `DEFAULT_PROFILE = "economy"` caps the capsule at 4,000 chars and
-  `_allocate_sections` pro-rates it across ~8 sections, so an 8,271-char `Playbook.md`
-  arrives as ~400 chars of preamble ("re-read these rules") with zero rules. Fix: default to
-  `balanced`; fit whole notes in priority order and emit an omitted-stub pointing at
-  `recall-note` instead of shredding (index.md may still truncate); add `Rules.md` as a
-  first-priority priming note guaranteed to inject whole.
+- [x] **Capsule budget shreds priming notes into preamble-only stubs** ([#238](https://github.com/CryptoJones/omind/issues/238)) — _fix (hooks)_ —
+  shipped in 8.3.0 (#245). The allocator now fits sections whole in priority order and
+  replaces an oversized note with an omitted-stub naming the exact `recall-note` call
+  (index.md, a catalog, may still truncate mid-list); an upstream-clipped digest is
+  stubbed, never shipped partial. Default profile is `balanced` (8k), and `Rules.md`
+  joins `PRIMING_FILES` first so a compact operator rules note always arrives whole.
 - [ ] **Truncation markers are dead ends; a truncated read satisfies the gate** ([#239](https://github.com/CryptoJones/omind/issues/239)) — _fix (recall/guard)_ —
   the git-rules note's own recurrence log records three violations caused by the overriding
   exception living below the 4,000-char `recall-note` fold. Fix: the marker names the note
