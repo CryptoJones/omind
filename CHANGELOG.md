@@ -5,6 +5,17 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.3.1] - 2026-08-14
+
+### Changed
+- **Injected-memory framing no longer invites the model to discount it**
+  (#242). The capsule header and the turn-preflight preamble both led with the
+  "user instructions win" hedge, teaching the host model to read memory as an
+  ignorable prior. Both now state what the content is first — standing operator
+  instructions, to follow as if typed at session start — and keep the
+  explicit-override clause with the clarification that silence is not an
+  override. Text-only change; no behavior differences.
+
 ## [8.3.0] - 2026-08-14
 
 ### Changed
