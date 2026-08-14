@@ -411,6 +411,13 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--json", action="store_true", help="emit measurements as JSON")
     _add_vault_args(bench)
 
+    rules = sub.add_parser(
+        "rules",
+        help="deterministic note rules compiled into PreToolUse checks (#240)",
+    )
+    rules.add_argument("action", choices=["list"], help="list compiled rules")
+    _add_vault_args(rules)
+
     lint = sub.add_parser(
         "lint",
         help="check the vault for broken wikilinks, isolated/orphaned notes, "
@@ -1603,6 +1610,11 @@ def main(argv: list[str] | None = None) -> int:
         return _run_bench(args)
     if args.command == "lint":
         return _run_lint(args)
+    if args.command == "rules":
+        from omind import rules as _rules
+
+        print(_rules.format_rules((args.vault / args.folder).expanduser()))
+        return 0
     if args.command == "recover":
         return _run_recover(args)
     if args.command == "graph":

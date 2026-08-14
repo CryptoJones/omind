@@ -1224,6 +1224,48 @@ def decide(action: dict[str, Any]) -> Verdict:
     return Verdict(allow=False, reason=f"omi-gate: {GATE_MESSAGE}", rule_id="omi-gate")
 
 
+def _note_rules_verdict(action: dict[str, Any], omi_dir: Path | None) -> Verdict | None:
+    """Deterministic operator note rules (#240), evaluated before everything.
+
+    Rules a hook can decide must never depend on model attention. A ``deny``
+    hit blocks with the rule's message (compliance-logged by the caller like
+    any other hard deny); a ``warn`` or an unknown-visibility miss logs a
+    decision event and falls through. Never raises — a broken rule table must
+    never brick the guard (fail-open like every other layer).
+    """
+    if omi_dir is None:
+        return None
+    try:
+        from omind import rules
+
+        hit = rules.evaluate(action, omi_dir, _repo_root_for_action(action))
+        if hit is None:
+            return None
+        session = str(action.get("session") or "")
+        if hit.outcome == rules.ACTION_DENY:
+            return Verdict(
+                allow=False,
+                reason=(
+                    f"omi-guard (hard): note rule '{hit.rule.id}' "
+                    f"[{hit.rule.note}]: {hit.rule.message}"
+                ),
+                rule_id=f"note-rule:{hit.rule.id}",
+            )
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session=session,
+            tool=str(action.get("tool") or ""),
+            command=str(action.get("command") or ""),
+            rule_id=f"note-rule:{hit.rule.id}",
+            severity="soft",
+            outcome=hit.outcome,
+            detail=(hit.detail or hit.rule.message)[:200],
+        )
+        return None
+    except Exception:
+        return None
+
+
 #: Hard ceiling for the embedded excerpt so a huge note can't bloat every deny.
 _EXCERPT_CAP = 1_600
 
@@ -1251,7 +1293,9 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
     (:mod:`omind.adapters`), so every harness logs + decides identically. The
     routine ``omi-gate`` "you didn't consult" deny is friction, not logged.
     """
-    verdict = decide(action)
+    verdict = _note_rules_verdict(action, omi_dir)
+    if verdict is None:
+        verdict = decide(action)
     if (
         not verdict.allow
         and verdict.rule_id == "repo-work-read-git-rules"

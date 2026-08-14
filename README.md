@@ -364,6 +364,16 @@ rule in `omind.policy`. The Playbook is the guard's priming made explicit: *don'
 ask a fresh instance to remember — put the rule in front of it, and block the wrong
 action.*
 
+Operators can also declare **deterministic rules inside ordinary vault notes**
+with fenced ```` ```omind-rule ```` blocks (YAML: `id`, `tool`, `match` glob,
+optional `when: {repo_visibility, branch}` and `except_repos`, `action:
+deny|warn`, `message`). They compile into PreToolUse checks evaluated before
+everything else — every rule a hook can decide never depends on model
+attention. Repo visibility comes from `gh` (cached a day) and **fails open**
+when unknown; invalid blocks are skipped with a breadcrumb. Inspect the
+compiled table with `omind rules list`. A note rule with a seed rule's `id`
+replaces the seed, so per-repo exceptions stay operator-editable in the vault.
+
 ## Activity checkpoints
 
 You can't reliably *force* a running agent to do something on a wall clock —
