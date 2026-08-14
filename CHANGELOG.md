@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.5.0] - 2026-08-14
+
+### Added
+- **Sustained vault-write failures are now loud** (#243). One fleet machine
+  lost every vault write for five days (macOS TCC `PermissionError`) with the
+  only trace a breadcrumb log nobody reads, while sessions kept reading a
+  silently stale vault. `omind doctor` gains a `vault_writes` check — fail at
+  ≥5 `append_entry` failures in 24h (with a macOS Full-Disk-Access remediation
+  hint on darwin) or on a direct write-probe failure, warn on 1–4 — and the
+  SessionStart capsule opens with a "MEMORY WRITES ARE FAILING" banner driven
+  by the same shared parser, so the agent itself reports the outage
+  immediately. Banner reads at most the log's 64 KiB tail and never raises.
+  Documented in `docs/troubleshooting.md`.
+
 ## [8.4.0] - 2026-08-14
 
 ### Added
