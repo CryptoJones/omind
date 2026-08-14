@@ -79,7 +79,18 @@ def compact_recall(
     limit = bounded_chars(max_chars)
     truncated = len(content) > limit
     if truncated:
-        marker = "\n…[truncated; request a section or a larger max_chars value]"
+        # A bare "truncated" marker was a dead end the agent rarely followed —
+        # the git-rules note's recurrence log records three real violations
+        # caused by an overriding exception living below the fold (#239). Name
+        # the note and the exact follow-up call instead.
+        wanted = min(len(content) + 500, MAX_RECALL_CHARS)
+        title = fields.title or Path(filename).stem
+        marker = (
+            f"\n…[TRUNCATED at {limit} of {len(content)} chars. Before acting "
+            "on this topic, call OMI MCP recall-note "
+            f'{{"name": "{title}", "max_chars": {wanted}}} '
+            "or request a specific section.]"
+        )
         content = content[: max(0, limit - len(marker))].rstrip() + marker
     payload: dict[str, Any] = {
         "filename": filename,

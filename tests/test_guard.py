@@ -1447,3 +1447,20 @@ def test_capability_question_still_gates_the_irreversible() -> None:
         assert not verdict.allow, command
         assert verdict.rule_id == "capability-question-explicit-auth", command
     guard.clear_gate("capblock")
+
+
+# -- #239: a truncated read of the demanded note does not clear the gate ------
+
+
+def test_truncated_demanded_read_keeps_git_rules_unconsulted() -> None:
+    session = "trunc1"
+    guard.begin_turn(session, "push the release")
+    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    assert guard._has_consulted_git_rules(session)  # complete read counts
+    guard.record_incomplete_consult(session, guard.GIT_RULES_NOTE)
+    assert not guard._has_consulted_git_rules(session)  # truncated read does not
+    guard.clear_incomplete_consult(session)
+    assert guard._has_consulted_git_rules(session)  # full re-read clears it
+    guard.begin_turn(session, "next turn")
+    assert guard.incomplete_consult(session) == ""  # per-turn state resets

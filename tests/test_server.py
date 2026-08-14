@@ -238,6 +238,10 @@ def test_recall_note_returns_one_bounded_representation(server: MCPServer) -> No
     assert len(recalled["content"]) <= 500
     assert recalled["truncated"] is True
     assert "raw" not in recalled and "fields" not in recalled
+    # #239: the marker is actionable — it names the note and a concrete
+    # follow-up call, not just "truncated".
+    assert '"name": "Compact"' in recalled["content"]
+    assert '"max_chars":' in recalled["content"]
 
     section = call(
         server,
