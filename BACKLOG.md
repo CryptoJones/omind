@@ -125,6 +125,52 @@ already rejected below._
   scope of the MCP *surfaces* rather than of the notes. May well not be worth it for a
   single-operator vault — if so, record that rather than leaving it to be re-proposed.
 
+### From the 2026-08-14 "reads OMI, then ignores it" investigation
+
+_A three-box investigation (hermes, pluto, makemake) into why the agent reads injected memory
+and then acts against it. Headline finding: on the `economy` profile (the shipped default,
+live on two of the three boxes) the 4,000-char capsule slices priming notes into
+preamble-only stubs — the agent was "ignoring" rules that were never actually in its context.
+Secondary mechanisms: dead-end truncation markers, enforcement that verifies the reading
+ceremony rather than compliance, rules injected 200 turns away from the action they govern,
+self-discounting framing, and one box silently failing every vault write since 2026-08-09.
+Each issue below is written to be executable by any agent without further context._
+
+- [ ] **Capsule budget shreds priming notes into preamble-only stubs** ([#238](https://github.com/CryptoJones/omind/issues/238)) — _fix (hooks)_ —
+  the primary mechanism. `DEFAULT_PROFILE = "economy"` caps the capsule at 4,000 chars and
+  `_allocate_sections` pro-rates it across ~8 sections, so an 8,271-char `Playbook.md`
+  arrives as ~400 chars of preamble ("re-read these rules") with zero rules. Fix: default to
+  `balanced`; fit whole notes in priority order and emit an omitted-stub pointing at
+  `recall-note` instead of shredding (index.md may still truncate); add `Rules.md` as a
+  first-priority priming note guaranteed to inject whole.
+- [ ] **Truncation markers are dead ends; a truncated read satisfies the gate** ([#239](https://github.com/CryptoJones/omind/issues/239)) — _fix (recall/guard)_ —
+  the git-rules note's own recurrence log records three violations caused by the overriding
+  exception living below the 4,000-char `recall-note` fold. Fix: the marker names the note
+  and a copy-pasteable `recall-note {"name": …, "max_chars": …}` call, and a truncated read
+  of a hard-guard-demanded note keeps the gate armed (with a one-re-read loop cap).
+- [ ] **Compile machine-readable note rules into deterministic PreToolUse checks** ([#240](https://github.com/CryptoJones/omind/issues/240)) — _feat (guard)_ —
+  the biggest structural fix: every rule a hook can decide must never depend on model
+  attention. `omind-rule` fenced blocks in notes compile (cached) into `guard.decide()`
+  deny/warn checks — v1 covers Bash command globs, repo visibility, branch, and per-repo
+  exception lists, which alone would have prevented all three logged recurrences. Includes
+  `omind rules list` and seed rules for the public-main-push and repo-deletion incidents.
+- [ ] **Place governing rule text adjacent to the action it governs** ([#241](https://github.com/CryptoJones/omind/issues/241)) — _feat (guard)_ —
+  for the judgment rules hooks can't decide: embed the demanded note's summary + first
+  section directly in the hard guard's block message (instead of only demanding a recall);
+  re-inject full excerpts (not summaries) on action-shaped turns; raise preflight from
+  top-1 to top-2 with the second note as title+summary only.
+- [ ] **Injected-memory framing invites the model to discount it** ([#242](https://github.com/CryptoJones/omind/issues/242)) — _fix (hooks, text-only)_ —
+  both the capsule header and the preflight preamble lead with "user instructions win,"
+  reading as a weak prior. Reword to "standing operator instructions — follow as if typed
+  at session start; silence is not a conflict," keeping the explicit-override clause.
+- [ ] **Loudly surface sustained vault-write failures** ([#243](https://github.com/CryptoJones/omind/issues/243)) — _feat (doctor)_ —
+  makemake has failed every vault write since 2026-08-09 (macOS TCC `PermissionError`),
+  breadcrumbed only to `hook-failures.log`, while sessions kept reading a silently stale
+  vault. Fix: a doctor `vault-writes` streak check with macOS-specific remediation, plus a
+  SessionStart capsule banner ("memory writes are failing — nothing you save will persist")
+  driven by the same parser. Granting Full Disk Access on makemake itself is operator work,
+  outside the repo.
+
 ## Not planned
 
 - [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
