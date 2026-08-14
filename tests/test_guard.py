@@ -1464,3 +1464,100 @@ def test_truncated_demanded_read_keeps_git_rules_unconsulted() -> None:
     assert guard._has_consulted_git_rules(session)  # full re-read clears it
     guard.begin_turn(session, "next turn")
     assert guard.incomplete_consult(session) == ""  # per-turn state resets
+
+
+# -- #241: rule text adjacent to the action -----------------------------------
+
+
+def test_repo_block_message_embeds_governing_excerpt(tmp_path: Path) -> None:
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title=guard.GIT_RULES_NOTE,
+            summary="Branch plus PR on public repos; private goes straight to main.",
+            details="EXCEPTION TABLE: repo-x pushes directly to master.",
+        )
+    )
+    session = "adj1"
+    guard.begin_turn(session, "push it")
+    verdict = guard.check_action(
+        {"tool": "Bash", "command": "git push origin main", "session": session},
+        omi_dir=omi,
+    )
+    assert not verdict.allow
+    assert "Governing memory (excerpt)" in verdict.reason
+    assert "Branch plus PR on public repos" in verdict.reason
+    assert "EXCEPTION TABLE" in verdict.reason
+    assert verdict.reason.index("ACTION BLOCKED") < verdict.reason.index("Governing")
+    assert len(verdict.reason) < 2_400  # demand + capped excerpt
+
+
+def test_repo_block_message_survives_a_missing_note(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    guard.begin_turn("adj2", "push it")
+    verdict = guard.check_action(
+        {"tool": "Bash", "command": "git push origin main", "session": "adj2"},
+        omi_dir=omi,
+    )
+    assert not verdict.allow  # the demand still stands on its own
+    assert "Governing memory" not in verdict.reason
+
+
+def test_preflight_reinjects_full_excerpt_on_action_shaped_turns(tmp_path: Path) -> None:
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Deploy Rules",
+            summary="Deploys are gated.",
+            details="Always deploy from a tagged release build.",
+        )
+    )
+    event = {"session_id": "act-turn", "prompt": "deploy the release build"}
+    first = guard.preflight_turn(event, omi)
+    assert "tagged release" in first
+    repeated = guard.preflight_turn(event, omi)
+    # Action-shaped turn: full excerpt again, no summary-only downgrade (#241).
+    assert "tagged release" in repeated
+    assert "already injected earlier this session" not in repeated
+
+
+def test_preflight_adds_second_title_summary_only(tmp_path: Path) -> None:
+    from omind import ai_usage
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    store = OmiStore(omi)
+    store.create_note(
+        NoteFields(
+            title="Token Budget Alpha",
+            summary="primary token budget note",
+            details="ALPHA-BODY token budget usage bounds",
+        )
+    )
+    store.create_note(
+        NoteFields(
+            title="Token Budget Beta",
+            summary="secondary token budget note",
+            details="BETA-BODY token budget usage bounds",
+        )
+    )
+    ai_usage.set_profile(omi, "full")
+    context = guard.preflight_turn(
+        {"session_id": "second-1", "prompt": "token budget usage bounds"}, omi
+    )
+    assert "Also possibly relevant: [[" in context
+    assert "BETA-BODY" not in context or "ALPHA-BODY" not in context  # runner-up is summary-only
+    ai_usage.set_profile(omi, "economy")
+    guard.clear_gate("second-2")
+    economy = guard.preflight_turn(
+        {"session_id": "second-2", "prompt": "token budget usage bounds"}, omi
+    )
+    assert "Also possibly relevant" not in economy  # skipped on economy

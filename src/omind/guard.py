@@ -1224,6 +1224,26 @@ def decide(action: dict[str, Any]) -> Verdict:
     return Verdict(allow=False, reason=f"omi-gate: {GATE_MESSAGE}", rule_id="omi-gate")
 
 
+#: Hard ceiling for the embedded excerpt so a huge note can't bloat every deny.
+_EXCERPT_CAP = 1_600
+
+
+def _governing_excerpt(omi_dir: Path | str, note: str) -> str:
+    """Summary + leading excerpt of ``note``, capped, for embedding in a deny
+    message (#241). Best-effort: any failure returns ``""`` — the deny still
+    stands on its demand sentence alone."""
+    try:
+        from omind import recall
+
+        memory = recall.compact_recall(omi_dir, note, max_chars=1_200)
+        summary = str(memory.get("summary") or "").strip()
+        content = str(memory.get("content") or "").strip()
+        text = "\n\n".join(part for part in (summary, content) if part)
+        return text[:_EXCERPT_CAP]
+    except Exception:
+        return ""
+
+
 def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict:
     """Decide an action and log a real policy-rule deny to the compliance log.
 
@@ -1232,6 +1252,25 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
     routine ``omi-gate`` "you didn't consult" deny is friction, not logged.
     """
     verdict = decide(action)
+    if (
+        not verdict.allow
+        and verdict.rule_id == "repo-work-read-git-rules"
+        and omi_dir is not None
+    ):
+        # #241: place the governing rule text adjacent to the action it blocks.
+        # The demand sentence stays first — the recall ceremony still runs and
+        # feeds consult telemetry — but the rule itself rides along, because an
+        # instruction next to the action wins attention that one injected 200
+        # turns earlier has lost.
+        excerpt = _governing_excerpt(omi_dir, GIT_RULES_NOTE)
+        if excerpt:
+            verdict = Verdict(
+                allow=False,
+                reason=(
+                    f"{verdict.reason}\n\n--- Governing memory (excerpt) ---\n{excerpt}"
+                ),
+                rule_id=verdict.rule_id,
+            )
     if not verdict.allow and verdict.rule_id == "omi-gate" and omi_dir is not None:
         from omind import retrieve
 
@@ -1360,6 +1399,37 @@ def _miss_strict() -> bool:
     return bool(os.environ.get(MISS_STRICT_ENV))
 
 
+#: Turns that look like an action rather than a conversation (#241). Fixed by
+#: design — an env knob here would be one more thing that silently degrades.
+_ACTION_TURN_RE = re.compile(
+    r"\b(git|push|commit|merge|deploy|release|sudo|rm|delete|publish|provision)\b",
+    re.IGNORECASE,
+)
+
+
+def _second_title_line(omi_dir: Path | str, titles: list[str], first: str) -> str:
+    """Title + summary of the runner-up preflight match, never a full body
+    (#241). Skipped on the economy profile, where the preflight budget is too
+    tight for a second note. Best-effort — a failure adds nothing."""
+    if len(titles) < 2:
+        return ""
+    try:
+        from omind import ai_usage, recall
+
+        if ai_usage.policy(omi_dir).preflight_chars < 2_000:
+            return ""
+        filename = recall.filename_for_title(omi_dir, titles[1])
+        if filename is None or filename == first:
+            return ""
+        memory = recall.compact_recall(omi_dir, filename, max_chars=recall.MIN_RECALL_CHARS)
+        title = str(memory.get("title") or Path(filename).stem)
+        summary = str(memory.get("summary") or "").strip()
+        line = f"\n\nAlso possibly relevant: [[{title}]]"
+        return line + (f" — {summary}" if summary else "")
+    except Exception:
+        return ""
+
+
 def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     """Prepare one turn with compact relevant memory and satisfy the soft gate.
 
@@ -1383,7 +1453,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
 
     from omind import ai_usage, recall, retrieve
 
-    titles = retrieve.relevant_titles(task, omi_dir, limit=1) if task else []
+    titles = retrieve.relevant_titles(task, omi_dir, limit=2) if task else []
     filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
     if filename is None:
         if task and not titles and not _miss_strict():
@@ -1416,9 +1486,14 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     )
     version = str(memory.get("version") or "")
     repeated = _injected_versions(session).get(filename) == version
+    # #241: the summary-only optimization for repeated notes loses to attention
+    # decay exactly when it matters — re-inject the full excerpt whenever the
+    # turn looks like an action (git/deploy/sudo/…), keep the optimization for
+    # conversational turns.
+    action_shaped = bool(_ACTION_TURN_RE.search(task))
     summary = str(memory.get("summary") or "").strip()
     excerpt = str(memory.get("content") or "").strip()
-    content = summary if repeated else "\n\n".join(
+    content = summary if repeated and not action_shaped else "\n\n".join(
         part for part in (summary, excerpt) if part and part != summary
     )
     if not content:
@@ -1428,12 +1503,17 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     _record_injected(session, filename, version)
     context = (
         f"OMI turn preflight recalled [[{memory.get('title') or Path(filename).stem}]]"
-        + (" (full excerpt already injected earlier this session)" if repeated else "")
+        + (
+            " (full excerpt already injected earlier this session)"
+            if repeated and not action_shaped
+            else ""
+        )
         + ". This is a standing operator instruction/memory relevant to this "
         "turn — apply it unless the user's current message explicitly "
         "overrides it. Silence is not an override.\n\n"
         + content
     )
+    context += _second_title_line(omi_dir, titles, filename)
     ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
     return context
 

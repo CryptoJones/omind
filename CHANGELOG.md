@@ -5,6 +5,26 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.4.0] - 2026-08-14
+
+### Added
+- **Governing rule text now rides inside the guard's own block message**
+  (#241). When repo work is blocked pending the git-rules consult, the deny
+  carries the note's summary and leading excerpt (capped at 1,600 chars) under
+  a "Governing memory (excerpt)" divider — an instruction adjacent to the
+  action wins attention that one injected 200 turns earlier has lost. The
+  demand sentence stays first and the recall ceremony still feeds consult
+  telemetry; a missing note degrades to the bare demand.
+- **Turn preflight surfaces a runner-up match.** `relevant_titles` now returns
+  two; the second appears as "Also possibly relevant: [[title]] — summary"
+  only (never a body), and is skipped on the economy profile.
+
+### Changed
+- **Action-shaped turns re-inject the full preflight excerpt.** The repeated-
+  note summary-only downgrade now applies only to conversational turns; a turn
+  matching git/push/commit/merge/deploy/release/sudo/rm/delete/publish/
+  provision gets the full excerpt every time (#241).
+
 ## [8.3.2] - 2026-08-14
 
 ### Changed
