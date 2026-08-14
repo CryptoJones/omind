@@ -616,11 +616,18 @@ def build_session_start_context(
     banners = [line for line in (_paused_gate_line(), nudge) if line]
     prefix = "\n\n".join(banners) + "\n\n" if banners else ""
 
+    # Framing matters (#242): leading with the hedge taught the model to read
+    # memory as an ignorable prior. State what the content IS first; keep the
+    # explicit-override clause, but make clear silence is not an override.
     header = (
-        "OMI is the durable-memory source of truth. This is a compact session "
-        f"capsule from {directory}; full notes remain available through OMI MCP "
-        "search-vault and recall-note. Current explicit user instructions win "
-        "when they conflict with memory."
+        "OMI is the durable-memory source of truth for this operator. The "
+        "sections below are STANDING OPERATOR INSTRUCTIONS and context "
+        "distilled from prior sessions — follow them as if the operator had "
+        "typed them at session start. They are not optional background. Full "
+        f"notes remain available from {directory} through OMI MCP search-vault "
+        "and recall-note. If a current, explicit user instruction directly "
+        "conflicts with a memory, the user instruction wins — but silence is "
+        "not a conflict: absent contrary instruction, the memory governs."
     )
     if not sections:
         fallback = prefix + (

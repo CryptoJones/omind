@@ -1397,8 +1397,9 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     context = (
         f"OMI turn preflight recalled [[{memory.get('title') or Path(filename).stem}]]"
         + (" (full excerpt already injected earlier this session)" if repeated else "")
-        + ". Treat this as durable local memory; the current user instruction wins "
-        "on conflict.\n\n"
+        + ". This is a standing operator instruction/memory relevant to this "
+        "turn — apply it unless the user's current message explicitly "
+        "overrides it. Silence is not an override.\n\n"
         + content
     )
     ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
