@@ -968,3 +968,61 @@ def test_agent_provisioners_never_call_claude(
 def test_hermes_provisioner_done_message_names_hermes(tmp_path: Path) -> None:
     assert "Hermes" in HermesProvisioner.DONE_MESSAGE
     assert "OpenClaw" in OpenClawProvisioner.DONE_MESSAGE
+
+
+def test_codex_recognizes_windows_launcher_hook_entries(tmp_path: Path) -> None:
+    """Windows resolves the executable to omind.EXE, so the command text never
+    contains the literal "omind hook" marker. The provisioner must still
+    recognize its own SessionStart/PostToolUse entries there — the old
+    substring-on-json.dumps idiom failed verification AND appended a duplicate
+    entry on every re-run (#261)."""
+    agents.codex_config_dir().mkdir(parents=True, exist_ok=True)
+    hooks_path = agents.codex_hooks_path()
+    win_session = (
+        'C:\\Users\\ci\\.local\\bin\\omind.EXE hook SessionStart '
+        '--vault "C:\\Users\\ci\\FreshVault" --folder "OMI"'
+    )
+    win_accounting = (
+        'C:\\Users\\ci\\.local\\bin\\omind.EXE hook PostToolUse '
+        '--vault "C:\\Users\\ci\\FreshVault" --folder "OMI"'
+    )
+    hooks_path.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": win_session, "timeout": 15}]}
+                    ],
+                    "PostToolUse": [
+                        {"hooks": [{"type": "command", "command": win_accounting, "timeout": 15}]}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+
+    config = _config(tmp_path, "codex")
+    provisioner = agents.CodexProvisioner(config, log=_quiet)
+    assert provisioner._priming_wired()
+    assert provisioner._accounting_wired()
+
+    # A re-run replaces the Windows-form entries instead of appending duplicates.
+    run_setup_for(config, log=_quiet)
+    data = json.loads(hooks_path.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    assert len(hooks["SessionStart"]) == 1
+    assert len(hooks["PostToolUse"]) == 1
+
+
+def test_command_is_omind_hook_forms() -> None:
+    from omind.hooks import command_is_omind_hook
+
+    posix = '/home/akclark/.local/bin/omind hook SessionStart --vault "/v" --folder "OMI"'
+    win = 'C:\\Users\\ci\\.local\\bin\\omind.EXE hook PostToolUse --vault "C:\\V" --folder "OMI"'
+    quoted = "'C:\\Users\\ci\\.local\\bin\\omind.exe' hook SessionStart"
+    assert command_is_omind_hook(posix)
+    assert command_is_omind_hook(win)
+    assert command_is_omind_hook(quoted)
+    assert not command_is_omind_hook("some-other-tool hook SessionStart")
+    assert not command_is_omind_hook("omind guard adapter --harness codex")
