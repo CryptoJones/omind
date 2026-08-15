@@ -7,6 +7,11 @@ here so neither side drifts.
 
 ## Open
 
+### Windows fresh-install test (2026-08-15, first fully-cold install)
+
+- [ ] **`setup --dry-run` warns about a missing claude CLI but the real run hard-fails** ([#258](https://github.com/CryptoJones/omind/issues/258)) — either fail the dry-run too, or degrade the real run gracefully (do vault/seed work, skip only MCP registration)
+- [ ] **Windows: POSIX `.sh` hooks + `fleet-sudo` installed unverified** ([#259](https://github.com/CryptoJones/omind/issues/259)) — doctor should probe hook executability (needs an `sh` on PATH); setup should warn or ship PowerShell equivalents; also `�` mojibake in doctor output under PS 5.1
+
 ### From the 2026-08-01 top-to-bottom code review
 
 _A full read-only pass over every module (memory core, retrieval, enforcement, mesh, ops,
