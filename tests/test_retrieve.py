@@ -148,3 +148,28 @@ def test_normalize_intent_lifts_path_heavy_pending_score() -> None:
     norm = retrieve.normalize_intent(pending)
     assert "prototype" not in norm and "corpus" not in norm  # dir scaffolding gone
     assert retrieve.overlap_score(norm, consult) > retrieve.overlap_score(pending, consult)
+
+
+def test_matched_terms_counts_distinct_stemmed_overlap() -> None:
+    from omind import retrieve
+
+    # stemming folds variants; stopwords/filler don't count. ("retry" and
+    # "retries" deliberately do NOT fold — the conservative stemmer has no "y"
+    # rule — so the shared-term words here are ones the stemmer does fold.)
+    assert retrieve.matched_terms("consult the gate scoring", "gates scored on consults") == 3
+    assert retrieve.matched_terms("retry", "unrelated note about a retry") == 1
+    assert retrieve.matched_terms("", "anything") == 0
+
+
+def test_preflight_min_terms_env_override(monkeypatch) -> None:
+    from omind import retrieve
+
+    assert retrieve.preflight_min_terms() == 2  # default
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "3")
+    assert retrieve.preflight_min_terms() == 3
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
+    assert retrieve.preflight_min_terms() == 0
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "junk")
+    assert retrieve.preflight_min_terms() == 2  # bad value -> default
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "-4")
+    assert retrieve.preflight_min_terms() == 0  # clamped

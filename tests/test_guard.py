@@ -22,9 +22,7 @@ from omind import compliance, guard, paths
 #: NOT on Windows, where Git Bash's CRLF/path quirks make the same script exit 1 and
 #: where the hook isn't the deployed form anyway.
 _HOOK_TESTABLE = (
-    sys.platform != "win32"
-    and shutil.which("bash") is not None
-    and shutil.which("jq") is not None
+    sys.platform != "win32" and shutil.which("bash") is not None and shutil.which("jq") is not None
 )
 
 
@@ -84,9 +82,7 @@ def test_raw_sudo_blocked_but_fleet_sudo_and_opt_in_allowed() -> None:
     assert not verdict.allow
     assert verdict.rule_id == "sudo-use-fleet-sudo"
     # fleet-sudo is NOT caught by the sudo rule (the "-sudo" suffix is excluded)
-    assert guard.decide(
-        {"command": "fleet-sudo systemctl reload nginx", "session": "sSudo"}
-    ).allow
+    assert guard.decide({"command": "fleet-sudo systemctl reload nginx", "session": "sSudo"}).allow
     # a deliberate raw sudo opts in, like the Codeberg-mirror escape hatch
     assert guard.decide({"command": "OMI_SUDO_OK=1 sudo reboot", "session": "sSudo"}).allow
     guard.clear_gate("sSudo")
@@ -174,9 +170,7 @@ def test_repo_work_requires_git_rules_note_and_freshness_check() -> None:
     assert compound.rule_id == "repo-work-fresh-base"
 
     # A standalone fetch establishes freshness for the separate next commit.
-    fresh = guard.decide(
-        {"tool": "Bash", "command": "git fetch --all --prune", "session": "repo"}
-    )
+    fresh = guard.decide({"tool": "Bash", "command": "git fetch --all --prune", "session": "repo"})
     assert fresh.allow
     assert guard.decide({"tool": "Bash", "command": "git commit -am x", "session": "repo"}).allow
     guard.clear_gate("repo")
@@ -234,12 +228,11 @@ def test_non_repo_work_does_not_demand_freshness(
     guard.record_consult(session, kind="read", target="task memory", relevant=True)
 
     target = tmp_path / "notes.txt"
-    assert guard._repo_root_for_action(
-        {"tool": "Write", "file_path": str(target), "session": session}
-    ) is None
-    allowed = guard.decide(
-        {"tool": "Write", "file_path": str(target), "session": session}
+    assert (
+        guard._repo_root_for_action({"tool": "Write", "file_path": str(target), "session": session})
+        is None
     )
+    allowed = guard.decide({"tool": "Write", "file_path": str(target), "session": session})
     assert allowed.allow, allowed.rule_id
     guard.clear_gate(session)
 
@@ -284,9 +277,7 @@ def test_freshness_gate_applies_only_to_commits(tmp_path: Path) -> None:
     guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
 
     # Non-commit repo work on a stale base: allowed (rules-note satisfied, no fetch).
-    assert guard.decide(
-        {"tool": "Edit", "file_path": str(repo / "x.py"), "session": session}
-    ).allow
+    assert guard.decide({"tool": "Edit", "file_path": str(repo / "x.py"), "session": session}).allow
     assert guard.decide(
         {"tool": "Bash", "command": f"git -C {repo} push origin main", "session": session}
     ).allow
@@ -542,6 +533,63 @@ def test_turn_preflight_with_empty_task_stays_strict(tmp_path: Path) -> None:
     context = guard.preflight_turn({"session_id": "preflight-empty", "prompt": ""}, omi)
     assert "search-vault" in context and "recall-note" in context
     assert not guard.consulted_this_turn("preflight-empty")
+
+
+def test_turn_preflight_weak_match_auto_clears_without_injecting(
+    tmp_path: Path,
+) -> None:
+    # A single shared term (here "retry") ranks the note as the best candidate,
+    # but one word is not evidence of relevance — no injection, gate cleared.
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Ghidra decompiler retry budget",
+            summary="Retry the decompile with a doubled budget.",
+            details="GUI-only behaviour; headless precheck cannot drive it.",
+        )
+    )
+    context = guard.preflight_turn({"session_id": "preflight-weak", "prompt": "retry"}, omi)
+    assert "weak memory match" in context
+    assert "[[" not in context  # nothing injected
+    assert guard.consulted_this_turn("preflight-weak")
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_WEAK_MATCH_RULE
+    assert events[-1]["outcome"] == "auto-clear"
+
+
+def test_turn_preflight_weak_match_stays_strict_when_opted_in(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind.store import NoteFields, OmiStore
+
+    monkeypatch.setenv(guard.MISS_STRICT_ENV, "1")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(title="Ghidra decompiler retry budget", summary="Retry logic.")
+    )
+    context = guard.preflight_turn({"session_id": "preflight-weak-strict", "prompt": "retry"}, omi)
+    assert "search-vault" in context and "recall-note" in context
+    assert not guard.consulted_this_turn("preflight-weak-strict")
+
+
+def test_turn_preflight_weak_match_filter_disabled_by_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import retrieve
+    from omind.store import NoteFields, OmiStore
+
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(title="Ghidra decompiler retry budget", summary="Retry logic.")
+    )
+    context = guard.preflight_turn({"session_id": "preflight-weak-off", "prompt": "retry"}, omi)
+    assert "[[Ghidra decompiler retry budget]]" in context  # legacy behavior
 
 
 def test_preflight_cli_emits_user_prompt_additional_context(
@@ -1151,9 +1199,7 @@ def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
         assert got == expected, command
     # Record and check sides resolve the SAME string for the same repo (#147) —
     # the marker is an exact string match, so this equality is load-bearing.
-    fetch_side = guard._repo_root_for_action(
-        {"tool": "Bash", "command": f"git -C {repo_b} fetch"}
-    )
+    fetch_side = guard._repo_root_for_action({"tool": "Bash", "command": f"git -C {repo_b} fetch"})
     commit_side = guard._repo_root_for_action(
         {"tool": "Bash", "command": f"git -C {repo_b} commit -m x"}
     )
@@ -1343,7 +1389,7 @@ def test_guard_status_flags_agent_writable_config(capsys: pytest.CaptureFixture[
 
 
 def test_would_you_is_a_polite_imperative_not_a_capability_question() -> None:
-    """"Would you <verb> ...?" authorizes; "Can you ...?" still does not."""
+    """ "Would you <verb> ...?" authorizes; "Can you ...?" still does not."""
     allowed = guard.decide(
         {
             "tool": "Bash",
@@ -1380,6 +1426,8 @@ def test_would_you_without_an_authorizing_verb_still_blocks_side_effects() -> No
     )
     assert not blocked.allow
     guard.clear_gate("wouldneg")
+
+
 def test_guard_pause_is_capped(capsys: pytest.CaptureFixture[str]) -> None:
     """A week-long pause is a disable with extra steps: it silently masks the
     enforcement check for the duration. One box was found paused for 185h."""

@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import importlib
 import json
+import os
 import re
 from pathlib import Path
 
@@ -31,16 +32,79 @@ from pathlib import Path
 _STOPWORDS = frozenset(
     {
         # function words
-        "and", "are", "but", "for", "from", "has", "have", "how", "into", "its",
-        "that", "the", "their", "then", "there", "these", "this", "was", "were",
-        "what", "when", "which", "who", "why", "with", "you", "your", "our", "does",
-        "than", "them", "they", "here", "over", "out",
+        "and",
+        "are",
+        "but",
+        "for",
+        "from",
+        "has",
+        "have",
+        "how",
+        "into",
+        "its",
+        "that",
+        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "this",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "who",
+        "why",
+        "with",
+        "you",
+        "your",
+        "our",
+        "does",
+        "than",
+        "them",
+        "they",
+        "here",
+        "over",
+        "out",
         # instruction filler / generic verbs that never carry the task's topic
-        "please", "before", "after", "again", "also", "just", "now", "more",
-        "most", "want", "wants", "need", "needs", "make", "makes", "made", "let",
-        "lets", "use", "uses", "used", "using", "can", "will", "would", "should",
-        "could", "must", "may", "might", "get", "gets", "got", "about", "any",
-        "all", "further",
+        "please",
+        "before",
+        "after",
+        "again",
+        "also",
+        "just",
+        "now",
+        "more",
+        "most",
+        "want",
+        "wants",
+        "need",
+        "needs",
+        "make",
+        "makes",
+        "made",
+        "let",
+        "lets",
+        "use",
+        "uses",
+        "used",
+        "using",
+        "can",
+        "will",
+        "would",
+        "should",
+        "could",
+        "must",
+        "may",
+        "might",
+        "get",
+        "gets",
+        "got",
+        "about",
+        "any",
+        "all",
+        "further",
     }
 )
 
@@ -55,14 +119,42 @@ _STOPWORDS = frozenset(
 _SUFFIXES: tuple[str, ...] = tuple(
     sorted(
         {
-            "ization", "isation", "ational",
-            "fulness", "iveness", "ousness",
-            "ation", "ition", "ement",
-            "ance", "ence", "able", "ible",
-            "ingly", "edly", "fully",
-            "tion", "sion", "ness", "ment", "ical",
-            "ing", "ies", "ied", "ity", "ive", "ous", "ant", "ent",
-            "er", "or", "al", "ed", "es", "ly", "s",
+            "ization",
+            "isation",
+            "ational",
+            "fulness",
+            "iveness",
+            "ousness",
+            "ation",
+            "ition",
+            "ement",
+            "ance",
+            "ence",
+            "able",
+            "ible",
+            "ingly",
+            "edly",
+            "fully",
+            "tion",
+            "sion",
+            "ness",
+            "ment",
+            "ical",
+            "ing",
+            "ies",
+            "ied",
+            "ity",
+            "ive",
+            "ous",
+            "ant",
+            "ent",
+            "er",
+            "or",
+            "al",
+            "ed",
+            "es",
+            "ly",
+            "s",
         },
         key=len,
         reverse=True,
@@ -74,9 +166,21 @@ _SUFFIXES: tuple[str, ...] = tuple(
 #: heavily de-ranked unless the task is itself about credentials.
 _CREDENTIAL_TERMS = frozenset(
     {
-        "credential", "credentials", "secret", "secrets", "token", "tokens",
-        "password", "passwords", "passphrase", "auth", "apikey", "keyfile",
-        "keyring", "gpg", "pass",
+        "credential",
+        "credentials",
+        "secret",
+        "secrets",
+        "token",
+        "tokens",
+        "password",
+        "passwords",
+        "passphrase",
+        "auth",
+        "apikey",
+        "keyfile",
+        "keyring",
+        "gpg",
+        "pass",
     }
 )
 
@@ -117,11 +221,7 @@ _CREDENTIAL_STEMS = frozenset(_stem(t) for t in _CREDENTIAL_TERMS)
 
 
 def _tokens(text: str) -> set[str]:
-    return {
-        _stem(w)
-        for w in _WORD_RE.findall(text.lower())
-        if w not in _STOPWORDS and len(w) > 2
-    }
+    return {_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS and len(w) > 2}
 
 
 def overlap_score(task: str, text: str) -> float:
@@ -135,6 +235,37 @@ def overlap_score(task: str, text: str) -> float:
     if not task_terms:
         return 0.0
     return len(task_terms & _tokens(text)) / len(task_terms)
+
+
+#: Minimum DISTINCT meaningful task terms a note must share with the turn's
+#: task before the proactive preflight injects it (``0`` disables the filter).
+#: The ranking paths surface the best candidate even when "best" is one shared
+#: word — a bare "retry" turn matching an unrelated note's title — which is the
+#: right behavior for gate-deny *suggestions* but far too eager for unsolicited
+#: per-turn injection. Ratio scores can't gate this (a one-term task trivially
+#: scores 1.0), so the preflight requires an absolute match count instead.
+PREFLIGHT_MIN_TERMS_ENV = "OMIND_PREFLIGHT_MIN_TERMS"
+_PREFLIGHT_MIN_TERMS_DEFAULT = 2
+
+
+def matched_terms(task: str, text: str) -> int:
+    """How many distinct meaningful task terms appear in ``text``.
+
+    Shares :func:`_tokens` (stopwords + stemming) with :func:`overlap_score`,
+    so "matched" means the same thing as everywhere else in retrieval.
+    """
+    return len(_tokens(task) & _tokens(text))
+
+
+def preflight_min_terms() -> int:
+    """The preflight injection threshold (env-overridable, never negative)."""
+    raw = os.environ.get(PREFLIGHT_MIN_TERMS_ENV, "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return _PREFLIGHT_MIN_TERMS_DEFAULT
 
 
 def normalize_intent(text: str) -> str:
@@ -199,9 +330,7 @@ def _indexed_titles(
         cred_files = set()
         if not task_is_cred:
             cred_files = {
-                row.filename
-                for row in rows
-                if _looks_credential(row.title, " ".join(row.tags))
+                row.filename for row in rows if _looks_credential(row.title, " ".join(row.tags))
             }
         titles = [
             title_by_file[hit.filename]
