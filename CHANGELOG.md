@@ -5,6 +5,22 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.7.1] - 2026-08-15
+
+### Fixed
+- **Windows: the Codex provisioner now recognizes its own hooks (#261).** The
+  dedup/verify predicate substring-matched the literal `omind hook`, which the
+  Windows launcher form `omind.EXE hook ...` never contains — so setup
+  false-negatived its own SessionStart/PostToolUse entries and appended a
+  duplicate pair on every re-run. All Codex and Hermes marker checks now share
+  the Windows-tolerant `command_is_omind_hook` predicate from `hooks.py`
+  (previously private to the Claude provisioner).
+- **A missing claude CLI degrades setup instead of refusing it (#258).**
+  `--dry-run` warned and previewed the full plan while the real run exited 1
+  before doing anything. `claude` is now a soft prerequisite: the vault, seeds
+  and hooks still provision, MCP registration/verification skip with a clear
+  warning, and doctor flags the gap. Missing hard tools still abort.
+
 ## [8.7.0] - 2026-08-15
 
 ### Added

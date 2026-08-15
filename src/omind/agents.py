@@ -34,7 +34,7 @@ import tomlkit.exceptions
 import yaml
 
 from omind import paths, seeds
-from omind.hooks import HOOK_MARKER
+from omind.hooks import HOOK_MARKER, command_is_omind_hook
 from omind.provision import (
     LEGACY_SERVER_NAME,
     CheckResult,
@@ -191,8 +191,25 @@ def _codex_omind_hook(event: str, hook: dict[str, Any]) -> bool:
     if event in {"PreToolUse", "PermissionRequest"}:
         return CODEX_GUARD_MARKER in command
     if event in {"PostToolUse", "SessionStart"}:
-        return HOOK_MARKER in command
+        return command_is_omind_hook(command)
     return False
+
+
+def _group_has_omind_hook(group: object) -> bool:
+    """True when a hooks-array matcher group contains an ``omind hook`` command.
+
+    Checks the command strings themselves rather than substring-matching the
+    group's JSON dump: Windows resolves the executable to ``omind.EXE``, so the
+    dump never contains the literal :data:`HOOK_MARKER` and the old idiom both
+    failed verification and made the dedup filter append duplicates (#261).
+    """
+    if not isinstance(group, dict):
+        return False
+    hooks = group.get("hooks")
+    return any(
+        isinstance(h, dict) and command_is_omind_hook(str(h.get("command", "")))
+        for h in (hooks if isinstance(hooks, list) else [])
+    )
 
 
 def gemini_config_dir() -> Path:
@@ -470,7 +487,7 @@ class HermesProvisioner(AgentProvisioner):
             if not (
                 isinstance(e, dict)
                 and isinstance(e.get("command"), str)
-                and HOOK_MARKER in e["command"]
+                and command_is_omind_hook(e["command"])
             )
         ]
         merged = kept + [desired]
@@ -1096,7 +1113,7 @@ class CodexProvisioner(AgentProvisioner):
         kept = [
             g
             for g in existing
-            if not (isinstance(g, dict) and HOOK_MARKER in json.dumps(g))
+            if not _group_has_omind_hook(g)
         ]
         merged = kept + [desired]
         if merged == existing and not self.config.force:
@@ -1127,7 +1144,7 @@ class CodexProvisioner(AgentProvisioner):
         kept = [
             group
             for group in existing
-            if not (isinstance(group, dict) and HOOK_MARKER in json.dumps(group))
+            if not _group_has_omind_hook(group)
         ]
         merged = kept + [desired]
         if merged == existing and not self.config.force:
@@ -1208,10 +1225,7 @@ class CodexProvisioner(AgentProvisioner):
             _root, hooks_cfg = self._read_hooks_file()
         except ProvisionError:
             return False
-        return any(
-            isinstance(g, dict) and HOOK_MARKER in json.dumps(g)
-            for g in (hooks_cfg.get("SessionStart") or [])
-        )
+        return any(_group_has_omind_hook(g) for g in (hooks_cfg.get("SessionStart") or []))
 
     def _accounting_wired(self) -> bool:
         try:
@@ -1219,8 +1233,7 @@ class CodexProvisioner(AgentProvisioner):
         except ProvisionError:
             return False
         return any(
-            isinstance(group, dict) and HOOK_MARKER in json.dumps(group)
-            for group in (hooks_cfg.get("PostToolUse") or [])
+            _group_has_omind_hook(group) for group in (hooks_cfg.get("PostToolUse") or [])
         )
 
     # -- persisted hook trust ----------------------------------------------
