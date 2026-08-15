@@ -5,6 +5,25 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.7.0] - 2026-08-15
+
+### Added
+- **The turn preflight requires a minimum term overlap before injecting a
+  memory (#255).** The proactive preflight injected the top-ranked note on
+  *any* score > 0, so a one-word prompt ("retry") reliably pulled an
+  unrelated note into every session, fleet-wide. A recalled note must now
+  share at least 2 distinct meaningful task terms (stemmed, stopword-
+  filtered — the same vocabulary as `overlap_score`) or it is treated as a
+  miss: nothing injected, the consult gate auto-clears, and the decision is
+  compliance-logged under `omi-gate-weak-match`. Tune with
+  `OMIND_PREFLIGHT_MIN_TERMS` (`0` restores the old always-inject
+  behavior); `OMI_GATE_MISS_STRICT=1` keeps strict mode. Gate-deny
+  *suggestions* are unchanged.
+
+### Fixed
+- **mypy unbreak in `rules.py` (#256).** `data.get("when")` called twice
+  defeated isinstance narrowing; bound once. No behavior change.
+
 ## [8.6.2] - 2026-08-14
 
 ### Fixed
