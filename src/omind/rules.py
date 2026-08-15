@@ -116,7 +116,8 @@ def _parse_block(text: str, note: str) -> NoteRule:
     match = str(data.get("match") or "").strip()
     action = str(data.get("action") or "").strip().lower()
     message = str(data.get("message") or "").strip()
-    when = data.get("when") if isinstance(data.get("when"), dict) else {}
+    when_raw = data.get("when")
+    when = when_raw if isinstance(when_raw, dict) else {}
     visibility = str(when.get("repo_visibility") or "").strip().lower()
     branches = when.get("branch")
     if isinstance(branches, str):
