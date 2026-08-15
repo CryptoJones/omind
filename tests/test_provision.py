@@ -662,7 +662,11 @@ def test_secret_output_guard_dry_run_writes_nothing(
     assert not (tmp_path / ".claude" / "hooks" / "secret-output-guard.sh").exists()
 
 
-def test_setup_writes_omi_guard_scripts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, posix_form: None) -> None:
+def test_setup_writes_omi_guard_scripts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    posix_form: None,
+) -> None:
     monkeypatch.setattr(provision.Path, "home", classmethod(lambda cls: tmp_path))
     Provisioner(_config(tmp_path), log=_quiet)._write_omi_guard_scripts()
     hooks = tmp_path / ".claude" / "hooks"
@@ -676,7 +680,9 @@ def test_setup_writes_omi_guard_scripts(monkeypatch: pytest.MonkeyPatch, tmp_pat
         assert "__OMIND_BIN__" not in body
 
 
-def test_omi_guard_installed_idempotently(tmp_path: Path, isolate_settings: Path, posix_form: None) -> None:
+def test_omi_guard_installed_idempotently(
+    tmp_path: Path, isolate_settings: Path, posix_form: None
+) -> None:
     config = _config(tmp_path)
     Provisioner(config, log=_quiet).ensure_omi_guard_installed()
     before = isolate_settings.read_text(encoding="utf-8")
@@ -693,7 +699,9 @@ def test_omi_guard_installed_idempotently(tmp_path: Path, isolate_settings: Path
     assert "mcp__omi__help" in data["permissions"]["allow"]
 
 
-def test_omi_guard_preserves_user_hooks(tmp_path: Path, isolate_settings: Path, posix_form: None) -> None:
+def test_omi_guard_preserves_user_hooks(
+    tmp_path: Path, isolate_settings: Path, posix_form: None
+) -> None:
     user_pre = {"matcher": "Bash", "hooks": [{"type": "command", "command": "/x/mine.sh"}]}
     isolate_settings.write_text(json.dumps({"hooks": {"PreToolUse": [user_pre]}}))
     Provisioner(_config(tmp_path), log=_quiet).ensure_omi_guard_installed()
