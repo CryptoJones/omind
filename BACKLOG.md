@@ -7,6 +7,12 @@ here so neither side drifts.
 
 ## Open
 
+### Windows fresh-install test (2026-08-15, first fully-cold install)
+
+- [x] **`setup --dry-run` warns about a missing claude CLI but the real run hard-fails** — fixed in 8.7.1: claude is a soft prerequisite, real run degrades like the dry-run promises ([#258](https://github.com/CryptoJones/omind/issues/258)) — either fail the dry-run too, or degrade the real run gracefully (do vault/seed work, skip only MCP registration)
+- [ ] **Windows: POSIX `.sh` hooks + `fleet-sudo` installed unverified** ([#259](https://github.com/CryptoJones/omind/issues/259)) — doctor should probe hook executability (needs an `sh` on PATH); setup should warn or ship PowerShell equivalents; also `�` mojibake in doctor output under PS 5.1
+- [x] **Windows: codex hook verifier false-negatives on its own SessionStart/PostToolUse entries** — fixed in 8.7.1: shared Windows-tolerant command_is_omind_hook predicate ([#261](https://github.com/CryptoJones/omind/issues/261)) — hooks are written correctly but setup/--force/doctor all report them missing (quoting-form mismatch in the matcher); guard selftest passes for all six harnesses on Windows
+
 ### From the 2026-08-01 top-to-bottom code review
 
 _A full read-only pass over every module (memory core, retrieval, enforcement, mesh, ops,
