@@ -1382,3 +1382,102 @@ def test_doctor_vault_writes_probe_fails_on_readonly_vault(tmp_path: Path) -> No
     if _os.name != "nt":  # chmod is advisory on Windows
         assert result.level == "fail"
         assert "not writable" in result.message
+
+
+# -- #259: native-Windows hook provisioning -----------------------------------
+
+
+def test_windows_omi_guard_registers_direct_omind_commands(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    """Native Windows cannot execute the .sh adapters, so the compliance guard
+    and gate-reset register direct omind invocations instead (#259)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).ensure_omi_guard_installed()
+    data = json.loads(isolate_settings.read_text(encoding="utf-8"))
+    pre = [
+        e
+        for e in data["hooks"]["PreToolUse"]
+        if provision.WINDOWS_OMI_GUARD_MARKER in json.dumps(e)
+    ]
+    ups = [
+        e
+        for e in data["hooks"]["UserPromptSubmit"]
+        if provision.WINDOWS_GATE_RESET_MARKER in json.dumps(e)
+    ]
+    assert len(pre) == 1 and pre[0]["matcher"] == "*"
+    assert len(ups) == 1
+    assert not any("omi-guard.sh" in json.dumps(e) for e in data["hooks"]["PreToolUse"])
+
+    # Re-run converges (no duplicate accumulation across the two forms).
+    before = isolate_settings.read_text(encoding="utf-8")
+    Provisioner(config, log=_quiet).ensure_omi_guard_installed()
+    assert isolate_settings.read_text(encoding="utf-8") == before
+
+
+def test_windows_omi_guard_replaces_posix_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).ensure_omi_guard_installed()  # POSIX form first
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    Provisioner(config, log=_quiet).ensure_omi_guard_installed()  # then Windows form
+    data = json.loads(isolate_settings.read_text(encoding="utf-8"))
+    pre_ours = [
+        e
+        for e in data["hooks"]["PreToolUse"]
+        if "omi-guard.sh" in json.dumps(e)
+        or provision.WINDOWS_OMI_GUARD_MARKER in json.dumps(e)
+    ]
+    assert len(pre_ours) == 1
+    assert provision.WINDOWS_OMI_GUARD_MARKER in json.dumps(pre_ours[0])
+
+
+def test_windows_bash_guards_skip_without_sh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    logs: list[str] = []
+    Provisioner(_config(tmp_path), log=logs.append).ensure_guard_hook_installed()
+    assert any("SKIP" in line and "sh" in line for line in logs)
+    if isolate_settings.exists():
+        data = json.loads(isolate_settings.read_text(encoding="utf-8"))
+        assert "git-fresh-base.sh" not in json.dumps(data)
+
+
+def test_windows_bash_guards_run_through_sh_when_present(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: "C:\\Git\\bin\\sh.EXE")
+    Provisioner(_config(tmp_path), log=_quiet).ensure_guard_hook_installed()
+    data = json.loads(isolate_settings.read_text(encoding="utf-8"))
+    bash_entries = [e for e in data["hooks"]["PreToolUse"] if e.get("matcher") == "Bash"]
+    commands = [h["command"] for e in bash_entries for h in e["hooks"]]
+    assert any(c.startswith('sh "') and "git-fresh-base.sh" in c for c in commands)
+    assert any(c.startswith('sh "') and "secret-output-guard.sh" in c for c in commands)
+
+
+def test_windows_diagnose_accepts_direct_commands_and_flags_missing_sh(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    config = _config(tmp_path)
+    prov = Provisioner(config, log=_quiet)
+    prov._write_omi_guard_scripts()  # Windows path: no .sh files, still stamps the manifest
+    prov.ensure_omi_guard_installed()
+    result = provision._diagnose_omi_guard(isolate_settings, config)
+    assert result.level == "ok", result.message
+
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    sh_results = provision._diagnose_windows_sh()
+    assert len(sh_results) == 1 and sh_results[0].level == "warn"
+    monkeypatch.setattr(provision.shutil, "which", lambda name: "C:\\Git\\bin\\sh.EXE")
+    sh_results = provision._diagnose_windows_sh()
+    assert len(sh_results) == 1 and sh_results[0].level == "ok"
+
+
+def test_posix_diagnose_has_no_sh_check() -> None:
+    assert provision._diagnose_windows_sh() == [] or os.name == "nt"
