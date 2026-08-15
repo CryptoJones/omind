@@ -69,6 +69,7 @@ GATE_MESSAGE = (
 MISS_STRICT_ENV = "OMI_GATE_MISS_STRICT"
 #: Synthetic rule id for a preflight miss that auto-cleared the gate.
 GATE_NO_MATCH_RULE = "omi-gate-no-match"
+GATE_WEAK_MATCH_RULE = "omi-gate-weak-match"
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
@@ -360,9 +361,7 @@ def mark_consulted(session: str) -> None:
     _write_sentinel(session, data)
 
 
-def record_consult(
-    session: str, *, kind: str, target: str, relevant: bool | None = None
-) -> None:
+def record_consult(session: str, *, kind: str, target: str, relevant: bool | None = None) -> None:
     """Append one OMI consult (note read / search) to the turn's sentinel with
     its relevance verdict (``None`` = not yet judged), and mark the gate
     consulted. Never raises."""
@@ -833,9 +832,7 @@ def _opt_in_satisfied(opt_in: str, command: str) -> bool:
     The optional ``env `` prefix must ITSELF be at command position — otherwise
     ``echo "use env OMI_SUDO_OK=1" && sudo …`` forged the opt-in from inside a
     string (the ``\\benv``-anywhere bug) and skipped a hard rule."""
-    pattern = (
-        r"(?:^|[;&|\n])[ \t]*(?:env[ \t]+)?" + re.escape(opt_in) + r"(?=\s|$)"
-    )
+    pattern = r"(?:^|[;&|\n])[ \t]*(?:env[ \t]+)?" + re.escape(opt_in) + r"(?=\s|$)"
     return re.search(pattern, command) is not None
 
 
@@ -1168,9 +1165,7 @@ def decide(action: dict[str, Any]) -> Verdict:
     if gate_paused():
         return Verdict(allow=True)
 
-    if _is_global_config_mutation(action) and not _turn_has_explicit_global_auth(
-        action, session
-    ):
+    if _is_global_config_mutation(action) and not _turn_has_explicit_global_auth(action, session):
         return Verdict(
             allow=False,
             reason=f"omi-guard (hard): {GLOBAL_MUTATION_MESSAGE}",
@@ -1296,11 +1291,7 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
     verdict = _note_rules_verdict(action, omi_dir)
     if verdict is None:
         verdict = decide(action)
-    if (
-        not verdict.allow
-        and verdict.rule_id == "repo-work-read-git-rules"
-        and omi_dir is not None
-    ):
+    if not verdict.allow and verdict.rule_id == "repo-work-read-git-rules" and omi_dir is not None:
         # #241: place the governing rule text adjacent to the action it blocks.
         # The demand sentence stays first — the recall ceremony still runs and
         # feeds consult telemetry — but the rule itself rides along, because an
@@ -1310,9 +1301,7 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
         if excerpt:
             verdict = Verdict(
                 allow=False,
-                reason=(
-                    f"{verdict.reason}\n\n--- Governing memory (excerpt) ---\n{excerpt}"
-                ),
+                reason=(f"{verdict.reason}\n\n--- Governing memory (excerpt) ---\n{excerpt}"),
                 rule_id=verdict.rule_id,
             )
     if not verdict.allow and verdict.rule_id == "omi-gate" and omi_dir is not None:
@@ -1528,6 +1517,37 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
         filename,
         max_chars=ai_usage.policy(omi_dir).preflight_chars,
     )
+    # #257: the ranking surfaces the best candidate even when "best" is a single
+    # shared word (a bare "retry" turn pulling an unrelated note). Require a
+    # minimum absolute term overlap before an unsolicited injection; a weak
+    # match is treated like a miss (auto-clear unless MISS_STRICT opts back in).
+    min_terms = retrieve.preflight_min_terms()
+    if min_terms:
+        haystack = " ".join(str(memory.get(key) or "") for key in ("title", "summary", "content"))
+        if retrieve.matched_terms(task, haystack) < min_terms:
+            if not _miss_strict():
+                record_consult(session, kind="weak-match", target=filename, relevant=False)
+                compliance.log_event(
+                    compliance.KIND_DECISION,
+                    session=session,
+                    tool="UserPromptSubmit",
+                    rule_id=GATE_WEAK_MATCH_RULE,
+                    severity="soft",
+                    outcome="auto-clear",
+                    detail=f"note={filename!r} task={task[:100]!r}",
+                )
+                return (
+                    "OMI turn preflight found only a weak memory match (fewer "
+                    f"than {min_terms} task terms shared) — not injecting it. "
+                    "Consult gate cleared for this turn — proceeding without a "
+                    f"forced read (set {MISS_STRICT_ENV}=1 to require one anyway)."
+                )
+            return (
+                "OMI turn preflight found no confident memory match. The consult "
+                "gate remains armed. Before any non-memory tool, call OMI MCP "
+                "`search-vault` with a focused query, then `recall-note` on one "
+                "result."
+            )
     version = str(memory.get("version") or "")
     repeated = _injected_versions(session).get(filename) == version
     # #241: the summary-only optimization for repeated notes loses to attention
@@ -1537,8 +1557,10 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     action_shaped = bool(_ACTION_TURN_RE.search(task))
     summary = str(memory.get("summary") or "").strip()
     excerpt = str(memory.get("content") or "").strip()
-    content = summary if repeated and not action_shaped else "\n\n".join(
-        part for part in (summary, excerpt) if part and part != summary
+    content = (
+        summary
+        if repeated and not action_shaped
+        else "\n\n".join(part for part in (summary, excerpt) if part and part != summary)
     )
     if not content:
         content = str(memory.get("title") or filename)
@@ -1554,8 +1576,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
         )
         + ". This is a standing operator instruction/memory relevant to this "
         "turn — apply it unless the user's current message explicitly "
-        "overrides it. Silence is not an override.\n\n"
-        + content
+        "overrides it. Silence is not an override.\n\n" + content
     )
     context += _second_title_line(omi_dir, titles, filename)
     ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
