@@ -46,6 +46,17 @@ from omind import filelock, paths
 _T = TypeVar("_T")
 
 HOOK_MARKER = "omind hook"  # substring used by provision.py to find our entries
+#: The omind executable followed by the ``hook`` subcommand. Windows resolves
+#: the executable to ``omind.EXE`` / ``omind.cmd``, so the literal
+#: :data:`HOOK_MARKER` substring never occurs there and a bare substring test
+#: false-negatives — which made the Codex dedup filter append a duplicate hook
+#: entry on every re-run (#261).
+HOOK_COMMAND_RE = re.compile(r"omind(?:\.exe|\.cmd|\.bat)?[\"']?\s+hook\b", re.IGNORECASE)
+
+
+def command_is_omind_hook(command: str) -> bool:
+    """True when ``command`` is an ``omind hook ...`` invocation omind owns."""
+    return HOOK_MARKER in command or bool(HOOK_COMMAND_RE.search(command))
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
 #: Hermes Agent has no SessionStart hook; it fires ``pre_llm_call`` before every
 #: LLM turn and consumes a ``{"context": ...}`` payload on stdout. omind installs

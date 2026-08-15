@@ -31,7 +31,7 @@ from pathlib import Path
 from typing import Any, ClassVar, TextIO
 
 from omind import __version__, guard, paths, policy, seeds
-from omind.hooks import HANDLED_EVENTS, HOOK_MARKER, JOURNAL_DIRNAME
+from omind.hooks import HANDLED_EVENTS, JOURNAL_DIRNAME, command_is_omind_hook
 from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
 from omind.proc import run_command
@@ -265,14 +265,10 @@ def claude_settings_path() -> Path:
     return Path.home() / ".claude" / "settings.json"
 
 
-# A hook command we own: the omind executable (Windows resolves it to
-# omind.EXE / omind.cmd, so the literal HOOK_MARKER substring isn't enough)
-# followed by the `hook` subcommand.
-_HOOK_COMMAND_RE = re.compile(r"omind(?:\.exe|\.cmd|\.bat)?[\"']?\s+hook\b", re.IGNORECASE)
-
-
-def _command_is_omind_hook(command: str) -> bool:
-    return HOOK_MARKER in command or bool(_HOOK_COMMAND_RE.search(command))
+# A hook command we own: the omind executable followed by the `hook`
+# subcommand. The Windows-tolerant predicate lives in hooks.py so the Codex
+# provisioner (agents.py) shares it instead of re-deriving a substring test.
+_command_is_omind_hook = command_is_omind_hook
 
 
 def _entry_has_omind_marker(entry: object) -> bool:
@@ -446,12 +442,21 @@ class Provisioner:
     config: SetupConfig
     log: Logger = print
     actions: list[str] = field(default_factory=list)
+    #: soft tools found missing by :meth:`check_prereqs`; dependent steps skip.
+    missing_tools: set[str] = field(default_factory=set)
 
     #: tool -> why it is needed; subclasses for other agents override this.
     REQUIRED_TOOLS: ClassVar[dict[str, str]] = {
         "claude": "the Claude Code CLI registers the MCP server",
         "git": "the mesh replicates the memory folder over git",
     }
+    #: Tools whose absence degrades setup instead of aborting it: every step
+    #: that does not shell out to them still runs, the dependent steps skip
+    #: with a warning, and doctor flags the gap. Before this, --dry-run merely
+    #: WARNED about a missing claude while the real run refused outright and
+    #: did nothing at all — an asymmetry that ambushed anyone who validated
+    #: with --dry-run first (#258).
+    SOFT_TOOLS: ClassVar[frozenset[str]] = frozenset({"claude"})
     DONE_MESSAGE: ClassVar[str] = (
         "Done. Restart Claude Code to load the OMI memory tools. To replicate "
         "to other machines: `omind mesh add-peer`, then `omind mesh install-service`."
@@ -509,11 +514,27 @@ class Provisioner:
     # -- steps --------------------------------------------------------------
 
     def check_prereqs(self) -> None:
-        """Raise (unless dry-run) when a required executable is missing."""
+        """Raise (unless dry-run) when a required executable is missing.
+
+        Tools in :data:`SOFT_TOOLS` never raise: their absence is recorded in
+        ``self.missing_tools``, the steps that shell out to them skip with a
+        warning, and everything else proceeds — the same on a real run as on
+        ``--dry-run`` (#258).
+        """
         required = self.REQUIRED_TOOLS
         missing = [tool for tool in required if shutil.which(tool) is None]
-        if missing:
-            details = "; ".join(f"{t} ({required[t]})" for t in missing)
+        soft = [tool for tool in missing if tool in self.SOFT_TOOLS]
+        hard = [tool for tool in missing if tool not in self.SOFT_TOOLS]
+        if soft:
+            self.missing_tools.update(soft)
+            details = "; ".join(f"{t} ({required[t]})" for t in soft)
+            self.log(
+                f"  WARNING: missing tool(s): {details}. Continuing — the "
+                "steps that need them will be skipped; install them and "
+                "re-run `omind setup` (doctor flags the gap meanwhile)."
+            )
+        if hard:
+            details = "; ".join(f"{t} ({required[t]})" for t in hard)
             message = (
                 f"missing required tool(s): {details}. Install them, then re-run."
             )
@@ -521,7 +542,7 @@ class Provisioner:
                 self.log(f"  WARNING: {message}")
             else:
                 raise ProvisionError(message)
-        else:
+        if not missing:
             self.log(f"  prerequisites present: {', '.join(required)}")
 
     def ensure_vault(self) -> None:
@@ -640,6 +661,12 @@ class Provisioner:
         self._run(["claude", "mcp", "remove", LEGACY_SERVER_NAME, "-s", "user"])
 
     def register_mcp(self) -> None:
+        if "claude" in self.missing_tools:
+            self.log(
+                "  SKIP: MCP registration shells out to the claude CLI, which "
+                "is not installed — install it and re-run `omind setup`."
+            )
+            return
         existing = self.registered_server()
         if existing is not None and self._matches_desired(existing) and not self.config.force:
             self.log(
@@ -1087,6 +1114,8 @@ class Provisioner:
     def verify(self) -> None:
         if self.config.dry_run:
             return
+        if "claude" in self.missing_tools:
+            return  # nothing was registered; check_prereqs already warned
         result = self._run(
             ["claude", "mcp", "get", self.config.server_name],
             check=False,

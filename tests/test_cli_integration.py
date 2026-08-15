@@ -289,6 +289,29 @@ def test_setup_missing_tools_exits_1_with_error(
     assert "missing required tool" in capsys.readouterr().err
 
 
+def test_setup_missing_claude_degrades_instead_of_refusing(
+    isolate_config: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """claude is a SOFT tool: without it, setup still seeds the vault and
+    installs hooks, skipping only MCP registration — matching what --dry-run
+    leads the operator to expect (#258)."""
+    real_which = provision.shutil.which
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: None if name == "claude" else real_which(name),
+    )
+    rc = main(["setup", "--vault", str(tmp_path / "vault"), "--no-mesh"])
+    out = capsys.readouterr().out
+    assert rc == 0
+    assert "SKIP: MCP registration" in out
+    assert "WARNING: missing tool(s): claude" in out
+    assert (tmp_path / "vault" / "OMI" / "index.md").exists()
+
+
 # -- quickstart ---------------------------------------------------------------
 
 
