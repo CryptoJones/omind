@@ -23,6 +23,7 @@ Subcommands:
 from __future__ import annotations
 
 import argparse
+import contextlib
 import os
 import shlex
 import sys
@@ -1578,6 +1579,13 @@ def _run_help(args: argparse.Namespace) -> int:
 
 
 def main(argv: list[str] | None = None) -> int:
+    if os.name == "nt":
+        # Windows PowerShell 5.1's default console codepage mangles the em
+        # dashes and check glyphs doctor/setup print (#259's mojibake finding);
+        # UTF-8 output fixes the rendering everywhere modern Windows runs.
+        for stream in (sys.stdout, sys.stderr):
+            with contextlib.suppress(Exception):
+                stream.reconfigure(encoding="utf-8")  # type: ignore[union-attr]
     parser = build_parser()
     args = parser.parse_args(argv)
     if args.command == "help":

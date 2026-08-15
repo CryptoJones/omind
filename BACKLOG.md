@@ -10,7 +10,7 @@ here so neither side drifts.
 ### Windows fresh-install test (2026-08-15, first fully-cold install)
 
 - [x] **`setup --dry-run` warns about a missing claude CLI but the real run hard-fails** — fixed in 8.7.1: claude is a soft prerequisite, real run degrades like the dry-run promises ([#258](https://github.com/CryptoJones/omind/issues/258)) — either fail the dry-run too, or degrade the real run gracefully (do vault/seed work, skip only MCP registration)
-- [ ] **Windows: POSIX `.sh` hooks + `fleet-sudo` installed unverified** ([#259](https://github.com/CryptoJones/omind/issues/259)) — doctor should probe hook executability (needs an `sh` on PATH); setup should warn or ship PowerShell equivalents; also `�` mojibake in doctor output under PS 5.1
+- [x] **Windows: POSIX `.sh` hooks + `fleet-sudo` installed unverified** — fixed in 8.7.2: direct omind hook commands on Windows, sh-gated bash guards, doctor probe, UTF-8 console ([#259](https://github.com/CryptoJones/omind/issues/259)) — doctor should probe hook executability (needs an `sh` on PATH); setup should warn or ship PowerShell equivalents; also `�` mojibake in doctor output under PS 5.1
 - [x] **Windows: codex hook verifier false-negatives on its own SessionStart/PostToolUse entries** — fixed in 8.7.1: shared Windows-tolerant command_is_omind_hook predicate ([#261](https://github.com/CryptoJones/omind/issues/261)) — hooks are written correctly but setup/--force/doctor all report them missing (quoting-form mismatch in the matcher); guard selftest passes for all six harnesses on Windows
 
 ### From the 2026-08-01 top-to-bottom code review
@@ -117,14 +117,14 @@ review's headline recommendations are deliberately NOT tracked here: temporal va
 already shipped (#169), and adopting an external memory framework as the storage layer is
 already rejected below._
 
-- [ ] **Capture the agent's own work without requiring it to remember a tool call** ([#221](https://github.com/CryptoJones/omind/issues/221)) — _enhancement (memory)_ —
+- [x] **Capture the agent's own work without requiring it to remember a tool call** ([#221](https://github.com/CryptoJones/omind/issues/221)) — _enhancement (memory)_ —
   7 of 10 lanes named this the largest gap. Every write needs the agent to *decide* to call
   `create-note`; a forgotten call loses the memory silently, with no error and no warning.
   Explicitly NOT the external-document ingest rejected below — this captures the agent's own
   work, which is what omind's notes already are. Open question is whether it belongs here or
   in the harness; a cheaper middle option is a detector that flags "this session wrote no
   notes" without omind ever reading a transcript.
-- [ ] **Flat note namespace: every agent on every machine sees every note** ([#222](https://github.com/CryptoJones/omind/issues/222)) — _enhancement (mesh)_ —
+- [x] **Flat note namespace: every agent on every machine sees every note** ([#222](https://github.com/CryptoJones/omind/issues/222)) — _enhancement (mesh)_ —
   single-lane finding. Two axes: retrieval precision (unrelated notes compete in every
   search, where Mem0/LangMem/Letta all partition by user/agent/run) and blast radius (no way
   to scope a note to a project, machine, or agent). Distinct from #196, which covered the

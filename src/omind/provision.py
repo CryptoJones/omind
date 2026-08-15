@@ -404,6 +404,17 @@ SECRET_OUTPUT_GUARD_TIMEOUT = 10
 #: (each adapter's filename always appears in its command).
 OMI_GUARD_MARKER = "omi-guard.sh"
 OMI_GATE_RESET_MARKER = "omi-gate-reset.sh"
+
+#: Native-Windows hook-command markers. Windows cannot execute the POSIX .sh
+#: adapters, so provisioning there registers direct omind invocations — the
+#: same pure-Python guard path the Codex harness uses (#259). The markers let
+#: replacement/diagnosis recognize either form on either platform.
+WINDOWS_OMI_GUARD_MARKER = "guard adapter --harness claude"
+WINDOWS_GATE_RESET_MARKER = "guard preflight"
+
+
+def _windows() -> bool:
+    return os.name == "nt"
 #: The retired hand-rolled PreToolUse('*') guard, replaced by ``omi-guard.sh``.
 #: Provision strips it from settings.json so a prototype machine doesn't run two
 #: guards. (Its name is NOT a substring of OMI_GUARD_MARKER, so the two markers
@@ -743,6 +754,8 @@ class Provisioner:
 
     def _write_guard_hook_script(self) -> None:
         """Write the fresh-base git guard hook from package data to ~/.claude/hooks/."""
+        if _windows() and shutil.which("sh") is None:
+            return  # POSIX script; no sh on this Windows box — install skipped
         dest = _guard_hook_dest()
         try:
             content = (
@@ -761,6 +774,8 @@ class Provisioner:
         Unlike ``omi-guard.sh`` the script has no machine-specific paths, so it
         ships verbatim with no install-time substitution (like ``git-fresh-base.sh``).
         """
+        if _windows() and shutil.which("sh") is None:
+            return  # POSIX script; no sh on this Windows box — install skipped
         dest = _secret_output_guard_dest()
         try:
             content = (
@@ -781,6 +796,8 @@ class Provisioner:
         ever guesses the entry or hands CJ a command to run. The guard blocks raw
         `sudo` and points here; see the OMI Playbook.
         """
+        if _windows():
+            return  # bash + pass + sudo wrapper — meaningless on Windows
         dest = _fleet_sudo_dest()
         try:
             content = (
@@ -918,22 +935,35 @@ class Provisioner:
         something changed (or ``--force``).
         """
         path = claude_settings_path()
+        if _windows() and shutil.which("sh") is None:
+            self.log(
+                "  SKIP: the secret-output + fresh-base git guards are POSIX "
+                "shell and no `sh` is on PATH — install Git for Windows to "
+                "enable them (doctor flags this gap)."
+            )
+            return
         data = self._read_settings(path)
         hooks_cfg = data.get("hooks")
         if not isinstance(hooks_cfg, dict):
             hooks_cfg = {}
+
+        def _script_command(dest: Path) -> str:
+            # A bare .sh path is not executable by the Windows shell; run it
+            # through the sh found on PATH (Git for Windows). The script
+            # filename stays in the command, so the markers still match.
+            return f'sh "{dest}"' if _windows() else str(dest)
 
         desired: dict[str, Any] = {
             "matcher": "Bash",
             "hooks": [
                 {
                     "type": "command",
-                    "command": str(_secret_output_guard_dest()),
+                    "command": _script_command(_secret_output_guard_dest()),
                     "timeout": SECRET_OUTPUT_GUARD_TIMEOUT,
                 },
                 {
                     "type": "command",
-                    "command": str(_guard_hook_dest()),
+                    "command": _script_command(_guard_hook_dest()),
                     "timeout": GUARD_HOOK_TIMEOUT,
                 },
             ],
@@ -988,6 +1018,18 @@ class Provisioner:
         retires the legacy prototype adapter and stamps the provision manifest so
         upgrades can detect hook-set drift (#86/#87)."""
         self._remove_legacy_omi_guard()
+        if _windows():
+            # The adapters are POSIX shell; Windows registers direct omind
+            # invocations instead (see ensure_omi_guard_installed), so writing
+            # the scripts would install dead files a reviewer must puzzle over.
+            self.log(
+                "  skip omi-guard.sh/omi-gate-reset.sh (POSIX adapters; "
+                "Windows hooks call omind directly)"
+            )
+            if not self.config.dry_run:
+                write_provision_manifest()
+                policy.write_seed_policy()
+            return
         omind_exe = canonical_omind_exe()
         omi_dir = str(self.config.omi_dir)
         for resource, dest in (
@@ -1029,24 +1071,44 @@ class Provisioner:
         if not isinstance(hooks_cfg, dict):
             hooks_cfg = {}
 
+        if _windows():
+            # No .sh adapters on native Windows: call omind directly — the same
+            # pure-Python guard path the Codex harness uses (#259).
+            omind_exe = canonical_omind_exe()
+            guard_command = (
+                f'"{omind_exe}" guard adapter --harness claude '
+                f'--omi-dir "{self.config.omi_dir}"'
+            )
+            reset_command = (
+                f'"{omind_exe}" guard preflight --omi-dir "{self.config.omi_dir}"'
+            )
+        else:
+            guard_command = str(_omi_guard_dest())
+            reset_command = str(_omi_gate_reset_dest())
         desired: dict[str, dict[str, Any]] = {
             "PreToolUse": {
                 "matcher": "*",
                 "hooks": [
                     {
                         "type": "command",
-                        "command": str(_omi_guard_dest()),
+                        "command": guard_command,
                         "timeout": OMI_GUARD_TIMEOUT,
                     }
                 ],
             },
             "UserPromptSubmit": {
-                "hooks": [{"type": "command", "command": str(_omi_gate_reset_dest())}]
+                "hooks": [{"type": "command", "command": reset_command}]
             },
         }
+        # Both platform forms are strippable so a checkout moved between
+        # platforms converges instead of accumulating one entry per form.
         strip_markers = {
-            "PreToolUse": (OMI_GUARD_MARKER, LEGACY_OMI_GUARD_MARKER),
-            "UserPromptSubmit": (OMI_GATE_RESET_MARKER,),
+            "PreToolUse": (
+                OMI_GUARD_MARKER,
+                LEGACY_OMI_GUARD_MARKER,
+                WINDOWS_OMI_GUARD_MARKER,
+            ),
+            "UserPromptSubmit": (OMI_GATE_RESET_MARKER, WINDOWS_GATE_RESET_MARKER),
         }
 
         changed = False
@@ -1249,6 +1311,31 @@ def _diagnose_tools(tools: dict[str, str]) -> list[CheckResult]:
     return results
 
 
+def _diagnose_windows_sh() -> list[CheckResult]:
+    """#259: on native Windows the secret-output + fresh-base git guards are
+    POSIX shell, executed through an `sh` on PATH (Git for Windows). Without
+    one they are skipped at setup, so surface the gap; on POSIX say nothing."""
+    if not _windows():
+        return []
+    if shutil.which("sh") is not None:
+        return [
+            CheckResult(
+                "tool:sh",
+                "ok",
+                "sh found on PATH — the secret-output + fresh-base git guards run through it",
+            )
+        ]
+    return [
+        CheckResult(
+            "tool:sh",
+            "warn",
+            "no `sh` on PATH — the secret-output + fresh-base git guards are "
+            "skipped on this Windows box (install Git for Windows, then re-run "
+            "`omind setup`); the OMI-compliance guard itself runs natively",
+        )
+    ]
+
+
 def _diagnose_jq() -> CheckResult:
     """#107: `jq` is the guard hook's fast-path parser, but no longer a hard
     dependency — the hook falls back to `omind guard adapter` (pure Python) when
@@ -1311,6 +1398,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
     """
     results = _diagnose_tools(Provisioner.REQUIRED_TOOLS)
     results.append(_diagnose_jq())
+    results.extend(_diagnose_windows_sh())
     results.extend(_diagnose_omi_folder(config))
     omi = config.omi_dir
 
@@ -1491,7 +1579,11 @@ def _diagnose_omi_guard(settings_path: Path, config: SetupConfig) -> CheckResult
     the auto-memory hooks. A green here must mean the per-turn consult gate and the
     hard blocks really run, so a missing/unwired guard is a ``fail``, not a silent
     pass."""
-    missing = [str(p) for p in _managed_guard_hooks().values() if not p.is_file()]
+    missing = (
+        []
+        if _windows()  # Windows registers direct omind commands, no .sh files
+        else [str(p) for p in _managed_guard_hooks().values() if not p.is_file()]
+    )
     if missing:
         return CheckResult(
             "omi_guard",
@@ -1515,12 +1607,19 @@ def _diagnose_omi_guard(settings_path: Path, config: SetupConfig) -> CheckResult
     pre_ok = any(
         isinstance(e, dict)
         and e.get("matcher") == "*"
-        and OMI_GUARD_MARKER in _entry_command_text(e)
+        and (
+            OMI_GUARD_MARKER in _entry_command_text(e)
+            or WINDOWS_OMI_GUARD_MARKER in _entry_command_text(e)
+        )
         for e in pre_list
     )
     ups_list = hooks_cfg.get("UserPromptSubmit")
     ups_list = ups_list if isinstance(ups_list, list) else []
-    ups_ok = any(OMI_GATE_RESET_MARKER in _entry_command_text(e) for e in ups_list)
+    ups_ok = any(
+        OMI_GATE_RESET_MARKER in _entry_command_text(e)
+        or WINDOWS_GATE_RESET_MARKER in _entry_command_text(e)
+        for e in ups_list
+    )
     if not (pre_ok and ups_ok):
         unwired: list[str] = []
         if not pre_ok:

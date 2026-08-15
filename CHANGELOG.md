@@ -5,6 +5,19 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.7.2] - 2026-08-15
+
+### Fixed
+- **Native Windows gets working Claude hooks (#259).** Setup registered the
+  POSIX `.sh` adapters on Windows unverified. Now: the OMI-compliance guard
+  and gate-reset register direct omind invocations (`guard adapter` /
+  `guard preflight` — the pure-Python path the Codex harness already uses);
+  the secret-output + fresh-base git guards run through `sh` when Git for
+  Windows provides one and are skipped with a clear warning (and a doctor
+  `tool:sh` check) when it doesn't; `fleet-sudo` and the dead `.sh` copies are
+  no longer written on Windows; and CLI output is forced to UTF-8 on Windows,
+  fixing the doctor mojibake under PowerShell 5.1.
+
 ## [8.7.1] - 2026-08-15
 
 ### Fixed
