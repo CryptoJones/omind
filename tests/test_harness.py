@@ -119,6 +119,7 @@ def test_selftest_all_pass() -> None:
         "opencode",
         "codex",
         "gemini",
+        "deepseek",
         "openclaw",
     }
     assert all(r["ok"] for r in results)

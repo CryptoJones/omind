@@ -5,6 +5,20 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [8.8.0]
+
+### Added
+- **DSH (DeepSeek Harness) agent support.** `omind setup --agent deepseek` wires
+  the `omi` MCP server into DSH's home-level `cordis.patch.yml` and installs an
+  `omind-guard.dsh.js` Cordis plugin that hard-blocks guarded tool calls at
+  `tools/pre-execute`, resets the consult gate + injects proactive memory at
+  `agent/pre-step` (turn boundaries), primes the session at
+  `agent/session-start`, journals at `tools/post-execute`, and records the
+  session stop at `agent/disposed`. The plugin is fail-open and exempts
+  navigation/listing tools and scaffolding reads from the consult gate.
+  `omind doctor --agent deepseek` verifies the MCP registration, guard plugin
+  entry, and plugin file presence.
+
 ## [8.7.2] - 2026-08-15
 
 ### Fixed
