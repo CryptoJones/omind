@@ -58,6 +58,13 @@ HARNESSES: dict[str, HarnessSpec] = {
         "codex", CAP_HARD_BLOCK, FMT_CODEX_HOOK, "Codex PreToolUse/PermissionRequest hook"
     ),
     "gemini": HarnessSpec("gemini", CAP_HARD_BLOCK, FMT_GEMINI, "Gemini CLI BeforeTool hook"),
+    # DSH (DeepSeek Harness) hard-blocks at the `tools/pre-execute` waterfall via
+    # its Cordis guard plugin (omind-guard.dsh.js), which denies before dispatch.
+    # Uses json_signal (exit-code + {allow,reason,rule_id} JSON) like OpenCode,
+    # so the JS plugin can enforce both hard-rule denies AND the consult-gate.
+    "deepseek": HarnessSpec(
+        "deepseek", CAP_HARD_BLOCK, FMT_JSON_SIGNAL, "DSH tools/pre-execute guard plugin"
+    ),
     # Detect-only until a live gateway is confirmed to enforce a deny (issue #88):
     # the verdict is rendered + sent, but we don't yet CLAIM hard-block capability.
     "openclaw": HarnessSpec(
@@ -197,6 +204,11 @@ _SELFTEST_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
             "tool_input": {"command": "gh pr merge 5"},
             "session_id": "st",
         },
+        True,
+    ),
+    (
+        "deepseek",
+        {"tool_name": "bash", "tool_input": {"command": "gh repo delete acme/widget"}, "session_id": "st"},
         True,
     ),
     (

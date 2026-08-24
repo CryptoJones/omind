@@ -132,6 +132,32 @@ def opencode_guard_plugin_path() -> Path:
     return opencode_config_dir() / "plugin" / "omi-guard.js"
 
 
+def dsh_home() -> Path:
+    """DSH's home directory: ``$DSH_HOME`` or ``~/.dsh``."""
+    env = os.environ.get("DSH_HOME")
+    return Path(env) if env else Path.home() / ".dsh"
+
+
+def dsh_home_patch_path() -> Path:
+    """DSH's home-level user patch layer: ``<dsh_home>/cordis.patch.yml``.
+
+    Applied over every profile's own layer, so an entry here affects ALL
+    profiles (headless, web, tui). This is the DSH analogue of
+    ``~/.claude.json`` — the right place to install omind hooks machine-wide.
+    """
+    return dsh_home() / "cordis.patch.yml"
+
+
+def dsh_guard_plugin_path() -> Path:
+    """Where omind writes the OMI-guard DSH Cordis plugin."""
+    return dsh_home() / "plugins" / "omi-guard.dsh.js"
+
+
+#: Substring identifying omind's own DSH guard plugin in the patch YAML,
+#: so a re-run finds and replaces only our entry (never duplicates).
+DSH_GUARD_MARKER = "omi-guard.dsh.js"
+
+
 def codex_config_dir() -> Path:
     """OpenAI Codex CLI's config directory: ``$CODEX_HOME`` or ``~/.codex``."""
     base = os.environ.get("CODEX_HOME")
@@ -974,6 +1000,252 @@ class OpenCodeProvisioner(AgentProvisioner):
             "__OMI_DIR__", str(self.config.omi_dir)
         )
         self._write_managed(dest, content)
+
+
+# -- DeepSeek Harness -----------------------------------------------------------
+
+
+class DeepseekProvisioner(AgentProvisioner):
+    """Wire the DeepSeek Harness (dsh) into OMI memory + guard.
+
+    DSH is a Cordis-plugin agent runtime. It loads its plugin tree from a
+    profile (``~/.dsh/profiles/<profile>/cordis.yml``) overlaid by patch layers:
+    the profile's own ``cordis.patch.yml``, then the HOME-level
+    ``~/.dsh/cordis.patch.yml`` (applies to all profiles), then ``--patch``
+    overlays. omind writes the OMI MCP server entry + the guard plugin entry
+    into the HOME-level patch so they survive profile switches and re-runs.
+
+    The guard is a JS Cordis plugin (``omi-guard.dsh.js``) that hooks
+    ``tools/pre-execute`` to deny blocked tool calls and ``agent/pre-step`` to
+    reset the per-turn consult gate + inject proactive memory. Priming and
+    journaling are handled inside the plugin itself (via ``omind hook``), so
+    there is no separate shell-hook installation — the plugin is the hook.
+
+    MCP servers in DSH are registered via the ``@deepseek-ai/dsh-mcp-client``
+    plugin entry, whose config carries ``serverName``, ``transport``,
+    ``command``, ``args``, and ``failOnStartupError``.
+    """
+
+    AGENT_LABEL = "DeepSeek Harness"
+    INSTALL_HINT = "Install DSH (`npm i -g @deepseek-ai/dsh`), then re-run."
+    DONE_MESSAGE = (
+        "Done. Restart DSH (or start a new session with `dsh --profile headless`) "
+        "to load the OMI memory + guard plugin."
+    )
+
+    def agent_root(self) -> Path:
+        return dsh_home()
+
+    def skill_dir(self) -> Path:
+        return dsh_home() / "skill" / "omind-omi-memory"
+
+    def desired_mcp_entry(self) -> dict[str, Any]:
+        """The ``@deepseek-ai/dsh-mcp-client`` entry for the OMI server."""
+        omind = canonical_omind_exe()
+        return {
+            "id": "mcp-omi",
+            "name": "@deepseek-ai/dsh-mcp-client",
+            "config": {
+                "serverName": self.config.server_name,
+                "transport": "stdio",
+                "command": omind,
+                "args": [
+                    "node",
+                    "--vault", str(self.config.vault),
+                    "--folder", self.config.folder,
+                ],
+                "failOnStartupError": False,
+            },
+        }
+
+    def desired_guard_entry(self) -> dict[str, Any]:
+        """The Cordis plugin entry that loads the DSH guard plugin.
+
+        The ``name`` is a ``file://`` URL so the Cordis loader resolves it as an
+        absolute path regardless of the active profile's ``baseUrl``.
+        """
+        plugin_url = Path(dsh_guard_plugin_path()).resolve().as_uri()
+        return {
+            "id": "omind-guard",
+            "name": plugin_url,
+        }
+
+    def registered_server(self) -> dict[str, Any] | None:
+        """Return the current MCP entry from the patch, or None if absent/divergent."""
+        entries = self._patch_entries(dsh_home_patch_path())
+        for e in entries:
+            if isinstance(e, dict) and e.get("id") == "mcp-omi":
+                return e
+        return None
+
+    def _patch_entries(self, path: Path) -> list[dict[str, Any]]:
+        """Return the flat list of entries inside this patch file's ``insert``
+        blocks (plus top-level id-targeted entries), so re-runs can merge
+        idempotently."""
+        if not path.is_file():
+            return []
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except (OSError, yaml.YAMLEError) as exc:
+            raise ProvisionError(
+                f"{path} is not valid YAML ({exc}); refusing to overwrite."
+            ) from exc
+        if not isinstance(data, list):
+            return []
+        entries: list[dict[str, Any]] = []
+        for row in data:
+            if not isinstance(row, dict):
+                continue
+            if "insert" in row and isinstance(row["insert"], list):
+                entries.extend(e for e in row["insert"] if isinstance(e, dict))
+            elif "id" in row:
+                entries.append(row)
+        return entries
+
+    def _sync_patch(self, path: Path) -> None:
+        """Rewrite the DSH home-level patch file, syncing omind-owned entries.
+
+        Reads the existing YAML list, removes any prior ``mcp-omi`` /
+        ``omind-guard`` entries (from any ``insert`` block or top-level), and
+        appends a fresh ``insert`` block with the current desired set. All
+        user-authored entries are preserved verbatim.
+        """
+        self._record(f"sync DSH patch entries in {path}")
+        if self.config.dry_run:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        # Load existing doc (list of rows)
+        doc: list[Any] = []
+        if path.is_file():
+            try:
+                doc = yaml.safe_load(path.read_text(encoding="utf-8")) or []
+            except (OSError, yaml.YAMLError):
+                doc = []
+        if not isinstance(doc, list):
+            doc = []
+        # Walk rows, stripping omind-owned entries from insert blocks + top-level.
+        pruned: list[Any] = []
+        for row in doc:
+            if not isinstance(row, dict):
+                pruned.append(row)
+                continue
+            if "insert" in row and isinstance(row["insert"], list):
+                kept = [
+                    e for e in row["insert"]
+                    if not (isinstance(e, dict)
+                            and str(e.get("id") or "") in ("mcp-omi", "omind-guard"))
+                ]
+                if kept:
+                    pruned.append({"insert": kept})
+                # If nothing remains, drop the now-empty insert block.
+            elif row.get("id") in ("mcp-omi", "omind-guard"):
+                continue  # skip omind-owned top-level patches
+            else:
+                pruned.append(row)
+        # Append a fresh insert block with omind's current desired entries.
+        pruned.append({"insert": [self.desired_mcp_entry(), self.desired_guard_entry()]})
+        paths.atomic_write_text(
+            path,
+            yaml.safe_dump(pruned, sort_keys=False, allow_unicode=True),
+        )
+
+    def register_mcp(self) -> None:
+        """Register the ``omi`` MCP server in the DSH home-level patch.
+
+        Delegates to :meth:`_sync_patch`, which writes BOTH the MCP entry and the
+        guard-plugin entry (the guard entry is harmless if the plugin file hasn't
+        been written yet).
+        """
+        path = dsh_home_patch_path()
+        entries = self._patch_entries(path)
+        if self.desired_mcp_entry() in entries and not self.config.force:
+            self.log(
+                f"  MCP server '{self.config.server_name}' already registered "
+                f"in {path}"
+            )
+        else:
+            self._sync_patch(path)
+
+    def install_priming(self) -> None:
+        """DSH priming is handled entirely by the guard plugin (it hooks
+        ``agent/session-start`` and ``agent/pre-step`` internally), so there is
+        nothing to install here beyond writing the plugin file."""
+        return None
+
+    def integrate(self) -> None:
+        self.register_mcp()
+        self.install_memory_skill()
+        self.install_guard()
+
+    def install_guard(self) -> None:
+        """Write the OMI-guard DSH plugin from package data, substituting the
+        omind binary + OMI folder, and register it in the DSH home-level patch.
+        Managed (refreshed on drift).."""
+        dest = dsh_guard_plugin_path()
+        try:
+            content = (
+                importlib.resources.files("omind")
+                .joinpath("omi-guard.dsh.js")
+                .read_text(encoding="utf-8")
+            )
+        except Exception as exc:
+            self.log(
+                f"  WARNING: could not read omi-guard.dsh.js from package data: {exc}"
+            )
+            return
+        omind_exe = canonical_omind_exe()
+        content = (
+            content
+            .replace("__OMIND_BIN__", omind_exe)
+            .replace("__OMI_DIR__", str(self.config.omi_dir))
+            .replace("__OMI_VAULT__", str(self.config.vault))
+            .replace("__OMI_FOLDER__", self.config.folder)
+        )
+        self._write_managed(dest, content)
+        # Register both the MCP server and guard entry in the patch file.
+        path = dsh_home_patch_path()
+        entries = self._patch_entries(path)
+        if (
+            any(isinstance(e, dict) and e.get("id") == "omind-guard" for e in entries)
+            and any(isinstance(e, dict) and e.get("id") == "mcp-omi" for e in entries)
+            and not self.config.force
+        ):
+            self.log(f"  OMI guard plugin already registered in {path}")
+        else:
+            self._sync_patch(path)
+
+    def verify(self) -> None:
+        """Read-back check: confirm the MCP server + guard plugin are in the patch."""
+        if self.config.dry_run:
+            return
+        path = dsh_home_patch_path()
+        entries = self._patch_entries(path)
+        mcp_ok = any(
+            isinstance(e, dict) and e.get("id") == "mcp-omi" for e in entries
+        )
+        guard_ok = any(
+            isinstance(e, dict) and e.get("id") == "omind-guard" for e in entries
+        )
+        plugin_path = dsh_guard_plugin_path()
+        if mcp_ok and guard_ok:
+            self.log(
+                f"  verified: OMI MCP server + guard plugin wired into DSH ({path})"
+            )
+        else:
+            missing = []
+            if not mcp_ok:
+                missing.append("MCP server")
+            if not guard_ok:
+                missing.append("guard plugin")
+            self.log(
+                f"  NOTE: could not confirm {' + '.join(missing)} in DSH patch "
+                f"({path}); re-run with --force or wire manually (`omind quickstart`)."
+            )
+        if not plugin_path.is_file():
+            self.log(
+                f"  NOTE: guard plugin file missing at {plugin_path}; "
+                "re-run with --force."
+            )
 
 
 # -- Codex CLI ------------------------------------------------------------------
@@ -1922,6 +2194,75 @@ def diagnose_q(config: SetupConfig) -> list[CheckResult]:
     return _diagnose_mcp_only(AmazonQProvisioner(config=config, log=lambda _msg: None))
 
 
+def diagnose_deepseek(config: SetupConfig) -> list[CheckResult]:
+    """Doctor checks for DSH: tools + DSH home + OMI folder + MCP + guard plugin."""
+    prov = DeepseekProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+
+    root = dsh_home()
+    if root.is_dir():
+        results.append(CheckResult("deepseek_root", "ok", f"DSH found: {root}"))
+    else:
+        results.append(
+            CheckResult(
+                "deepseek_root", "fail",
+                f"DSH not found: {root} does not exist (install `npm i -g @deepseek-ai/dsh`)",
+            )
+        )
+
+    results.extend(_diagnose_omi_folder(config))
+
+    # MCP server + guard plugin in the home-level patch.
+    path = dsh_home_patch_path()
+    entries = prov._patch_entries(path)
+    mcp_ok = any(isinstance(e, dict) and e.get("id") == "mcp-omi" for e in entries)
+    guard_ok = any(isinstance(e, dict) and e.get("id") == "omind-guard" for e in entries)
+    plugin_path = dsh_guard_plugin_path()
+
+    if mcp_ok:
+        results.append(
+            CheckResult("deepseek_mcp_registration", "ok", f"OMI MCP server registered in {path}")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "deepseek_mcp_registration", "fail",
+                f"OMI MCP server not in DSH patch ({path}) (run `omind setup --agent deepseek`)",
+            )
+        )
+
+    if guard_ok and plugin_path.is_file():
+        results.append(
+            CheckResult("deepseek_guard", "ok", f"OMI guard plugin wired in {path} ({plugin_path})")
+        )
+    elif not guard_ok:
+        results.append(
+            CheckResult(
+                "deepseek_guard", "fail",
+                f"OMI guard plugin not in DSH patch ({path}) (run `omind setup --agent deepseek`)",
+            )
+        )
+    elif not plugin_path.is_file():
+        results.append(
+            CheckResult(
+                "deepseek_guard", "warn",
+                f"OMI guard plugin entry present but file missing: {plugin_path} (run `omind setup --agent deepseek --force`)",
+            )
+        )
+
+    skill = prov.skill_dir() / paths.AGENT_SKILL_FILENAME
+    if skill.is_file():
+        results.append(CheckResult("deepseek_skill", "ok", f"memory skill installed: {skill}"))
+    else:
+        results.append(
+            CheckResult(
+                "deepseek_skill", "warn",
+                f"memory skill missing: {skill} (run `omind setup --agent deepseek`)",
+            )
+        )
+    return results
+
+
 # -- dispatch -------------------------------------------------------------------
 
 PROVISIONERS: dict[str, type[Provisioner]] = {
@@ -1935,6 +2276,7 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "kiro": KiroProvisioner,
     "vscode": VsCodeProvisioner,
     "q": AmazonQProvisioner,
+    "deepseek": DeepseekProvisioner,
 }
 
 DIAGNOSERS = {
@@ -1948,6 +2290,7 @@ DIAGNOSERS = {
     "kiro": diagnose_kiro,
     "vscode": diagnose_vscode,
     "q": diagnose_q,
+    "deepseek": diagnose_deepseek,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)
