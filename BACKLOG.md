@@ -288,4 +288,21 @@ Each issue below is written to be executable by any agent without further contex
 
 ---
 
+## PyPI Publish Setup (2026-08-24) ([#267](https://github.com/CryptoJones/omind/issues/267))
+
+- [ ] **`omind` is not yet on PyPI — first publish pending.** The package
+  (now at v8.8.0 with DSH agent support) has never been uploaded to PyPI
+  (HTTP 404 on the simple index). To publish:
+  1. Register the `omind` package name on https://pypi.org/ (account required)
+  2. Create a PyPI API token (`pypi-…`) or set up [trusted publishing](https://docs.pypi.org/trusted-publishers/)
+     (recommended: GitHub Actions with `permissions: id-token: write` +
+     `uv publish --trusted-publishing always` in a `publish` job)
+  3. Add a `publish` job to `.github/workflows/test.yml` (see the trusted-publishing
+     snippet in the PR description)
+  4. Run `uv publish dist/omind-8.8.0-py3-none-any.whl --token pypi-…` (or
+     `uv publish --trusted-publishing always` in CI)
+  - No credentials exist on any machine (Ronin28, makemake, pluto, telesto) or in
+    the `pass` keyring, macOS keychains, GitHub secrets, or `.pypirc` files.
+  - Build artifacts are ready in `dist/` (8.8.0 wheel + sdist).
+
 *Proudly Made in Nebraska. Go Big Red! 🌽 <https://xkcd.com/2347/>*
