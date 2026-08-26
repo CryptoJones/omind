@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import math
 import os
+import shlex
 import shutil
 import subprocess
 from dataclasses import asdict, dataclass
@@ -418,7 +419,58 @@ def _usage_int(usage: dict[str, Any], *names: str) -> int:
     return 0
 
 
-def run_claude(
+#: One-shot model backends, in preference order.
+#:
+#: omind guards SEVEN harnesses but this helper only ever spoke Claude, so on a
+#: box running Codex/Gemini/DSH/opencode the model tier was simply dead and the
+#: verifier silently degraded to deterministic-only. A harness-agnostic core with
+#: a vendor-locked model call is not harness-agnostic.
+#:
+#: Each entry is (binary, argv-template, structured-json). ``{prompt}`` is
+#: substituted; a backend needing stdin uses ``STDIN`` instead. Only ``claude``
+#: returns structured usage, so it alone gets measured token accounting — the
+#: rest are estimated.
+#:
+#: Invocations here are VERIFIED, not guessed (2026-08-25). Do not add an entry
+#: without running it: the flags differ in ways that fail silently, e.g. some
+#: CLIs consume the NEXT ARG as the prompt so flag order matters.
+#: Deliberately absent: the standalone `gemini` CLI, which now returns
+#: IneligibleTierError for individual accounts — Google migrated them to
+#: Antigravity (`agy`), which is the entry below.
+STDIN = "\x00stdin"
+_MODEL_BACKENDS: tuple[tuple[str, tuple[str, ...], bool], ...] = (
+    ("claude", ("-p", "--output-format", "json", "{prompt}"), True),
+    ("agy", ("-p", "{prompt}"), False),
+    ("codex", ("exec", "{prompt}"), False),
+)
+#: Pin one backend by name.
+MODEL_CLI_ENV = "OMI_MODEL_CLI"
+#: Full escape hatch for a CLI omind does not know: a command line containing
+#: ``{prompt}``. Anything shell-quoted works, so a new harness needs no patch.
+MODEL_CMD_ENV = "OMI_MODEL_CMD"
+
+
+def resolve_model_backend() -> tuple[list[str], bool, str] | None:
+    """(argv-template, structured-json, name) for the first usable backend.
+
+    ``None`` when nothing is available — callers fail open.
+    """
+    custom = os.environ.get(MODEL_CMD_ENV)
+    if custom:
+        parts = shlex.split(custom)
+        if parts and any("{prompt}" in p for p in parts):
+            return parts, False, parts[0]
+    pinned = os.environ.get(MODEL_CLI_ENV)
+    for name, argv, as_json in _MODEL_BACKENDS:
+        if pinned and name != pinned:
+            continue
+        found = shutil.which(name)
+        if found:
+            return [found, *argv], as_json, name
+    return None
+
+
+def run_model(
     omi_dir: Path | str,
     operation: str,
     prompt: str,
@@ -426,7 +478,7 @@ def run_claude(
     timeout: int,
     allowed: bool = True,
 ) -> str | None:
-    """Run a headless Claude call, account for it, and return response text.
+    """Run a headless one-shot model call, account for it, return response text.
 
     Any failure preserves the historic fail-open contract by returning ``None``.
     """
@@ -441,12 +493,18 @@ def run_claude(
             reason="disabled by expense profile",
         )
         return None
-    claude = shutil.which("claude")
-    if not claude:
+    resolved = resolve_model_backend()
+    if resolved is None:
         return None
+    template, as_json, _name = resolved
+    argv = [prompt if part == "{prompt}" else part.replace("{prompt}", prompt) for part in template]
+    stdin_text = prompt if STDIN in template else None
+    if stdin_text is not None:
+        argv = [p for p in argv if p != STDIN]
     try:
         result = subprocess.run(
-            [claude, "-p", "--output-format", "json", prompt],
+            argv,
+            input=stdin_text,
             capture_output=True,
             text=True,
             encoding="utf-8",
@@ -460,6 +518,17 @@ def run_claude(
     stdout = (result.stdout or "").strip()
     if not stdout:
         return None
+    if not as_json:
+        # Backends without structured usage: estimate, so spend is still tracked.
+        log_event(
+            omi_dir,
+            operation,
+            measurement="estimated",
+            characters=len(prompt) + len(stdout),
+            input_tokens=estimate_tokens(prompt),
+            output_tokens=estimate_tokens(stdout),
+        )
+        return stdout
     try:
         payload = json.loads(stdout)
     except ValueError:
@@ -501,3 +570,8 @@ def profile_payload(omi_dir: Path | str) -> dict[str, Any]:
     info["policies"] = {name: asdict(value) for name, value in PROFILE_POLICIES.items()}
     info["aliases"] = dict(PROFILE_ALIASES)
     return info
+
+
+#: Historic name. Kept so existing callers and tests keep working; the call is no
+#: longer Claude-specific.
+run_claude = run_model
