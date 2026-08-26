@@ -1721,17 +1721,27 @@ def _diagnose_enforcement() -> list[CheckResult]:
             CheckResult("compliance_log", "ok", "compliance log: no violations recorded yet")
         )
 
-    if shutil.which("claude"):
+    from omind import ai_usage as _ai_usage
+
+    _backend = _ai_usage.resolve_model_backend()
+    if _backend is not None:
         results.append(
-            CheckResult("verifier_backend", "ok", "verifier model backend: `claude` on PATH")
+            CheckResult(
+                "verifier_backend",
+                "ok",
+                f"verifier model backend: `{_backend[2]}` on PATH",
+            )
         )
     else:
+        _known = ", ".join(f"`{n}`" for n, _a, _j in _ai_usage._MODEL_BACKENDS)
         results.append(
             CheckResult(
                 "verifier_backend",
                 "warn",
-                "verifier model backend: `claude` not on PATH — the relevance "
-                "verifier runs deterministic-only (fails open, no model tiebreaker)",
+                f"verifier model backend: none of {_known} on PATH — the relevance "
+                f"verifier runs deterministic-only (fails open, no model tiebreaker). "
+                f"Set {_ai_usage.MODEL_CMD_ENV} to a command containing '{{prompt}}' "
+                f"to use any other CLI.",
             )
         )
     return results

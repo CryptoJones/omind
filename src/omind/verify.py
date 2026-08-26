@@ -11,8 +11,9 @@ consult was relevant to the turn's captured task:
 * a fast **deterministic prefilter** (:func:`omind.retrieve.overlap_score`)
   decides the clear cases — high overlap is relevant, ~zero overlap is not — with
   no model call;
-* only the ambiguous middle shells out to headless ``claude -p`` (short timeout);
-* **any** error, timeout, missing ``claude`` binary, empty task, or unreadable
+* only the ambiguous middle shells out to a headless one-shot model — whichever
+  supported CLI is on PATH, or ``OMI_MODEL_CMD`` (short timeout);
+* **any** error, timeout, missing model CLI, empty task, or unreadable
   note fails **open** (treated relevant) and is logged — a verifier must never
   wedge the agent.
 
@@ -30,7 +31,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import shutil
 import subprocess
 import sys
 from datetime import datetime
@@ -316,8 +316,11 @@ def _parse_verdict(text: str) -> bool | None:
 
 
 def _ask_model(task: str, text: str, omi_dir: Path | str | None = None) -> bool | None:
-    """Ask headless ``claude -p`` whether the consult was relevant. ``None`` on
-    any unavailability/error/timeout (the caller fails open)."""
+    """Ask a headless one-shot model whether the consult was relevant.
+
+    Backend-agnostic: whichever of the known CLIs is on PATH, or a custom one via
+    ``OMI_MODEL_CMD``. ``None`` on any unavailability/error/timeout (the caller
+    fails open)."""
     from omind import ai_usage
 
     limits = ai_usage.policy(omi_dir) if omi_dir is not None else None
@@ -339,12 +342,22 @@ def _ask_model(task: str, text: str, omi_dir: Path | str | None = None) -> bool 
     if omi_dir is None:
         # Compatibility path for the public pure ``judge`` helper. Real hook
         # calls always supply the vault and therefore use the accounted wrapper.
-        claude = shutil.which("claude")
-        if not claude:
+        from omind import ai_usage as _au
+
+        resolved = _au.resolve_model_backend()
+        if resolved is None:
             return None
+        template, _as_json, _name = resolved
+        argv = [
+            prompt if part == "{prompt}" else part.replace("{prompt}", prompt)
+            for part in template
+        ]
+        stdin_text = prompt if _au.STDIN in template else None
+        if stdin_text is not None:
+            argv = [p for p in argv if p != _au.STDIN]
         try:
             result = subprocess.run(
-                [claude, "-p", prompt], capture_output=True, text=True, timeout=timeout
+                argv, input=stdin_text, capture_output=True, text=True, timeout=timeout
             )
         except (subprocess.TimeoutExpired, OSError):
             return None
@@ -477,7 +490,7 @@ def verify_consult(
     session = str(event.get("session_id") or "")
     if guard.gate_paused():
         # Operator pause (`omind guard pause`): the gate is open anyway, so skip
-        # relevance judging entirely — no overlap compute, no `claude -p` tiebreak,
+        # relevance judging entirely — no overlap compute, no model tiebreak,
         # no re-close. Record the consult (relevant) so the turn history is intact
         # and the off-topic streak doesn't accrue against a paused window.
         guard.record_consult(session, kind=kind, target=target, relevant=True)
@@ -592,7 +605,7 @@ def explain_consult(event: dict[str, Any], omi_dir: Path | str) -> dict[str, Any
     elif score <= low:
         band, verdict = "low → deterministic irrelevant", False
     else:
-        band, verdict = "middle → claude -p tiebreaker", None
+        band, verdict = "middle → model tiebreaker", None
     return {
         "kind": kind,
         "target": target,

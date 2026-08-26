@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import subprocess
 from datetime import datetime
 from pathlib import Path
 
@@ -117,9 +118,37 @@ def test_judge_middle_band_consults_the_model(monkeypatch: pytest.MonkeyPatch) -
     assert calls  # the model was actually consulted
 
 
-def test_ask_model_fails_open_without_claude(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(verify.shutil, "which", lambda _name: None)
-    assert verify._ask_model("t", "x") is None  # no binary -> None -> caller fails open
+def test_ask_model_fails_open_without_any_backend(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No model CLI at all -> None -> the caller fails open.
+
+    The verifier used to hardcode `claude`; it now resolves whichever supported
+    CLI is present, so absence means *no backend resolved*, not *no claude*.
+    """
+    from omind import ai_usage
+
+    monkeypatch.setattr(ai_usage, "resolve_model_backend", lambda: None)
+    assert verify._ask_model("t", "x") is None
+
+
+def test_ask_model_uses_whatever_backend_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A non-Claude CLI must be driven correctly — the point of the change."""
+    from omind import ai_usage
+
+    seen: dict[str, object] = {}
+
+    def fake_run(argv, **kw):  # type: ignore[no-untyped-def]
+        seen["argv"] = argv
+        return subprocess.CompletedProcess(argv, 0, stdout="RELEVANT", stderr="")
+
+    monkeypatch.setattr(
+        ai_usage,
+        "resolve_model_backend",
+        lambda: (["/usr/bin/somecli", "exec", "{prompt}"], False, "somecli"),
+    )
+    monkeypatch.setattr(verify.subprocess, "run", fake_run)
+    assert verify._ask_model("t", "x") is True
+    assert seen["argv"][:2] == ["/usr/bin/somecli", "exec"]
+    assert "OMI-compliance relevance checker" in seen["argv"][2]  # {prompt} substituted
 
 
 def test_verify_consult_relevant_records_no_violation(
