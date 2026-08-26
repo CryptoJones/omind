@@ -234,3 +234,33 @@ def test_share_is_unavailable_until_parent_session_usage_is_observed(tmp_path: P
     summary = ai_usage.usage_summary(omi, since="all")
     assert summary["traffic"]["provider_tokens"] == 0
     assert summary["traffic"]["omi_share_percent"] is None
+
+
+def test_resolve_finds_a_cli_outside_path(tmp_path, monkeypatch):
+    """A CLI installed in ~/.local/bin but absent from a non-login PATH must
+    still be found. Hooks run in exactly that context, and reporting "no
+    backend" for an installed, authenticated binary is the bug this prevents."""
+    fake_home = tmp_path / "home"
+    (fake_home / ".local" / "bin").mkdir(parents=True)
+    exe = fake_home / ".local" / "bin" / "claude"
+    exe.write_text("#!/bin/sh\necho hi\n")
+    exe.chmod(0o755)
+
+    monkeypatch.setattr(ai_usage.shutil, "which", lambda _n: None)  # not on PATH
+    monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.delenv(ai_usage.MODEL_CLI_ENV, raising=False)
+    monkeypatch.delenv(ai_usage.MODEL_CMD_ENV, raising=False)
+
+    resolved = ai_usage.resolve_model_backend()
+    assert resolved is not None, "installed CLI outside PATH was not found"
+    assert resolved[2] == "claude"
+    assert str(exe) == resolved[0][0]
+
+
+def test_resolve_returns_none_when_truly_absent(tmp_path, monkeypatch):
+    monkeypatch.setattr(ai_usage.shutil, "which", lambda _n: None)
+    monkeypatch.setenv("HOME", str(tmp_path / "empty"))
+    monkeypatch.delenv(ai_usage.MODEL_CLI_ENV, raising=False)
+    monkeypatch.delenv(ai_usage.MODEL_CMD_ENV, raising=False)
+    monkeypatch.setattr(ai_usage, "_EXTRA_BIN_DIRS", ("~/nope",))
+    assert ai_usage.resolve_model_backend() is None

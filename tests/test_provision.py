@@ -1008,11 +1008,32 @@ def test_diagnose_enforcement_reports_policy_compliance_and_backend(
     assert by_name["verifier_backend"].level == "ok"
 
 
-def test_diagnose_enforcement_warns_without_claude(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+def test_diagnose_enforcement_warns_without_any_model_backend(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Backend detection moved to ai_usage.resolve_model_backend, which also
+    searches user-local bin dirs — so patching PATH alone no longer simulates
+    absence. Patch the resolver itself."""
+    from omind import ai_usage
+
+    monkeypatch.setattr(ai_usage, "resolve_model_backend", lambda: None)
     by_name = {c.key: c for c in provision._diagnose_enforcement()}
     assert by_name["verifier_backend"].level == "warn"
+    assert "OMI_MODEL_CMD" in by_name["verifier_backend"].message
     assert by_name["compliance_log"].message == "compliance log: no violations recorded yet"
+
+
+def test_diagnose_enforcement_names_the_backend_it_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omind import ai_usage
+
+    monkeypatch.setattr(
+        ai_usage, "resolve_model_backend", lambda: (["/x/somecli"], False, "somecli")
+    )
+    by_name = {c.key: c for c in provision._diagnose_enforcement()}
+    assert by_name["verifier_backend"].level == "ok"
+    assert "somecli" in by_name["verifier_backend"].message
 
 
 # -- 2.40.1: test-isolation guard + stale allow-rule pruning ------------------
