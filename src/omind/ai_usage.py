@@ -464,9 +464,35 @@ def resolve_model_backend() -> tuple[list[str], bool, str] | None:
     for name, argv, as_json in _MODEL_BACKENDS:
         if pinned and name != pinned:
             continue
-        found = shutil.which(name)
+        found = _which(name)
         if found:
             return [found, *argv], as_json, name
+    return None
+
+
+#: Where user-level CLIs land when PATH has not been set up for a non-login
+#: shell. Hooks run in exactly that context: a binary that is installed AND
+#: authenticated is invisible to shutil.which, so omind reported "no backend"
+#: on a host that had one. Observed on telesto 2026-08-25 -- claude was in
+#: ~/.local/bin the whole time and doctor said none of the CLIs were present.
+_EXTRA_BIN_DIRS = (
+    "~/.local/bin",
+    "~/.local/share/uv/tools",  # uv tool shims
+    "~/bin",
+    "/opt/homebrew/bin",
+    "/usr/local/bin",
+)
+
+
+def _which(name: str) -> str | None:
+    """``shutil.which`` plus the usual user-local bin dirs."""
+    found = shutil.which(name)
+    if found:
+        return found
+    for d in _EXTRA_BIN_DIRS:
+        candidate = Path(d).expanduser() / name
+        if candidate.is_file() and os.access(candidate, os.X_OK):
+            return str(candidate)
     return None
 
 
