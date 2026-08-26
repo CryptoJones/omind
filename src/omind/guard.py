@@ -659,13 +659,22 @@ _STRONG_ACTION_AUTH_RE = re.compile(
     re.IGNORECASE,
 )
 #: "Can/could you ...?" asks whether something is POSSIBLE — the honest answer is
-#: an answer, not an action. "Would you ...?" is a polite imperative in practice
-#: ("would you add a button", "would you push that"), so it is NOT treated as
-#: interrogatory; it falls through to the ordinary verb-based auth check, which
-#: still requires a real authorizing verb ("add"/"fix"/"change"/...) that isn't
-#: negated. So "would you mind not touching that" does not become authorization.
+#: an answer, not an action.
+#:
+#: "Would you ...?" and "Will you ...?" are polite imperatives in practice
+#: ("would you add a button", "will you push that"). Both ask about WILLINGNESS,
+#: not capability, so neither is treated as interrogatory; they fall through to
+#: the ordinary verb-based auth check, which still requires a real authorizing
+#: verb ("add"/"fix"/"change"/...) that isn't negated. So "would you mind not
+#: touching that" does not become authorization.
+#:
+#: `will` was grouped with can/could until 2026-08-25, which contradicted the
+#: paragraph above and made "will you please implement the fixes?" read as a
+#: capability question — hard-blocking every push and merge for the rest of that
+#: turn while the work sat finished and unpublishable. CJ: "Will you is asking
+#: you to execute, can you is capability."
 _CAPABILITY_QUESTION_RE = re.compile(
-    r"^\s*(?:\w+[,:]\s+)?(?:hey[, ]+|please[, ]+)?(?:can|could|will)\s+you\b",
+    r"^\s*(?:\w+[,:]\s+)?(?:hey[, ]+|please[, ]+)?(?:can|could)\s+you\b",
     re.IGNORECASE,
 )
 # A REAL output redirect to a file: ``> f`` / ``>> f`` — but NOT ``2>&1`` (fd

@@ -1413,6 +1413,49 @@ def test_would_you_is_a_polite_imperative_not_a_capability_question() -> None:
     guard.clear_gate("wouldq")
 
 
+def test_will_you_is_a_polite_imperative_not_a_capability_question() -> None:
+    """"Will you <verb> ...?" authorizes; "Can you ...?" still does not.
+
+    Regression: `will` used to sit in the interrogatory set, so "will you please
+    implement the fixes?" blocked every side effect in the turn.
+    """
+    allowed = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh issue create --title x",
+            "prompt": "Will you please add an issue for that?",
+            "session": "willq",
+        }
+    )
+    assert allowed.rule_id != "capability-question-explicit-auth"
+
+    blocked = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh issue create --title x",
+            "prompt": "Can you please add an issue for that?",
+            "session": "willq",
+        }
+    )
+    assert not blocked.allow
+    assert blocked.rule_id == "capability-question-explicit-auth"
+    guard.clear_gate("willq")
+
+
+def test_will_you_without_an_authorizing_verb_still_blocks_side_effects() -> None:
+    """Dropping "will" from the interrogatory set must not blanket-authorize."""
+    blocked = guard.decide(
+        {
+            "tool": "Bash",
+            "command": "gh pr merge 1 --merge",
+            "prompt": "Will you be around later?",
+            "session": "willq2",
+        }
+    )
+    assert not blocked.allow
+    guard.clear_gate("willq2")
+
+
 def test_would_you_without_an_authorizing_verb_still_blocks_side_effects() -> None:
     """Dropping "would" from the interrogatory set must not blanket-authorize:
     the verb-based check still has to find a non-negated authorizing verb."""

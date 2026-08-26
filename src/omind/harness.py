@@ -208,7 +208,11 @@ _SELFTEST_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
     ),
     (
         "deepseek",
-        {"tool_name": "bash", "tool_input": {"command": "gh repo delete acme/widget"}, "session_id": "st"},
+        {
+            "tool_name": "bash",
+            "tool_input": {"command": "gh repo delete acme/widget"},
+            "session_id": "st",
+        },
         True,
     ),
     (

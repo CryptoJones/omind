@@ -1086,7 +1086,7 @@ class DeepseekProvisioner(AgentProvisioner):
             return []
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLEError) as exc:
+        except (OSError, yaml.YAMLError) as exc:
             raise ProvisionError(
                 f"{path} is not valid YAML ({exc}); refusing to overwrite."
             ) from exc
@@ -2246,7 +2246,8 @@ def diagnose_deepseek(config: SetupConfig) -> list[CheckResult]:
         results.append(
             CheckResult(
                 "deepseek_guard", "warn",
-                f"OMI guard plugin entry present but file missing: {plugin_path} (run `omind setup --agent deepseek --force`)",
+                "OMI guard plugin entry present but file missing: "
+                f"{plugin_path} (run `omind setup --agent deepseek --force`)",
             )
         )
 
