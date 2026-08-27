@@ -32,7 +32,7 @@ from mcp.shared.message import SessionMessage
 from omind import graph
 from omind.help_system import render_help
 from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
-from omind.store import ActionItem, NoteFields, OmiStore, parse_note
+from omind.store import ActionItem, NoteFields, OmiStore, _clean_agent, parse_note
 
 SERVER_NAME = "omi"
 
@@ -281,6 +281,14 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
     ) -> dict[str, object]:
         return compact_recall(store.omi_dir, name, max_chars=max_chars, section=section)
 
+    def _resolve_agent(explicit: str | None) -> str:
+        """Self-declared caller identity: explicit arg > OMIND_AGENT env > "".
+
+        2026-08-27 roundtable consensus: ADVISORY ONLY — stored on the note and
+        echoed back, but never consumed for ranking, access, or trust (a spoofed
+        identity is one env var away in a single-operator fleet)."""
+        return _clean_agent(explicit or "") or os.environ.get("OMIND_AGENT", "")
+
     @mcp.tool(
         name="create-note",
         description=(
@@ -288,7 +296,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "([[wikilink]] targets), references, action_items ('[x] text' = done). "
             "confidence: high|medium|low, omit if unknown. conflicts_with: a "
             "[[wikilink]] to a memory this one DISAGREES with (use supersedes "
-            "instead when this cleanly replaces the older fact)."
+            "instead when this cleanly replaces the older fact). agent: your "
+            "self-declared identity (advisory attribution only)."
         ),
     )
     def create_note(
@@ -304,6 +313,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
+        agent: str = "",
     ) -> dict[str, str]:
         fields = NoteFields(
             title=title,
@@ -315,12 +325,13 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             superseded_by=superseded_by,
             confidence=confidence,
             conflicts_with=conflicts_with,
+            agent=_resolve_agent(agent),
             connections=connections or [],
             action_items=_parse_action_items(action_items or []),
             references=references or [],
         )
         filename = store.create_note(fields)
-        return {"filename": filename}
+        return {"filename": filename, "agent": fields.agent}
 
     @mcp.tool(
         name="edit-note",
@@ -347,6 +358,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
+        agent: str | None = None,
         expected_version: str | None = None,
     ) -> dict[str, str]:
         fields = store.read_fields(name)
@@ -374,6 +386,10 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             fields.action_items = _parse_action_items(action_items)
         if references is not None:
             fields.references = references
+        if agent is not None:
+            # Omitted keeps the current writer; an explicit value re-attributes
+            # (e.g. a takeover). Resolution: arg > OMIND_AGENT env.
+            fields.agent = _resolve_agent(agent)
         filename = store.update_note(name, fields, expected_version=expected_version)
         result: dict[str, str] = {"filename": filename, "version": store.note_version(name)}
         if expected_version is None:

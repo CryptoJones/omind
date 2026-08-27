@@ -83,7 +83,7 @@ def test_create_read_round_trip(server: MCPServer, omi_dir: Path) -> None:
             "references": ["Source: test"],
         },
     )
-    assert created == {"filename": "Server Note.md"}
+    assert created == {"filename": "Server Note.md", "agent": ""}  # no identity resolved
     assert (omi_dir / "Server Note.md").is_file()
 
     got = call(server, "read-note", {"name": "Server Note.md"})

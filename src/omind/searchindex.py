@@ -59,7 +59,7 @@ from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 from omind import paths
 
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 #: RRF constant. 60 is the value from the original TREC paper and what every
@@ -160,6 +160,10 @@ class Hit:
     conflicts_with: str = ""
     #: "high" | "medium" | "low"; "" when the note declares none.
     confidence: str = ""
+    #: Self-declared last-writer identity, echoed verbatim from the note's
+    #: ``Agent:`` line. Advisory only (roundtable 2026-08-27): never consumed
+    #: for ranking, access, or trust.
+    agent: str = ""
     #: Score gap to the NEXT hit (0.0 on the last one). The ranker already
     #: computes these scores and then throws the margin away, leaving the caller
     #: unable to tell a clear winner from a coin-flip between near-duplicates —
@@ -245,6 +249,7 @@ class _NoteRow:
     superseded_by: str = ""
     confidence: str = ""
     conflicts_with: str = ""
+    agent: str = ""
     has_title: bool = True
     tags: list[str] = field(default_factory=list)
     disabled: bool = False
@@ -263,6 +268,7 @@ CREATE TABLE IF NOT EXISTS notes (
     superseded_by TEXT NOT NULL DEFAULT '',
     confidence TEXT NOT NULL DEFAULT '',
     conflicts_with TEXT NOT NULL DEFAULT '',
+    agent TEXT NOT NULL DEFAULT '',
     has_title INTEGER NOT NULL DEFAULT 1,
     disabled INTEGER NOT NULL DEFAULT 0,
     mtime_ns INTEGER NOT NULL DEFAULT 0,
@@ -754,6 +760,7 @@ class SearchIndex:
             superseded_by=fields.superseded_by,
             confidence=fields.confidence,
             conflicts_with=fields.conflicts_with,
+            agent=fields.agent,
             has_title=bool(fields.title),
             tags=fields.tags,
             disabled=fields.disabled,
@@ -761,8 +768,8 @@ class SearchIndex:
         self._forget(db, path.name)
         db.execute(
             "INSERT INTO notes(filename, title, created, okf_type, supersedes, superseded_by,"
-            " confidence, conflicts_with, has_title, disabled, mtime_ns, size, sha)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " confidence, conflicts_with, agent, has_title, disabled, mtime_ns, size, sha)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.filename,
                 row.title,
@@ -772,6 +779,7 @@ class SearchIndex:
                 row.superseded_by,
                 row.confidence,
                 row.conflicts_with,
+                row.agent,
                 int(row.has_title),
                 int(row.disabled),
                 st.st_mtime_ns,
@@ -1339,7 +1347,7 @@ class SearchIndex:
         for chunk_id, score in fused:
             row = db.execute(
                 "SELECT c.filename AS filename, c.heading AS heading, n.title AS title,"
-                " n.confidence AS confidence,"
+                " n.confidence AS confidence, n.agent AS agent,"
                 " (SELECT group_concat(tag, ' ') FROM note_tags t WHERE t.filename = c.filename)"
                 " AS tags FROM chunks c JOIN notes n ON n.filename = c.filename WHERE c.id = ?",
                 (chunk_id,),
@@ -1364,6 +1372,7 @@ class SearchIndex:
                     score=score,
                     conflicts_with=weights.conflicts.get(name, ""),
                     confidence=str(row["confidence"] or ""),
+                    agent=str(row["agent"] or ""),
                     keyword_rank=ranks["keyword"].get(chunk_id, 0),
                     vector_rank=ranks["vector"].get(chunk_id, 0),
                 )

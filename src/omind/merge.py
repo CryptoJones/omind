@@ -248,6 +248,16 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         if t == b:
             return o  # type: ignore[no-any-return]
         if ours_wins is None:
+            if name == "agent":
+                # 2026-08-27 roundtable: on the equal-rev content tiebreak,
+                # max(o, t) would pick the lexicographically larger name and
+                # FABRICATE authorship. Blank the field; the merge message
+                # names both claims so nothing is lost silently.
+                messages.append(
+                    f"agent: concurrent edits at equal/absent rev; both dropped ({o!r}, {t!r})"
+                )
+                lww_losses.append(name)
+                return ""
             winner = max(o, t)
             messages.append(f"{name}: concurrent edits at equal/absent rev; kept {winner!r}")
             return winner  # type: ignore[no-any-return]
@@ -276,6 +286,7 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         created=str(scalar("created")),
         tags=_union3(base.tags, ours.tags, theirs.tags),
         related_to=str(scalar("related_to")),
+        agent=str(scalar("agent")),
         supersedes=str(scalar("supersedes")),
         superseded_by=str(scalar("superseded_by")),
         confidence=str(scalar("confidence")),
