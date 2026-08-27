@@ -32,7 +32,11 @@ filed and linked below; they close when the fix branch merges._
 
 _(Feature roadmap from the same review — agent identity, usefulness feedback
 loop, sleep-time consolidation, write-time dedup, scoped writes — is Part 2 of
-the report and deliberately NOT started; see AGENTS.md handoff.)_
+the report. Agent identity is SHIPPED on `feat/agent-identity`; the other four
+are design-ratified by the FlatlineRoundtable panel (zero REJECTs, majority
+rulings on every split) in
+[docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md)
+and await implementation.)_
 
 ### Windows fresh-install test (2026-08-15, first fully-cold install)
 
