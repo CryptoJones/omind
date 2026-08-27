@@ -42,6 +42,32 @@ TIER_GITHUB_PUSH = "github_push"
 TIER_SUDO = "sudo"
 TIER_LEARNED = "learned"
 
+
+def opt_in_satisfied(opt_in: str, command: str) -> bool:
+    """True only when the ``VAR=VALUE`` opt-in token appears as a REAL leading
+    environment assignment — at the command start, right after a shell separator
+    (``;`` / ``&&`` / ``|`` / a NEWLINE), or via ``env`` — so it actually takes effect.
+
+    A bare substring match (the old behaviour) let the token be forged in a comment
+    or a string arg (``rm -rf / # OMI_SUDO_OK=1``, ``echo "OMI_SUDO_OK=1"``) and
+    silently bypass a hard rule without ever setting the variable. That is not a
+    deliberate opt-in, so it must not skip the deny.
+
+    A newline IS a shell command boundary, so a line-leading assignment inside a
+    multi-line script (``…\\n  OMI_PUSH_GITHUB=1 git push …``) is legitimate and must
+    be recognised — omitting ``\\n`` from the separator class wrongly rejected it
+    (3.0.2). A plain space is NOT a separator, so a mid-line ``echo OMI_SUDO_OK=1``
+    still doesn't count.
+
+    The optional ``env `` prefix must ITSELF be at command position — otherwise
+    ``echo "use env OMI_SUDO_OK=1" && sudo …`` forged the opt-in from inside a
+    string (the ``\\benv``-anywhere bug) and skipped a hard rule.
+
+    Lives here (not in guard.py) so both the guard's deny path and the compliance
+    detector's Layer-E recording share one strict matcher (2026-08-27 review)."""
+    pattern = r"(?:^|[;&|\n])[ \t]*(?:env[ \t]+)?" + re.escape(opt_in) + r"(?=\s|$)"
+    return re.search(pattern, command) is not None
+
 #: Shell wrapper/keyword tokens that transparently precede the real command, so
 #: the anchored token is still in command position after them:
 #: ``if/while … ; then sudo …``, ``exec sudo …``, ``nohup sudo …``,

@@ -303,6 +303,11 @@ def _pushed_branches(command: str) -> list[str] | None:
     # First positional token is the remote; the rest are refspecs.
     for token in positional[1:]:
         dest = token.rsplit(":", 1)[-1]
+        # Force-push refspecs prefix the destination with '+' (`git push
+        # origin +main`); without stripping it, "+main" never matched the
+        # branch condition and the public-main deny silently skipped the
+        # riskiest variant (2026-08-27 review).
+        dest = dest.lstrip("+")
         dest = dest.removeprefix("refs/heads/")
         if dest.startswith("refs/tags/") or re.fullmatch(r"v?\d+[\w.\-]*", dest):
             refs.append("(tags)")

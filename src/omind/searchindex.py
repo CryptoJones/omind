@@ -557,8 +557,11 @@ class SearchIndex:
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA busy_timeout=5000")
             db.executescript(_SCHEMA)
+            from omind import embed
+
+            identity = embed.model_identity(self.model)
             if self._meta(db, "schema") != str(SCHEMA_VERSION) or self._meta(db, "model") != (
-                self.model
+                identity
             ):
                 self._wipe(db)
             self._db = db
@@ -588,9 +591,15 @@ class SearchIndex:
             with contextlib.suppress(sqlite3.Error):
                 db.execute(f"DROP TABLE IF EXISTS {table}")
         db.executescript(_SCHEMA)
+        # Store the encoder IDENTITY (name + embedding-space digest), not just
+        # the name: the same name with a different cached snapshot is a
+        # different vector space, and the old name-only check let vectors from
+        # two spaces coexist silently (2026-08-27 review).
+        from omind import embed
+
         db.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?), ('model', ?)",
-            (str(SCHEMA_VERSION), self.model),
+            (str(SCHEMA_VERSION), embed.model_identity(self.model)),
         )
         self._bump(db)
 
@@ -690,8 +699,17 @@ class SearchIndex:
             for stale in [name for name in known if name not in seen]:
                 self._forget(db, stale)
                 stats.removed += 1
-            if vectors and pending_embed:
-                stats.embedded = self._embed_chunks(db, pending_embed)
+            if vectors:
+                if pending_embed:
+                    stats.embedded = self._embed_chunks(db, pending_embed)
+                # Backfill: notes ingested while the embed backend was down (or
+                # before it was installed) kept FTS-only rows forever — the
+                # mtime/size skip never revisited them, so installing the
+                # backend later silently left the semantic leg half-empty
+                # (2026-08-27 review). Embed whatever is still missing.
+                missing = self._chunks_without_vectors(db)
+                if missing:
+                    stats.embedded += self._embed_chunks(db, missing)
             self._bump(db)
             db.execute("COMMIT")
             stats.seconds = time.perf_counter() - started
@@ -808,6 +826,36 @@ class SearchIndex:
         db.execute("DELETE FROM links WHERE src = ?", (filename,))
         db.execute("DELETE FROM notes WHERE filename = ?", (filename,))
 
+    def _chunks_without_vectors(
+        self, db: sqlite3.Connection, cap: int = 2000
+    ) -> list[tuple[int, str]]:
+        """``(chunk_id, embed_text)`` pairs with no vector row yet, oldest first.
+
+        The chunk body lives in ``chunks_fts`` (rowid = chunk id), so the embed
+        text is reassembled exactly as :meth:`_ingest` built it — title,
+        heading, tags, then body — so backfilled vectors live in the same space
+        as freshly-ingested ones. Capped so one backfill pass is bounded; the
+        next refresh continues."""
+        rows = db.execute(
+            "SELECT c.id AS cid, n.title AS title, f.heading AS heading, "
+            "f.tags AS tags, f.text AS body "
+            "FROM chunks c "
+            "JOIN notes n ON n.filename = c.filename "
+            "JOIN chunks_fts f ON f.rowid = c.id "
+            "LEFT JOIN vectors v ON v.chunk_id = c.id "
+            "WHERE v.chunk_id IS NULL ORDER BY c.id LIMIT ?",
+            (cap,),
+        ).fetchall()
+        return [
+            (
+                int(r["cid"]),
+                "\n".join(
+                    [str(r["title"]), str(r["heading"]), str(r["tags"]), str(r["body"])]
+                ).strip(),
+            )
+            for r in rows
+        ]
+
     def _embed_chunks(self, db: sqlite3.Connection, pending: list[tuple[int, str]]) -> int:
         """Embed the given chunks in one batch. 0 when there is no backend."""
         from omind import embed
@@ -877,6 +925,7 @@ class SearchIndex:
             tokens_returned=sum(h.tokens for h in window),
         )
 
+    @_locked
     def search(
         self,
         query: str,
@@ -889,13 +938,22 @@ class SearchIndex:
 
         An empty ``query`` is a *listing* (optionally tag-filtered) in date order,
         which is what the tag-only search surface has always meant.
+
+        Under the index lock like every other public entry point: ``search()``
+        was the one path that shared the single sqlite connection across
+        threads unlocked, so concurrent in-process searches could interleave
+        statements and silently degrade to the scan fallback (2026-08-27
+        review). Re-entrant: the inner refresh re-acquires on the same thread.
         """
         db = self._connect()
         if db is None:
             return None
-        if self._refresh_if_needed() is None and not self._has_rows(db):
-            return None  # nothing indexed and we couldn't build it
         try:
+            # Inside the try: refresh() only caught sqlite3.Error, so a stat()
+            # race or a parse surprise escaped into the caller — invariant 2
+            # says retrieval degrades, never raises (2026-08-27 review).
+            if self._refresh_if_needed() is None and not self._has_rows(db):
+                return None  # nothing indexed and we couldn't build it
             allowed = self._candidates(db, tag=tag, include_disabled=include_disabled)
             if allowed is not None and not allowed:
                 return []
@@ -930,7 +988,7 @@ class SearchIndex:
             return self._materialize(
                 db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars
             )
-        except (sqlite3.Error, ValueError):
+        except Exception:  # noqa: BLE001 — invariant 2: degrade to the fallback, never raise
             return None
 
     @staticmethod

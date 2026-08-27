@@ -7,6 +7,33 @@ here so neither side drifts.
 
 ## Open
 
+### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
+
+_A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,
+fleet/ops, web/CLI, lifecycle) plus a 2025–26 SOTA survey. 35 code findings — all
+fixed, gates green (1,004 tests / ruff / mypy strict). Full report:
+[docs/reviews/2026-08-27-multi-agent-review.md](docs/reviews/2026-08-27-multi-agent-review.md).
+GitHub issues not yet filed for these; file before the next release per the
+two-views rule._
+
+- [x] **Force-refspec push bypassed the public-main deny** — `+main` stripped
+- [x] **`omind guard reset` was an unlogged, agent-reachable gate clear** — logged
+- [x] **A failed git fetch still satisfied the freshness gate** — retracted on PostToolUse
+- [x] **txn `prepare` didn't fsync the journal dir entry** — parent fsynced
+- [x] **Self-update installed from a mutable tag with no rollback** — SHA-pinned + `--rollback`
+- [x] **Vector spaces could silently mix; vector-less notes never backfilled** — model identity + backfill
+- [x] **Tombstones destroyed edits that raced the purge** — Rev capture + keep/report
+- [x] **Node-id minting / backup / settings merges were unlocked RMWs** — `filelock.exclusive` everywhere
+- [x] **Gate sentinels, re-close/off-topic counters, loopguard lost increments** — locked RMW
+- [x] **Consolidation bypassed the #169 Supersedes chain** — wired in
+- [x] **`edit-note` was silent last-write-wins without a token; `read-note` unbounded** — flagged / capped
+- [x] **Merge scalar LWW losses invisible; `mesh purge` ungated; verifier injectable** — `merge-lww` tag / `--yes` / fenced
+- [x] **Web cross-site POST; ai-usage ledger unbounded; journal rollup stranded appends; okf/checkpoint lost-update** — Origin check / rotation / flocks / version pinning
+
+_(Feature roadmap from the same review — agent identity, usefulness feedback
+loop, sleep-time consolidation, write-time dedup, scoped writes — is Part 2 of
+the report and deliberately NOT started; see AGENTS.md handoff.)_
+
 ### Windows fresh-install test (2026-08-15, first fully-cold install)
 
 - [x] **`setup --dry-run` warns about a missing claude CLI but the real run hard-fails** — fixed in 8.7.1: claude is a soft prerequisite, real run degrades like the dry-run promises ([#258](https://github.com/CryptoJones/omind/issues/258)) — either fail the dry-run too, or degrade the real run gracefully (do vault/seed work, skip only MCP registration)

@@ -64,6 +64,7 @@ class ImportResult:
 
     added: list[str] = field(default_factory=list)
     unchanged: list[str] = field(default_factory=list)
+    skipped: list[str] = field(default_factory=list)
     conflicts: list[str] = field(default_factory=list)  # differing content, skipped
     overwritten: list[str] = field(default_factory=list)  # differing content, --force
 
@@ -150,7 +151,9 @@ def _export_json(omi: Path, out: Path) -> int:
         "omind_export_version": EXPORT_VERSION,
         "omind_version": __version__,
         "exported_at": today(),
-        "source": str(omi),
+        # Folder name only: a shareable bundle must not leak the machine's
+        # absolute vault path (2026-08-27 review).
+        "source": omi.name,
         "note_count": len(notes),
         "notes": notes,
     }
@@ -214,6 +217,7 @@ def import_dataset(
         f"import: +{len(result.added)} added, "
         f"{len(result.unchanged)} unchanged, "
         f"{len(result.overwritten)} overwritten, "
+        f"{len(result.skipped)} skipped (plugin/config), "
         f"{len(result.conflicts)} conflict(s) skipped"
     )
     if result.conflicts and not force:
@@ -325,6 +329,12 @@ def _import_targz(
                 raise TransferError(f"archive member escapes the OMI directory: {rel!r}")
             if _control_artifact(rel):
                 raise TransferError(f"archive member targets a VCS control directory: {rel!r}")
+            # Obsidian PLUGIN code inside the vault is an executable-ish import
+            # vector — one crafted bundle would mesh-replicate it to every node.
+            # Inert .obsidian settings (app.json etc.) still round-trip.
+            if ".obsidian" in Path(rel).parts and "plugins" in Path(rel).parts:
+                result.skipped.append(rel)
+                continue
             if Path(rel).name == paths.INDEX_FILENAME and Path(rel).parent == Path("."):
                 continue  # derived top-level index; regenerated after import
             if _runtime_artifact(Path(rel).name):

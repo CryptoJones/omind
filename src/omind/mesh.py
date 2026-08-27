@@ -15,6 +15,7 @@ must never interleave with a half-written note.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -31,10 +32,12 @@ from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
 
+from omind import filelock
 from omind.backup import config_dir
+from omind.clock import Rev
 from omind.paths import sync_state_path
 from omind.proc import run_command
-from omind.store import OmiStore, _atomic_write
+from omind.store import OmiStore, _atomic_write, parse_note
 
 Logger = Callable[[str], None]
 
@@ -162,8 +165,21 @@ def load_node_config(omi_dir: Path) -> NodeConfig | None:
 
 
 def save_node_config(omi_dir: Path, cfg: NodeConfig) -> None:
+    """Save this folder's node config under the node-config lock.
+
+    Two concurrent `omind setup` runs (two agents, fleet automation) otherwise
+    read-modify-write the shared file and one folder's entry — its node_id —
+    is lost, minting a duplicate Lamport identity on the next setup
+    (2026-08-27 review). The flock lives on a sibling ``.lock`` file because
+    the data file is replaced atomically."""
     path = node_config_path()
     path.parent.mkdir(parents=True, exist_ok=True)
+    with filelock.exclusive(path.with_suffix(".json.lock")):
+        _save_node_config_unlocked(omi_dir, cfg)
+
+
+def _save_node_config_unlocked(omi_dir: Path, cfg: NodeConfig) -> None:
+    path = node_config_path()
     data = _read_config_file()
     nodes = data.setdefault("nodes", {})
     nodes[_config_key(omi_dir)] = {
@@ -234,13 +250,19 @@ def mesh_init(omi_dir: Path, log: Logger = print) -> NodeConfig:
         raise MeshError(f"OMI folder not found: {omi_dir}")
     store = OmiStore(omi_dir)
 
-    cfg = load_node_config(omi_dir)
-    if cfg is None:
-        cfg = NodeConfig(node_id=new_node_id())
-        save_node_config(omi_dir, cfg)
-        log(f"node id: {cfg.node_id} (saved to {node_config_path()})")
-    else:
-        log(f"node id: {cfg.node_id} (existing)")
+    lock_path = node_config_path().with_suffix(".json.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    # The load→mint→save cycle is serialized: two concurrent setups minting
+    # node ids would give two folders the same Lamport identity (merge order
+    # corrupts) (2026-08-27 review).
+    with filelock.exclusive(lock_path):
+        cfg = load_node_config(omi_dir)
+        if cfg is None:
+            cfg = NodeConfig(node_id=new_node_id())
+            _save_node_config_unlocked(omi_dir, cfg)
+            log(f"node id: {cfg.node_id} (saved to {node_config_path()})")
+        else:
+            log(f"node id: {cfg.node_id} (existing)")
 
     with store.write_lock():
         if not (omi_dir / ".git").exists():
@@ -561,40 +583,67 @@ def _inbox_refs(omi_dir: Path, node_id: str) -> list[str]:
 TOMBSTONE_TTL_DAYS = 90
 
 
-def _parse_tombstone(line: str) -> tuple[datetime | None, str]:
-    """``(timestamp|None, filename)`` for a tombstone line.
+def _parse_tombstone(line: str) -> tuple[datetime | None, str, str]:
+    """``(timestamp|None, filename, rev)`` for a tombstone line.
 
-    New lines are ``<iso-8601>\\t<filename>``; a legacy bare ``<filename>`` (no
-    timestamp) has no expiry — it can't be safely dated under the ``merge=union``
-    driver (a peer would re-add the old line), so it stays permanent as before.
+    New lines are ``<iso-8601>\\t<filename>[\\t<rev>]``; a legacy bare
+    ``<filename>`` (no timestamp) has no expiry — it can't be safely dated under
+    the ``merge=union`` driver (a peer would re-add the old line), so it stays
+    permanent as before. The optional third field is the Lamport Rev the purge
+    observed: when a live note's rev DOMINATES it, the note was edited after the
+    purge decision, and the edit wins over the delete instead of being destroyed
+    silently (2026-08-27 review).
     """
     line = line.strip()
     if not line:
-        return None, ""
-    if "\t" in line:
-        ts_raw, name = line.split("\t", 1)
-        try:
-            return datetime.fromisoformat(ts_raw.strip()), name.strip()
-        except ValueError:
-            return None, name.strip()
-    return None, line
+        return None, "", ""
+    parts = line.split("\t")
+    if len(parts) == 1:
+        return None, line, ""
+    ts: datetime | None
+    try:
+        ts = datetime.fromisoformat(parts[0].strip())
+    except ValueError:
+        ts = None
+    name = parts[1].strip()
+    rev = parts[2].strip() if len(parts) > 2 else ""
+    return ts, name, rev
 
 
 def _as_utc(dt: datetime) -> datetime:
     return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
 
 
-def _apply_tombstones(omi_dir: Path, store: OmiStore, now: datetime | None = None) -> None:
+def _live_rev_newer(target: Path, purged_rev: str) -> bool:
+    """True when the live note's Rev dominates the rev captured at purge time —
+    the note was edited after the purge decision, so the edit wins."""
+    try:
+        live = parse_note(target.read_text(encoding="utf-8")).rev
+        a, b = Rev.parse(live), Rev.parse(purged_rev)
+    except Exception:
+        return False
+    if a is None or b is None:
+        return False
+    return a.sort_key() > b.sort_key()
+
+
+def _apply_tombstones(omi_dir: Path, store: OmiStore, now: datetime | None = None) -> list[str]:
     """Unlink any note a live purge tombstone names, and GC expired tombstones.
+
+    Returns the names it REFUSED to delete: when a tombstone captured the
+    purge-time Rev and the live note's Rev is newer, an edit raced the purge
+    and the edit survives (reported as a purge-edit conflict) instead of being
+    destroyed vault-wide with no trace (2026-08-27 review).
     Caller holds the write lock."""
     tomb = omi_dir / TOMBSTONES_FILENAME
+    conflicts: list[str] = []
     if not tomb.is_file():
-        return
+        return conflicts
     cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=TOMBSTONE_TTL_DAYS)
     kept: list[str] = []
     changed = False
     for raw in tomb.read_text(encoding="utf-8").splitlines():
-        ts, name = _parse_tombstone(raw)
+        ts, name, rev = _parse_tombstone(raw)
         if not name:
             changed = changed or bool(raw.strip())
             continue
@@ -608,9 +657,15 @@ def _apply_tombstones(omi_dir: Path, store: OmiStore, now: datetime | None = Non
         target = omi_dir / name
         # Tombstones name plain note files only; never follow odd paths.
         if target.parent == omi_dir and target.is_file() and target.suffix == ".md":
+            # An edit newer than the purge beats the delete: keep the note and
+            # report it, instead of silently destroying the other agent's work.
+            if rev and _live_rev_newer(target, rev):
+                conflicts.append(name)
+                continue
             target.unlink()
     if changed:
         _atomic_write(tomb, ("\n".join(kept) + "\n") if kept else "")
+    return conflicts
 
 
 def conflict_scan(omi_dir: Path) -> list[str]:
@@ -716,11 +771,20 @@ def sync(
     # vault re-parse and a git status/add/commit round for every peer, under
     # the lock. Every push below then carries the regenerated state.
     with store.write_lock():
-        _apply_tombstones(omi_dir, store)
+        purge_conflicts = _apply_tombstones(omi_dir, store)
         store.update_index_locked()
         _commit_locked(omi_dir, f"omind: post-merge regeneration on {node_id}")
 
         report.conflicts = conflict_scan(omi_dir)
+        for name in purge_conflicts:
+            if name not in report.conflicts:
+                report.conflicts.append(name)
+        if purge_conflicts:
+            log(
+                "purge-edit conflict: kept newer edits to "
+                + ", ".join(sorted(purge_conflicts))
+                + " (the tombstone stays armed for genuinely-stale copies)"
+            )
 
     for ps in merged_peers:
         # A push can TIME OUT (a hung/blackholed peer); run_command raises on
@@ -780,8 +844,15 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
         if not already:
             # Dated so the tombstone expires (TOMBSTONE_TTL_DAYS) and a note
             # re-created with this filename later is not silently deleted (#127).
+            # The third field captures the Rev the purge observed, so a peer
+            # applying the tombstone later can tell "the purged note" from "a
+            # newer edit that raced the purge" — the edit wins (2026-08-27).
+            rev = ""
+            if target.is_file():
+                with contextlib.suppress(Exception):
+                    rev = store.read_fields(target.name).rev
             stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
-            new_line = f"{stamp}\t{target.name}"
+            new_line = f"{stamp}\t{target.name}" + (f"\t{rev}" if rev else "")
             # Atomic: a torn tombstone file would un-purge every prior purge
             # mesh-wide once the truncation merged out to the peers.
             _atomic_write(tomb, "\n".join([*existing, new_line]) + "\n")

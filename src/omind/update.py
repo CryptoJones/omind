@@ -24,6 +24,7 @@ network check entirely (offline/privacy).
 
 from __future__ import annotations
 
+import contextlib
 import json
 import os
 import re
@@ -233,9 +234,46 @@ def installed_extras() -> list[str]:
     return []
 
 
+def _resolve_tag_sha(version: str, timeout: float = 60.0) -> str | None:
+    """The commit a release tag points at, via ``git ls-remote`` over HTTPS.
+
+    Installs pin the SHA, not the mutable tag: a tag can be moved or forged,
+    and a tag-pinned ref let a moved tag swap the code every fleet machine
+    installs (2026-08-27 review). Prefers the peeled ``^{}`` commit of an
+    annotated tag. ``None`` when resolution fails — the caller falls back to
+    the tag ref rather than refusing updates offline."""
+    try:
+        result = subprocess.run(
+            ["git", "ls-remote", f"https://github.com/{GITHUB_REPO}", f"refs/tags/v{version}"],
+            capture_output=True,
+            text=True,
+            timeout=timeout,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    peeled: str | None = None
+    plain: str | None = None
+    for line in result.stdout.splitlines():
+        sha, _, ref = line.partition("\t")
+        ref = ref.strip()
+        if ref == f"refs/tags/v{version}^{{}}":
+            peeled = sha.strip() or None
+        elif ref == f"refs/tags/v{version}":
+            plain = sha.strip() or None
+    return peeled or plain
+
+
 def update_command(install: InstallInfo, version: str) -> list[str] | None:
-    """The argv that installs ``version``, or None when it can't be automated."""
+    """The argv that installs ``version``, or None when it can't be automated.
+
+    The ref is pinned to the resolved commit SHA when ``git ls-remote`` can
+    resolve it (see :func:`_resolve_tag_sha`); on resolution failure it falls
+    back to the tag ref so an offline-but-cached install path still works."""
     ref = f"git+https://github.com/{GITHUB_REPO}@v{version}"
+    sha = _resolve_tag_sha(version)
+    if sha:
+        ref = f"git+https://github.com/{GITHUB_REPO}@{sha}"
     if install.method == "uv-tool":
         extras = installed_extras()
         # The PEP 508 `omind[embed] @ git+…` form, so uv keeps the extras it was
@@ -291,9 +329,18 @@ def _post_update_heal(*, log: Callable[[str], object] = print) -> None:
 
 
 def self_update(
-    *, check_only: bool = False, force: bool = False, log: Callable[[str], object] = print
+    *,
+    check_only: bool = False,
+    force: bool = False,
+    rollback: bool = False,
+    log: Callable[[str], object] = print,
 ) -> int:
-    """``omind self-update``: report, then (unless ``--check``) reinstall the latest tag."""
+    """``omind self-update``: report, then (unless ``--check``) reinstall the latest
+    tag. ``--rollback`` reinstalls the version that was current before the last
+    update (2026-08-27 review — a broken release used to strand every machine
+    until a manual downgrade)."""
+    if rollback:
+        return rollback_update(log=log)
     # A user-invoked update gets a generous network timeout, not the 2s nudge
     # budget (which times out on a slow-but-working link and falsely reports
     # "could not reach GitHub").
@@ -321,6 +368,7 @@ def self_update(
             )
         return 1
     log(f"updating: {' '.join(cmd)}")
+    _record_rollback(status.current, status.latest, cmd)
     try:
         # A watchdog timeout so a hung `uv tool install git+…` (a stalled clone,
         # a dead network) can't wedge the update pass forever when run from
@@ -338,4 +386,61 @@ def self_update(
         log("Restart the MCP server / agent session to load it.")
         return 0
     log(f"update command exited {result.returncode}.")
+    return result.returncode
+
+
+_ROLLBACK_NAME = "last-install.json"
+
+
+def _rollback_path() -> Path:
+    return state_dir() / _ROLLBACK_NAME
+
+
+def _record_rollback(previous: str, target: str, cmd: list[str]) -> None:
+    """Remember what was installed before this update, so a broken release can
+    be rolled back with `omind self-update --rollback` instead of stranding
+    every machine until a manual downgrade (2026-08-27 review)."""
+    with contextlib.suppress(OSError):
+        _rollback_path().write_text(
+            json.dumps({"from": previous, "to": target, "at": time.time()}),
+            encoding="utf-8",
+        )
+
+
+def rollback_update(*, log: Callable[[str], object] = print) -> int:
+    """Reinstall the version that was current before the last self-update."""
+    try:
+        data = json.loads(_rollback_path().read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        log("no rollback record: `omind self-update` has not upgraded from here before.")
+        return 1
+    previous = str(data.get("from") or "")
+    if not previous:
+        log("rollback record is empty.")
+        return 1
+    install = detect_install()
+    cmd = update_command(install, previous)
+    if cmd is None:
+        if install.method == "editable":
+            log(
+                f"editable checkout at {install.detail} — roll back with "
+                f"`git checkout v{previous}`."
+            )
+        else:
+            log(f"cannot auto-install {previous} on a {install.method!r} install.")
+        return 1
+    log(f"rolling back to omind {previous}: {' '.join(cmd)}")
+    try:
+        result = subprocess.run(cmd, check=False, timeout=600)  # streams to terminal
+    except subprocess.TimeoutExpired:
+        log("rollback timed out after 600s (network stall?) — try again.")
+        return 1
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"rollback failed to launch: {exc}")
+        return 1
+    if result.returncode == 0:
+        _post_update_heal(log=log)
+        log(f"rolled back to {previous}. Restart the MCP server / agent session to load it.")
+        return 0
+    log(f"rollback command exited {result.returncode}.")
     return result.returncode

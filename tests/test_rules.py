@@ -112,6 +112,23 @@ def test_deny_on_public_main_push(tmp_path: Path, repo: Path, monkeypatch) -> No
     assert rules.evaluate(_action("git push origin main"), omi, repo) is None
 
 
+def test_deny_on_force_push_refspec(tmp_path: Path, repo: Path, monkeypatch) -> None:
+    """`git push origin +main` is the RISKIEST variant of the public-main push —
+    the leading '+' of the force refspec used to defeat the branch condition and
+    the deny silently skipped it (2026-08-27 review)."""
+    omi = tmp_path / "OMI"
+    _note_with_rule(omi)
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    for command in (
+        "git push origin +main",
+        "git push origin +refs/heads/main",
+        "git push origin HEAD:+main",
+    ):
+        hit = rules.evaluate(_action(command), omi, repo)
+        assert hit is not None and hit.outcome == "deny", command
+
+
 def test_no_fire_on_private_or_feature_branch(tmp_path: Path, repo: Path, monkeypatch) -> None:
     omi = tmp_path / "OMI"
     _note_with_rule(omi)

@@ -890,7 +890,13 @@ class OmiStore:
         """
         self.omi_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.omi_dir / LOCK_FILENAME
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        # O_NOFOLLOW: a symlink swapped in at the lock path must not redirect
+        # the flock (same discipline as the hardened append writers, #187) —
+        # otherwise two processes can hold different inodes and both "win".
+        flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(lock_path, flags, 0o644)
         try:
             filelock.lock_fd(fd)
             yield
@@ -1383,6 +1389,8 @@ class OmiStore:
         self,
         fields: NoteFields,
         sources: list[tuple[str, str]],
+        *,
+        superseded_by: str | None = None,
     ) -> str:
         """Create one reviewed note and archive unchanged sources under one lock.
 
@@ -1390,6 +1398,11 @@ class OmiStore:
         the target's nonexistence are checked before the first write, closing
         the gap where another OmiStore writer could change the second source
         between a separate create and two archive calls.
+
+        ``superseded_by`` (the created note's filename) writes the #169
+        temporal-validity chain on the archived sources — without it, the
+        index keeps serving the archived originals as current knowledge after
+        a consolidation (2026-08-27 review).
 
         The writes run inside a journaled transaction (:mod:`omind.txn`), so an
         interrupted apply is rolled back by ``omind recover`` instead of leaving
@@ -1429,7 +1442,13 @@ class OmiStore:
             transaction = txn.Transaction(self.omi_dir)
             transaction.write(target, content)
             for path, _expected in source_paths:
-                archived = _with_disabled(_read_text(path), True)
+                archived_src = _read_text(path)
+                archived = _with_disabled(archived_src, True)
+                if superseded_by:
+                    source_fields = parse_note(archived_src)
+                    source_fields.disabled = True
+                    source_fields.superseded_by = superseded_by
+                    archived = render_fields(source_fields)
                 if self.node_id is not None:
                     archived = self._stamped(path, archived)
                 transaction.write(path, archived)

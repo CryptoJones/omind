@@ -136,13 +136,25 @@ def test_nudge(monkeypatch: pytest.MonkeyPatch) -> None:
     assert update_nudge() is None  # any failure is swallowed
 
 
-def test_update_command_by_install() -> None:
-    ref = "git+https://github.com/CryptoJones/omind@v2.37.0"
+def test_update_command_by_install(monkeypatch: pytest.MonkeyPatch) -> None:
+    # SHA-pinned when ls-remote resolves the tag (a mutable tag must never be
+    # the install pin); falls back to the tag ref when resolution fails.
+    monkeypatch.setattr(update, "_resolve_tag_sha", lambda v, timeout=60.0: "abc123")
+    ref = "git+https://github.com/CryptoJones/omind@abc123"
     uv = update_command(InstallInfo("uv-tool", "x"), "2.37.0")
     assert uv is not None and uv[:3] == ["uv", "tool", "install"] and ref in uv
     pip = update_command(InstallInfo("pip", "x"), "2.37.0")
     assert pip is not None and pip[1:3] == ["-m", "pip"] and ref in pip
     assert update_command(InstallInfo("editable", "/repo"), "2.37.0") is None
+
+
+def test_update_command_falls_back_to_the_tag_when_the_sha_cannot_be_resolved(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(update, "_resolve_tag_sha", lambda v, timeout=60.0: None)
+    ref = "git+https://github.com/CryptoJones/omind@v2.37.0"
+    uv = update_command(InstallInfo("uv-tool", "x"), "2.37.0")
+    assert uv is not None and ref in uv
 
 
 def test_self_update_check_only(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -155,18 +167,21 @@ def test_self_update_check_only(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_self_update_runs_installer(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(update, "check_for_update", _fixed_status("2.36.0", "2.37.0"))
     monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("uv-tool", "x"))
-    ran: dict[str, object] = {}
+    monkeypatch.setattr(update, "_resolve_tag_sha", lambda v, timeout=60.0: "abc123")
+    ran: list[list[str]] = []
 
     class _Result:
         returncode = 0
 
-    def fake_run(cmd: list[str], check: bool, timeout: float | None = None) -> _Result:
-        ran["cmd"] = cmd
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Result:
+        # monkeypatching update.subprocess patches the SHARED subprocess module,
+        # so the post-update heal's `git -C` calls land here too — collect all.
+        ran.append(list(cmd))
         return _Result()
 
     monkeypatch.setattr(update.subprocess, "run", fake_run)
     assert self_update(log=lambda _m: None) == 0
-    assert ran["cmd"][:3] == ["uv", "tool", "install"]  # type: ignore[index]
+    assert any(cmd[:3] == ["uv", "tool", "install"] for cmd in ran)
 
 
 def test_self_update_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:

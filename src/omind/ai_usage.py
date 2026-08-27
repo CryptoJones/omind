@@ -10,6 +10,7 @@ legacy/malformed responses use a clearly-labelled, provider-neutral estimate.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import math
 import os
@@ -117,6 +118,26 @@ def estimate_tokens(text_or_chars: str | int) -> int:
     return math.ceil(max(0, chars) / 4)
 
 
+#: Rotate the usage ledger at the same 8 MiB bound compliance.jsonl uses —
+#: without it this sibling ledger grew unbounded, and every hook path in
+#: every session appends to it (2026-08-27 review).
+_LOG_CAP_BYTES = 8 * 1024 * 1024
+
+
+def _rotate_if_oversized(path: Path) -> None:
+    """One-generation rotation: the live ledger becomes ``<name>.1``. Usage
+    summaries are windowed, so history dropping off the live file is the
+    intended bound; the rotation happens BEFORE the append fd opens (Windows
+    refuses renaming a file this process still holds open — lesson #202)."""
+    try:
+        if path.stat().st_size < _LOG_CAP_BYTES:
+            return
+    except OSError:
+        return
+    with contextlib.suppress(OSError):
+        os.replace(path, path.with_suffix(path.suffix + ".1"))
+
+
 def log_event(
     omi_dir: Path | str,
     operation: str,
@@ -157,6 +178,7 @@ def log_event(
     try:
         path = usage_path(omi_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
+        _rotate_if_oversized(path)
         with filelock.append_locked(path) as fd:
             os.write(fd, (json.dumps(record, separators=(",", ":")) + "\n").encode())
     except (OSError, ValueError, TypeError):

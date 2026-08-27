@@ -24,7 +24,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from omind.paths import NON_CONSULT_FILENAMES
-from omind.store import OmiStore, parse_frontmatter, parse_note, render_fields
+from omind.store import NoteConflictError, OmiStore, parse_frontmatter, parse_note, render_fields
 
 #: Files that are NOT OKF concept documents, so the ``type``-required rule does
 #: not apply: OKF reserves ``index.md`` / ``log.md`` (directory listing / change
@@ -111,6 +111,9 @@ class ConvertResult:
 
     converted: int = 0
     unchanged: int = 0
+    #: Notes another writer changed mid-conversion — skipped rather than
+    #: silently reverted (2026-08-27 review); re-run converts them.
+    conflicts: int = 0
     report: OkfReport = field(default_factory=OkfReport)
 
 
@@ -129,13 +132,21 @@ def convert_vault(omi_dir: Path | str, *, dry_run: bool = False) -> ConvertResul
     result = ConvertResult()
     for summary in store.list_notes(include_disabled=True):
         name = summary.filename
+        version = store.note_version(name)
         raw = store.read_note(name)
         rendered = render_fields(parse_note(raw))
         if rendered.strip() == raw.strip():
             result.unchanged += 1
             continue
         if not dry_run:
-            store.write_note(name, rendered)
+            try:
+                # Pin the version captured before the read: converting from a
+                # stale base would silently revert a concurrent agent's edit
+                # (2026-08-27 review).
+                store.write_note(name, rendered, expected_version=version)
+            except NoteConflictError:
+                result.conflicts += 1
+                continue
         result.converted += 1
     result.report = check_conformance(store.omi_dir)
     return result

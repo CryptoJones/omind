@@ -46,11 +46,12 @@ import shlex
 import sys
 import tempfile
 import time
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, TextIO
 
-from omind import compliance, paths, policy
+from omind import compliance, filelock, paths, policy
 
 GATE_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `search-vault` with a focused task query, "
@@ -326,6 +327,65 @@ def _git_fresh_for_repo(session: str, repo: Path) -> bool:
     return str(repo) in _fresh_repos(session)
 
 
+def _retract_git_freshness(session: str, repo: Path) -> None:
+    """Remove one repo from this turn's fresh set (a fetch that failed)."""
+    if not session:
+        return
+    with contextlib.suppress(OSError, ValueError):
+        path = _git_fresh_path(session)
+        repos = _fresh_repos(session)
+        if str(repo) not in repos:
+            return
+        del repos[str(repo)]
+        if repos:
+            path.write_text(json.dumps({"repos": repos}), encoding="utf-8")
+        else:
+            path.unlink()
+
+
+def _tool_outcome_failed(tool_response: object) -> bool:
+    """True on an EXPLICIT failure signal only — a harness that reports no
+    outcome at all is trusted (mirrors hooks._extract_outcome's discipline)."""
+    if not isinstance(tool_response, dict):
+        return False
+    if (
+        tool_response.get("is_error")
+        or tool_response.get("success") is False
+        or tool_response.get("error")
+    ):
+        return True
+    for key in ("exit_code", "returncode"):
+        value = tool_response.get(key)
+        if isinstance(value, int) and value != 0:
+            return True
+    return False
+
+
+def record_freshness_outcome(event: dict[str, Any]) -> None:
+    """PostToolUse retraction for the git-freshness grant.
+
+    PreToolUse records freshness BEFORE the fetch runs, so a fetch that exits 1
+    (unreachable mirror) used to still satisfy the commit-time freshness gate —
+    the block message promises "the fetch must succeed (exit 0)" but nothing
+    enforced it (2026-08-27 review). This retracts the grant when the outcome
+    says the command failed. Best-effort; never raises."""
+    try:
+        if str(event.get("tool_name") or "") != "Bash":
+            return
+        tool_input = event.get("tool_input")
+        command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
+        if not command or not _is_freshness_command(command):
+            return
+        if not _tool_outcome_failed(event.get("tool_response")):
+            return
+        session = str(event.get("session_id") or "")
+        repo = _repo_root_for_action(event)
+        if session and repo is not None:
+            _retract_git_freshness(session, repo)
+    except Exception:
+        return
+
+
 def _clear_git_freshness(session: str) -> None:
     with contextlib.suppress(OSError):
         _git_fresh_path(session).unlink()
@@ -350,27 +410,53 @@ def _write_sentinel(session: str, data: dict[str, Any]) -> None:
     with contextlib.suppress(OSError):
         path = _sentinel_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(json.dumps(data), encoding="utf-8")
+        paths.atomic_write_text(path, json.dumps(data), mode=0o600)
+
+
+def _mutate_sentinel(session: str, mutate: Callable[[dict[str, Any]], dict[str, Any]]) -> None:
+    """Locked read-modify-write of the turn sentinel.
+
+    Hook processes fire concurrently (parallel tool calls, several agents on
+    one box); an unlocked read→write pair loses the other side's consult
+    record, which spuriously re-arms the gate (2026-08-27 review). The flock
+    lives on a sibling ``.lock`` file — the sentinel itself is replaced
+    atomically, so a lock on the data inode would protect nothing."""
+    path = _sentinel_path(session)
+    with contextlib.suppress(OSError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(_sibling_lock(path)):
+            _write_sentinel(session, mutate(_read_sentinel(session)))
+
+
+def _sibling_lock(path: Path) -> Path:
+    """The lock-file path guarding ``path``'s read-modify-write cycle."""
+    return path.with_name(path.name + ".lock")
 
 
 def mark_consulted(session: str) -> None:
     """Mark OMI consulted this turn — the sentinel's *existence* is the gate.
     Preserves any consult records already captured this turn."""
-    data = _read_sentinel(session)
-    data.setdefault("consults", [])
-    _write_sentinel(session, data)
+
+    def _mark(data: dict[str, Any]) -> dict[str, Any]:
+        data.setdefault("consults", [])
+        return data
+
+    _mutate_sentinel(session, _mark)
 
 
 def record_consult(session: str, *, kind: str, target: str, relevant: bool | None = None) -> None:
     """Append one OMI consult (note read / search) to the turn's sentinel with
     its relevance verdict (``None`` = not yet judged), and mark the gate
     consulted. Never raises."""
-    data = _read_sentinel(session)
-    existing = data.get("consults")
-    consult_list = existing if isinstance(existing, list) else []
-    consult_list.append({"kind": kind, "target": target, "relevant": relevant})
-    data["consults"] = consult_list
-    _write_sentinel(session, data)
+
+    def _record(data: dict[str, Any]) -> dict[str, Any]:
+        existing = data.get("consults")
+        consult_list = existing if isinstance(existing, list) else []
+        consult_list.append({"kind": kind, "target": target, "relevant": relevant})
+        data["consults"] = consult_list
+        return data
+
+    _mutate_sentinel(session, _record)
 
 
 def consults(session: str) -> list[dict[str, Any]]:
@@ -440,12 +526,20 @@ def reclose_count(session: str) -> int:
 
 
 def bump_reclose(session: str) -> int:
-    """Increment and return this turn's re-close count. Never raises."""
+    """Increment and return this turn's re-close count. Never raises.
+
+    Locked: concurrent PostToolUse hook processes otherwise interleave the
+    read→write pair and lose increments, tripping the anti-wedge cap later
+    than designed (2026-08-27 review)."""
+    path = _reclose_path(session)
     nxt = reclose_count(session) + 1
-    with contextlib.suppress(OSError):
-        path = _reclose_path(session)
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(nxt), encoding="utf-8")
+        with filelock.exclusive(_sibling_lock(path)):
+            nxt = reclose_count(session) + 1
+            paths.atomic_write_text(path, str(nxt), mode=0o600)
+    except OSError:
+        pass
     return nxt
 
 
@@ -474,12 +568,17 @@ def offtopic_count(session: str) -> int:
 
 
 def bump_offtopic(session: str) -> int:
-    """Increment and return the consecutive off-topic streak. Never raises."""
+    """Increment and return the consecutive off-topic streak. Never raises.
+    Locked like :func:`bump_reclose` (2026-08-27 review)."""
+    path = _offtopic_path(session)
     nxt = offtopic_count(session) + 1
-    with contextlib.suppress(OSError):
-        path = _offtopic_path(session)
+    try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(str(nxt), encoding="utf-8")
+        with filelock.exclusive(_sibling_lock(path)):
+            nxt = offtopic_count(session) + 1
+            paths.atomic_write_text(path, str(nxt), mode=0o600)
+    except OSError:
+        pass
     return nxt
 
 
@@ -823,26 +922,10 @@ def _command_targets_global_config(command: str) -> bool:
 
 
 def _opt_in_satisfied(opt_in: str, command: str) -> bool:
-    """True only when the ``VAR=VALUE`` opt-in token appears as a REAL leading
-    environment assignment — at the command start, right after a shell separator
-    (``;`` / ``&&`` / ``|`` / a NEWLINE), or via ``env`` — so it actually takes effect.
-
-    A bare substring match (the old behaviour) let the token be forged in a comment
-    or a string arg (``rm -rf / # OMI_SUDO_OK=1``, ``echo "OMI_SUDO_OK=1"``) and
-    silently bypass a hard rule without ever setting the variable. That is not a
-    deliberate opt-in, so it must not skip the deny.
-
-    A newline IS a shell command boundary, so a line-leading assignment inside a
-    multi-line script (``…\n  OMI_PUSH_GITHUB=1 git push …``) is legitimate and must
-    be recognised — omitting ``\\n`` from the separator class wrongly rejected it
-    (3.0.2). A plain space is NOT a separator, so a mid-line ``echo OMI_SUDO_OK=1``
-    still doesn't count.
-
-    The optional ``env `` prefix must ITSELF be at command position — otherwise
-    ``echo "use env OMI_SUDO_OK=1" && sudo …`` forged the opt-in from inside a
-    string (the ``\\benv``-anywhere bug) and skipped a hard rule."""
-    pattern = r"(?:^|[;&|\n])[ \t]*(?:env[ \t]+)?" + re.escape(opt_in) + r"(?=\s|$)"
-    return re.search(pattern, command) is not None
+    """Strict opt-in matcher — implementation lives in :mod:`omind.policy` so
+    the compliance detector (Layer E) shares the one definition that can't be
+    forged by a bare substring (2026-08-27 review)."""
+    return policy.opt_in_satisfied(opt_in, command)
 
 
 def _action_path(action: dict[str, Any]) -> str:
@@ -1148,6 +1231,10 @@ def decide(action: dict[str, Any]) -> Verdict:
         )
 
     if repo is not None and _is_freshness_command(command):
+        # Recorded optimistically here (PreToolUse cannot know the exit code);
+        # a FAILED fetch is retracted by guard.record_freshness_outcome on
+        # PostToolUse, so a fetch that exits 1 no longer satisfies the
+        # commit-time freshness gate (2026-08-27 review).
         _record_git_freshness(session, repo, command)
         return Verdict(allow=True)
 
@@ -1375,6 +1462,18 @@ def run_guard(
     if action_name == "reset":
         data = _load(src)
         session = str(data.get("session") or data.get("session_id") or "")
+        # Compliance-log every reset. This verb is agent-reachable (the session
+        # id is echoed by hooks, and an empty session clears EVERY gate on the
+        # box), so an unlogged clear is an invisible gate bypass; the recidivism
+        # reader should see who cleared what, when (2026-08-27 review).
+        with contextlib.suppress(Exception):
+            compliance.log_event(
+                compliance.KIND_GATE_RESET,
+                session=session or "(all sessions)",
+                tool="guard",
+                command="omind guard reset",
+                outcome="cleared",
+            )
         if session:
             clear_gate(session)
             begin_turn(session, str(data.get("prompt") or ""))

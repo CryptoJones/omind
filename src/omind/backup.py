@@ -37,7 +37,7 @@ from dataclasses import asdict, dataclass
 from datetime import datetime, timezone
 from pathlib import Path
 
-from omind import paths
+from omind import filelock, paths
 from omind.notes import upsert_note
 from omind.paths import INDEX_FILENAME
 from omind.proc import DEFAULT_TIMEOUT, run_command
@@ -143,10 +143,17 @@ def load_config() -> BackupConfig | None:
 
 
 def save_config(config: BackupConfig) -> None:
-    # Atomic write: a torn backup.json makes load_config raise, which disables
-    # backups AND the failure counter (run_backup dies in _require_config before
-    # it can record anything) — the escalation machinery needs the file that broke.
-    paths.atomic_write_text(config_path(), json.dumps(asdict(config), indent=2) + "\n")
+    # Locked read-modify-write: two agents running `omind backup` concurrently
+    # would otherwise lose each other's failure counters through the shared
+    # read→replace window (2026-08-27 review). The flock lives on a sibling
+    # `.lock` file because the data file is replaced atomically.
+    path = config_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with filelock.exclusive(path.with_suffix(".json.lock")):
+        # Atomic write: a torn backup.json makes load_config raise, which disables
+        # backups AND the failure counter (run_backup dies in _require_config before
+        # it can record anything) — the escalation machinery needs the file that broke.
+        paths.atomic_write_text(config_path(), json.dumps(asdict(config), indent=2) + "\n")
 
 
 # -- subprocess plumbing --------------------------------------------------------
@@ -293,6 +300,41 @@ def _rsync_destination(repo: str) -> str:
     return repo
 
 
+#: The degraded-rsync warning note, written once so an operator browsing the
+#: vault sees that backups are leaving UNENCRYPTED (a log line was the only
+#: trace; 2026-08-27 review). Removed by _record_success when restic is back.
+UNENCRYPTED_NOTE_FILENAME = "Backup Runs Unencrypted.md"
+UNENCRYPTED_NOTE_TITLE = "Backup Runs Unencrypted"
+
+
+def _warn_unencrypted_once(omi_dir: Path, log: Logger) -> None:
+    try:
+        store = OmiStore(omi_dir)
+        if store.safe_name(UNENCRYPTED_NOTE_FILENAME).exists():
+            return
+        upsert_note(
+            omi_dir,
+            NoteFields(
+                title=UNENCRYPTED_NOTE_TITLE,
+                summary=(
+                    "restic is not installed; backups fall back to plain rsync — "
+                    "the vault leaves this machine UNENCRYPTED."
+                ),
+                details=(
+                    "`omind backup` could not find restic and fell back to rsync, which "
+                    "ships the vault to the remote host WITHOUT encryption. Install "
+                    "restic (or point the repo spec at a local path) to restore "
+                    "encryption at rest. This note is removed automatically once an "
+                    "encrypted snapshot succeeds."
+                ),
+                tags=["omind", "backup", "auto"],
+            ),
+        )
+        log("  wrote 'Backup Runs Unencrypted.md' — install restic to re-enable encryption")
+    except Exception:  # noqa: BLE001 — a warning note must never break a backup
+        pass
+
+
 def _rsync_backup(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
     dest = _rsync_destination(config.repo).rstrip("/")
     stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
@@ -304,6 +346,7 @@ def _rsync_backup(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
     _run(cmd, timeout=SNAPSHOT_TIMEOUT)
     config.last_snapshot = stamp
     log(f"  rsync snapshot written: {dest}/{stamp}/ (unencrypted — install restic)")
+    _warn_unencrypted_once(omi_dir, log)
 
 
 def _record_success(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
@@ -313,6 +356,9 @@ def _record_success(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
     with contextlib.suppress(NoteNotFoundError):
         OmiStore(omi_dir).delete_note(FAILING_NOTE_FILENAME)
         log(f"  backup healthy again — removed the '{FAILING_NOTE_TITLE}' note")
+    with contextlib.suppress(NoteNotFoundError):
+        OmiStore(omi_dir).delete_note(UNENCRYPTED_NOTE_FILENAME)
+        log(f"  encrypted snapshots resumed — removed the '{UNENCRYPTED_NOTE_TITLE}' note")
     log("  backup succeeded")
 
 

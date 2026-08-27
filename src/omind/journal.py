@@ -20,13 +20,15 @@ that layout:
 
 from __future__ import annotations
 
+import contextlib
+import os
 import re
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
-from omind import paths, txn
+from omind import filelock, paths, txn
 from omind.hooks import JOURNAL_TAGS, action_bullets, journal_dir
 from omind.store import NoteFields, OmiStore, _atomic_write, render_fields, today
 
@@ -275,21 +277,41 @@ def rollup_journals(
                     if day is not None and iso_week(day) == wk:
                         archived_dated.append((day, path))
             stats = JournalStats()
-            for _, path in [*archived_dated, *dated_paths]:
-                _tally(path.read_text(encoding="utf-8", errors="replace"), stats)
-            days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
-            filename = rollup_name(wk)
-            _atomic_write(directory / filename, render_rollup(wk, days, stats))
-            archived: list[str] = []
-            deleted: list[str] = []
-            for _, path in dated_paths:
-                if delete:
-                    path.unlink()
-                    deleted.append(path.name)
-                else:
-                    archive_dir.mkdir(parents=True, exist_ok=True)
-                    path.replace(archive_dir / path.name)
-                    archived.append(path.name)
+            # Serialize against hook appends: a write landing between this
+            # tally and the rename below previously rode the old inode into
+            # Archive/ — an entry stranded where no rollup would ever see it
+            # again (2026-08-27 review). Hooks append under an flock on the
+            # data fd (filelock.append_locked), so holding the same locks
+            # across tally → write → rename closes the window. Scoped per
+            # week and re-locked per file, so two rollup runs never hold and
+            # wait across weeks.
+            locked_fds: list[int] = []
+            try:
+                for _, path in dated_paths:
+                    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+                    filelock.lock_fd(fd)
+                    locked_fds.append(fd)
+                for _, path in [*archived_dated, *dated_paths]:
+                    _tally(path.read_text(encoding="utf-8", errors="replace"), stats)
+                days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
+                filename = rollup_name(wk)
+                _atomic_write(directory / filename, render_rollup(wk, days, stats))
+                archived: list[str] = []
+                deleted: list[str] = []
+                for _, path in dated_paths:
+                    if delete:
+                        path.unlink()
+                        deleted.append(path.name)
+                    else:
+                        archive_dir.mkdir(parents=True, exist_ok=True)
+                        path.replace(archive_dir / path.name)
+                        archived.append(path.name)
+            finally:
+                for fd in locked_fds:
+                    with contextlib.suppress(OSError):
+                        filelock.unlock_fd(fd)
+                    with contextlib.suppress(OSError):
+                        os.close(fd)
             results.append(
                 WeekRollup(
                     week=wk,

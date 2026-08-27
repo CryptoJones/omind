@@ -139,6 +139,10 @@ def _draft_fields(
         ),
         action_items=actions,
         references=_unique([*left.references, *right.references]),
+        # The #169 chain: the merged note supersedes both sources, so retrieval
+        # de-ranks the archived originals instead of serving them as current
+        # (2026-08-27 review — consolidation was bypassing temporal validity).
+        supersedes=", ".join([Path(left_name).stem, Path(right_name).stem]),
         extras=extras,
         okf_type=left.okf_type or right.okf_type,
     )
@@ -176,11 +180,16 @@ def propose(omi_dir: Path | str, *, limit: int = 5) -> list[Proposal]:
     for left, right, score in selected:
         plan_id = secrets.token_hex(8)
         plan_path, draft_path = _proposal_paths(omi, plan_id)
+        # Capture versions BEFORE reading fields: the draft must describe the
+        # content its version token vouches for, or apply's revalidation passes
+        # against content the draft never saw (2026-08-27 review).
+        left_version = store.note_version(left)
+        right_version = store.note_version(right)
         left_fields = store.read_fields(left)
         right_fields = store.read_fields(right)
         sources = (
-            Source(left, store.note_version(left)),
-            Source(right, store.note_version(right)),
+            Source(left, left_version),
+            Source(right, right_version),
         )
         draft = _draft_fields(left, left_fields, right, right_fields)
         atomic_write_text(draft_path, render_fields(draft))
@@ -257,6 +266,7 @@ def apply(omi_dir: Path | str, plan_id: str) -> ApplyResult:
         filename = store.create_and_disable_sources(
             draft,
             [(source.filename, source.version) for source in sources],
+            superseded_by=store.filename_for_title(draft.title),
         )
     except NoteConflictError as exc:
         raise ConsolidationError(

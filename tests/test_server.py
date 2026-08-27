@@ -105,9 +105,37 @@ def test_edit_note_partial_update(server: MCPServer) -> None:
     call(server, "create-note", {"title": "Partial", "summary": "old", "tags": ["keep"]})
     edited = call(server, "edit-note", {"name": "Partial.md", "summary": "new"})
     assert edited["filename"] == "Partial.md"
+    assert edited["concurrency"] == "unverified"  # no expected_version → flagged
     got = call(server, "read-note", {"name": "Partial.md"})
     assert got["fields"]["summary"] == "new"
     assert got["fields"]["tags"] == ["keep"]  # omitted fields untouched
+
+
+def test_edit_note_with_version_is_verified(server: MCPServer) -> None:
+    call(server, "create-note", {"title": "Verified", "summary": "v1"})
+    version = call(server, "read-note", {"name": "Verified.md"})["version"]
+    edited = call(
+        server, "edit-note", {"name": "Verified.md", "summary": "v2", "expected_version": version}
+    )
+    assert "concurrency" not in edited  # the token was honored
+
+
+def test_read_note_body_is_bounded(server: MCPServer) -> None:
+    """One huge note must not become one unbounded tool result — the read-note
+    hole in invariant 8 (2026-08-27 review)."""
+    call(server, "create-note", {"title": "Huge", "summary": "s", "details": "x" * 30000})
+    got = call(server, "read-note", {"name": "Huge.md", "representation": "raw"})
+    raw = str(got["raw"])
+    assert len(raw) < 21000  # default cap 20000 + the marker
+    assert "truncated" in raw
+    bigger = call(
+        server,
+        "read-note",
+        {"name": "Huge.md", "representation": "raw", "max_chars": 65536},
+    )
+    assert "truncated" not in str(bigger["raw"])  # raisable within the hard cap
+    fields = call(server, "read-note", {"name": "Huge.md", "max_chars": 100})
+    assert "truncated" in str(fields["fields"]["details"])
 
 
 def test_edit_note_version_conflict(server: MCPServer) -> None:

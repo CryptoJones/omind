@@ -83,3 +83,26 @@ def append_locked(path: Path, *, mode: int = 0o600) -> Iterator[int]:
         with contextlib.suppress(OSError):
             unlock_fd(fd)
         os.close(fd)
+
+
+@contextlib.contextmanager
+def exclusive(path: Path, *, mode: int = 0o600) -> Iterator[int]:
+    """Open (creating) ``path`` read-write and hold the exclusive lock on it.
+
+    For serializing read-modify-write of small state files — gate sentinels,
+    re-close/off-topic counters, loop-guard counters, the mesh node config.
+    Hook processes from parallel tool calls and multiple agents fire
+    concurrently; without this, interleaved load→mutate→save pairs lose
+    increments and consult records (2026-08-27 review). Callers must hold the
+    lock on a SIBLING path (``<name>.lock``), never on the data file itself:
+    the write side replaces the data file atomically, and a flock on a
+    replaced inode protects nothing.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | _BINARY | _NOFOLLOW, mode)
+    try:
+        lock_fd(fd)
+        yield fd
+    finally:
+        with contextlib.suppress(OSError):
+            unlock_fd(fd)
+        os.close(fd)

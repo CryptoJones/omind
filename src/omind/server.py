@@ -217,15 +217,32 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             graph_cache["graph"] = graph.build_graph(store.omi_dir)
         return graph_cache["graph"]  # type: ignore[return-value]
 
+    read_note_default_chars = 20000
+    read_note_hard_cap = 65536
+
+    def _clamp_body(text: str, max_chars: int) -> str:
+        """Bound a note body so one huge note cannot become one unbounded
+        tool result (the read-note hole in invariant 8; 2026-08-27 review)."""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + (
+            f"\n\n[truncated: showing {max_chars} of {len(text)} chars — "
+            f"raise max_chars (hard cap {read_note_hard_cap}) or use "
+            "recall-note with a section]"
+        )
+
     @mcp.tool(
         name="read-note",
         description=(
             "Read one note for EDITING, with a version token. representation: "
             "fields (default, parsed) or raw (Markdown). Prefer recall-note to "
-            "simply remember something."
+            "simply remember something. Bodies are capped (max_chars, default "
+            "20000) with an explicit truncation marker."
         ),
     )
-    def read_note(name: str, representation: str = "fields") -> dict[str, object]:
+    def read_note(
+        name: str, representation: str = "fields", max_chars: int = read_note_default_chars
+    ) -> dict[str, object]:
         raw = store.read_note(name)
         filename = store.safe_name(name).name
         from omind import access
@@ -239,10 +256,14 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "filename": filename,
             "version": store.note_version(name),
         }
+        cap = max(1, min(int(max_chars), read_note_hard_cap))
         if representation == "raw":
-            payload["raw"] = raw
+            payload["raw"] = _clamp_body(raw, cap)
         else:
-            payload["fields"] = parse_note(raw).to_dict()
+            fields = parse_note(raw).to_dict()
+            if isinstance(fields.get("details"), str):
+                fields["details"] = _clamp_body(fields["details"], cap)
+            payload["fields"] = fields
         return payload
 
     @mcp.tool(
@@ -306,7 +327,10 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         description=(
             "Update fields of an existing note; omitted fields keep their current "
             "value. Pass expected_version from recall-note/read-note to fail loudly (instead "
-            "of overwriting) when another writer changed the note in between."
+            "of overwriting) when another writer changed the note in between — without "
+            "it the response is flagged concurrency=unverified. When a note makes a "
+            "memory obsolete, set supersedes (or the target's superseded_by) rather "
+            "than silently rewriting history."
         ),
     )
     def edit_note(
@@ -351,14 +375,22 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         if references is not None:
             fields.references = references
         filename = store.update_note(name, fields, expected_version=expected_version)
-        return {"filename": filename, "version": store.note_version(name)}
+        result: dict[str, str] = {"filename": filename, "version": store.note_version(name)}
+        if expected_version is None:
+            # Make the silent-last-write-wins case visible to the caller
+            # (2026-08-27 review): without the token the write was not checked
+            # against concurrent writers.
+            result["concurrency"] = "unverified"
+        return result
 
     @mcp.tool(
         name="search-vault",
         description=(
             "Relevance-ranked memory search (keyword + semantic + recency) over "
             "titles, summaries, details, and tags; each hit carries a matched "
-            "excerpt. Empty query + tag lists that tag. Optional limit/offset."
+            "excerpt. Empty query + tag lists that tag. include_archived adds "
+            "soft-deleted (archived) notes — without it a second agent's delete "
+            "hides its target from your results. Optional limit/offset."
         ),
     )
     def search_vault(
@@ -386,6 +418,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         name="list-notes",
         description=(
             "One page of memory notes, newest first (limit default 25, max 100). "
+            "include_archived adds soft-deleted (archived) notes. "
             "To FIND a note use search-vault; listing is for browsing."
         ),
     )
