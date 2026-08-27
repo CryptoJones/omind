@@ -13,22 +13,22 @@ _A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,
 fleet/ops, web/CLI, lifecycle) plus a 2025–26 SOTA survey. 35 code findings — all
 fixed, gates green (1,004 tests / ruff / mypy strict). Full report:
 [docs/reviews/2026-08-27-multi-agent-review.md](docs/reviews/2026-08-27-multi-agent-review.md).
-GitHub issues not yet filed for these; file before the next release per the
-two-views rule._
+Issues [#272](https://github.com/CryptoJones/omind/issues/272)–[#284](https://github.com/CryptoJones/omind/issues/284)
+filed and linked below; they close when the fix branch merges._
 
-- [x] **Force-refspec push bypassed the public-main deny** — `+main` stripped
-- [x] **`omind guard reset` was an unlogged, agent-reachable gate clear** — logged
-- [x] **A failed git fetch still satisfied the freshness gate** — retracted on PostToolUse
-- [x] **txn `prepare` didn't fsync the journal dir entry** — parent fsynced
-- [x] **Self-update installed from a mutable tag with no rollback** — SHA-pinned + `--rollback`
-- [x] **Vector spaces could silently mix; vector-less notes never backfilled** — model identity + backfill
-- [x] **Tombstones destroyed edits that raced the purge** — Rev capture + keep/report
-- [x] **Node-id minting / backup / settings merges were unlocked RMWs** — `filelock.exclusive` everywhere
-- [x] **Gate sentinels, re-close/off-topic counters, loopguard lost increments** — locked RMW
-- [x] **Consolidation bypassed the #169 Supersedes chain** — wired in
-- [x] **`edit-note` was silent last-write-wins without a token; `read-note` unbounded** — flagged / capped
-- [x] **Merge scalar LWW losses invisible; `mesh purge` ungated; verifier injectable** — `merge-lww` tag / `--yes` / fenced
-- [x] **Web cross-site POST; ai-usage ledger unbounded; journal rollup stranded appends; okf/checkpoint lost-update** — Origin check / rotation / flocks / version pinning
+- [x] **Force-refspec push bypassed the public-main deny** ([#272](https://github.com/CryptoJones/omind/issues/272)) — `+main` stripped
+- [x] **`omind guard reset` was an unlogged, agent-reachable gate clear** ([#273](https://github.com/CryptoJones/omind/issues/273)) — logged
+- [x] **A failed git fetch still satisfied the freshness gate** ([#274](https://github.com/CryptoJones/omind/issues/274)) — retracted on PostToolUse
+- [x] **txn `prepare` didn't fsync the journal dir entry** ([#275](https://github.com/CryptoJones/omind/issues/275)) — parent fsynced
+- [x] **Self-update installed from a mutable tag with no rollback** ([#276](https://github.com/CryptoJones/omind/issues/276)) — SHA-pinned + `--rollback`
+- [x] **Vector spaces could silently mix; vector-less notes never backfilled** ([#277](https://github.com/CryptoJones/omind/issues/277)) — model identity + backfill
+- [x] **Tombstones destroyed edits that raced the purge** ([#278](https://github.com/CryptoJones/omind/issues/278)) — Rev capture + keep/report
+- [x] **Node-id minting / backup / settings merges were unlocked RMWs** ([#279](https://github.com/CryptoJones/omind/issues/279)) — `filelock.exclusive` everywhere
+- [x] **Gate sentinels, re-close/off-topic counters, loopguard lost increments** ([#280](https://github.com/CryptoJones/omind/issues/280)) — locked RMW
+- [x] **Consolidation bypassed the #169 Supersedes chain** ([#281](https://github.com/CryptoJones/omind/issues/281)) — wired in
+- [x] **`edit-note` was silent last-write-wins without a token; `read-note` unbounded** ([#282](https://github.com/CryptoJones/omind/issues/282)) — flagged / capped
+- [x] **Merge scalar LWW losses invisible; `mesh purge` ungated; verifier injectable** ([#283](https://github.com/CryptoJones/omind/issues/283)) — `merge-lww` tag / `--yes` / fenced
+- [x] **Web cross-site POST; ai-usage ledger unbounded; journal rollup stranded appends; okf/checkpoint lost-update** ([#284](https://github.com/CryptoJones/omind/issues/284)) — Origin check / rotation / flocks / version pinning
 
 _(Feature roadmap from the same review — agent identity, usefulness feedback
 loop, sleep-time consolidation, write-time dedup, scoped writes — is Part 2 of
