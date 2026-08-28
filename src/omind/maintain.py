@@ -25,12 +25,17 @@ from __future__ import annotations
 
 import contextlib
 import json
+import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from omind import consolidate, filelock, journal, mesh, paths, searchindex
-from omind.store import LOCK_FILENAME, NoteFields, OmiStore
+from omind.store import LOCK_FILENAME, SCRATCH_SUFFIX, NoteFields, OmiStore
+
+#: Scratch-tier TTL (item #5 part 2): 7 days from LAST MODIFICATION (HAL9000's
+#: clock refinement — not creation). Expiry ARCHIVES, never deletes.
+_SCRATCH_TTL_DAYS = 7
 
 
 @dataclass
@@ -70,6 +75,25 @@ def _reindex_detail(omi_dir: Path) -> str:
     if result is None:
         return "index busy — skipped"
     return f"{result.reindexed} reindexed, {result.removed} reaped, {result.notes} notes"
+
+
+def _expire_scratch(omi_dir: Path, *, apply: bool) -> str:
+    """Archive scratch notes untouched for the TTL. Machine-local, so this is
+    safe outside ``--sync``; archives (never deletes) via the soft-delete path."""
+    store = OmiStore(omi_dir)
+    cutoff = time.time() - _SCRATCH_TTL_DAYS * 86_400
+    expired: list[str] = []
+    for path in sorted(omi_dir.glob(f"*{SCRATCH_SUFFIX}")):
+        with contextlib.suppress(Exception):
+            if store.read_fields(path.name).disabled:
+                continue  # already archived
+            if path.stat().st_mtime >= cutoff:
+                continue
+            expired.append(path.name)
+            if apply:
+                store.disable_note(path.name)
+    verb = "archived" if apply else "would expire"
+    return f"{len(expired)} scratch note(s) {verb} (>{_SCRATCH_TTL_DAYS}d since last change)"
 
 
 def _sync_detail(omi_dir: Path, node_id: str) -> str:
@@ -142,6 +166,9 @@ def run(
             lambda: f"{len(consolidate.propose(omi))} merge review plan(s) proposed"
             " (propose-only; never auto-applied)",
         )
+        # Scratch expiry runs in every mode: reports what would expire on a dry
+        # run, archives on --apply. Machine-local, so it is safe outside --sync.
+        step("expire-scratch", lambda: _expire_scratch(omi, apply=apply))
         if apply:
             step("reindex", lambda: _reindex_detail(omi))
         if rollup:

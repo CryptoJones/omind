@@ -154,6 +154,20 @@ def test_create_note_writes_file_and_index(store: OmiStore) -> None:
     assert seeds.INDEX_RECENT_HEADING in index
 
 
+def test_scratch_note_gets_the_scratch_suffix_and_is_findable(store: OmiStore) -> None:
+    from omind import mesh
+    from omind.store import is_scratch
+
+    name = store.create_note(NoteFields(title="Temp Buffer", summary="ephemeral"), scratch=True)
+    assert name == "Temp Buffer.scratch.md"  # the suffix IS the mark
+    assert is_scratch(name) and not is_scratch("Temp Buffer.md")
+    assert (store.omi_dir / name).is_file()
+    # Still a top-level *.md, so search/listings find it like any other note...
+    assert name in [s.filename for s in store.list_notes()]
+    # ...but the mesh never replicates it.
+    assert "*.scratch.md" in mesh.GITIGNORE
+
+
 def test_list_excludes_reserved_files(store: OmiStore) -> None:
     (store.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).write_text(seeds.MEMORY_TEMPLATE)
     (store.omi_dir / paths.INDEX_FILENAME).write_text("# index")
