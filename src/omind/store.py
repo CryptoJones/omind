@@ -43,6 +43,16 @@ from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 # renames (see :func:`_atomic_write`) keep every read consistent.
 LOCK_FILENAME = ".omi.lock"
 
+#: Scratch-tier marker (item #5 part 2). A note whose filename ends in this is
+#: machine-local (mesh gitignores ``*.scratch.md``), still a top-level ``*.md``
+#: so search and listings find it, and TTL-expired by ``omind maintain``.
+SCRATCH_SUFFIX = ".scratch.md"
+
+
+def is_scratch(name: str | Path) -> bool:
+    """Whether ``name`` (a filename or path) is a scratch-tier note."""
+    return str(name).endswith(SCRATCH_SUFFIX)
+
 # index.md is the primary SessionStart priming payload (16k char cap in
 # omind.hooks), so the Recent Memories list is capped rather than unbounded.
 RECENT_LIMIT = 25
@@ -1030,7 +1040,7 @@ class OmiStore:
             raise NoteError(f"note name escapes the OMI directory: {name!r}")
         return target
 
-    def filename_for_title(self, title: str) -> str:
+    def filename_for_title(self, title: str, *, suffix: str = ".md") -> str:
         cleaned = _ILLEGAL_FILENAME_CHARS.sub(" ", title).strip()
         cleaned = re.sub(r"\s+", " ", cleaned)
         # Strip leading dots so a title like ".NET notes" doesn't become an
@@ -1039,13 +1049,13 @@ class OmiStore:
         if not cleaned:
             raise NoteError("title produces an empty filename")
         # Truncate on a char boundary so the encoded filename stays under the
-        # OS byte limit (leaving room for the ".md" suffix).
-        budget = _MAX_FILENAME_BYTES - len(".md")
+        # OS byte limit (leaving room for the suffix — ".md" or ".scratch.md").
+        budget = _MAX_FILENAME_BYTES - len(suffix)
         while len(cleaned.encode("utf-8")) > budget:
             cleaned = cleaned[:-1].rstrip()
         if not cleaned:
             raise NoteError("title produces an empty filename")
-        return f"{cleaned}.md"
+        return f"{cleaned}{suffix}"
 
     # -- reads --------------------------------------------------------------
 
@@ -1409,12 +1419,16 @@ class OmiStore:
             current = incoming
         return _with_rev(content, str(next_rev(current, self.node_id)))
 
-    def create_note(self, fields: NoteFields) -> str:
+    def create_note(self, fields: NoteFields, *, scratch: bool = False) -> str:
         if not fields.title.strip():
             raise NoteError("a note requires a title")
         if not fields.created:
             fields.created = today()
-        filename = self.filename_for_title(fields.title)
+        # Scratch tier (item #5 part 2): the ".scratch.md" suffix IS the mark —
+        # machine-local (mesh gitignores it), still a top-level *.md so search
+        # finds it, TTL-expired by `omind maintain`. See SCRATCH_SUFFIX.
+        suffix = SCRATCH_SUFFIX if scratch else ".md"
+        filename = self.filename_for_title(fields.title, suffix=suffix)
         _hoist_field_headings(fields)  # canonicalize ## H2-in-body -> extras
         # Existence is re-checked under the write lock (must_create) to close the
         # concurrent-create race, not here.

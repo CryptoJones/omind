@@ -308,7 +308,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "confidence: high|medium|low, omit if unknown. conflicts_with: a "
             "[[wikilink]] to a memory this one DISAGREES with (use supersedes "
             "instead when this cleanly replaces the older fact). agent: your "
-            "self-declared identity (advisory attribution only)."
+            "self-declared identity (advisory attribution only). scratch: mark a "
+            "machine-local, auto-expiring note (never mesh-synced; archived after "
+            "7 idle days by `omind maintain`)."
         ),
     )
     def create_note(
@@ -325,6 +327,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         action_items: list[str] | None = None,
         references: list[str] | None = None,
         agent: str = "",
+        scratch: bool = False,
     ) -> dict[str, object]:
         fields = NoteFields(
             title=title,
@@ -341,7 +344,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             action_items=_parse_action_items(action_items or []),
             references=references or [],
         )
-        filename = store.create_note(fields)
+        # scratch=True marks this a machine-local, auto-expiring scratch note
+        # (item #5 part 2): never mesh-replicated, TTL-expired by `omind maintain`.
+        filename = store.create_note(fields, scratch=scratch)
         result: dict[str, object] = {"filename": filename, "agent": fields.agent}
         # Write-time near-duplicate warning (2026-08-27 roundtable: ADOPT —
         # advisory, fail-open, never blocks the write; hint field DROPPED for

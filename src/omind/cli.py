@@ -11,6 +11,8 @@ Subcommands:
   * ``omind export`` — write the entire OMI dataset to a json or tar.gz bundle.
   * ``omind import`` — load an OMI dataset bundle back into a folder.
   * ``omind reindex`` — regenerate index.md under the inter-process write lock.
+  * ``omind maintain`` — sleep-time janitor: propose merges, refresh the index,
+    opt-in journal rollup / mesh sync. Safe by default (dry run).
   * ``omind quickstart`` — print the manual-wiring steps `setup` automates.
   * ``omind graph`` — query the [[wikilink]] knowledge graph (neighbors, path,
     orphans, dangling links, stats, export).
@@ -67,7 +69,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--version", action="version", version=f"omind {__version__}")
     sub = parser.add_subparsers(
         dest="command",
-        metavar="{help,setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,note,rollup,recover,hook}",
+        metavar="{help,setup,quickstart,serve,doctor,self-update,backup,ai,export,import,reindex,maintain,note,rollup,recover,hook}",
     )
 
     help_p = sub.add_parser(
@@ -312,6 +314,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="refresh the search index without rewriting index.md",
     )
     _add_vault_args(reindex)
+
+    maintain = sub.add_parser(
+        "maintain",
+        help="sleep-time janitor: propose merges, refresh the index, and "
+        "(opt-in) roll up journals or sync the mesh — safe by default",
+    )
+    maintain.add_argument(
+        "--apply",
+        action="store_true",
+        help="perform the safe maintenance (index refresh); consolidations stay "
+        "propose-only regardless",
+    )
+    maintain.add_argument(
+        "--sync",
+        action="store_true",
+        help="also run a mesh sync — the only fleet-propagating, irreversible "
+        "step, so it is opt-in and never in --apply",
+    )
+    maintain.add_argument(
+        "--rollup",
+        action="store_true",
+        help="also roll up eligible weeks of daily journals (a lossy history "
+        "squash — opt-in, never default)",
+    )
+    maintain.add_argument(
+        "--report-note",
+        action="store_true",
+        help="write the run report as a vault note (default: stdout + state dir "
+        "only, so the janitor doesn't litter the vault)",
+    )
+    _add_vault_args(maintain)
 
     convert = sub.add_parser(
         "convert",
@@ -1102,6 +1135,35 @@ def _run_import(args: argparse.Namespace) -> int:
     return 1 if (result.conflicts and not args.force) else 0
 
 
+def _run_maintain(args: argparse.Namespace) -> int:
+    from omind import maintain, mesh
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    node_id = ""
+    if args.sync:
+        cfg = mesh.load_node_config(omi_dir)
+        if cfg is None:
+            print(
+                "--sync needs a mesh node — run `omind mesh init` first, or drop --sync",
+                file=sys.stderr,
+            )
+            return 1
+        node_id = cfg.node_id
+    report = maintain.run(
+        omi_dir,
+        node_id=node_id,
+        apply=args.apply,
+        sync=args.sync,
+        rollup=args.rollup,
+        report_note=args.report_note,
+    )
+    if report.refused:
+        return 1
+    if not args.apply and not args.sync and not args.rollup:
+        print("(dry run — pass --apply to act; nothing in the vault was changed)")
+    return 1 if report.aborted else 0
+
+
 def _run_reindex(args: argparse.Namespace) -> int:
     from omind import searchindex
     from omind.journal import migrate_journals
@@ -1682,6 +1744,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ai(args)
     if args.command == "reindex":
         return _run_reindex(args)
+    if args.command == "maintain":
+        return _run_maintain(args)
     if args.command == "convert":
         return _run_convert(args)
     if args.command == "note":
