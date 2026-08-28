@@ -125,3 +125,13 @@ def transaction_dir(omi_dir: Path) -> Path:
     doing, is meaningless on another peer, and must never be mesh-synced.
     """
     return state_dir() / f"txn-{_omi_dir_digest(omi_dir)}"
+
+
+def maintain_lock_path(omi_dir: Path) -> Path:
+    """Single-instance mutex for ``omind maintain`` (one janitor per vault)."""
+    return state_dir() / f"maintain-{_omi_dir_digest(omi_dir)}.lock"
+
+
+def maintain_state_path(omi_dir: Path) -> Path:
+    """Last ``omind maintain`` run report — state-dir, never a vault note."""
+    return state_dir() / f"maintain-{_omi_dir_digest(omi_dir)}.json"
