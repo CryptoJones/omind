@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import time
 from pathlib import Path
 
 import pytest
@@ -26,8 +27,9 @@ def test_default_run_is_a_dry_run_that_changes_nothing(omi: Path) -> None:
     before = {p.name for p in omi.glob("*.md")}
     report = maintain.run(omi, log=lambda _msg: None)
     assert report.ran and not report.refused and not report.aborted
-    # Consolidation is proposed, never applied; no reindex/rollup/sync step.
-    assert [s.name for s in report.steps] == ["propose-consolidations"]
+    # Consolidation is proposed, never applied; scratch is only *reported* on a
+    # dry run; no reindex/rollup/sync step.
+    assert [s.name for s in report.steps] == ["propose-consolidations", "expire-scratch"]
     assert {p.name for p in omi.glob("*.md")} == before  # vault untouched
     assert not (omi / "Maintenance Report.md").exists()  # no vault report note
 
@@ -69,6 +71,39 @@ def test_pipeline_is_fail_closed_sync_never_runs_after_a_failure(
     assert "propose-consolidations" in step_names
     # The fleet-propagating, irreversible sync must not run after the failure.
     assert "mesh-sync" not in step_names
+
+
+def test_apply_expires_stale_scratch_notes_by_archiving_them(omi: Path) -> None:
+    import os
+
+    store = OmiStore(omi)
+    stale = store.create_note(NoteFields(title="Old Scratch", summary="temp"), scratch=True)
+    fresh = store.create_note(NoteFields(title="New Scratch", summary="temp"), scratch=True)
+    assert stale.endswith(".scratch.md") and fresh.endswith(".scratch.md")
+    old = time.time() - 8 * 86_400  # past the 7-day TTL, by last-modified time
+    os.utime(omi / stale, (old, old))
+
+    report = maintain.run(omi, apply=True, log=lambda _msg: None)
+    detail = next(s.detail for s in report.steps if s.name == "expire-scratch")
+    assert "1 scratch note(s) archived" in detail
+    # Expiry ARCHIVES (soft-delete), never deletes — both files still on disk.
+    assert (omi / stale).is_file() and (omi / fresh).is_file()
+    assert store.read_fields(stale).disabled  # the stale one is archived
+    assert not store.read_fields(fresh).disabled  # the fresh one is untouched
+
+
+def test_dry_run_only_reports_scratch_expiry_never_archives(omi: Path) -> None:
+    import os
+
+    store = OmiStore(omi)
+    stale = store.create_note(NoteFields(title="Old Scratch", summary="temp"), scratch=True)
+    old = time.time() - 8 * 86_400
+    os.utime(omi / stale, (old, old))
+
+    report = maintain.run(omi, log=lambda _msg: None)  # no --apply
+    detail = next(s.detail for s in report.steps if s.name == "expire-scratch")
+    assert "1 scratch note(s) would expire" in detail
+    assert not store.read_fields(stale).disabled  # dry run changed nothing
 
 
 def test_report_note_is_opt_in(omi: Path) -> None:
