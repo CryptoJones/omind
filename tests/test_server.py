@@ -531,3 +531,48 @@ def test_recall_note_warns_about_a_conflicting_memory(server: MCPServer) -> None
     plain = call(server, "recall-note", {"name": "Older.md"})
     assert "conflicts_with" not in plain and "confidence" not in plain
     assert "warning" not in plain
+
+
+# -- scoped-write interlock (item #5) --------------------------------------
+
+
+def test_create_note_denies_an_out_of_scope_write(
+    server: MCPServer, omi_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMIND_SCOPE", "buzz")
+    with pytest.raises(ToolError, match="scope interlock"):
+        call(server, "create-note", {"title": "Wrong", "summary": "s", "scope": "antigua"})
+    assert not (omi_dir / "Wrong.md").exists()  # the deny prevented the write
+
+
+def test_create_note_warn_mode_writes_but_flags_it(
+    server: MCPServer, omi_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMIND_SCOPE", "buzz")
+    monkeypatch.setenv("OMIND_SCOPE_MODE", "warn")
+    result = call(server, "create-note", {"title": "Soft", "summary": "s", "scope": "antigua"})
+    assert result["filename"] == "Soft.md"
+    assert "antigua" in result["scope_warning"]
+    assert (omi_dir / "Soft.md").is_file()
+
+
+def test_in_scope_and_unscoped_writes_are_allowed(
+    server: MCPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("OMIND_SCOPE", "buzz")
+    matched = call(server, "create-note", {"title": "Right", "summary": "s", "scope": "buzz"})
+    assert "scope_warning" not in matched
+    # An unscoped note is global — always writable, even under a scoped process.
+    unscoped = call(server, "create-note", {"title": "Global", "summary": "s"})
+    assert "scope_warning" not in unscoped
+
+
+def test_edit_is_guarded_against_the_notes_existing_scope(
+    server: MCPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Created with no interlock (process unscoped), so the antigua note exists.
+    call(server, "create-note", {"title": "Owned", "summary": "s", "scope": "antigua"})
+    monkeypatch.setenv("OMIND_SCOPE", "buzz")
+    # An edit that never touches scope is still guarded against the note's scope.
+    with pytest.raises(ToolError, match="scope interlock"):
+        call(server, "edit-note", {"name": "Owned.md", "summary": "changed"})
