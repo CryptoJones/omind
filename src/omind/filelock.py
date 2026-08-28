@@ -31,6 +31,15 @@ if sys.platform == "win32":
         os.lseek(fd, 0, os.SEEK_SET)
         msvcrt.locking(fd, msvcrt.LK_LOCK, _REGION_BYTES)
 
+    def try_lock_fd(fd: int) -> bool:
+        """Take the exclusive lock without blocking; ``False`` if held elsewhere."""
+        os.lseek(fd, 0, os.SEEK_SET)
+        try:
+            msvcrt.locking(fd, msvcrt.LK_NBLCK, _REGION_BYTES)
+        except OSError:
+            return False
+        return True
+
     def unlock_fd(fd: int) -> None:
         """Release the lock taken by :func:`lock_fd`."""
         os.lseek(fd, 0, os.SEEK_SET)
@@ -42,6 +51,14 @@ else:
     def lock_fd(fd: int) -> None:
         """Block until this process holds the exclusive lock on ``fd``."""
         fcntl.flock(fd, fcntl.LOCK_EX)
+
+    def try_lock_fd(fd: int) -> bool:
+        """Take the exclusive lock without blocking; ``False`` if held elsewhere."""
+        try:
+            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except OSError:
+            return False
+        return True
 
     def unlock_fd(fd: int) -> None:
         """Release the lock taken by :func:`lock_fd`."""
@@ -82,6 +99,27 @@ def append_locked(path: Path, *, mode: int = 0o600) -> Iterator[int]:
     finally:
         with contextlib.suppress(OSError):
             unlock_fd(fd)
+        os.close(fd)
+
+
+@contextlib.contextmanager
+def try_exclusive(path: Path, *, mode: int = 0o600) -> Iterator[bool]:
+    """Try to take the exclusive lock on ``path`` WITHOUT blocking.
+
+    Yields ``True`` when this process took the lock (held for the block) and
+    ``False`` when another process already holds it — the primitive behind the
+    janitor's single-instance mutex and its "is a sync in flight?" probe, where
+    waiting is exactly the wrong behaviour. Same sibling-``.lock`` discipline as
+    :func:`exclusive`.
+    """
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | _BINARY | _NOFOLLOW, mode)
+    acquired = try_lock_fd(fd)
+    try:
+        yield acquired
+    finally:
+        if acquired:
+            with contextlib.suppress(OSError):
+                unlock_fd(fd)
         os.close(fd)
 
 
