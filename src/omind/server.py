@@ -29,10 +29,17 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.message import SessionMessage
 
-from omind import graph, searchindex
+from omind import graph, scope_guard, searchindex
 from omind.help_system import render_help
 from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
-from omind.store import ActionItem, NoteFields, OmiStore, _clean_agent, parse_note
+from omind.store import (
+    ActionItem,
+    NoteFields,
+    OmiStore,
+    _clean_agent,
+    _clean_scope,
+    parse_note,
+)
 
 SERVER_NAME = "omi"
 
@@ -325,7 +332,15 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         action_items: list[str] | None = None,
         references: list[str] | None = None,
         agent: str = "",
+        scope: str = "",
     ) -> dict[str, object]:
+        # Scoped-write interlock (item #5): deny an out-of-scope write BEFORE it
+        # lands. Raises (rendered as a tool error) in deny mode; returns a
+        # warning to surface in warn mode; fail-open when either side is
+        # unscoped. Never reached by mesh/system writes, which call the store
+        # directly rather than through this tool.
+        note_scope = _clean_scope(scope)
+        scope_warning = scope_guard.check_write(note_scope)
         fields = NoteFields(
             title=title,
             summary=summary,
@@ -340,9 +355,12 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             connections=connections or [],
             action_items=_parse_action_items(action_items or []),
             references=references or [],
+            scope=note_scope,
         )
         filename = store.create_note(fields)
         result: dict[str, object] = {"filename": filename, "agent": fields.agent}
+        if scope_warning:
+            result["scope_warning"] = scope_warning
         # Write-time near-duplicate warning (2026-08-27 roundtable: ADOPT —
         # advisory, fail-open, never blocks the write; hint field DROPPED for
         # v1 because cosine cannot distinguish "replaces" from "disagrees";
@@ -403,6 +421,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         action_items: list[str] | None = None,
         references: list[str] | None = None,
         agent: str | None = None,
+        scope: str | None = None,
         expected_version: str | None = None,
     ) -> dict[str, str]:
         fields = store.read_fields(name)
@@ -434,8 +453,16 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             # Omitted keeps the current writer; an explicit value re-attributes
             # (e.g. a takeover). Resolution: arg > OMIND_AGENT env.
             fields.agent = _resolve_agent(agent)
+        if scope is not None:
+            fields.scope = _clean_scope(scope)
+        # Scoped-write interlock (item #5): guard the effective post-edit scope
+        # before the write lands. An edit that leaves scope untouched is still
+        # guarded against the note's existing scope.
+        scope_warning = scope_guard.check_write(fields.scope)
         filename = store.update_note(name, fields, expected_version=expected_version)
         result: dict[str, str] = {"filename": filename, "version": store.note_version(name)}
+        if scope_warning:
+            result["scope_warning"] = scope_warning
         if expected_version is None:
             # Make the silent-last-write-wins case visible to the caller
             # (2026-08-27 review): without the token the write was not checked
