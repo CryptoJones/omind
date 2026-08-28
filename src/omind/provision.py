@@ -30,7 +30,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, ClassVar, TextIO
 
-from omind import __version__, guard, paths, policy, seeds
+from omind import __version__, filelock, guard, paths, policy, seeds
 from omind.hooks import HANDLED_EVENTS, JOURNAL_DIRNAME, command_is_omind_hook
 from omind.hooks import failure_log_path as hook_failure_log_path
 from omind.journal import find_stray_journals, migrate_journals
@@ -869,8 +869,17 @@ class Provisioner:
         user-authored hooks and every other settings key untouched. Re-registers
         when the embedded vault path drifts. Writes only when something changed
         (or ``--force``).
-        """
+
+        The read→merge→write cycle runs under an flock on a sibling ``.lock``
+        file: two agents running `omind setup` concurrently on one machine would
+        otherwise read-modify-write the shared settings and one side's hook
+        entries silently vanish (2026-08-27 review)."""
         path = claude_settings_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            self._ensure_hooks_installed_locked(path)
+
+    def _ensure_hooks_installed_locked(self, path: Path) -> None:
         data = self._read_settings(path)
         hooks_cfg = data.get("hooks")
         if not isinstance(hooks_cfg, dict):

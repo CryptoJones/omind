@@ -173,3 +173,32 @@ def similarity(a: str, b: str) -> float | None:
     # Cosine of L2-normalised vectors is in [-1, 1]; clamp to [0, 1] so it composes
     # with the keyword overlap score (also 0..1) under a plain ``max``.
     return max(0.0, min(1.0, sim))
+
+
+def model_identity(model_name: str | None = None) -> str:
+    """The encoder's identity: model name + a digest of its embedding space.
+
+    The same model NAME with a different cached snapshot (an HF cache refresh,
+    two machines that fetched at different times) is a DIFFERENT vector space.
+    The search index stored only the name, so vectors from two encoder spaces
+    coexisted silently and semantic quality degraded invisibly (2026-08-27
+    review). The digest is taken from the loaded encoder's first embedding rows
+    — deterministic per snapshot, cheap, no network. Returns the bare name when
+    no backend loads (the vector leg is off anyway)."""
+    name = model_name or os.environ.get(_MODEL_ENV) or _DEFAULT_MODEL
+    backend = _resolve()
+    if backend is None:
+        return name
+    try:
+        import hashlib
+
+        import numpy as np
+
+        embedding = getattr(backend, "embedding", None)  # model2vec StaticModel
+        if embedding is None:
+            return name
+        rows = np.asarray(embedding, dtype="float32")[:8]
+        digest = hashlib.blake2s(rows.tobytes(), digest_size=16).hexdigest()
+        return f"{name}:{digest}"
+    except Exception:
+        return name

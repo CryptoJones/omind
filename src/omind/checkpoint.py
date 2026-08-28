@@ -42,7 +42,7 @@ from typing import Any
 
 from omind import compliance, hooks
 from omind.notes import upsert_note
-from omind.store import NoteError, NoteFields, OmiStore
+from omind.store import NoteConflictError, NoteError, NoteFields, OmiStore
 
 _SINCE_RE = re.compile(r"^\s*(\d+)\s*([smhd]?)\s*$", re.IGNORECASE)
 _UNIT_SECONDS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "": 60}  # bare number = minutes
@@ -251,20 +251,34 @@ def write_checkpoint(
     llm: bool = False,
 ) -> tuple[str, str]:
     """Gather the window and upsert today's ``Worklog <date>`` note. Returns
-    ``(action, filename)`` from :func:`omind.notes.upsert_note`."""
+    ``(action, filename)`` from :func:`omind.notes.upsert_note`.
+
+    The version is pinned BEFORE the existing worklog is read: another agent
+    editing the same worklog between the read and the write used to be
+    silently reverted (lost-update; 2026-08-27 review). A conflict retries
+    from a fresh read; after three it raises rather than clobbering."""
     now = now or datetime.now()
     cutoff = now - parse_since(since)
-    activity = gather_activity(omi_dir, cutoff, now)
-    section = render_section(activity, since, now, llm=llm, omi_dir=omi_dir)
+    store = OmiStore(Path(omi_dir))
     title = f"Worklog {now.strftime('%Y-%m-%d')}"
-    details = _append_section(_existing_details(omi_dir, title), section)
-    fields = NoteFields(
-        title=title,
-        summary=_WORKLOG_SUMMARY,
-        details=details,
-        tags=["worklog", "omind", "checkpoint", "auto"],
-    )
-    return upsert_note(Path(omi_dir), fields)
+    filename = store.filename_for_title(title)
+    last_conflict: Exception | None = None
+    for _attempt in range(3):
+        version = store.note_version(filename)
+        activity = gather_activity(omi_dir, cutoff, now)
+        section = render_section(activity, since, now, llm=llm, omi_dir=omi_dir)
+        details = _append_section(_existing_details(omi_dir, title), section)
+        fields = NoteFields(
+            title=title,
+            summary=_WORKLOG_SUMMARY,
+            details=details,
+            tags=["worklog", "omind", "checkpoint", "auto"],
+        )
+        try:
+            return upsert_note(Path(omi_dir), fields, expected_version=version or None)
+        except NoteConflictError as exc:
+            last_conflict = exc
+    raise last_conflict if last_conflict is not None else RuntimeError("unreachable")
 
 
 # -- systemd user timer -------------------------------------------------------------

@@ -899,7 +899,7 @@ def run_hook(
                 lambda: _emit_unwritten(omi_dir, event.get("session_id")),
             )
         if event_name == "PostToolUse":
-            from omind import ai_usage, compliance, loopguard, verify
+            from omind import ai_usage, compliance, guard, loopguard, verify
 
             # Four independent subsystems. Each is isolated (#204) so a failure
             # in one — accounting is the most fragile, and the least important —
@@ -925,6 +925,13 @@ def run_hook(
             _best_effort(
                 "PostToolUse/verify.verify_consult",
                 lambda: verify.verify_consult(event, omi_dir),
+            )
+            # A freshness command that FAILED must not leave the repo marked
+            # fresh: PreToolUse records optimistically (it cannot know the exit
+            # code), this retracts on an explicit failure (2026-08-27 review).
+            _best_effort(
+                "PostToolUse/guard.record_freshness_outcome",
+                lambda: guard.record_freshness_outcome(event),
             )
     except Exception as exc:
         _record_failure(f"run_hook({event_name}, {omi_dir})", exc)

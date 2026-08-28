@@ -52,6 +52,7 @@ _EVENTS_MEMO: tuple[_MemoKey, list[dict[str, Any]]] | None = None
 
 KIND_DECISION = "decision"
 KIND_VIOLATION = "violation"
+KIND_GATE_RESET = "gate-reset"
 
 
 def compliance_log_path() -> Path:
@@ -321,7 +322,10 @@ def record_post_tool(event: dict[str, Any], *, now: datetime | None = None) -> i
         for rule in policy.load_policy():
             if not rule.compiled().search(command):
                 continue
-            if rule.opt_in and re.search(rule.opt_in, command):
+            # The STRICT opt-in matcher, not a bare substring: Layer E used to
+            # re.search the token, so a forged token in a comment suppressed the
+            # escape record and blinded the recidivism loop (2026-08-27 review).
+            if rule.opt_in and policy.opt_in_satisfied(rule.opt_in, command):
                 continue
             outcome = "escaped" if rule.severity == policy.SEVERITY_HARD else "observed"
             log_event(

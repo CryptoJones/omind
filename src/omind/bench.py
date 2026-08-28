@@ -314,7 +314,7 @@ def run(omi_dir: Path | str, *, queries: tuple[str, ...] = SAMPLE_QUERIES) -> Re
         f"{len(capsule or '')} chars in {capsule_ms:.0f} ms",
     )
     if notes:
-        payload = recall.compact_recall(omi, notes[0].filename)
+        payload = recall.compact_recall(omi, notes[0].filename, organic=False)
         text = str(payload.get("content", "")) if isinstance(payload, dict) else ""
         report.add("one bounded recall", ai_usage.estimate_tokens(text), "tokens")
         listing = _listing_tokens(notes)

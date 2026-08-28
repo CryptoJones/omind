@@ -49,6 +49,12 @@ from omind.store import (
 #: Tag stamped onto a note whose Details carry conflict markers.
 CONFLICT_TAG = "merge-conflict"
 
+#: Tag stamped when a scalar field resolved by last-writer-wins and a changed
+#: value was discarded — daemon stderr is unread, so the loss is surfaced IN
+#: the vault (and via `omind doctor`) instead of silently vanishing
+#: (2026-08-27 review).
+LWW_TAG = "merge-lww"
+
 #: ``TEMPLATE_SECTIONS`` (the headings the NoteFields template owns; anything
 #: else is an "extra" section preserved verbatim-ish through the merge) lives in
 #: :mod:`omind.store` so parse_note's extra-capture and this driver agree.
@@ -217,6 +223,7 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
     o_rev = Rev.parse(ours.rev)
     t_rev = Rev.parse(theirs.rev)
     messages: list[str] = []
+    lww_losses: list[str] = []
 
     ours_wins: bool | None
     if o_rev is None and t_rev is None:
@@ -241,10 +248,22 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         if t == b:
             return o  # type: ignore[no-any-return]
         if ours_wins is None:
+            if name == "agent":
+                # 2026-08-27 roundtable: on the equal-rev content tiebreak,
+                # max(o, t) would pick the lexicographically larger name and
+                # FABRICATE authorship. Blank the field; the merge message
+                # names both claims so nothing is lost silently.
+                messages.append(
+                    f"agent: concurrent edits at equal/absent rev; both dropped ({o!r}, {t!r})"
+                )
+                lww_losses.append(name)
+                return ""
             winner = max(o, t)
             messages.append(f"{name}: concurrent edits at equal/absent rev; kept {winner!r}")
             return winner  # type: ignore[no-any-return]
-        messages.append(f"{name}: last-writer-wins by rev")
+        loser = t if ours_wins else o
+        messages.append(f"{name}: last-writer-wins by rev (discarded {loser!r})")
+        lww_losses.append(name)
         return o if ours_wins else t  # type: ignore[no-any-return]
 
     details, details_clean, detail_msgs = _merge3_lines(
@@ -267,6 +286,7 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         created=str(scalar("created")),
         tags=_union3(base.tags, ours.tags, theirs.tags),
         related_to=str(scalar("related_to")),
+        agent=str(scalar("agent")),
         supersedes=str(scalar("supersedes")),
         superseded_by=str(scalar("superseded_by")),
         confidence=str(scalar("confidence")),
@@ -282,6 +302,16 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         rev=merged_rev,
         disabled=bool(scalar("disabled")),
     )
+    if lww_losses:
+        # A scalar LWW loss used to be visible only in daemon stderr, which
+        # nobody reads — tag the merged note so the vault itself records the
+        # contested metadata (2026-08-27 review).
+        messages.append(
+            "scalar fields resolved last-writer-wins (loser discarded): "
+            + ", ".join(sorted(set(lww_losses)))
+        )
+        if LWW_TAG not in merged.tags:
+            merged.tags.append(LWW_TAG)
     if not details_clean and CONFLICT_TAG not in merged.tags:
         merged.tags.append(CONFLICT_TAG)
     return MergeResult(fields=merged, extras={}, clean=details_clean, messages=messages)

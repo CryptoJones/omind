@@ -19,13 +19,14 @@ from __future__ import annotations
 
 import mimetypes
 import os
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import asdict
 from pathlib import Path
 from typing import Literal, TypeVar
+from urllib.parse import urlparse
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import Response
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import JSONResponse, Response
 from pydantic import BaseModel
 from starlette.middleware.trustedhost import TrustedHostMiddleware
 
@@ -93,6 +94,30 @@ def create_app(omi_dir: Path | str, allowed_hosts: list[str] | None = None) -> F
     app.add_middleware(
         TrustedHostMiddleware, allowed_hosts=allowed_hosts or DEFAULT_ALLOWED_HOSTS
     )
+
+    # Cross-site POST defence (2026-08-27 review): the Host allowlist stops DNS
+    # rebinding, but a page at ANY origin can still send a simple POST (a
+    # no-Content-Type Blob body parses as JSON) with Host: 127.0.0.1 — reaching
+    # create/restore without a preflight. Browsers always send Origin on
+    # cross-site requests, so requiring it to match an allowed host closes that
+    # hole while same-origin UI traffic (Origin = the serve origin) passes.
+    @app.middleware("http")
+    async def check_origin(
+        request: Request, call_next: Callable[[Request], Awaitable[Response]]
+    ) -> Response:
+        hosts = allowed_hosts or DEFAULT_ALLOWED_HOSTS
+        origin = request.headers.get("origin")
+        if origin and "*" not in hosts:
+            try:
+                origin_host = urlparse(origin).hostname or ""
+            except ValueError:
+                origin_host = ""
+            # Bracket-stripped compare so an allowed "[::1]" matches a URL
+            # whose hostname comes back as "::1".
+            allowed = {h.lstrip("[").rstrip("]") for h in hosts}
+            if origin_host not in allowed:
+                return JSONResponse({"detail": "origin not allowed"}, status_code=403)
+        return await call_next(request)
 
     @app.get("/api/notes")
     async def list_notes(include_disabled: bool = False) -> list[dict[str, object]]:

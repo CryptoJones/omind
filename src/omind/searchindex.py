@@ -56,10 +56,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
-from omind import paths
+from omind import access, paths
 
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
-SCHEMA_VERSION = 5
+SCHEMA_VERSION = 6
 
 
 #: RRF constant. 60 is the value from the original TREC paper and what every
@@ -160,6 +160,10 @@ class Hit:
     conflicts_with: str = ""
     #: "high" | "medium" | "low"; "" when the note declares none.
     confidence: str = ""
+    #: Self-declared last-writer identity, echoed verbatim from the note's
+    #: ``Agent:`` line. Advisory only (roundtable 2026-08-27): never consumed
+    #: for ranking, access, or trust.
+    agent: str = ""
     #: Score gap to the NEXT hit (0.0 on the last one). The ranker already
     #: computes these scores and then throws the margin away, leaving the caller
     #: unable to tell a clear winner from a coin-flip between near-duplicates —
@@ -172,6 +176,16 @@ class Hit:
     #: and act on, and a real tokenizer would add a dependency for accuracy
     #: nobody needs when deciding whether to fetch a fourth chunk.
     tokens: int = 0
+    #: Usefulness demotion actually applied to this hit's score (item #2):
+    #: ``1.0`` means untouched, below it means an organically-read note that has
+    #: since gone stale was nudged down. Surfaced by ``search --explain``.
+    usefulness_weight: float = 1.0
+    #: Organic, per-session-deduped reads behind the usefulness weight (the
+    #: *counted* signal), and the reads it *filtered* out (non-organic or a
+    #: same-session re-read). Both shown by ``--explain`` so the weight is
+    #: never magic.
+    useful_reads: int = 0
+    filtered_reads: int = 0
 
 
 @dataclass
@@ -245,6 +259,7 @@ class _NoteRow:
     superseded_by: str = ""
     confidence: str = ""
     conflicts_with: str = ""
+    agent: str = ""
     has_title: bool = True
     tags: list[str] = field(default_factory=list)
     disabled: bool = False
@@ -263,6 +278,7 @@ CREATE TABLE IF NOT EXISTS notes (
     superseded_by TEXT NOT NULL DEFAULT '',
     confidence TEXT NOT NULL DEFAULT '',
     conflicts_with TEXT NOT NULL DEFAULT '',
+    agent TEXT NOT NULL DEFAULT '',
     has_title INTEGER NOT NULL DEFAULT 1,
     disabled INTEGER NOT NULL DEFAULT 0,
     mtime_ns INTEGER NOT NULL DEFAULT 0,
@@ -557,8 +573,11 @@ class SearchIndex:
             db.execute("PRAGMA synchronous=NORMAL")
             db.execute("PRAGMA busy_timeout=5000")
             db.executescript(_SCHEMA)
+            from omind import embed
+
+            identity = embed.model_identity(self.model)
             if self._meta(db, "schema") != str(SCHEMA_VERSION) or self._meta(db, "model") != (
-                self.model
+                identity
             ):
                 self._wipe(db)
             self._db = db
@@ -588,9 +607,15 @@ class SearchIndex:
             with contextlib.suppress(sqlite3.Error):
                 db.execute(f"DROP TABLE IF EXISTS {table}")
         db.executescript(_SCHEMA)
+        # Store the encoder IDENTITY (name + embedding-space digest), not just
+        # the name: the same name with a different cached snapshot is a
+        # different vector space, and the old name-only check let vectors from
+        # two spaces coexist silently (2026-08-27 review).
+        from omind import embed
+
         db.execute(
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?), ('model', ?)",
-            (str(SCHEMA_VERSION), self.model),
+            (str(SCHEMA_VERSION), embed.model_identity(self.model)),
         )
         self._bump(db)
 
@@ -690,8 +715,17 @@ class SearchIndex:
             for stale in [name for name in known if name not in seen]:
                 self._forget(db, stale)
                 stats.removed += 1
-            if vectors and pending_embed:
-                stats.embedded = self._embed_chunks(db, pending_embed)
+            if vectors:
+                if pending_embed:
+                    stats.embedded = self._embed_chunks(db, pending_embed)
+                # Backfill: notes ingested while the embed backend was down (or
+                # before it was installed) kept FTS-only rows forever — the
+                # mtime/size skip never revisited them, so installing the
+                # backend later silently left the semantic leg half-empty
+                # (2026-08-27 review). Embed whatever is still missing.
+                missing = self._chunks_without_vectors(db)
+                if missing:
+                    stats.embedded += self._embed_chunks(db, missing)
             self._bump(db)
             db.execute("COMMIT")
             stats.seconds = time.perf_counter() - started
@@ -736,6 +770,7 @@ class SearchIndex:
             superseded_by=fields.superseded_by,
             confidence=fields.confidence,
             conflicts_with=fields.conflicts_with,
+            agent=fields.agent,
             has_title=bool(fields.title),
             tags=fields.tags,
             disabled=fields.disabled,
@@ -743,8 +778,8 @@ class SearchIndex:
         self._forget(db, path.name)
         db.execute(
             "INSERT INTO notes(filename, title, created, okf_type, supersedes, superseded_by,"
-            " confidence, conflicts_with, has_title, disabled, mtime_ns, size, sha)"
-            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+            " confidence, conflicts_with, agent, has_title, disabled, mtime_ns, size, sha)"
+            " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
             (
                 row.filename,
                 row.title,
@@ -754,6 +789,7 @@ class SearchIndex:
                 row.superseded_by,
                 row.confidence,
                 row.conflicts_with,
+                row.agent,
                 int(row.has_title),
                 int(row.disabled),
                 st.st_mtime_ns,
@@ -807,6 +843,36 @@ class SearchIndex:
         db.execute("DELETE FROM note_tags WHERE filename = ?", (filename,))
         db.execute("DELETE FROM links WHERE src = ?", (filename,))
         db.execute("DELETE FROM notes WHERE filename = ?", (filename,))
+
+    def _chunks_without_vectors(
+        self, db: sqlite3.Connection, cap: int = 2000
+    ) -> list[tuple[int, str]]:
+        """``(chunk_id, embed_text)`` pairs with no vector row yet, oldest first.
+
+        The chunk body lives in ``chunks_fts`` (rowid = chunk id), so the embed
+        text is reassembled exactly as :meth:`_ingest` built it — title,
+        heading, tags, then body — so backfilled vectors live in the same space
+        as freshly-ingested ones. Capped so one backfill pass is bounded; the
+        next refresh continues."""
+        rows = db.execute(
+            "SELECT c.id AS cid, n.title AS title, f.heading AS heading, "
+            "f.tags AS tags, f.text AS body "
+            "FROM chunks c "
+            "JOIN notes n ON n.filename = c.filename "
+            "JOIN chunks_fts f ON f.rowid = c.id "
+            "LEFT JOIN vectors v ON v.chunk_id = c.id "
+            "WHERE v.chunk_id IS NULL ORDER BY c.id LIMIT ?",
+            (cap,),
+        ).fetchall()
+        return [
+            (
+                int(r["cid"]),
+                "\n".join(
+                    [str(r["title"]), str(r["heading"]), str(r["tags"]), str(r["body"])]
+                ).strip(),
+            )
+            for r in rows
+        ]
 
     def _embed_chunks(self, db: sqlite3.Connection, pending: list[tuple[int, str]]) -> int:
         """Embed the given chunks in one batch. 0 when there is no backend."""
@@ -877,6 +943,7 @@ class SearchIndex:
             tokens_returned=sum(h.tokens for h in window),
         )
 
+    @_locked
     def search(
         self,
         query: str,
@@ -889,13 +956,22 @@ class SearchIndex:
 
         An empty ``query`` is a *listing* (optionally tag-filtered) in date order,
         which is what the tag-only search surface has always meant.
+
+        Under the index lock like every other public entry point: ``search()``
+        was the one path that shared the single sqlite connection across
+        threads unlocked, so concurrent in-process searches could interleave
+        statements and silently degrade to the scan fallback (2026-08-27
+        review). Re-entrant: the inner refresh re-acquires on the same thread.
         """
         db = self._connect()
         if db is None:
             return None
-        if self._refresh_if_needed() is None and not self._has_rows(db):
-            return None  # nothing indexed and we couldn't build it
         try:
+            # Inside the try: refresh() only caught sqlite3.Error, so a stat()
+            # race or a parse surprise escaped into the caller — invariant 2
+            # says retrieval degrades, never raises (2026-08-27 review).
+            if self._refresh_if_needed() is None and not self._has_rows(db):
+                return None  # nothing indexed and we couldn't build it
             allowed = self._candidates(db, tag=tag, include_disabled=include_disabled)
             if allowed is not None and not allowed:
                 return []
@@ -921,6 +997,8 @@ class SearchIndex:
             fused = self._weight_generated(db, fused)
             fused = self._weight_superseded(db, fused)
             fused = self._weight_confidence(db, fused)
+            useful = self._usefulness_map(db, fused)
+            fused = self._weight_usefulness(fused, useful, self._weighting(db).owners)
             if not fused:
                 return []
             ranks = {
@@ -928,9 +1006,9 @@ class SearchIndex:
                 "vector": {cid: i + 1 for i, cid in enumerate(vector)},
             }
             return self._materialize(
-                db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars
+                db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars, useful
             )
-        except (sqlite3.Error, ValueError):
+        except Exception:  # noqa: BLE001 — invariant 2: degrade to the fallback, never raise
             return None
 
     @staticmethod
@@ -1244,6 +1322,41 @@ class SearchIndex:
         ]
         return sorted(weighted, key=lambda item: (-item[1], item[0]))
 
+    def _usefulness_map(
+        self, db: sqlite3.Connection, fused: list[tuple[int, float]]
+    ) -> dict[str, access.Usefulness]:
+        """Usefulness signal for exactly the notes already fused (item #2).
+
+        Restricted to matched filenames so the leg can only *reorder* the hits
+        the content legs produced — it never reaches a note nothing matched
+        (the reorder-never-add contract the recency leg established, which
+        ``test_recency_only_reorders...`` guards and this extends)."""
+        owners = self._weighting(db).owners
+        matched = {owners[cid] for cid, _ in fused if cid in owners}
+        if not matched:
+            return {}
+        return access.usefulness_weights(self.omi_dir, matched)
+
+    def _weight_usefulness(
+        self,
+        fused: list[tuple[int, float]],
+        useful: dict[str, access.Usefulness],
+        owners: dict[int, str],
+    ) -> list[tuple[int, float]]:
+        """Decay-only demotion of organically-read notes that have gone stale.
+
+        No boost: every weight is ``<= 1.0``, so a frequently-read note is never
+        pushed up — a long-unread one is nudged down, floored (2026-08-27
+        roundtable, item #2)."""
+        if not useful:
+            return fused
+        weighted: list[tuple[int, float]] = []
+        for chunk_id, score in fused:
+            entry = useful.get(owners.get(chunk_id, ""))
+            factor = entry.weight if entry is not None else 1.0
+            weighted.append((chunk_id, score * factor if factor < 1.0 else score))
+        return sorted(weighted, key=lambda item: (-item[1], item[0]))
+
     def _listing(
         self, db: sqlite3.Connection, allowed: set[str] | None, limit: int
     ) -> list[Hit]:
@@ -1270,9 +1383,12 @@ class SearchIndex:
         ranks: dict[str, dict[int, int]],
         limit: int,
         excerpt_chars: int,
+        useful: dict[str, access.Usefulness] | None = None,
     ) -> list[Hit]:
         """Best chunk per note, credential-penalised, with a bounded excerpt."""
         from omind import retrieve
+
+        useful = useful or {}
 
         task_is_cred = bool(retrieve._tokens(query) & retrieve._CREDENTIAL_STEMS)
         weights = self._weighting(db)
@@ -1281,7 +1397,7 @@ class SearchIndex:
         for chunk_id, score in fused:
             row = db.execute(
                 "SELECT c.filename AS filename, c.heading AS heading, n.title AS title,"
-                " n.confidence AS confidence,"
+                " n.confidence AS confidence, n.agent AS agent,"
                 " (SELECT group_concat(tag, ' ') FROM note_tags t WHERE t.filename = c.filename)"
                 " AS tags FROM chunks c JOIN notes n ON n.filename = c.filename WHERE c.id = ?",
                 (chunk_id,),
@@ -1296,6 +1412,7 @@ class SearchIndex:
                 str(row["title"]), str(row["tags"] or "")
             ):
                 score *= retrieve._CREDENTIAL_PENALTY
+            use = useful.get(name)
             hits.append(
                 Hit(
                     filename=name,
@@ -1306,8 +1423,12 @@ class SearchIndex:
                     score=score,
                     conflicts_with=weights.conflicts.get(name, ""),
                     confidence=str(row["confidence"] or ""),
+                    agent=str(row["agent"] or ""),
                     keyword_rank=ranks["keyword"].get(chunk_id, 0),
                     vector_rank=ranks["vector"].get(chunk_id, 0),
+                    usefulness_weight=use.weight if use is not None else 1.0,
+                    useful_reads=use.useful_reads if use is not None else 0,
+                    filtered_reads=use.filtered_reads if use is not None else 0,
                 )
             )
         # The credential penalty is applied after fusion, so re-sort before cutting.

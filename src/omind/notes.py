@@ -15,19 +15,28 @@ from pathlib import Path
 from omind.store import NoteError, NoteFields, OmiStore
 
 
-def upsert_note(omi_dir: Path | str, fields: NoteFields) -> tuple[str, str]:
+def upsert_note(
+    omi_dir: Path | str, fields: NoteFields, *, expected_version: str | None = None
+) -> tuple[str, str]:
     """Create the note, or update it in place if it already exists.
 
     Returns ``(action, filename)`` where ``action`` is ``"created"`` or
     ``"updated"``. Raises :class:`omind.store.NoteError` on an empty title.
+
+    ``expected_version`` pins the update to the version the caller built
+    ``fields`` from. When omitted, the version is captured immediately before
+    the existing fields are read — capturing it AFTER the read left a window
+    where a concurrent writer's edit was silently reverted (2026-08-27
+    review).
     """
     if not fields.title.strip():
         raise NoteError("a note requires a title")
     store = OmiStore(omi_dir)
     filename = store.filename_for_title(fields.title)
     if store.safe_name(filename).exists():
+        version = expected_version if expected_version is not None else store.note_version(filename)
         _keep_existing_when_unset(fields, store.read_fields(filename))
-        store.update_note(filename, fields)
+        store.update_note(filename, fields, expected_version=version)
         return "updated", filename
     store.create_note(fields)
     return "created", filename

@@ -187,6 +187,12 @@ def build_parser() -> argparse.ArgumentParser:
         "delete only archives — this is the rare exception",
     )
     mesh_purge.add_argument("note", help="note filename (e.g. 'Old Note.md')")
+    mesh_purge.add_argument(
+        "--yes",
+        action="store_true",
+        help="confirm the hard delete (required non-interactively; "
+        "otherwise an interactive prompt names the note first)",
+    )
     for mp in (
         mesh_init_p,
         mesh_add_peer,
@@ -702,6 +708,11 @@ def build_parser() -> argparse.ArgumentParser:
         "--check", action="store_true", help="only report whether an update is available"
     )
     selfupdate.add_argument(
+        "--rollback",
+        action="store_true",
+        help="reinstall the version that was current before the last self-update",
+    )
+    selfupdate.add_argument(
         "--force", action="store_true", help="reinstall the latest even if not newer"
     )
 
@@ -946,7 +957,9 @@ def _run_mesh(args: argparse.Namespace) -> int:
             mesh.mesh_init(omi_dir)
         elif args.mesh_command == "add-peer":
             mesh.add_peer(omi_dir, args.name, args.url)
-            print(f"peer added: {args.name} -> {args.url}")
+            # Redact userinfo: a credential-embedded remote must not land in
+            # stdout that a scripting agent then persists.
+            print(f"peer added: {args.name} -> {_redact_url(args.url)}")
         elif args.mesh_command == "add-seed":
             mesh.add_seed(omi_dir, args.name, args.url, mirror=args.mirror)
         elif args.mesh_command == "remove-peer":
@@ -973,11 +986,36 @@ def _run_mesh(args: argparse.Namespace) -> int:
             mesh.clone(args.url, omi_dir)
             print(f"node ready at {omi_dir}; next: omind setup")
         elif args.mesh_command == "purge":
-            mesh.purge(omi_dir, args.note, require_node_id())
+            note = args.note
+            if not args.yes:
+                if not sys.stdin.isatty():
+                    raise mesh.MeshError(
+                        f"refusing to purge {note!r} without --yes — purge hard-deletes "
+                        "the note from EVERY node (tombstoned), not just this one"
+                    )
+                print(
+                    f"purge permanently deletes {note!r} from this node and every peer "
+                    "(the normal delete only archives)."
+                )
+                reply = input("type the note name to confirm: ")
+                if reply.strip() != note:
+                    print("aborted", file=sys.stderr)
+                    return 1
+            mesh.purge(omi_dir, note, require_node_id())
     except (mesh.MeshError, NoteError) as exc:
         print(f"error: {exc}", file=sys.stderr)
         return 1
     return 0
+
+
+def _redact_url(url: str) -> str:
+    """scheme://user:token@host → scheme://***@host (best effort)."""
+    scheme, sep, rest = url.partition("://")
+    if sep and "@" in rest:
+        creds, _, host = rest.rpartition("@")
+        if creds:
+            return f"{scheme}://***@{host}"
+    return url
 
 
 def _serve_allowed_hosts(host: str) -> list[str]:
@@ -1146,7 +1184,10 @@ def _run_search_explain(omi_dir: Path, args: argparse.Namespace) -> int:
         print("search index could not answer (locked or corrupt) — falling back to a scan")
         return 0
     semantic = "on" if embed.available() else "off (install the [embed] extra)"
-    print(f"query: {args.query!r}  legs: keyword=on semantic={semantic} recency=on")
+    print(
+        f"query: {args.query!r}  legs: keyword=on semantic={semantic} "
+        "recency=on usefulness=on"
+    )
     if not hits:
         print("no matches")
         return 0
@@ -1156,6 +1197,14 @@ def _run_search_explain(omi_dir: Path, args: argparse.Namespace) -> int:
             f"{rank}. {hit.filename}{where}  score={hit.score:.5f} "
             f"keyword={hit.keyword_rank or '-'} semantic={hit.vector_rank or '-'}"
         )
+        # Usefulness (item #2): always show the reads behind the weight — both
+        # the counted (organic) and filtered (hook/re-read) tallies — so a
+        # demotion is diagnosable and a 1.0 weight is visibly a no-op.
+        if hit.usefulness_weight < 1.0 or hit.useful_reads or hit.filtered_reads:
+            print(
+                f"     usefulness={hit.usefulness_weight:.3f} "
+                f"reads: counted={hit.useful_reads} filtered={hit.filtered_reads}"
+            )
         if hit.excerpt:
             print(f"     {hit.excerpt}")
     return 0
@@ -1561,7 +1610,7 @@ def _run_loop(args: argparse.Namespace) -> int:
 def _run_self_update(args: argparse.Namespace) -> int:
     from omind.update import self_update
 
-    return self_update(check_only=args.check, force=args.force)
+    return self_update(check_only=args.check, force=args.force, rollback=args.rollback)
 
 
 def _run_help(args: argparse.Namespace) -> int:

@@ -361,6 +361,51 @@ def test_recent_tombstone_still_deletes(tmp_path: Path) -> None:
     assert not (omi / "Doomed.md").exists()
 
 
+def test_tombstone_keeps_an_edit_newer_than_the_purge(tmp_path: Path) -> None:
+    """A tombstone captures the purge-time Rev; a note whose live Rev dominates
+    it was edited after the purge decision, so the edit survives and is
+    reported instead of being destroyed silently (2026-08-27 review)."""
+    from datetime import datetime, timezone
+
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi, node_id="test-a")  # stamped revs require a node id
+    fields = store.create_note(NoteFields(title="Raced", summary="v1"))
+    live_rev = OmiStore(omi).read_fields(fields).rev
+    assert live_rev  # sanity: the purge actually captured a rev
+    # Simulate the race: the note is edited (higher rev) AFTER the tombstone
+    # captured the purge-time rev.
+    tomb = omi / mesh.TOMBSTONES_FILENAME
+    tomb.write_text(
+        f"{datetime.now(timezone.utc).isoformat()}\tRaced.md\t{live_rev}\n",
+        encoding="utf-8",
+    )
+    store.update_note(
+        fields, NoteFields(title="Raced", summary="v2 — edited after the purge")
+    )
+    with store.write_lock():
+        conflicts = mesh._apply_tombstones(omi, store)
+    assert (omi / "Raced.md").exists()  # the edit won over the delete
+    assert conflicts == ["Raced.md"]
+    assert OmiStore(omi).read_fields(fields).summary == "v2 — edited after the purge"
+
+
+def test_tombstone_without_a_rev_still_deletes(tmp_path: Path) -> None:
+    """Legacy two-field tombstones keep the old unlink behavior."""
+    from datetime import datetime, timezone
+
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    fields = store.create_note(NoteFields(title="Legacy", summary="s"))
+    tomb = omi / mesh.TOMBSTONES_FILENAME
+    tomb.write_text(
+        f"{datetime.now(timezone.utc).isoformat()}\tLegacy.md\n", encoding="utf-8"
+    )
+    with store.write_lock():
+        mesh._apply_tombstones(omi, store)
+    assert not (omi / "Legacy.md").exists()
+    assert store.note_version(fields) == "" or not (omi / "Legacy.md").exists()
+
+
 def test_legacy_bare_tombstone_stays_permanent(tmp_path: Path) -> None:
     """An undated legacy tombstone keeps deleting (can't be safely dated under union-merge)."""
     omi = tmp_path / "OMI"

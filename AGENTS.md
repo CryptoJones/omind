@@ -58,88 +58,60 @@ replication (`mesh.py`, `merge.py`). Know which subsystem you are in.
 
 ---
 
-## Handoff: the retrieval subsystem (2026-07-24)
+## Handoff: the 2026-08-27 multi-agent review (shipped)
 
-### State
-
-Branch **`feat/hybrid-retrieval-token-budgets`**, one commit (`2eea146`),
-**not pushed to either mirror**. 808 tests + ruff + mypy strict green.
-Version deliberately **not bumped** — changes sit under `## [Unreleased]` in
-`CHANGELOG.md`; the next release is 4.3.0 (module docstrings already say so).
+The 2026-07-24 retrieval handoff below is history: `feat/hybrid-retrieval-token-budgets`
+landed long ago, and #167–#178 all shipped (see BACKLOG.md). Current state at this
+writing: **v8.8.0 on `main`**, 1,000+ tests + ruff + mypy strict green. Trust
+**BACKLOG.md + CHANGELOG.md** for what's open — not older handoffs.
 
 ### What changed and why
 
-Search used to read and parse *every note on every query* to run `needle in
-haystack`, then sort by **date**. A natural-language question with no literal
-substring returned nothing. `omind.searchindex` replaces that with a derived
-SQLite index: FTS5/BM25 over heading-split chunks + packed `float32` chunk
-vectors + the resolved `[[wikilink]]` graph, fused with Reciprocal Rank Fusion.
+A nine-slice multi-agent review (report:
+[docs/reviews/2026-08-27-multi-agent-review.md](docs/reviews/2026-08-27-multi-agent-review.md))
+found 35 issues; all are fixed in the working tree. The classes worth remembering:
 
-Read **[docs/retrieval.md](docs/retrieval.md)** first — it is the design doc.
+- **Locking is total now, and the pattern is uniform.** Any read-modify-write of a
+  small state file (gate sentinels, re-close/off-topic counters, `loop_guard.json`,
+  `node.json`, `backup.json`, harness settings.json) goes through
+  `filelock.exclusive()` on a SIBLING `.lock` path — never on the data file itself,
+  because the data file is replaced atomically and a flock on a replaced inode
+  protects nothing. Apply this to any new state file.
+- **Optimistic concurrency is the coordination story.** `upsert_note` captures the
+  version BEFORE reading existing fields; checkpoint/okf/consolidate pin versions;
+  `edit-note` without a token answers `concurrency: "unverified"` instead of
+  silently last-write-wins.
+- **Deletion yields to newer edits.** Purge tombstones carry the purge-time Rev;
+  `_apply_tombstones` keeps and reports a note whose live Rev dominates it.
+- **Merge LWW losses are visible in the vault** (`merge-lww` tag), not just daemon
+  stderr. If you touch `merge.py`, keep scalar losses tagged.
+- **The index stores the encoder IDENTITY** (`embed.model_identity`: name +
+  embedding-space digest), not the model name — same name/different snapshot used
+  to mix vector spaces silently. Refresh also BACKFILLS chunks missing vectors.
+- **Self-update pins the resolved commit SHA**, never the mutable tag, and records
+  the previous version for `omind self-update --rollback`.
+- **Enforcement hardening:** `guard reset` is compliance-logged (`gate-reset`);
+  freshness recorded at PreToolUse is RETRACTED on PostToolUse failure; the
+  verifier prompt fences untrusted material and parses verdicts by token; Layer E
+  uses the strict `policy.opt_in_satisfied` matcher.
 
-Measured on the live 744-note vault: search 268 ms → 18 ms; natural-language
-queries 0 hits → 10 ranked hits; `list-notes` payload ~90,800 → 3,136 tokens.
+### Things that will bite you (still true)
 
-### Things that will bite you
-
-- **`search()` refreshes the index on every call.** That's a `stat()` per note
-  (~5 ms of an ~18 ms query). Intentional — it keeps results correct when
-  another process wrote a note — but it is the throttling target in #176.
-- **Recency is a *leg*, not a sort key, and it may only re-rank what the content
-  legs matched.** An early version let it add notes, and every query returned the
-  whole vault newest-first — exactly the bug the index exists to kill. Guarded by
-  `test_recency_only_reorders_matches_it_never_adds_notes`.
-- **The index does *not* strip code fences from `[[wikilinks]]`; `lint.py` does.**
-  That asymmetry is why lint was left as the last independent full-vault scanner
-  (#174). Swapping it naively resurrects false broken-link errors.
-- **`link_targets()` preserves case.** Dangling-link reports quote links as the
-  author wrote them; only resolution lowercases. Lowercasing at ingest broke
-  three tests.
-- **Never mutate a `NoteSummary` from `_cached_summary`** — it is the shared
-  cached instance. Use `dataclasses.replace` (see `store._indexed_search`).
-- **`embed.encode` may return a plain list** in tests that fake the backend.
-  Coerce through `searchindex._query_vector`, never assume `.shape`.
-- **The `[embed]` extra reaches huggingface.co** on first use to check the model
-  revision (cached afterwards). It fails open when offline.
-
-### Dead end already walked
-
-Filtering query terms by **document frequency** (drop terms appearing in >N% of
-chunks, keep the rare ones) to clean up noisy results. It cannot work: on a real
-vault `handle` sits at 1.6% and `colorblind` at 0.32% — both "rare" in absolute
-terms, so no fixed ratio separates filler from signal, and a relative cutoff
-drops genuinely meaningful common words like `release` (12%). It was replaced by
-**graded matching** (all-words-match ranks above any-words-match), which is
-threshold-free and behaves the same on a 10-note vault and a 10,000-note one.
-Don't reintroduce the df filter; the real fix is reranking (#167).
-
-### Verifying retrieval changes
-
-```bash
-omind bench                                        # latency + token cost, real vault
-omind search "why did release signing fail" --explain   # per-leg ranks behind each hit
-omind reindex --rebuild                            # discard and rebuild the index
-OMI_INDEX_DISABLE=1 omind search "…"               # prove the fallback path still works
-```
-
-Always check both paths: with the index and with `OMI_INDEX_DISABLE=1`. A change
-that only works when the index is healthy has broken invariant #2.
+- Retrieval/enforcement fail OPEN — every new path must degrade, never raise into
+  the agent. `SearchIndex.search` now blanket-catches; keep it that way.
+- Recency only re-ranks matches (`test_recency_only_reorders_matches...`).
+- The index doesn't strip fences from `[[wikilinks]]`; lint.py does.
+- `link_targets()` preserves case.
+- Never mutate a cached `NoteSummary`; use `dataclasses.replace`.
+- `mesh purge` requires `--yes` (or a TTY confirm) — keep it gated.
+- `read-note` caps bodies (20k default / 65k hard) — keep it bounded (invariant 8).
 
 ### Where to pick up
 
-Twelve issues, [#167–#178](https://github.com/CryptoJones/omind/issues), mirrored
-in [BACKLOG.md](BACKLOG.md). Highest leverage first:
-
-1. **#168 — eval harness.** Do this *before* #167. Ranking is currently judged by
-   eye on one vault, so any weight/fusion/chunking change is unmeasurable.
-2. **#167 — rerank the fused top-k.** RRF gets rank 1 right but admits weak
-   matches at ranks 4–10. Local only; never an API call on the query path.
-3. **#176, #175** — cheap, contained perf/size wins.
-
-**One item needs the user's decision before any code:**
-
-- **#172** (`omind consolidate`) merges notes. Propose-and-review only — a wrong
-  merge destroys memory that exists nowhere else.
+The feature roadmap (agent identity/attribution, a usefulness feedback loop,
+sleep-time consolidation, write-time dedup, scoped writes) is Part 2 of the review
+report — none of it is started. `omind` is still not on PyPI (#267 needs the
+user's PyPI account/credentials).
 
 ---
 

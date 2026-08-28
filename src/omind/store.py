@@ -211,6 +211,15 @@ class NoteFields:
     #: nothing more. Absent (the default, and every note ever written) means
     #: unscoped, which stays visible to every query.
     scope: str = ""
+    #: Self-declared identity of the last writer ("Agent: hermes/pluto/dix"),
+    #: resolved by the caller (explicit arg > OMIND_AGENT env > empty). 2026-08-27
+    #: roundtable consensus: ADVISORY ONLY — observed, never consumed. It must
+    #: not feed ranking, access control, or any trust decision: identity is
+    #: self-declared in a single-operator fleet, so a spoofed name is one env
+    #: var away. Capped at 64 slug characters at the parse boundary. Merges
+    #: follow the body's Rev winner; on the equal-rev content tiebreak the
+    #: field is blanked rather than letting max() fabricate authorship.
+    agent: str = ""
     connections: list[str] = field(default_factory=list)
     action_items: list[ActionItem] = field(default_factory=list)
     references: list[str] = field(default_factory=list)
@@ -261,6 +270,7 @@ class NoteFields:
             confidence=_clean_confidence(data.get("confidence", "")),
             conflicts_with=str(data.get("conflicts_with", "")).strip(),
             scope=_clean_scope(data.get("scope", "")),
+            agent=_clean_agent(data.get("agent", "")),
             connections=[str(c).strip() for c in (data.get("connections") or []) if str(c).strip()],
             action_items=items,
             references=[str(r).strip() for r in (data.get("references") or []) if str(r).strip()],
@@ -301,6 +311,9 @@ class NoteSummary:
     #: listings as well as searches, because a caller filtering by scope needs to
     #: see what it filtered on. NOT a security boundary — see Note.scope.
     scope: str = ""
+    #: Self-declared last-writer identity (2026-08-27 roundtable: advisory only —
+    #: never consumed for ranking, access, or trust; see NoteFields.agent).
+    agent: str = ""
     #: Search-only: the score gap to the next result, and this entry's rough
     #: token cost. The ranker computed the margin and used to discard it, which
     #: left a caller unable to tell a clear winner from a coin flip between
@@ -330,6 +343,21 @@ def _clean_scope(value: object) -> str:
     note readable rather than unparseable.
     """
     return str(value).strip().lstrip("#").strip().lower()
+
+
+#: 2026-08-27 roundtable consensus: identity strings are slugs, capped at 64
+#: characters — long enough for "hermes@makemake" or a harness session slug,
+#: short enough that a hostile 4 KB "identity" cannot bloat every note it
+#: touches. Disallowed characters are dropped, never fatal (hand-edited
+#: Markdown and older peers must stay readable).
+_AGENT_MAX_LEN = 64
+_AGENT_KEEP_RE = re.compile(r"[^A-Za-z0-9._@:/-]+")
+
+
+def _clean_agent(value: object) -> str:
+    """Normalise a self-declared agent identity, or ``""``. Never raises."""
+    cleaned = _AGENT_KEEP_RE.sub("-", str(value).strip())
+    return cleaned[:_AGENT_MAX_LEN]
 
 
 def _clean_confidence(value: object) -> str:
@@ -548,6 +576,7 @@ def parse_note(md: str) -> NoteFields:
     confidence = ""
     conflicts_with = ""
     scope = ""
+    agent = ""
     rev = ""
     disabled = False
     tags: list[str] = []
@@ -564,6 +593,8 @@ def parse_note(md: str) -> NoteFields:
             superseded_by = m.group(1).strip()
         elif m := re.match(r"^\s*-\s*Scope:\s*(.*)$", line):
             scope = _clean_scope(m.group(1))
+        elif m := re.match(r"^\s*-\s*Agent:\s*(.*)$", line):
+            agent = _clean_agent(m.group(1))
         elif m := re.match(r"^\s*-\s*Confidence:\s*(.*)$", line):
             confidence = _clean_confidence(m.group(1))
         elif m := re.match(r"^\s*-\s*Conflicts with:\s*(.*)$", line):
@@ -620,6 +651,7 @@ def parse_note(md: str) -> NoteFields:
         confidence=confidence,
         conflicts_with=conflicts_with,
         scope=scope,
+        agent=agent,
         connections=[c.strip() for c in connections if c.strip()],
         action_items=action_items,
         references=references,
@@ -654,6 +686,8 @@ def render_fields(f: NoteFields) -> str:
     tag_str = " ".join(f"#{_clean_tag(t)}" for t in f.tags if _clean_tag(t))
     out.append(f"- Tags: {tag_str}".rstrip())
     out.append(f"- Related to: {f.related_to}".rstrip())
+    if f.agent:
+        out.append(f"- Agent: {f.agent}")
     if f.supersedes:
         out.append(f"- Supersedes: {f.supersedes}")
     if f.superseded_by:
@@ -890,7 +924,13 @@ class OmiStore:
         """
         self.omi_dir.mkdir(parents=True, exist_ok=True)
         lock_path = self.omi_dir / LOCK_FILENAME
-        fd = os.open(lock_path, os.O_WRONLY | os.O_CREAT, 0o644)
+        # O_NOFOLLOW: a symlink swapped in at the lock path must not redirect
+        # the flock (same discipline as the hardened append writers, #187) —
+        # otherwise two processes can hold different inodes and both "win".
+        flags = os.O_WRONLY | os.O_CREAT
+        if hasattr(os, "O_NOFOLLOW"):
+            flags |= os.O_NOFOLLOW
+        fd = os.open(lock_path, flags, 0o644)
         try:
             filelock.lock_fd(fd)
             yield
@@ -1057,6 +1097,7 @@ class OmiStore:
             summary=_collapse(fields.summary or fields.details, 200),
             disabled=fields.disabled,
             scope=fields.scope,
+            agent=fields.agent,
         )
 
     def list_notes(self, include_disabled: bool = False) -> list[NoteSummary]:
@@ -1383,6 +1424,8 @@ class OmiStore:
         self,
         fields: NoteFields,
         sources: list[tuple[str, str]],
+        *,
+        superseded_by: str | None = None,
     ) -> str:
         """Create one reviewed note and archive unchanged sources under one lock.
 
@@ -1390,6 +1433,11 @@ class OmiStore:
         the target's nonexistence are checked before the first write, closing
         the gap where another OmiStore writer could change the second source
         between a separate create and two archive calls.
+
+        ``superseded_by`` (the created note's filename) writes the #169
+        temporal-validity chain on the archived sources — without it, the
+        index keeps serving the archived originals as current knowledge after
+        a consolidation (2026-08-27 review).
 
         The writes run inside a journaled transaction (:mod:`omind.txn`), so an
         interrupted apply is rolled back by ``omind recover`` instead of leaving
@@ -1429,7 +1477,13 @@ class OmiStore:
             transaction = txn.Transaction(self.omi_dir)
             transaction.write(target, content)
             for path, _expected in source_paths:
-                archived = _with_disabled(_read_text(path), True)
+                archived_src = _read_text(path)
+                archived = _with_disabled(archived_src, True)
+                if superseded_by:
+                    source_fields = parse_note(archived_src)
+                    source_fields.disabled = True
+                    source_fields.superseded_by = superseded_by
+                    archived = render_fields(source_fields)
                 if self.node_id is not None:
                     archived = self._stamped(path, archived)
                 transaction.write(path, archived)

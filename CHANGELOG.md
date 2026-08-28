@@ -5,6 +5,44 @@ All notable changes to this project are documented here.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [Unreleased]
+
+### Fixed — from the 2026-08-27 multi-agent review (35 findings, all fixed;
+full report in `docs/reviews/2026-08-27-multi-agent-review.md`)
+
+- **Enforcement:** `git push origin +main` (force refspec) no longer bypasses the
+  public-main deny; `omind guard reset` is compliance-logged (`gate-reset`); a
+  git-freshness grant is retracted when the fetch's PostToolUse outcome failed;
+  the verifier prompt fences untrusted note material and parses verdicts by
+  token (not substring); the compliance detector's Layer E uses the strict
+  `policy.opt_in_satisfied` matcher; gate sentinels, re-close/off-topic
+  counters, and `loop_guard.json` are locked read-modify-write.
+- **Concurrency:** `omind txn prepare` fsyncs the transaction dir's parent;
+  every small-state RMW (node.json minting, backup.json, harness settings.json,
+  loop-guard, gate state) runs under a sibling-`.lock` flock
+  (`filelock.exclusive`); `upsert_note` pins the version before reading
+  existing fields (checkpoint retries, okf convert counts conflicts);
+  consolidate's propose no longer has a fields/versions TOCTOU window;
+  `.omi.lock` opens with `O_NOFOLLOW`.
+- **Mesh:** purge tombstones capture the purge-time Rev and keep+report a note
+  edited after the purge instead of destroying it; merge scalar
+  last-writer-wins losses are tagged `merge-lww` in the vault.
+- **Retrieval:** the index stores the encoder identity (name + embedding-space
+  digest) and wipes on change; refresh backfills chunks missing vectors; `search()`
+  runs under the index lock and blanket-fails open.
+- **Agent surface:** `read-note` caps bodies (20k default, 65k hard) with a
+  truncation marker; `edit-note` without a version token answers
+  `concurrency: "unverified"`; tool descriptions document `include_archived`
+  and supersession.
+- **Ops:** self-update pins the resolved commit SHA (tag fallback when
+  unresolvable) and gains `--rollback`; `mesh purge` requires `--yes` (TTY
+  confirm otherwise); `mesh add-peer` redacts credentials in echoed URLs;
+  transfer import skips `.obsidian/plugins/` and no longer leaks the absolute
+  vault path in JSON exports; the web app rejects cross-site `Origin` headers;
+  the ai-usage ledger rotates at 8 MiB; degraded unencrypted rsync backups
+  write a persistent vault warning note; journal rollup holds per-file flocks
+  across tally→rename so hook appends are never stranded.
+
 ## [8.8.0]
 
 ### Added

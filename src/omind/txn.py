@@ -252,6 +252,10 @@ class Transaction:
             return
         directory = self._dir()
         directory.mkdir(parents=True, exist_ok=True)
+        # Durability: fsync the PARENT too, so the new directory entry itself
+        # survives power loss. Without it the fsynced pre-images can outlive
+        # the journal that makes them recoverable (2026-08-27 review).
+        _fsync_dir(directory.parent)
         for index, entry in enumerate(self._entries):
             entry.new_sha = _sha(entry.content) if entry.content is not None else ""
             try:

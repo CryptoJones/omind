@@ -7,6 +7,37 @@ here so neither side drifts.
 
 ## Open
 
+### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
+
+_A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,
+fleet/ops, web/CLI, lifecycle) plus a 2025–26 SOTA survey. 35 code findings — all
+fixed, gates green (1,004 tests / ruff / mypy strict). Full report:
+[docs/reviews/2026-08-27-multi-agent-review.md](docs/reviews/2026-08-27-multi-agent-review.md).
+Issues [#272](https://github.com/CryptoJones/omind/issues/272)–[#284](https://github.com/CryptoJones/omind/issues/284)
+filed and linked below; they close when the fix branch merges._
+
+- [x] **Force-refspec push bypassed the public-main deny** ([#272](https://github.com/CryptoJones/omind/issues/272)) — `+main` stripped
+- [x] **`omind guard reset` was an unlogged, agent-reachable gate clear** ([#273](https://github.com/CryptoJones/omind/issues/273)) — logged
+- [x] **A failed git fetch still satisfied the freshness gate** ([#274](https://github.com/CryptoJones/omind/issues/274)) — retracted on PostToolUse
+- [x] **txn `prepare` didn't fsync the journal dir entry** ([#275](https://github.com/CryptoJones/omind/issues/275)) — parent fsynced
+- [x] **Self-update installed from a mutable tag with no rollback** ([#276](https://github.com/CryptoJones/omind/issues/276)) — SHA-pinned + `--rollback`
+- [x] **Vector spaces could silently mix; vector-less notes never backfilled** ([#277](https://github.com/CryptoJones/omind/issues/277)) — model identity + backfill
+- [x] **Tombstones destroyed edits that raced the purge** ([#278](https://github.com/CryptoJones/omind/issues/278)) — Rev capture + keep/report
+- [x] **Node-id minting / backup / settings merges were unlocked RMWs** ([#279](https://github.com/CryptoJones/omind/issues/279)) — `filelock.exclusive` everywhere
+- [x] **Gate sentinels, re-close/off-topic counters, loopguard lost increments** ([#280](https://github.com/CryptoJones/omind/issues/280)) — locked RMW
+- [x] **Consolidation bypassed the #169 Supersedes chain** ([#281](https://github.com/CryptoJones/omind/issues/281)) — wired in
+- [x] **`edit-note` was silent last-write-wins without a token; `read-note` unbounded** ([#282](https://github.com/CryptoJones/omind/issues/282)) — flagged / capped
+- [x] **Merge scalar LWW losses invisible; `mesh purge` ungated; verifier injectable** ([#283](https://github.com/CryptoJones/omind/issues/283)) — `merge-lww` tag / `--yes` / fenced
+- [x] **Web cross-site POST; ai-usage ledger unbounded; journal rollup stranded appends; okf/checkpoint lost-update** ([#284](https://github.com/CryptoJones/omind/issues/284)) — Origin check / rotation / flocks / version pinning
+
+_(Feature roadmap from the same review — agent identity, usefulness feedback
+loop, sleep-time consolidation, write-time dedup, scoped writes — is Part 2 of
+the report. Agent identity is SHIPPED on `feat/agent-identity`; the other four
+are design-ratified by the FlatlineRoundtable panel (zero REJECTs, majority
+rulings on every split) in
+[docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md)
+and await implementation.)_
+
 ### Windows fresh-install test (2026-08-15, first fully-cold install)
 
 - [x] **`setup --dry-run` warns about a missing claude CLI but the real run hard-fails** — fixed in 8.7.1: claude is a soft prerequisite, real run degrades like the dry-run promises ([#258](https://github.com/CryptoJones/omind/issues/258)) — either fail the dry-run too, or degrade the real run gracefully (do vault/seed work, skip only MCP registration)

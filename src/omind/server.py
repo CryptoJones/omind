@@ -29,10 +29,10 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.message import SessionMessage
 
-from omind import graph
+from omind import graph, searchindex
 from omind.help_system import render_help
 from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
-from omind.store import ActionItem, NoteFields, OmiStore, parse_note
+from omind.store import ActionItem, NoteFields, OmiStore, _clean_agent, parse_note
 
 SERVER_NAME = "omi"
 
@@ -43,6 +43,15 @@ restorable); nothing is removed from disk. Use the version token from
 read-note as expected_version when editing to detect concurrent writers."""
 
 logger = logging.getLogger(__name__)
+
+
+def _session_id() -> str:
+    """Best-effort session key for per-session usefulness dedupe (item #2).
+
+    ``$CLAUDE_SESSION_ID`` is the same handle the loop guard and journal already
+    key on; an empty value simply means reads cannot be deduped this run.
+    """
+    return os.environ.get("CLAUDE_SESSION_ID", "")
 
 
 @asynccontextmanager
@@ -217,20 +226,37 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             graph_cache["graph"] = graph.build_graph(store.omi_dir)
         return graph_cache["graph"]  # type: ignore[return-value]
 
+    read_note_default_chars = 20000
+    read_note_hard_cap = 65536
+
+    def _clamp_body(text: str, max_chars: int) -> str:
+        """Bound a note body so one huge note cannot become one unbounded
+        tool result (the read-note hole in invariant 8; 2026-08-27 review)."""
+        if len(text) <= max_chars:
+            return text
+        return text[:max_chars] + (
+            f"\n\n[truncated: showing {max_chars} of {len(text)} chars — "
+            f"raise max_chars (hard cap {read_note_hard_cap}) or use "
+            "recall-note with a section]"
+        )
+
     @mcp.tool(
         name="read-note",
         description=(
             "Read one note for EDITING, with a version token. representation: "
             "fields (default, parsed) or raw (Markdown). Prefer recall-note to "
-            "simply remember something."
+            "simply remember something. Bodies are capped (max_chars, default "
+            "20000) with an explicit truncation marker."
         ),
     )
-    def read_note(name: str, representation: str = "fields") -> dict[str, object]:
+    def read_note(
+        name: str, representation: str = "fields", max_chars: int = read_note_default_chars
+    ) -> dict[str, object]:
         raw = store.read_note(name)
         filename = store.safe_name(name).name
         from omind import access
 
-        access.record(store.omi_dir, filename)
+        access.record(store.omi_dir, filename, session=_session_id())
         # One read + one parse: read_fields would re-read the file just read.
         # ONE representation, never both: returning `raw` and `fields` together
         # sent every note body through the context twice, and the editing caller
@@ -239,10 +265,14 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "filename": filename,
             "version": store.note_version(name),
         }
+        cap = max(1, min(int(max_chars), read_note_hard_cap))
         if representation == "raw":
-            payload["raw"] = raw
+            payload["raw"] = _clamp_body(raw, cap)
         else:
-            payload["fields"] = parse_note(raw).to_dict()
+            fields = parse_note(raw).to_dict()
+            if isinstance(fields.get("details"), str):
+                fields["details"] = _clamp_body(fields["details"], cap)
+            payload["fields"] = fields
         return payload
 
     @mcp.tool(
@@ -258,7 +288,17 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         max_chars: int = DEFAULT_RECALL_CHARS,
         section: str = "",
     ) -> dict[str, object]:
-        return compact_recall(store.omi_dir, name, max_chars=max_chars, section=section)
+        return compact_recall(
+            store.omi_dir, name, max_chars=max_chars, section=section, session=_session_id()
+        )
+
+    def _resolve_agent(explicit: str | None) -> str:
+        """Self-declared caller identity: explicit arg > OMIND_AGENT env > "".
+
+        2026-08-27 roundtable consensus: ADVISORY ONLY — stored on the note and
+        echoed back, but never consumed for ranking, access, or trust (a spoofed
+        identity is one env var away in a single-operator fleet)."""
+        return _clean_agent(explicit or "") or os.environ.get("OMIND_AGENT", "")
 
     @mcp.tool(
         name="create-note",
@@ -267,7 +307,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "([[wikilink]] targets), references, action_items ('[x] text' = done). "
             "confidence: high|medium|low, omit if unknown. conflicts_with: a "
             "[[wikilink]] to a memory this one DISAGREES with (use supersedes "
-            "instead when this cleanly replaces the older fact)."
+            "instead when this cleanly replaces the older fact). agent: your "
+            "self-declared identity (advisory attribution only)."
         ),
     )
     def create_note(
@@ -283,7 +324,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
-    ) -> dict[str, str]:
+        agent: str = "",
+    ) -> dict[str, object]:
         fields = NoteFields(
             title=title,
             summary=summary,
@@ -294,19 +336,56 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             superseded_by=superseded_by,
             confidence=confidence,
             conflicts_with=conflicts_with,
+            agent=_resolve_agent(agent),
             connections=connections or [],
             action_items=_parse_action_items(action_items or []),
             references=references or [],
         )
         filename = store.create_note(fields)
-        return {"filename": filename}
+        result: dict[str, object] = {"filename": filename, "agent": fields.agent}
+        # Write-time near-duplicate warning (2026-08-27 roundtable: ADOPT —
+        # advisory, fail-open, never blocks the write; hint field DROPPED for
+        # v1 because cosine cannot distinguish "replaces" from "disagrees";
+        # archived and already-superseded notes excluded). Threshold 0.88 is a
+        # placeholder pending `lint --calibrate-dup`.
+        near: list[dict[str, object]] = []
+        with contextlib.suppress(Exception):
+            ix = searchindex.shared(store.omi_dir)
+            if ix is not None:
+                probe = "\n".join(part for part in (title, summary) if part)
+                for name, similarity in (
+                    ix.nearest(probe, exclude=filename, limit=3) or []
+                ):
+                    if float(similarity) < 0.88:
+                        continue
+                    fields_of = store.read_fields(name)
+                    if fields_of.disabled or fields_of.superseded_by:
+                        continue
+                    near.append(
+                        {
+                            "filename": name,
+                            "similarity": round(float(similarity), 4),
+                            "title": fields_of.title,
+                        }
+                    )
+        if near:
+            result["near_duplicates"] = near
+            result["near_duplicates_note"] = (
+                "Advisory only — the write succeeded. If this note cleanly "
+                "replaces an existing one, set supersedes; if they disagree, "
+                "set conflicts_with; if it is redundant, archive it."
+            )
+        return result
 
     @mcp.tool(
         name="edit-note",
         description=(
             "Update fields of an existing note; omitted fields keep their current "
             "value. Pass expected_version from recall-note/read-note to fail loudly (instead "
-            "of overwriting) when another writer changed the note in between."
+            "of overwriting) when another writer changed the note in between — without "
+            "it the response is flagged concurrency=unverified. When a note makes a "
+            "memory obsolete, set supersedes (or the target's superseded_by) rather "
+            "than silently rewriting history."
         ),
     )
     def edit_note(
@@ -323,6 +402,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         connections: list[str] | None = None,
         action_items: list[str] | None = None,
         references: list[str] | None = None,
+        agent: str | None = None,
         expected_version: str | None = None,
     ) -> dict[str, str]:
         fields = store.read_fields(name)
@@ -350,15 +430,27 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             fields.action_items = _parse_action_items(action_items)
         if references is not None:
             fields.references = references
+        if agent is not None:
+            # Omitted keeps the current writer; an explicit value re-attributes
+            # (e.g. a takeover). Resolution: arg > OMIND_AGENT env.
+            fields.agent = _resolve_agent(agent)
         filename = store.update_note(name, fields, expected_version=expected_version)
-        return {"filename": filename, "version": store.note_version(name)}
+        result: dict[str, str] = {"filename": filename, "version": store.note_version(name)}
+        if expected_version is None:
+            # Make the silent-last-write-wins case visible to the caller
+            # (2026-08-27 review): without the token the write was not checked
+            # against concurrent writers.
+            result["concurrency"] = "unverified"
+        return result
 
     @mcp.tool(
         name="search-vault",
         description=(
             "Relevance-ranked memory search (keyword + semantic + recency) over "
             "titles, summaries, details, and tags; each hit carries a matched "
-            "excerpt. Empty query + tag lists that tag. Optional limit/offset."
+            "excerpt. Empty query + tag lists that tag. include_archived adds "
+            "soft-deleted (archived) notes — without it a second agent's delete "
+            "hides its target from your results. Optional limit/offset."
         ),
     )
     def search_vault(
@@ -386,6 +478,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         name="list-notes",
         description=(
             "One page of memory notes, newest first (limit default 25, max 100). "
+            "include_archived adds soft-deleted (archived) notes. "
             "To FIND a note use search-vault; listing is for browsing."
         ),
     )

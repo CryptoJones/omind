@@ -37,11 +37,12 @@ from __future__ import annotations
 import contextlib
 import json
 import os
+from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any
 
-from omind import paths
+from omind import filelock, paths
 
 DEFAULT_MAX_BLOCKS = 25
 DEFAULT_HOURS = 24.0
@@ -82,9 +83,30 @@ def _save(state: dict[str, Any]) -> None:
     try:
         p = _path()
         p.parent.mkdir(parents=True, exist_ok=True)
-        tmp = p.with_suffix(".json.tmp")
+        # Unique tmp name: a fixed ".tmp" is shared by concurrent hook processes
+        # and two writers would corrupt each other's payload (2026-08-27 review).
+        tmp = p.with_suffix(f".json.{os.getpid()}.tmp")
         tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
         os.replace(tmp, p)
+    except OSError:
+        pass
+
+
+def _mutate(mutate: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:
+    """Locked read-modify-write of the loop-guard state file.
+
+    Stop-hook and PostToolUse hook processes from concurrent sessions fire in
+    parallel; an unlocked load→save pair loses increments (delays the backstop)
+    and reset signals (premature auto-disarm) (2026-08-27 review). The flock
+    lives on a sibling ``.lock`` file — the state file itself is replaced
+    atomically, so a lock on the data inode would protect nothing."""
+    p = _path()
+    try:
+        p.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(p.with_suffix(".json.lock")):
+            result = mutate(_load())
+            if result is not None:
+                _save(result)
     except OSError:
         pass
 
@@ -150,15 +172,18 @@ def reset(session: object | None = None) -> None:
     (``PostToolUse``), so relentless work never trips the no-work backstop. Only
     the OWNER session's work resets the counter; a concurrent session's work must
     not, or it would keep the backstop from ever firing for a wedged owner."""
-    state = _load()
-    if not state.get("armed") or not state.get("blocks"):
-        return
-    owner = state.get("owner")
-    sess = _clean_session(session)
-    if owner is not None and sess is not None and sess != owner:
-        return
-    state["blocks"] = 0
-    _save(state)
+
+    def _apply(state: dict[str, Any]) -> dict[str, Any] | None:
+        if not state.get("armed") or not state.get("blocks"):
+            return None
+        owner = state.get("owner")
+        sess = _clean_session(session)
+        if owner is not None and sess is not None and sess != owner:
+            return None
+        state["blocks"] = 0
+        return state
+
+    _mutate(_apply)
 
 
 def register_block(session: object | None = None, now: datetime | None = None) -> tuple[bool, str]:
@@ -170,29 +195,39 @@ def register_block(session: object | None = None, now: datetime | None = None) -
     """
     if not is_armed(now):
         return (False, "")
-    state = _load()
-    sess = _clean_session(session)
-    owner = state.get("owner")
-    if sess is not None:
-        if owner is None:
-            # First session to hit a Stop under a global arm claims the loop.
-            owner = sess
-            state["owner"] = sess
-        elif sess != owner:
-            # A different, concurrent session — never trap it.
-            return (False, "")
-    blocks = int(state.get("blocks", 0)) + 1
-    max_blocks = int(state.get("max_blocks", DEFAULT_MAX_BLOCKS))
-    if blocks > max_blocks:
-        disarm()
-        return (
-            False,
-            f"loop guard: {blocks - 1} consecutive stops with no work — auto-disarmed (backstop).",
-        )
-    state["blocks"] = blocks
-    _save(state)
-    extra = f" (reason: {state['reason']})" if state.get("reason") else ""
-    return (True, DIRECTIVE + extra)
+    verdict: list[tuple[bool, str]] = []
+
+    def _apply(state: dict[str, Any]) -> dict[str, Any] | None:
+        sess = _clean_session(session)
+        owner = state.get("owner")
+        if sess is not None:
+            if owner is None:
+                # First session to hit a Stop under a global arm claims the loop.
+                state["owner"] = sess
+            elif sess != owner:
+                # A different, concurrent session — never trap it.
+                verdict.append((False, ""))
+                return None
+        blocks = int(state.get("blocks", 0)) + 1
+        max_blocks = int(state.get("max_blocks", DEFAULT_MAX_BLOCKS))
+        if blocks > max_blocks:
+            disarm()
+            verdict.append(
+                (
+                    False,
+                    f"loop guard: {blocks - 1} consecutive stops with no work — "
+                    "auto-disarmed (backstop).",
+                )
+            )
+            return None
+        state["blocks"] = blocks
+        _save(state)
+        extra = f" (reason: {state['reason']})" if state.get("reason") else ""
+        verdict.append((True, DIRECTIVE + extra))
+        return state
+
+    _mutate(_apply)
+    return verdict[0] if verdict else (False, "")
 
 
 def status(now: datetime | None = None) -> dict[str, Any]:
