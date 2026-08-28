@@ -29,7 +29,7 @@ from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStre
 from mcp.server.mcpserver import MCPServer
 from mcp.shared.message import SessionMessage
 
-from omind import graph
+from omind import graph, searchindex
 from omind.help_system import render_help
 from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
 from omind.store import ActionItem, NoteFields, OmiStore, _clean_agent, parse_note
@@ -314,7 +314,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         action_items: list[str] | None = None,
         references: list[str] | None = None,
         agent: str = "",
-    ) -> dict[str, str]:
+    ) -> dict[str, object]:
         fields = NoteFields(
             title=title,
             summary=summary,
@@ -331,7 +331,40 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             references=references or [],
         )
         filename = store.create_note(fields)
-        return {"filename": filename, "agent": fields.agent}
+        result: dict[str, object] = {"filename": filename, "agent": fields.agent}
+        # Write-time near-duplicate warning (2026-08-27 roundtable: ADOPT —
+        # advisory, fail-open, never blocks the write; hint field DROPPED for
+        # v1 because cosine cannot distinguish "replaces" from "disagrees";
+        # archived and already-superseded notes excluded). Threshold 0.88 is a
+        # placeholder pending `lint --calibrate-dup`.
+        near: list[dict[str, object]] = []
+        with contextlib.suppress(Exception):
+            ix = searchindex.shared(store.omi_dir)
+            if ix is not None:
+                probe = "\n".join(part for part in (title, summary) if part)
+                for name, similarity in (
+                    ix.nearest(probe, exclude=filename, limit=3) or []
+                ):
+                    if float(similarity) < 0.88:
+                        continue
+                    fields_of = store.read_fields(name)
+                    if fields_of.disabled or fields_of.superseded_by:
+                        continue
+                    near.append(
+                        {
+                            "filename": name,
+                            "similarity": round(float(similarity), 4),
+                            "title": fields_of.title,
+                        }
+                    )
+        if near:
+            result["near_duplicates"] = near
+            result["near_duplicates_note"] = (
+                "Advisory only — the write succeeded. If this note cleanly "
+                "replaces an existing one, set supersedes; if they disagree, "
+                "set conflicts_with; if it is redundant, archive it."
+            )
+        return result
 
     @mcp.tool(
         name="edit-note",

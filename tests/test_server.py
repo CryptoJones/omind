@@ -22,6 +22,7 @@ import pytest
 from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 
+from omind import server as server_module
 from omind.paths import sync_signal_path
 from omind.server import build_server
 
@@ -118,6 +119,47 @@ def test_edit_note_with_version_is_verified(server: MCPServer) -> None:
         server, "edit-note", {"name": "Verified.md", "summary": "v2", "expected_version": version}
     )
     assert "concurrency" not in edited  # the token was honored
+
+
+def test_create_note_warns_on_near_duplicate(
+    server: MCPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Roundtable-ratified: advisory near-duplicate warnings at write time —
+    fail-open, never blocking, no supersedes/conflicts hint (cosine cannot
+    distinguish replace from disagree), sub-threshold and superseded
+    candidates filtered."""
+    call(server, "create-note", {"title": "Original", "summary": "the one true fact"})
+    monkeypatch.setattr(
+        server_module.searchindex,
+        "shared",
+        lambda omi_dir: type(
+            "_Ix",
+            (),
+            {
+                "nearest": lambda self, text, exclude=None, limit=3: [
+                    ("Original.md", 0.93),  # above threshold
+                    ("Unrelated.md", 0.40),  # below threshold — filtered
+                ]
+            },
+        )(),
+    )
+    got = call(server, "create-note", {"title": "Original Again", "summary": "the one true fact"})
+    assert got["filename"] == "Original Again.md"  # the write ALWAYS succeeds
+    assert [d["filename"] for d in got["near_duplicates"]] == ["Original.md"]
+    assert "supersedes" in got["near_duplicates_note"]
+
+
+def test_create_note_survives_a_broken_dedup_probe(
+    server: MCPServer, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr(
+        server_module.searchindex,
+        "shared",
+        lambda omi_dir: (_ for _ in ()).throw(RuntimeError("index exploded")),
+    )
+    got = call(server, "create-note", {"title": "Doomed Probe", "summary": "s"})
+    assert got["filename"] == "Doomed Probe.md"  # fail-open: no warning, write fine
+    assert "near_duplicates" not in got
 
 
 def test_read_note_body_is_bounded(server: MCPServer) -> None:
