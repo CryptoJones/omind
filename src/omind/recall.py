@@ -65,14 +65,22 @@ def compact_recall(
     *,
     max_chars: int = DEFAULT_RECALL_CHARS,
     section: str = "",
+    organic: bool = True,
+    session: str = "",
 ) -> dict[str, Any]:
-    """Read one note without returning raw/parsed duplicate representations."""
+    """Read one note without returning raw/parsed duplicate representations.
+
+    ``organic`` is the usefulness-signal gate (item #2): an agent explicitly
+    recalling a note counts, but a guard/hook/turn-preflight force-recall does
+    not — its position basis is not evidence the note was useful. ``session``
+    dedupes a burst of re-reads to one signal.
+    """
     store = OmiStore(omi_dir)
     raw = store.read_note(name)
     filename = store.safe_name(name).name
     from omind import access
 
-    access.record(store.omi_dir, filename)
+    access.record(store.omi_dir, filename, organic=organic, session=session)
     fields = parse_note(raw)
     selected = _section(raw, section) if section else ""
     content = selected or _memory_text(fields)

@@ -1368,7 +1368,7 @@ def _governing_excerpt(omi_dir: Path | str, note: str) -> str:
     try:
         from omind import recall
 
-        memory = recall.compact_recall(omi_dir, note, max_chars=1_200)
+        memory = recall.compact_recall(omi_dir, note, max_chars=1_200, organic=False)
         summary = str(memory.get("summary") or "").strip()
         content = str(memory.get("content") or "").strip()
         text = "\n\n".join(part for part in (summary, content) if part)
@@ -1562,7 +1562,9 @@ def _second_title_line(omi_dir: Path | str, titles: list[str], first: str) -> st
         filename = recall.filename_for_title(omi_dir, titles[1])
         if filename is None or filename == first:
             return ""
-        memory = recall.compact_recall(omi_dir, filename, max_chars=recall.MIN_RECALL_CHARS)
+        memory = recall.compact_recall(
+            omi_dir, filename, max_chars=recall.MIN_RECALL_CHARS, organic=False
+        )
         title = str(memory.get("title") or Path(filename).stem)
         summary = str(memory.get("summary") or "").strip()
         line = f"\n\nAlso possibly relevant: [[{title}]]"
@@ -1624,6 +1626,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
         omi_dir,
         filename,
         max_chars=ai_usage.policy(omi_dir).preflight_chars,
+        organic=False,
     )
     # #257: the ranking surfaces the best candidate even when "best" is a single
     # shared word (a bare "retry" turn pulling an unrelated note). Require a

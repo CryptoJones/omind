@@ -56,7 +56,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
 
-from omind import paths
+from omind import access, paths
 
 #: Bumped whenever the schema below changes shape; a mismatch rebuilds from scratch.
 SCHEMA_VERSION = 6
@@ -176,6 +176,16 @@ class Hit:
     #: and act on, and a real tokenizer would add a dependency for accuracy
     #: nobody needs when deciding whether to fetch a fourth chunk.
     tokens: int = 0
+    #: Usefulness demotion actually applied to this hit's score (item #2):
+    #: ``1.0`` means untouched, below it means an organically-read note that has
+    #: since gone stale was nudged down. Surfaced by ``search --explain``.
+    usefulness_weight: float = 1.0
+    #: Organic, per-session-deduped reads behind the usefulness weight (the
+    #: *counted* signal), and the reads it *filtered* out (non-organic or a
+    #: same-session re-read). Both shown by ``--explain`` so the weight is
+    #: never magic.
+    useful_reads: int = 0
+    filtered_reads: int = 0
 
 
 @dataclass
@@ -987,6 +997,8 @@ class SearchIndex:
             fused = self._weight_generated(db, fused)
             fused = self._weight_superseded(db, fused)
             fused = self._weight_confidence(db, fused)
+            useful = self._usefulness_map(db, fused)
+            fused = self._weight_usefulness(fused, useful, self._weighting(db).owners)
             if not fused:
                 return []
             ranks = {
@@ -994,7 +1006,7 @@ class SearchIndex:
                 "vector": {cid: i + 1 for i, cid in enumerate(vector)},
             }
             return self._materialize(
-                db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars
+                db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars, useful
             )
         except Exception:  # noqa: BLE001 — invariant 2: degrade to the fallback, never raise
             return None
@@ -1310,6 +1322,41 @@ class SearchIndex:
         ]
         return sorted(weighted, key=lambda item: (-item[1], item[0]))
 
+    def _usefulness_map(
+        self, db: sqlite3.Connection, fused: list[tuple[int, float]]
+    ) -> dict[str, access.Usefulness]:
+        """Usefulness signal for exactly the notes already fused (item #2).
+
+        Restricted to matched filenames so the leg can only *reorder* the hits
+        the content legs produced — it never reaches a note nothing matched
+        (the reorder-never-add contract the recency leg established, which
+        ``test_recency_only_reorders...`` guards and this extends)."""
+        owners = self._weighting(db).owners
+        matched = {owners[cid] for cid, _ in fused if cid in owners}
+        if not matched:
+            return {}
+        return access.usefulness_weights(self.omi_dir, matched)
+
+    def _weight_usefulness(
+        self,
+        fused: list[tuple[int, float]],
+        useful: dict[str, access.Usefulness],
+        owners: dict[int, str],
+    ) -> list[tuple[int, float]]:
+        """Decay-only demotion of organically-read notes that have gone stale.
+
+        No boost: every weight is ``<= 1.0``, so a frequently-read note is never
+        pushed up — a long-unread one is nudged down, floored (2026-08-27
+        roundtable, item #2)."""
+        if not useful:
+            return fused
+        weighted: list[tuple[int, float]] = []
+        for chunk_id, score in fused:
+            entry = useful.get(owners.get(chunk_id, ""))
+            factor = entry.weight if entry is not None else 1.0
+            weighted.append((chunk_id, score * factor if factor < 1.0 else score))
+        return sorted(weighted, key=lambda item: (-item[1], item[0]))
+
     def _listing(
         self, db: sqlite3.Connection, allowed: set[str] | None, limit: int
     ) -> list[Hit]:
@@ -1336,9 +1383,12 @@ class SearchIndex:
         ranks: dict[str, dict[int, int]],
         limit: int,
         excerpt_chars: int,
+        useful: dict[str, access.Usefulness] | None = None,
     ) -> list[Hit]:
         """Best chunk per note, credential-penalised, with a bounded excerpt."""
         from omind import retrieve
+
+        useful = useful or {}
 
         task_is_cred = bool(retrieve._tokens(query) & retrieve._CREDENTIAL_STEMS)
         weights = self._weighting(db)
@@ -1362,6 +1412,7 @@ class SearchIndex:
                 str(row["title"]), str(row["tags"] or "")
             ):
                 score *= retrieve._CREDENTIAL_PENALTY
+            use = useful.get(name)
             hits.append(
                 Hit(
                     filename=name,
@@ -1375,6 +1426,9 @@ class SearchIndex:
                     agent=str(row["agent"] or ""),
                     keyword_rank=ranks["keyword"].get(chunk_id, 0),
                     vector_rank=ranks["vector"].get(chunk_id, 0),
+                    usefulness_weight=use.weight if use is not None else 1.0,
+                    useful_reads=use.useful_reads if use is not None else 0,
+                    filtered_reads=use.filtered_reads if use is not None else 0,
                 )
             )
         # The credential penalty is applied after fusion, so re-sort before cutting.

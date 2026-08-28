@@ -11,12 +11,13 @@ Real embedding quality is covered by test_embed.py.
 from __future__ import annotations
 
 import sqlite3
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
 
-from omind import embed, searchindex
+from omind import access, embed, searchindex
 
 #: A tiny fixed-vocabulary "embedding": a normalised bag-of-words over these terms.
 _VOCAB = ["release", "push", "forge", "version", "smoothie", "banana", "auth", "token"]
@@ -200,6 +201,28 @@ def test_recency_only_reorders_matches_it_never_adds_notes(omi: Path) -> None:
     _note(omi, "Target", "the specific thing", ["t"], created="2019-01-01")
     idx = searchindex.SearchIndex(omi)
     assert [h.filename for h in idx.search("specific") or []] == ["Target.md"]
+
+
+def test_usefulness_leg_demotes_a_stale_read_but_never_drops_it(omi: Path) -> None:
+    _note(omi, "Target", "the specific thing", ["t"])
+    idx = searchindex.SearchIndex(omi)
+    # Organically read two months ago: past the onset, so decayed — but a
+    # decay-only leg reorders, it never removes (the recency-leg contract).
+    access.record(omi, "Target.md", session="s", now=time.time() - 60 * 86_400)
+    hits = idx.search("specific") or []
+    assert [h.filename for h in hits] == ["Target.md"]  # still present
+    assert 0.7 < hits[0].usefulness_weight < 1.0
+    assert hits[0].useful_reads == 1
+    assert hits[0].filtered_reads == 0
+
+
+def test_usefulness_fields_are_neutral_for_an_unread_note(omi: Path) -> None:
+    _note(omi, "Target", "the specific thing", ["t"])
+    idx = searchindex.SearchIndex(omi)
+    hit = (idx.search("specific") or [])[0]
+    assert hit.usefulness_weight == 1.0
+    assert hit.useful_reads == 0
+    assert hit.filtered_reads == 0
 
 
 def test_stemmed_query_matches_inflected_text(omi: Path) -> None:

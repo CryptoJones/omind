@@ -45,6 +45,15 @@ read-note as expected_version when editing to detect concurrent writers."""
 logger = logging.getLogger(__name__)
 
 
+def _session_id() -> str:
+    """Best-effort session key for per-session usefulness dedupe (item #2).
+
+    ``$CLAUDE_SESSION_ID`` is the same handle the loop guard and journal already
+    key on; an empty value simply means reads cannot be deduped this run.
+    """
+    return os.environ.get("CLAUDE_SESSION_ID", "")
+
+
 @asynccontextmanager
 async def _fd_stdio_server() -> AsyncIterator[
     tuple[
@@ -247,7 +256,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         filename = store.safe_name(name).name
         from omind import access
 
-        access.record(store.omi_dir, filename)
+        access.record(store.omi_dir, filename, session=_session_id())
         # One read + one parse: read_fields would re-read the file just read.
         # ONE representation, never both: returning `raw` and `fields` together
         # sent every note body through the context twice, and the editing caller
@@ -279,7 +288,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         max_chars: int = DEFAULT_RECALL_CHARS,
         section: str = "",
     ) -> dict[str, object]:
-        return compact_recall(store.omi_dir, name, max_chars=max_chars, section=section)
+        return compact_recall(
+            store.omi_dir, name, max_chars=max_chars, section=section, session=_session_id()
+        )
 
     def _resolve_agent(explicit: str | None) -> str:
         """Self-declared caller identity: explicit arg > OMIND_AGENT env > "".

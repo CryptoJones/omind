@@ -1184,7 +1184,10 @@ def _run_search_explain(omi_dir: Path, args: argparse.Namespace) -> int:
         print("search index could not answer (locked or corrupt) — falling back to a scan")
         return 0
     semantic = "on" if embed.available() else "off (install the [embed] extra)"
-    print(f"query: {args.query!r}  legs: keyword=on semantic={semantic} recency=on")
+    print(
+        f"query: {args.query!r}  legs: keyword=on semantic={semantic} "
+        "recency=on usefulness=on"
+    )
     if not hits:
         print("no matches")
         return 0
@@ -1194,6 +1197,14 @@ def _run_search_explain(omi_dir: Path, args: argparse.Namespace) -> int:
             f"{rank}. {hit.filename}{where}  score={hit.score:.5f} "
             f"keyword={hit.keyword_rank or '-'} semantic={hit.vector_rank or '-'}"
         )
+        # Usefulness (item #2): always show the reads behind the weight — both
+        # the counted (organic) and filtered (hook/re-read) tallies — so a
+        # demotion is diagnosable and a 1.0 weight is visibly a no-op.
+        if hit.usefulness_weight < 1.0 or hit.useful_reads or hit.filtered_reads:
+            print(
+                f"     usefulness={hit.usefulness_weight:.3f} "
+                f"reads: counted={hit.useful_reads} filtered={hit.filtered_reads}"
+            )
         if hit.excerpt:
             print(f"     {hit.excerpt}")
     return 0
