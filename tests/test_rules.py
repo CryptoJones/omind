@@ -221,3 +221,55 @@ def test_export_rules_emits_markdown_for_an_always_loaded_file(tmp_path: Path) -
     assert "**NEVER `*git push*`**" in text
     assert "public repos" in text and "on main/master" in text
     assert "Go Big Red" in text  # docs carry the signature line
+
+
+def test_no_github_remote_is_private_not_a_failure(tmp_path: Path, monkeypatch) -> None:
+    """A repo with no GitHub remote (the OMI mesh vault pushes only to pluto/seed)
+    is classified ``private`` and records NO hook failure: ``gh`` cannot classify a
+    non-GitHub repo and that is expected, not an error (fixes the omind-doctor
+    ``rules_visibility: gh visibility lookup failed`` breadcrumb)."""
+    repo = tmp_path / "local-repo"
+    repo.mkdir()
+
+    def fake_run(argv, *a, **k):  # type: ignore[no-untyped-def]
+        if argv and argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 1, "", "no known GitHub host")
+        if argv[:1] == ["git"] and "remote" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, "seed\tssh://akclark@pluto.local/home/akclark/omi-mesh.git (fetch)\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(rules.subprocess, "run", fake_run)
+    breadcrumbs: list = []
+    monkeypatch.setattr(rules, "_breadcrumb", lambda *a, **k: breadcrumbs.append(a))
+    monkeypatch.setattr(rules, "_visibility_cache_path", lambda: tmp_path / "vis.json")
+
+    assert rules._repo_visibility(repo) == "private"
+    assert breadcrumbs == []  # not logged as a failure
+
+
+def test_github_remote_but_gh_fails_is_unknown_and_breadcrumbed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A repo that DOES have a GitHub remote but whose ``gh`` lookup fails is a real
+    failure: UNKNOWN + breadcrumb (unchanged fail-open behaviour)."""
+    repo = tmp_path / "gh-repo"
+    repo.mkdir()
+
+    def fake_run(argv, *a, **k):  # type: ignore[no-untyped-def]
+        if argv and argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 1, "", "auth error")
+        if argv[:1] == ["git"] and "remote" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, "origin\thttps://github.com/o/r.git (fetch)\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(rules.subprocess, "run", fake_run)
+    breadcrumbs: list = []
+    monkeypatch.setattr(rules, "_breadcrumb", lambda *a, **k: breadcrumbs.append(a))
+    monkeypatch.setattr(rules, "_visibility_cache_path", lambda: tmp_path / "vis.json")
+
+    assert rules._repo_visibility(repo) == rules._VISIBILITY_UNKNOWN
+    assert len(breadcrumbs) == 1
