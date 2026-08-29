@@ -206,6 +206,25 @@ def _visibility_cache_path() -> Path:
     return paths.state_dir() / "repo-visibility.json"
 
 
+def _has_github_remote(repo: Path) -> bool:
+    """True if ``repo`` has any git remote pointing at github.com.
+
+    Used to tell a genuine ``gh`` failure apart from a repo that is simply not on
+    GitHub (a local or mesh-only repo, e.g. the OMI vault that pushes to pluto/seed
+    over SSH). The latter must not be logged as a failure — it is expected.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "remote", "-v"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return proc.returncode == 0 and "github.com" in proc.stdout.lower()
+
+
 def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
     """``public`` / ``private`` / ``unknown`` for ``repo``, via ``gh``, cached
     on disk for a day. UNKNOWN on any failure — visibility-conditioned rules
@@ -234,8 +253,17 @@ def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
     except (OSError, subprocess.SubprocessError):
         visibility = ""
     if visibility not in ("public", "private", "internal"):
-        _breadcrumb(f"rules_visibility({repo})", "gh visibility lookup failed")
-        return _VISIBILITY_UNKNOWN
+        if not _has_github_remote(repo):
+            # No GitHub remote at all (e.g. the OMI mesh vault): ``gh`` cannot
+            # classify it and that is expected, not a failure. Such a repo is by
+            # definition not public, so treat it as private — visibility-conditioned
+            # public-repo rules then correctly do not fire — and cache it WITHOUT a
+            # breadcrumb. Only a repo that HAS a GitHub remote yet fails lookup is a
+            # real error worth recording.
+            visibility = "private"
+        else:
+            _breadcrumb(f"rules_visibility({repo})", "gh visibility lookup failed")
+            return _VISIBILITY_UNKNOWN
     cache[str(repo)] = {"visibility": visibility, "ts": now.isoformat(timespec="seconds")}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
