@@ -7,6 +7,15 @@ here so neither side drifts.
 
 ## Open
 
+### Guard — authorization classification
+
+- [ ] **Mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) —
+  the guard reads only a turn's OPENING message, so an explicit mid-turn imperative
+  ("Fix it all please") cannot lift a block armed by an opening capability question
+  ("Can you ...?"). `guard explain` returns ALLOW for the same command, and
+  `guard pause` does not help because the rule is a hard block. The agent is forced to
+  ask the user to re-issue an instruction they already gave.
+
 ### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
 
 _A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,
