@@ -7,6 +7,10 @@ here so neither side drifts.
 
 ## Open
 
+### Bugs
+
+- [ ] **`edit-note` silently guts a note when `details` contains a `## ` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug_ — content after the first `## ` is reclassified as an "extra" section and re-emitted after `## References`, leaving `## Details` empty; a second edit leaves the stale copy AND the new one in the file. Hit for real on 2026-08-31 through the MCP tool — a project note ended up with two contradictory bodies, including just-corrected guidance still reading as current, with a success return and a fresh version token both times. `###` is unaffected (`_H2_RE` requires whitespace after `##`).
+
 ### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
 
 _A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,
