@@ -89,7 +89,7 @@ these three and leaves the rest of the file alone:
         "hooks": [
           {
             "type": "command",
-            "command": "omind hook PostToolUse --vault \"$HOME/Documents/Obsidian Vault\" --folder \"OMI\""
+            "command": "omind hook PostToolUse --vault \"$HOME/Documents/Obsidian Vault\" --folder \"OMI\" --harness claude"
           }
         ]
       }
