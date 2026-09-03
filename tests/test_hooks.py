@@ -790,3 +790,56 @@ def test_session_start_no_banner_below_threshold(tmp_path: Path) -> None:
     _write_failure_log([f"{stamp} append_entry(/v/OMI): PermissionError(1, 'op')"])
     ctx = hooks.build_session_start_context(tmp_path)
     assert "MEMORY WRITES ARE FAILING" not in ctx
+
+
+def test_post_tool_use_injects_midturn_recall_only_for_an_injecting_harness(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#296: the mid-turn recall rides Claude's PostToolUse ``additionalContext``;
+    a harness that cannot inject after a tool call gets nothing here (its core
+    re-arm demand at PreToolUse carries the same memory instead)."""
+    from omind import guard
+    from omind.store import NoteFields
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="telesto deploy runbook",
+            summary="How to deploy the telesto services safely.",
+            details="Stop the telesto services before a deploy, then restart them.",
+        )
+    )
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "1")
+    sid = "hook-midturn"
+    guard.begin_turn(sid, "restart the telesto services after the deploy")
+    guard.mark_consulted(sid)
+    guard.count_action(sid, "systemctl restart telesto")
+    event = {
+        "hook_event_name": "PostToolUse",
+        "session_id": sid,
+        "tool_name": "Bash",
+        "tool_input": {"command": "systemctl restart telesto"},
+    }
+    silent = io.StringIO()
+    assert (
+        hooks.run_hook("PostToolUse", omi, stdin=io.StringIO(json.dumps(event)), stdout=silent)
+        == 0
+    )
+    assert silent.getvalue() == ""  # unknown harness: never a phantom injection
+    assert guard.actions_since_consult(sid) == 1
+
+    out = io.StringIO()
+    rc = hooks.run_hook(
+        "PostToolUse",
+        omi,
+        stdin=io.StringIO(json.dumps(event)),
+        stdout=out,
+        harness="claude",
+    )
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    specific = payload["hookSpecificOutput"]
+    assert specific["hookEventName"] == "PostToolUse"
+    assert "[[telesto deploy runbook]]" in specific["additionalContext"]
+    assert guard.actions_since_consult(sid) == 0

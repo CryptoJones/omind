@@ -71,6 +71,35 @@ MISS_STRICT_ENV = "OMI_GATE_MISS_STRICT"
 #: Synthetic rule id for a preflight miss that auto-cleared the gate.
 GATE_NO_MATCH_RULE = "omi-gate-no-match"
 GATE_WEAK_MATCH_RULE = "omi-gate-weak-match"
+#: Consult continuity across a long session (#296). The per-turn gate keyed off
+#: the user prompt alone, and in a long session most prompts are continuations
+#: ("retry", "go ahead", a task notification) that carry no signal — so the
+#: preflight auto-cleared and the turn ran dozens of actions with no memory
+#: contact. Two controls close that: a continuation prompt is retrieved against
+#: the PRIOR task plus the agent's recent activity, and every allowed action
+#: counts against a per-turn budget after which the core re-checks whether an
+#: unseen relevant memory exists for the work in progress.
+ACTION_BUDGET_ENV = "OMIND_GATE_ACTION_BUDGET"
+_DEFAULT_ACTION_BUDGET = 25
+#: Per-turn ceiling on mid-turn re-arms/injections — an anti-wedge cap, like the
+#: verifier's re-close cap: a turn can never be re-gated indefinitely.
+MAX_REARM_ENV = "OMIND_GATE_MAX_REARM"
+_DEFAULT_MAX_REARM = 4
+#: Synthetic rule ids for the continuity decisions (all soft; all ceremonies).
+GATE_REARM_RULE = "omi-gate-rearm"
+GATE_REARM_NO_MATCH_RULE = "omi-gate-rearm-no-match"
+GATE_CARRY_RULE = "omi-gate-carry"
+GATE_PREFLIGHT_RULE = "omi-gate-preflight"
+#: A prompt with fewer meaningful terms than this is a continuation of the
+#: prior turn's work, not a new task ("retry", "Yes please", "Delete it").
+CONTINUATION_MAX_TERMS = 3
+#: An identical prompt re-sent within this window is the harness's own API
+#: auto-retry (or a human re-poking), not a new turn: the gate state carries.
+RETRY_WINDOW_SECS = 120.0
+#: How many recent action texts the sentinel keeps as the turn's activity trail
+#: (the harness-agnostic activity signal — every adapter reaches the core).
+_TRAIL_LEN = 8
+_TRAIL_ITEM_CAP = 160
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
@@ -174,6 +203,7 @@ def begin_turn(session: str, task: str) -> None:
     verifier's anti-wedge cap and the transition signal are both measured per turn
     (the bash turn-start hook clears the same counter file)."""
     _clear_reclose(session)
+    _clear_rearm(session)
     _clear_pending(session)
     _clear_git_freshness(session)
     _clear_demanded(session)
@@ -439,6 +469,7 @@ def mark_consulted(session: str) -> None:
 
     def _mark(data: dict[str, Any]) -> dict[str, Any]:
         data.setdefault("consults", [])
+        data["actions"] = 0
         return data
 
     _mutate_sentinel(session, _mark)
@@ -454,6 +485,7 @@ def record_consult(session: str, *, kind: str, target: str, relevant: bool | Non
         consult_list = existing if isinstance(existing, list) else []
         consult_list.append({"kind": kind, "target": target, "relevant": relevant})
         data["consults"] = consult_list
+        data["actions"] = 0
         return data
 
     _mutate_sentinel(session, _record)
@@ -492,6 +524,370 @@ def _reap_legacy_sentinels() -> None:
         for path in stale:
             with contextlib.suppress(OSError):
                 path.unlink()
+
+
+# --------------------------------------------------------------------------
+# Consult continuity (#296): action budget, activity trail, continuation turns
+# --------------------------------------------------------------------------
+
+
+def _env_int(env: str, default: int) -> int:
+    raw = os.environ.get(env, "").strip()
+    if raw:
+        try:
+            return max(0, int(raw))
+        except ValueError:
+            pass
+    return default
+
+
+def action_budget() -> int:
+    """Allowed non-consult actions per turn before the core re-checks memory
+    (``0`` disables the budget)."""
+    return _env_int(ACTION_BUDGET_ENV, _DEFAULT_ACTION_BUDGET)
+
+
+def _max_rearm() -> int:
+    return _env_int(MAX_REARM_ENV, _DEFAULT_MAX_REARM)
+
+
+def _rearm_path(session: str) -> Path:
+    return paths.state_dir() / f"rearm-{_safe_sid(session)}"
+
+
+def rearm_count(session: str) -> int:
+    """Mid-turn re-arms + injections so far this turn (reset at turn start)."""
+    try:
+        return int(_rearm_path(session).read_text(encoding="utf-8").strip() or "0")
+    except (OSError, ValueError):
+        return 0
+
+
+def bump_rearm(session: str) -> int:
+    path = _rearm_path(session)
+    with contextlib.suppress(OSError, ValueError):
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(_sibling_lock(path)):
+            nxt = rearm_count(session) + 1
+            path.write_text(str(nxt), encoding="utf-8")
+            return nxt
+    return rearm_count(session)
+
+
+def _clear_rearm(session: str) -> None:
+    with contextlib.suppress(OSError):
+        _rearm_path(session).unlink()
+
+
+def _last_turn_path(session: str) -> Path:
+    """The previous turn's prompt + substantive task + timestamp, so a
+    continuation prompt can be resolved against what the agent was doing."""
+    return paths.state_dir() / f"lastturn-{_safe_sid(session)}.json"
+
+
+def _read_last_turn(session: str) -> dict[str, Any]:
+    try:
+        data = json.loads(_last_turn_path(session).read_text(encoding="utf-8") or "{}")
+    except (OSError, ValueError):
+        return {}
+    return data if isinstance(data, dict) else {}
+
+
+def _write_last_turn(session: str, *, prompt: str, task: str, ts: float) -> None:
+    with contextlib.suppress(OSError, ValueError):
+        path = _last_turn_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(
+            json.dumps({"prompt": prompt[:2_000], "task": task[:4_000], "ts": ts}),
+            encoding="utf-8",
+        )
+
+
+def is_continuation_prompt(prompt: str) -> bool:
+    """True when ``prompt`` continues the prior turn rather than starting a task:
+    a harness-injected wrapper (``<task-notification>``, ``<system-reminder>``)
+    or fewer than :data:`CONTINUATION_MAX_TERMS` meaningful terms. Empty is not
+    a continuation — an empty task keeps the gate strict elsewhere."""
+    text = prompt.strip()
+    if not text:
+        return False
+    if text.startswith("<"):
+        return True
+    from omind import retrieve
+
+    return retrieve.term_count(text) < CONTINUATION_MAX_TERMS
+
+
+def actions_since_consult(session: str) -> int:
+    """Allowed non-consult actions since this turn's last OMI consult."""
+    try:
+        return int(_read_sentinel(session).get("actions") or 0)
+    except (TypeError, ValueError):
+        return 0
+
+
+def action_trail(session: str) -> list[str]:
+    """The most recent allowed action texts this turn (newest last)."""
+    raw = _read_sentinel(session).get("trail")
+    return [str(t) for t in raw if isinstance(t, str)] if isinstance(raw, list) else []
+
+
+def count_action(session: str, text: str) -> None:
+    """Record one allowed non-consult action against the turn's budget and
+    append it to the activity trail. Never raises."""
+
+    def _count(data: dict[str, Any]) -> dict[str, Any]:
+        try:
+            data["actions"] = int(data.get("actions") or 0) + 1
+        except (TypeError, ValueError):
+            data["actions"] = 1
+        raw = data.get("trail")
+        trail = [str(t) for t in raw if isinstance(t, str)] if isinstance(raw, list) else []
+        item = " ".join(text.split())[:_TRAIL_ITEM_CAP]
+        if item:
+            trail.append(item)
+        data["trail"] = trail[-_TRAIL_LEN:]
+        return data
+
+    _mutate_sentinel(session, _count)
+
+
+def reset_action_count(session: str) -> None:
+    def _reset(data: dict[str, Any]) -> dict[str, Any]:
+        data["actions"] = 0
+        return data
+
+    _mutate_sentinel(session, _reset)
+
+
+#: Path components that name a machine's layout, not the work (a trail item
+#: ``/home/x/Source/repos/telesto/deploy.sh`` should contribute "telesto" and
+#: "deploy", not "home"/"source"/"repos").
+_TRAIL_NOISE_PARTS = frozenset(
+    {"home", "users", "source", "repos", "src", "tmp", "srv", "var", "opt", "usr", "bin", "lib"}
+)
+_TRAIL_SPLIT_RE = re.compile(r"[\\/]+")
+
+
+def _trail_words(item: str) -> str:
+    """A trail item as retrieval words: path separators become spaces and the
+    layout-only components drop out, so a file's project and name both count
+    (the verifier's ``normalize_intent`` keeps only basenames, which throws
+    away the project — the strongest signal for *which memory* applies)."""
+    words = []
+    for token in item.split():
+        for part in _TRAIL_SPLIT_RE.split(token):
+            if part and part.casefold() not in _TRAIL_NOISE_PARTS:
+                words.append(part)
+    return " ".join(words)
+
+
+def _activity_text(session: str, omi_dir: Path | str | None) -> str:
+    """What the agent has been doing: the sentinel's action trail (reaches the
+    core under every harness) plus the journal's recent activity where a
+    harness journals. Never raises."""
+    parts = [_trail_words(item) for item in action_trail(session)]
+    if omi_dir is not None:
+        try:
+            from omind import verify
+
+            parts.append(verify.recent_activity(session, omi_dir))
+        except Exception:
+            pass
+    return " ".join(part for part in parts if part)
+
+
+def _seen_note_stems(session: str) -> set[str]:
+    """Notes this session has already been shown or has consulted this turn —
+    a mid-turn re-arm must surface something NEW, never re-demand these."""
+    stems = {Path(name).stem.casefold() for name in _injected_versions(session)}
+    for consult in consults(session):
+        target = str(consult.get("target") or "")
+        if target:
+            stems.add(Path(target).stem.casefold())
+    demanded = demanded_note(session)
+    if demanded:
+        stems.add(Path(demanded).stem.casefold())
+    return stems
+
+
+def midturn_candidate(
+    session: str, omi_dir: Path | str, *, query: str = ""
+) -> tuple[str, str] | None:
+    """``(filename, title)`` of the best note relevant to the work in progress
+    that this session has not seen yet, or ``None``. ``query`` defaults to the
+    turn's task plus the activity signal. Deterministic; no model call."""
+    from omind import recall, retrieve
+
+    if not query:
+        query = " ".join(p for p in (turn_task(session), _activity_text(session, omi_dir)) if p)
+    if not retrieve.term_count(query):
+        return None
+    seen = _seen_note_stems(session)
+    min_terms = retrieve.preflight_min_terms()
+    for title in retrieve.relevant_titles(query, omi_dir, limit=5):
+        filename = recall.filename_for_title(omi_dir, title)
+        if filename is None or Path(filename).stem.casefold() in seen:
+            continue
+        if min_terms:
+            memory = recall.compact_recall(omi_dir, filename, max_chars=recall.MIN_RECALL_CHARS)
+            haystack = " ".join(
+                str(memory.get(key) or "") for key in ("title", "summary", "content")
+            )
+            if retrieve.matched_terms(query, haystack) < min_terms:
+                continue
+        return filename, title
+    return None
+
+
+def _log_continuity(
+    session: str, *, tool: str, command: str, rule_id: str, outcome: str, detail: str
+) -> None:
+    compliance.log_event(
+        compliance.KIND_DECISION,
+        session=session,
+        tool=tool,
+        command=command,
+        rule_id=rule_id,
+        severity="soft",
+        outcome=outcome,
+        detail=detail,
+    )
+
+
+def budget_verdict(action: dict[str, Any], omi_dir: Path | str | None) -> Verdict | None:
+    """The mid-turn continuity check for an action the gate already ALLOWED.
+
+    Counts the action against the turn's budget; at the budget, looks for a
+    relevant memory this session has not seen. Found → the gate re-arms and
+    demands that note (one ``recall-note`` clears it — the verifier treats a
+    demanded read as obedience). Nothing new → the budget resets and the
+    auto-clear is logged. Returns a deny :class:`Verdict` or ``None`` (allow).
+    Runs in the harness-agnostic core, so every adapter inherits it; a harness
+    that can inject context after a tool call gets the same memory as a nudge
+    first (:func:`midturn_context`) and never reaches the deny.
+    """
+    session = str(action.get("session") or "")
+    if not session or omi_dir is None or action.get("is_omi_consult") or gate_paused():
+        return None
+    command = str(action.get("command") or "")
+    if command and _is_inert_command(command):
+        return None
+    if not consulted_this_turn(session):
+        return None
+    tool = str(action.get("tool") or "")
+    text = command or _action_path(action) or tool
+    actions = actions_since_consult(session)
+    budget = action_budget()
+    if budget and actions >= budget and rearm_count(session) < _max_rearm():
+        found = midturn_candidate(session, omi_dir)
+        if found is not None:
+            from omind import recall
+
+            filename, title = found
+            clear_gate(session)
+            record_demanded_note(session, filename)
+            record_pending(session, text)
+            bump_rearm(session)
+            _log_continuity(
+                session,
+                tool=tool,
+                command=command,
+                rule_id=GATE_REARM_RULE,
+                outcome="deny",
+                detail=f"actions={actions} note={filename!r}",
+            )
+            call = json.dumps(
+                {"name": filename, "max_chars": recall.MAX_RECALL_CHARS},
+                ensure_ascii=False,
+                separators=(",", ":"),
+            )
+            reason = (
+                f"omi-gate (re-arm): {actions} actions since this turn's last memory "
+                "consult and the work has moved on. Relevant memory not yet consulted "
+                f"this session: [[{title}]]. Next call OMI MCP `recall-note` with "
+                f"`{call}`, then retry this action. (Budget: {budget} actions between "
+                f"consults; {ACTION_BUDGET_ENV} tunes it.)"
+            )
+            excerpt = _governing_excerpt(omi_dir, filename)
+            if excerpt:
+                reason += f"\n\n--- Governing memory (excerpt) ---\n{excerpt}"
+            return Verdict(allow=False, reason=reason, rule_id=GATE_REARM_RULE)
+        reset_action_count(session)
+        _log_continuity(
+            session,
+            tool=tool,
+            command=command,
+            rule_id=GATE_REARM_NO_MATCH_RULE,
+            outcome="auto-clear",
+            detail=f"actions={actions}",
+        )
+    count_action(session, text)
+    return None
+
+
+def midturn_context(event: dict[str, Any], omi_dir: Path | str | None) -> str:
+    """Proactive mid-turn recall for a harness whose post-tool hook can inject
+    context (Claude Code ``PostToolUse`` ``additionalContext``). At the action
+    budget, the same candidate :func:`budget_verdict` would demand is injected
+    as a nudge instead, and the budget resets — so the deny never fires there.
+    Returns ``""`` when there is nothing to inject. Never raises."""
+    try:
+        session = str(event.get("session_id") or event.get("session") or "")
+        if not session or omi_dir is None or gate_paused():
+            return ""
+        if not consulted_this_turn(session):
+            return ""
+        budget = action_budget()
+        actions = actions_since_consult(session)
+        if not budget or actions < budget or rearm_count(session) >= _max_rearm():
+            return ""
+        found = midturn_candidate(session, omi_dir)
+        if found is None:
+            reset_action_count(session)
+            _log_continuity(
+                session,
+                tool="PostToolUse",
+                command="",
+                rule_id=GATE_REARM_NO_MATCH_RULE,
+                outcome="auto-clear",
+                detail=f"actions={actions}",
+            )
+            return ""
+        from omind import ai_usage, recall
+
+        filename, title = found
+        memory = recall.compact_recall(
+            omi_dir, filename, max_chars=ai_usage.policy(omi_dir).preflight_chars
+        )
+        summary = str(memory.get("summary") or "").strip()
+        excerpt = str(memory.get("content") or "").strip()
+        content = "\n\n".join(part for part in (summary, excerpt) if part and part != summary)
+        if not content:
+            content = str(memory.get("title") or filename)
+        record_consult(session, kind="midturn", target=filename, relevant=True)
+        reset_offtopic(session)
+        _record_injected(session, filename, str(memory.get("version") or ""))
+        bump_rearm(session)
+        _log_continuity(
+            session,
+            tool="PostToolUse",
+            command="",
+            rule_id=GATE_REARM_RULE,
+            outcome="inject",
+            detail=f"actions={actions} note={filename!r}",
+        )
+        context = (
+            f"OMI mid-turn recall: {actions} actions since this turn's last memory "
+            f"consult and the work has moved on. [[{memory.get('title') or title}]] is a "
+            "standing operator instruction/memory relevant to the work in progress — "
+            "apply it unless the user's current message explicitly overrides it. "
+            "Silence is not an override.\n\n" + content
+        )
+        ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
+        return context
+    except Exception:
+        return ""
 
 
 def clear_gate(session: str) -> None:
@@ -1387,6 +1783,12 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
     verdict = _note_rules_verdict(action, omi_dir)
     if verdict is None:
         verdict = decide(action)
+    if verdict.allow:
+        # #296: an allowed action still counts against the turn's budget, and at
+        # the budget the core may re-arm the gate around an unseen relevant note.
+        rearm = budget_verdict(action, omi_dir)
+        if rearm is not None:
+            verdict = rearm
     if not verdict.allow and verdict.rule_id == "repo-work-read-git-rules" and omi_dir is not None:
         # #241: place the governing rule text adjacent to the action it blocks.
         # The demand sentence stays first — the recall ceremony still runs and
@@ -1409,7 +1811,7 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
             reason=f"omi-gate: {retrieve.suggest_message(turn_task(session), omi_dir)}",
             rule_id=verdict.rule_id,
         )
-    if not verdict.allow and verdict.rule_id and verdict.rule_id != "omi-gate":
+    if not verdict.allow and verdict.rule_id and not verdict.rule_id.startswith("omi-gate"):
         compliance.log_event(
             compliance.KIND_DECISION,
             session=str(action.get("session") or ""),
@@ -1589,14 +1991,54 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     """
     session = str(data.get("session_id") or data.get("session") or "")
     task = str(data.get("prompt") or data.get("user_prompt") or "")
+    now = time.time()
+    last = _read_last_turn(session)
+    # #296: an identical continuation-shaped prompt inside the retry window is
+    # the harness's own API auto-retry (a burst of bare "retry" turns), not new
+    # work — carry the turn's gate state and injected memory instead of
+    # resetting and re-judging. A substantive prompt re-sent verbatim is a human
+    # re-asking and gets a normal (summary-only, cheap) preflight.
+    if (
+        task
+        and str(last.get("prompt") or "") == task
+        and now - float(last.get("ts") or 0.0) <= RETRY_WINDOW_SECS
+        and is_continuation_prompt(task)
+    ):
+        _write_last_turn(session, prompt=task, task=str(last.get("task") or task), ts=now)
+        _log_continuity(
+            session,
+            tool="UserPromptSubmit",
+            command="",
+            rule_id=GATE_CARRY_RULE,
+            outcome="carry",
+            detail=f"task={task[:100]!r}",
+        )
+        return ""
+    # Read the activity trail BEFORE the reset: it lives in the sentinel.
+    activity = _activity_text(session, omi_dir) if task else ""
     clear_gate(session)
-    begin_turn(session, task)
+    # #296: a continuation prompt ("retry", "go ahead", a task notification)
+    # carries no signal of its own — resolve it against the prior turn's task
+    # and what the agent has been doing, so the gate only auto-clears when the
+    # vault genuinely has nothing for the work in progress.
+    prior_task = str(last.get("task") or "")
+    continuation = bool(task) and is_continuation_prompt(task)
+    retrieval_task = (
+        " ".join(p for p in (task, prior_task, activity) if p) if continuation else task
+    )
+    begin_turn(session, retrieval_task)
+    _write_last_turn(
+        session,
+        prompt=task,
+        task=prior_task if continuation and prior_task else task,
+        ts=now,
+    )
     if gate_paused() or omi_dir is None:
         return ""
 
     from omind import ai_usage, recall, retrieve
 
-    titles = retrieve.relevant_titles(task, omi_dir, limit=2) if task else []
+    titles = retrieve.relevant_titles(retrieval_task, omi_dir, limit=2) if task else []
     filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
     if filename is None:
         if task and not titles and not _miss_strict():
@@ -1635,7 +2077,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     min_terms = retrieve.preflight_min_terms()
     if min_terms:
         haystack = " ".join(str(memory.get(key) or "") for key in ("title", "summary", "content"))
-        if retrieve.matched_terms(task, haystack) < min_terms:
+        if retrieve.matched_terms(retrieval_task, haystack) < min_terms:
             if not _miss_strict():
                 record_consult(session, kind="weak-match", target=filename, relevant=False)
                 compliance.log_event(
@@ -1665,7 +2107,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     # decay exactly when it matters — re-inject the full excerpt whenever the
     # turn looks like an action (git/deploy/sudo/…), keep the optimization for
     # conversational turns.
-    action_shaped = bool(_ACTION_TURN_RE.search(task))
+    action_shaped = bool(_ACTION_TURN_RE.search(f"{task} {prior_task}"))
     summary = str(memory.get("summary") or "").strip()
     excerpt = str(memory.get("content") or "").strip()
     content = (
@@ -1678,8 +2120,18 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     record_consult(session, kind="preflight", target=filename, relevant=True)
     reset_offtopic(session)
     _record_injected(session, filename, version)
+    _log_continuity(
+        session,
+        tool="UserPromptSubmit",
+        command="",
+        rule_id=GATE_PREFLIGHT_RULE,
+        outcome="inject",
+        detail=f"note={filename!r} continuation={continuation}",
+    )
     context = (
-        f"OMI turn preflight recalled [[{memory.get('title') or Path(filename).stem}]]"
+        "OMI turn preflight"
+        + (" (continuing the prior task)" if continuation else "")
+        + f" recalled [[{memory.get('title') or Path(filename).stem}]]"
         + (
             " (full excerpt already injected earlier this session)"
             if repeated and not action_shaped

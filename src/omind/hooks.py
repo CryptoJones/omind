@@ -58,6 +58,13 @@ def command_is_omind_hook(command: str) -> bool:
     """True when ``command`` is an ``omind hook ...`` invocation omind owns."""
     return HOOK_MARKER in command or bool(HOOK_COMMAND_RE.search(command))
 HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
+#: Harnesses whose post-tool hook can inject context back to the model
+#: (``hookSpecificOutput.additionalContext``). Only these get the proactive
+#: mid-turn recall (#296); every other harness gets the same memory as a
+#: PreToolUse re-arm demand from the core, so nothing is lost — just nudged
+#: later. Declared here, not inferred from the event, because a phantom
+#: injection would be recorded as a consult the model never saw.
+INJECTING_HARNESSES = frozenset({"claude"})
 #: Hermes Agent has no SessionStart hook; it fires ``pre_llm_call`` before every
 #: LLM turn and consumes a ``{"context": ...}`` payload on stdout. omind installs
 #: this event to inject the same priming the Claude SessionStart hook does — but
@@ -850,8 +857,12 @@ def run_hook(
     *,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
+    harness: str = "",
 ) -> int:
-    """Dispatch one hook invocation. ALWAYS returns 0 so the agent never blocks."""
+    """Dispatch one hook invocation. ALWAYS returns 0 so the agent never blocks.
+
+    ``harness`` names the caller (``omind hook … --harness claude``); it only
+    gates the mid-turn recall injection, see :data:`INJECTING_HARNESSES`."""
     try:
         if event_name == "SessionStart":
             event = read_event(stdin)
@@ -926,6 +937,28 @@ def run_hook(
                 "PostToolUse/verify.verify_consult",
                 lambda: verify.verify_consult(event, omi_dir),
             )
+            # #296: proactive mid-turn recall where this harness can inject
+            # context after a tool call. At the turn's action budget the note
+            # the core would otherwise DEMAND at the next PreToolUse is handed
+            # to the model here instead, and the budget resets.
+            if harness in INJECTING_HARNESSES:
+                context = _best_effort(
+                    "PostToolUse/guard.midturn_context",
+                    lambda: guard.midturn_context(event, Path(omi_dir)),
+                )
+                if context:
+                    sink = stdout if stdout is not None else sys.stdout
+                    sink.write(
+                        json.dumps(
+                            {
+                                "hookSpecificOutput": {
+                                    "hookEventName": "PostToolUse",
+                                    "additionalContext": context,
+                                }
+                            }
+                        )
+                        + "\n"
+                    )
             # A freshness command that FAILED must not leave the repo marked
             # fresh: PreToolUse records optimistically (it cannot know the exit
             # code), this retracts on an explicit failure (2026-08-27 review).

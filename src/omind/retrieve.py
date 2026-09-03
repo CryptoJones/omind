@@ -224,6 +224,13 @@ def _tokens(text: str) -> set[str]:
     return {_stem(w) for w in _WORD_RE.findall(text.lower()) if w not in _STOPWORDS and len(w) > 2}
 
 
+def term_count(text: str) -> int:
+    """How many distinct meaningful terms ``text`` carries (stopwords and short
+    tokens dropped, stemmed) — the guard's "is this prompt a continuation"
+    signal shares retrieval's definition of a meaningful term."""
+    return len(_tokens(text))
+
+
 def overlap_score(task: str, text: str) -> float:
     """Fraction of the task's meaningful terms covered by ``text`` (0..1).
 

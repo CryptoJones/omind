@@ -7,6 +7,37 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+- **Consult continuity across long sessions (#296).** Measured on a live box,
+  ~40% of turns started with the consult gate auto-cleared and nothing
+  injected, because the preflight ranked notes against the prompt alone and a
+  long session's prompts are continuations (`retry`, `Yes please`, a task
+  notification). Two harness-agnostic controls in `guard`: (1) a
+  continuation-shaped prompt is retrieved against the prior turn's task plus the
+  agent's recent activity, and an identical `retry` inside two minutes (the
+  harness's own API auto-retry) carries the turn's gate state instead of
+  resetting it; (2) every allowed action counts against a per-turn budget
+  (`OMIND_GATE_ACTION_BUDGET`, default 25) after which the core surfaces a
+  relevant memory this session has not seen — injected via Claude Code's
+  `PostToolUse` `additionalContext` (`omind hook PostToolUse --harness claude`,
+  written by `omind setup`), or demanded as a re-arm at the next PreToolUse on
+  every other harness. Capped by `OMIND_GATE_MAX_REARM` (default 4) per turn.
+  `omind doctor` gains a `gate_continuity` check (7-day auto-clear rate, warns
+  at 40%); every decision is compliance-logged (`omi-gate-preflight`,
+  `omi-gate-carry`, `omi-gate-rearm`, `omi-gate-rearm-no-match`) and the whole
+  `omi-gate*` family is excluded from the fine-tune corpus and from the
+  OpenCode plugin's enforced denies.
+
+### Fixed
+- **Tool error text survives mcp >= 2.1 (#294).** mcp 2.1.x hands the client a
+  bare `Error executing tool <name>` for any exception that is not a deliberate
+  `ToolError`, which hid every anticipated failure — a missing note, an unsafe
+  name, a bad graph argument, and the stale-version conflict whose message is
+  what tells an agent to re-read before writing. The server now re-raises those
+  domain failures (`NoteError`, `NoteConflictError`, `ValueError`) as `ToolError`
+  at the tool boundary; a real crash stays masked as the SDK intends. `uv.lock`
+  moves to mcp 2.1.1 so a local run sees what CI sees.
+
 ### Fixed — from the 2026-08-27 multi-agent review (35 findings, all fixed;
 full report in `docs/reviews/2026-08-27-multi-agent-review.md`)
 
