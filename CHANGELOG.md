@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Tool error text survives mcp >= 2.1 (#294).** mcp 2.1.x hands the client a
+  bare `Error executing tool <name>` for any exception that is not a deliberate
+  `ToolError`, which hid every anticipated failure — a missing note, an unsafe
+  name, a bad graph argument, and the stale-version conflict whose message is
+  what tells an agent to re-read before writing. The server now re-raises those
+  domain failures (`NoteError`, `NoteConflictError`, `ValueError`) as `ToolError`
+  at the tool boundary; a real crash stays masked as the SDK intends. `uv.lock`
+  moves to mcp 2.1.1 so a local run sees what CI sees.
+
 ### Fixed — from the 2026-08-27 multi-agent review (35 findings, all fixed;
 full report in `docs/reviews/2026-08-27-multi-agent-review.md`)
 
