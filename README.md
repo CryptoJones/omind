@@ -295,6 +295,24 @@ broken hook can never wedge the agent.
   a miss, so it still leaves the gate armed. Set `OMI_GATE_MISS_STRICT=1` to
   restore the old force-a-consult-on-every-miss behavior. Hard rule-specific
   prerequisites remain independent.
+- **Consult continuity across a long session.** A continuation prompt
+  (`retry`, `go ahead`, a task notification — fewer than three meaningful
+  terms) carries no signal of its own, so it is retrieved against the **prior
+  turn's task plus the agent's recent activity**; the gate auto-clears only when
+  the vault has nothing for the work in progress. An identical `retry` re-sent
+  within two minutes is the harness's own API auto-retry and carries the
+  turn's gate state instead of resetting it. Inside a turn, every allowed
+  action counts against a budget (`OMIND_GATE_ACTION_BUDGET`, default 25);
+  at the budget the core retrieves against the turn's task and its action
+  trail, and if a relevant memory this session has not seen exists it is
+  surfaced — injected after the tool call where the harness can do that
+  (Claude Code `PostToolUse`), otherwise as a re-arm that demands exactly that
+  note before the next action (one `recall-note` clears it). No candidate →
+  the budget resets and the auto-clear is logged. At most
+  `OMIND_GATE_MAX_REARM` (default 4) mid-turn re-arms per turn, so a turn can
+  never be re-gated indefinitely. This lives in the harness-agnostic core, so
+  every adapter (Claude, Hermes, OpenCode, Codex, Gemini, DSH) inherits it.
+  `omind doctor` reports the 7-day auto-clear rate (`gate_continuity`).
 - **The verifier.** Clearing the gate by reading *any* note isn't enough, so a
   `PostToolUse` verifier judges whether the consult was actually **relevant** to
   the turn's task — a deterministic keyword-overlap prefilter decides the clear

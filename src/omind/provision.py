@@ -43,6 +43,9 @@ ENFORCE_HOOK_MARKER = "omi-enforce.py"
 #: the consult-gate over-firing. Precision, not volume, decides whether the guard
 #: is helping — see the compliance_log check.
 _DENY_RATE_WARN_PCT = 25
+#: Window and threshold for the consult-gate continuity check (#296).
+_CONTINUITY_WINDOW_DAYS = 7
+_AUTO_CLEAR_WARN_PCT = 40.0
 
 #: The stable user-install path for the omind executable. On a `uv tool install`
 #: box this is a symlink into the tool env that uv retargets on every upgrade,
@@ -712,9 +715,13 @@ class Provisioner:
         # which provision uses to find/replace omind's own entries.
         # Both values are quoted: the hook string goes through a shell, and an
         # unquoted folder like "My Memory" word-splits into a stray positional.
+        # Claude Code's PostToolUse can inject context back to the model, so
+        # its journal hook also carries the mid-turn recall (#296). The flag is
+        # per harness on purpose: see hooks.INJECTING_HARNESSES.
+        harness = " --harness claude" if event == "PostToolUse" else ""
         return (
             f'{omind_exe} hook {event} --vault "{self.config.vault}" '
-            f'--folder "{self.config.folder}"'
+            f'--folder "{self.config.folder}"{harness}'
         )
 
     def _omind_hook_entries(self) -> dict[str, list[dict[str, Any]]]:
@@ -1690,6 +1697,31 @@ def _diagnose_enforcement() -> list[CheckResult]:
             f"policy: {len(policy.SEED_RULES)} seed + {len(learned)} learned rule(s)",
         )
     )
+
+    # #296: does memory actually reach the agent's turns? Auto-clears are the
+    # turns that started with the gate open and NOTHING injected; a session made
+    # of continuation prompts used to auto-clear on nearly every turn, silently.
+    continuity = compliance.gate_continuity(days=_CONTINUITY_WINDOW_DAYS)
+    if continuity["turns"]:
+        pct = continuity["auto_clear_pct"]
+        status = "warn" if pct >= _AUTO_CLEAR_WARN_PCT else "ok"
+        detail = (
+            f"consult gate ({_CONTINUITY_WINDOW_DAYS}d): {continuity['turns']} turn(s), "
+            f"{continuity['injected']} with memory injected, "
+            f"{continuity['auto_cleared']} auto-cleared ({pct:.0f}%), "
+            f"{continuity['carried']} retry carry; mid-turn: "
+            f"{continuity['rearm_injects']} injection(s), "
+            f"{continuity['rearm_denies']} re-arm(s), "
+            f"{continuity['rearm_no_match']} no-match"
+        )
+        if status == "warn":
+            detail += (
+                f" — over {_AUTO_CLEAR_WARN_PCT:.0f}% of turns start with no memory. "
+                "Check `omind guard log` for the auto-cleared prompts: continuation "
+                "prompts should resolve against the prior task (#296); a vault with "
+                "nothing on the current work is the other explanation"
+            )
+        results.append(CheckResult("gate_continuity", status, detail))
 
     summary = compliance.summary()
     if summary["total"]:

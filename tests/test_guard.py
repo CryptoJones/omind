@@ -1652,3 +1652,242 @@ def test_preflight_adds_second_title_summary_only(tmp_path: Path) -> None:
         {"session_id": "second-2", "prompt": "token budget usage bounds"}, omi
     )
     assert "Also possibly relevant" not in economy  # skipped on economy
+
+
+# ---------------------------------------------------------------------------
+# #296 — consult continuity: continuation prompts, retry carry, action budget
+# ---------------------------------------------------------------------------
+
+
+def _vault_with(tmp_path: Path, *notes: tuple[str, str, str]) -> Path:
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir(exist_ok=True)
+    store = OmiStore(omi)
+    for title, summary, details in notes:
+        store.create_note(NoteFields(title=title, summary=summary, details=details))
+    return omi
+
+
+def test_continuation_prompt_is_recognised_by_shape() -> None:
+    assert guard.is_continuation_prompt("retry")
+    assert guard.is_continuation_prompt("Yes please")
+    assert guard.is_continuation_prompt("go ahead and do it")
+    assert guard.is_continuation_prompt("<task-notification>agent done</task-notification>")
+    assert not guard.is_continuation_prompt("")  # empty stays strict elsewhere
+    assert not guard.is_continuation_prompt("is there a vpn turned on for this laptop?")
+    assert not guard.is_continuation_prompt("reduce the OMI token usage in the preflight")
+
+
+def test_continuation_prompt_is_resolved_against_the_prior_turns_task(tmp_path: Path) -> None:
+    """The auto-clear hole: "go ahead" after a real task used to search the
+    vault for "go ahead", miss, and open the gate with nothing injected."""
+    omi = _vault_with(
+        tmp_path,
+        ("Token Usage Strategy", "Keep OMI token usage bounded.", "Use compact recall."),
+    )
+    sid = "cont-1"
+    first = guard.preflight_turn({"session_id": sid, "prompt": "reduce OMI token usage"}, omi)
+    assert "[[Token Usage Strategy]]" in first
+    follow = guard.preflight_turn({"session_id": sid, "prompt": "go ahead"}, omi)
+    assert "continuing the prior task" in follow
+    assert "[[Token Usage Strategy]]" in follow
+    assert guard.consulted_this_turn(sid)
+    # The captured task the verifier scores against is the composite, and the
+    # remembered substantive task survives a chain of continuations.
+    assert "token usage" in guard.turn_task(sid).casefold()
+    assert guard._read_last_turn(sid)["task"] == "reduce OMI token usage"
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_PREFLIGHT_RULE
+    assert events[-1]["outcome"] == "inject"
+    assert "continuation=True" in events[-1]["detail"]
+
+
+def test_continuation_with_nothing_prior_keeps_the_old_auto_clear(tmp_path: Path) -> None:
+    omi = _vault_with(tmp_path, ("Ghidra decompiler retry budget", "Retry the decompile.", ""))
+    context = guard.preflight_turn({"session_id": "cont-fresh", "prompt": "retry"}, omi)
+    assert "weak memory match" in context
+    assert compliance.read_events()[-1]["rule_id"] == guard.GATE_WEAK_MATCH_RULE
+
+
+def test_identical_retry_inside_the_window_carries_the_gate_state(tmp_path: Path) -> None:
+    """A burst of bare "retry" turns is Claude Code auto-retrying an API error;
+    each one used to reset the gate, search for "retry", and auto-clear."""
+    omi = _vault_with(tmp_path, ("Token Usage Strategy", "Keep OMI token usage bounded.", ""))
+    sid = "carry-1"
+    guard.preflight_turn({"session_id": sid, "prompt": "reduce OMI token usage"}, omi)
+    guard.mark_consulted(sid)
+    guard.count_action(sid, "pytest tests/")
+    before = guard._read_sentinel(sid)
+    first_retry = guard.preflight_turn({"session_id": sid, "prompt": "retry"}, omi)
+    assert first_retry  # the first "retry" is judged like any continuation
+    assert guard.consulted_this_turn(sid)
+    second_retry = guard.preflight_turn({"session_id": sid, "prompt": "retry"}, omi)
+    assert second_retry == ""  # carried: no reset, no re-judging, no injection
+    assert guard.consulted_this_turn(sid)
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_CARRY_RULE
+    assert events[-1]["outcome"] == "carry"
+    # A substantive prompt re-sent verbatim is a human re-asking, not a retry.
+    again = guard.preflight_turn({"session_id": sid, "prompt": "reduce OMI token usage"}, omi)
+    assert "[[Token Usage Strategy]]" in again
+    assert before  # (sentinel existed before the retries)
+
+
+def test_action_budget_rearms_the_gate_around_an_unseen_relevant_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi = _vault_with(
+        tmp_path,
+        (
+            "telesto deploy runbook",
+            "How to deploy the telesto services safely.",
+            "Stop the telesto services before a deploy, then restart them.",
+        ),
+    )
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "3")
+    sid = "budget-1"
+    # The turn's opening consult was about something else entirely.
+    guard.preflight_turn({"session_id": sid, "prompt": "list the open pull requests"}, omi)
+    guard.mark_consulted(sid)
+    action = {"tool": "Edit", "file_path": "/srv/telesto/deploy.sh", "session": sid}
+    for _ in range(3):
+        assert guard.check_action(action, omi_dir=omi).allow
+    assert guard.actions_since_consult(sid) == 3
+    assert "deploy.sh" in " ".join(guard.action_trail(sid))
+    # The 4th action: the work has drifted onto telesto deploys; an unseen
+    # relevant note exists → the gate re-arms and demands exactly that note.
+    verdict = guard.check_action(action, omi_dir=omi)
+    assert not verdict.allow
+    assert verdict.rule_id == guard.GATE_REARM_RULE
+    assert "[[telesto deploy runbook]]" in verdict.reason
+    assert "recall-note" in verdict.reason
+    assert "Governing memory (excerpt)" in verdict.reason
+    assert guard.demanded_note(sid) == "telesto deploy runbook.md"
+    assert not guard.consulted_this_turn(sid)
+    assert guard.rearm_count(sid) == 1
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_REARM_RULE
+    assert events[-1]["severity"] == "soft"  # a ceremony, never a hard deny
+    # Consulting the demanded note clears it and restarts the budget.
+    consult = {
+        "is_omi_consult": True,
+        "consult_target": "telesto deploy runbook.md",
+        "consult_kind": "read",
+        "session": sid,
+    }
+    assert guard.check_action(consult, omi_dir=omi).allow
+    assert guard.check_action(action, omi_dir=omi).allow
+    assert guard.actions_since_consult(sid) == 1
+    # The same note is never re-demanded this session: budget exhausts to a
+    # logged no-match auto-clear instead.
+    for _ in range(3):  # actions 2, 3, then the budget hit: no candidate → reset
+        assert guard.check_action(action, omi_dir=omi).allow
+    assert compliance.read_events()[-1]["rule_id"] == guard.GATE_REARM_NO_MATCH_RULE
+    assert guard.actions_since_consult(sid) == 1
+    assert guard.check_action(action, omi_dir=omi).allow
+    assert guard.actions_since_consult(sid) == 2
+
+
+def test_action_budget_skips_notes_already_injected_this_session(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi = _vault_with(
+        tmp_path, ("telesto deploy runbook", "Deploy the telesto services.", "Restart telesto.")
+    )
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "2")
+    sid = "budget-seen"
+    # Injected at turn start (the preflight found it) — it is already in context.
+    context = guard.preflight_turn({"session_id": sid, "prompt": "deploy telesto services"}, omi)
+    assert "[[telesto deploy runbook]]" in context
+    action = {"tool": "Bash", "command": "systemctl restart telesto", "session": sid}
+    for _ in range(4):
+        assert guard.check_action(action, omi_dir=omi).allow
+    assert guard.rearm_count(sid) == 0
+    assert compliance.read_events()[-1]["rule_id"] == guard.GATE_REARM_NO_MATCH_RULE
+
+
+def test_action_budget_is_capped_per_turn_and_reset_by_the_turn_start(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi = _vault_with(
+        tmp_path,
+        ("telesto deploy runbook", "Deploy the telesto services.", "Restart telesto."),
+        ("telesto backup policy", "Back up telesto before any deploy.", "Snapshot telesto."),
+    )
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "1")
+    monkeypatch.setenv(guard.MAX_REARM_ENV, "1")
+    sid = "budget-cap"
+    guard.begin_turn(sid, "restart the telesto services after the deploy")
+    guard.mark_consulted(sid)
+    action = {"tool": "Bash", "command": "systemctl restart telesto", "session": sid}
+    assert guard.check_action(action, omi_dir=omi).allow
+    blocked = guard.check_action(action, omi_dir=omi)
+    assert not blocked.allow and blocked.rule_id == guard.GATE_REARM_RULE
+    guard.mark_consulted(sid)  # (any consult re-opens; the cap is now reached)
+    for _ in range(4):
+        assert guard.check_action(action, omi_dir=omi).allow  # never re-gated again
+    guard.begin_turn(sid, "next turn")
+    assert guard.rearm_count(sid) == 0
+
+
+def test_action_budget_ignores_consults_inert_commands_and_a_paused_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi = _vault_with(tmp_path, ("telesto deploy runbook", "Deploy telesto.", "Restart telesto."))
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "1")
+    sid = "budget-skip"
+    guard.begin_turn(sid, "deploy telesto")
+    guard.mark_consulted(sid)
+    assert guard.check_action({"command": "pwd", "session": sid}, omi_dir=omi).allow
+    assert guard.actions_since_consult(sid) == 0  # inert commands don't count
+    assert guard.check_action({"command": "ls -la", "session": sid}, omi_dir=omi).allow
+    assert guard.actions_since_consult(sid) == 1
+    guard.pause_gate(60)
+    try:
+        assert guard.check_action({"command": "ls -la", "session": sid}, omi_dir=omi).allow
+        assert guard.check_action({"command": "ls -la", "session": sid}, omi_dir=omi).allow
+    finally:
+        guard.resume_gate()
+    assert guard.rearm_count(sid) == 0
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "0")  # 0 disables the budget
+    for _ in range(3):
+        assert guard.check_action({"command": "ls -la", "session": sid}, omi_dir=omi).allow
+
+
+def test_midturn_context_injects_the_candidate_and_resets_the_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi = _vault_with(
+        tmp_path,
+        (
+            "telesto deploy runbook",
+            "How to deploy the telesto services safely.",
+            "Stop the telesto services before a deploy, then restart them.",
+        ),
+    )
+    monkeypatch.setenv(guard.ACTION_BUDGET_ENV, "2")
+    sid = "midturn-1"
+    guard.begin_turn(sid, "restart the telesto services after the deploy")
+    guard.mark_consulted(sid)
+    event = {"session_id": sid, "tool_name": "Bash", "tool_input": {"command": "ls"}}
+    assert guard.midturn_context(event, omi) == ""  # under budget: nothing
+    for _ in range(2):
+        guard.count_action(sid, "systemctl restart telesto")
+    context = guard.midturn_context(event, omi)
+    assert "OMI mid-turn recall" in context
+    assert "[[telesto deploy runbook]]" in context
+    assert "Stop the telesto services" in context
+    assert guard.actions_since_consult(sid) == 0
+    assert guard.consulted_this_turn(sid)
+    assert guard.consults(sid)[-1]["kind"] == "midturn"
+    assert compliance.read_events()[-1]["outcome"] == "inject"
+    # Injected once, the note is "seen": the next budget hit finds nothing new
+    # and the PreToolUse path never re-arms around it either.
+    for _ in range(2):
+        guard.count_action(sid, "systemctl restart telesto")
+    assert guard.midturn_context(event, omi) == ""
+    assert compliance.read_events()[-1]["rule_id"] == guard.GATE_REARM_NO_MATCH_RULE
+    action = {"tool": "Bash", "command": "systemctl restart telesto", "session": sid}
+    assert guard.check_action(action, omi_dir=omi).allow

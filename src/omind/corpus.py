@@ -55,7 +55,9 @@ def corpus_examples() -> list[dict[str, Any]]:
     examples: list[dict[str, Any]] = []
     for event in compliance.read_events():
         rule_id = str(event.get("rule_id") or "")
-        if not rule_id or rule_id == "omi-gate":
+        # The consult-gate family (the gate itself, its preflight auto-clears,
+        # the mid-turn budget) is ceremony, not a violation to learn from.
+        if not rule_id or rule_id.startswith("omi-gate"):
             continue
         tool = str(event.get("tool") or "action")
         command = str(event.get("command") or "")

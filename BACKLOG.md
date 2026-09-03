@@ -7,6 +7,17 @@ here so neither side drifts.
 
 ## Open
 
+### From the 2026-09-03 long-session investigation
+
+- [x] **Long sessions run dozens of tool calls with no memory contact — the per-turn gate keys off continuation prompts** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _feat (guard)_ —
+  continuation-aware preflight + retry carry + a per-turn action budget in the
+  harness-agnostic core (injected on Claude `PostToolUse`, demanded as a re-arm
+  elsewhere); `doctor` gains `gate_continuity`.
+- [ ] **CI: Windows test jobs fail on every run since 2026-08-26** ([#297](https://github.com/CryptoJones/omind/issues/297)) — _fix (journal, ai_usage)_ —
+  seven journal-rollup `PermissionError`s (an open handle before the archive
+  move) and the off-`PATH` CLI resolver test; neither job is a required check,
+  so the Windows matrix currently carries no signal.
+
 ### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
 
 _A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,

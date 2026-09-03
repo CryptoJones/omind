@@ -197,3 +197,40 @@ def test_summary_separates_ceremony_from_blocking_denials() -> None:
     assert rollup["ceremony_denies"] == 2
     assert rollup["blocking_denies"] == 1  # only the real refusal
     assert "sudo-use-fleet-sudo" not in compliance.CEREMONY_RULES
+
+
+def test_gate_continuity_rolls_up_the_consult_gate_decisions() -> None:
+    """#296: the doctor's continuity check needs turns-with-memory vs
+    auto-cleared turns, plus what the mid-turn budget did."""
+    for rule_id, outcome in (
+        ("omi-gate-preflight", "inject"),
+        ("omi-gate-preflight", "inject"),
+        ("omi-gate-weak-match", "auto-clear"),
+        ("omi-gate-no-match", "auto-clear"),
+        ("omi-gate-carry", "carry"),
+        ("omi-gate-rearm", "deny"),
+        ("omi-gate-rearm", "inject"),
+        ("omi-gate-rearm-no-match", "auto-clear"),
+        ("public-main-push", "deny"),  # a real (non-ceremony) refusal
+    ):
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session="s",
+            tool="t",
+            rule_id=rule_id,
+            severity="soft",
+            outcome=outcome,
+        )
+    rollup = compliance.gate_continuity(days=7)
+    assert rollup["turns"] == 4
+    assert rollup["injected"] == 2
+    assert rollup["auto_cleared"] == 2
+    assert rollup["auto_clear_pct"] == 50.0
+    assert rollup["carried"] == 1
+    assert rollup["rearm_denies"] == 1
+    assert rollup["rearm_injects"] == 1
+    assert rollup["rearm_no_match"] == 1
+    # Old events fall outside the window.
+    assert compliance.gate_continuity(days=0)["turns"] == 0
+    # The re-arm is a ceremony, not a blocking deny, in the headline summary.
+    assert compliance.summary()["blocking_denies"] == 1
