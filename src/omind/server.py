@@ -15,24 +15,36 @@ entire eof-guard/hang class of the old obsidian-mcp (issue #49).
 from __future__ import annotations
 
 import contextlib
+import functools
 import logging
 import os
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import anyio
 import mcp.types as mcp_types
 from anyio.streams.memory import MemoryObjectReceiveStream, MemoryObjectSendStream
 from mcp.server.mcpserver import MCPServer
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.message import SessionMessage
 
 from omind import graph, searchindex
 from omind.help_system import render_help
 from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
-from omind.store import ActionItem, NoteFields, OmiStore, _clean_agent, parse_note
+from omind.store import (
+    ActionItem,
+    NoteConflictError,
+    NoteError,
+    NoteFields,
+    OmiStore,
+    _clean_agent,
+    parse_note,
+)
+
+_T = TypeVar("_T")
 
 SERVER_NAME = "omi"
 
@@ -187,6 +199,36 @@ def _parse_action_items(items: list[str]) -> list[ActionItem]:
     return parsed
 
 
+#: Failures a tool ANTICIPATES — a missing note, an unsafe name, a stale
+#: version token, a bad graph argument. Their text is the whole point: the
+#: version-conflict message is what tells an agent to re-read before writing.
+#: mcp >= 2.1 keeps a deliberate ``ToolError``'s text but treats any other
+#: exception as a crash and hands the client only ``Error executing tool <name>``
+#: (#294), so these are re-raised as ``ToolError`` at the tool boundary. A real
+#: crash (OSError, a bug) stays masked, as the SDK intends.
+_ANTICIPATED_ERRORS: tuple[type[BaseException], ...] = (
+    NoteError,
+    NoteConflictError,
+    ValueError,
+)
+
+
+def _anticipated(fn: Callable[..., _T]) -> Callable[..., _T]:
+    """Re-raise a tool's anticipated domain failures as a deliberate ``ToolError``
+    so the message reaches the caller under every mcp 2.x."""
+
+    @functools.wraps(fn)
+    def wrapper(*args: Any, **kwargs: Any) -> _T:
+        try:
+            return fn(*args, **kwargs)
+        except ToolError:
+            raise
+        except _ANTICIPATED_ERRORS as exc:
+            raise ToolError(str(exc)) from exc
+
+    return wrapper
+
+
 def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
     """Build the node MCP server over one OMI folder.
 
@@ -198,7 +240,20 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
     # the mesh daemon, not just this server's tools.
     store = OmiStore(omi_dir, node_id=node_id)
 
-    mcp = MCPServer(SERVER_NAME, instructions=_INSTRUCTIONS)
+    server = MCPServer(SERVER_NAME, instructions=_INSTRUCTIONS)
+
+    class _Registrar:
+        """``mcp.tool(...)`` with every tool body wrapped by :func:`_anticipated`."""
+
+        def tool(self, *args: Any, **kwargs: Any) -> Callable[[Callable[..., _T]], Any]:
+            register = server.tool(*args, **kwargs)
+
+            def decorate(fn: Callable[..., _T]) -> Any:
+                return register(_anticipated(fn))
+
+            return decorate
+
+    mcp = _Registrar()
 
     # The five graph tools each rebuilt the whole [[wikilink]] graph from disk
     # (a full-vault read+parse) on every call. Cache it, invalidated by a cheap
@@ -600,7 +655,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
     ) -> dict[str, object]:
         return _graph_query(op, source, target, limit, offset)
 
-    return mcp
+    return server
 
 
 def run_node(omi_dir: Path, node_id: str | None = None) -> int:
