@@ -531,3 +531,34 @@ def test_recall_note_warns_about_a_conflicting_memory(server: MCPServer) -> None
     plain = call(server, "recall-note", {"name": "Older.md"})
     assert "conflicts_with" not in plain and "confidence" not in plain
     assert "warning" not in plain
+
+
+def test_anticipated_domain_errors_surface_as_tool_errors_with_their_text() -> None:
+    """#294: mcp >= 2.1 masks any non-``ToolError`` exception as a bare
+    ``Error executing tool <name>``. The tool boundary re-raises the failures a
+    tool anticipates as a deliberate ``ToolError`` so the text — the version
+    conflict's "re-read before writing" in particular — still reaches the caller."""
+    from omind.server import _anticipated
+    from omind.store import NoteConflictError, NoteNotFoundError
+
+    @_anticipated
+    def conflict() -> None:
+        raise NoteConflictError("note changed on disk; re-read before writing")
+
+    @_anticipated
+    def missing() -> None:
+        raise NoteNotFoundError("note not found: 'x.md'")
+
+    @_anticipated
+    def crash() -> None:
+        raise OSError("disk on fire")
+
+    with pytest.raises(ToolError, match="changed on disk") as info:
+        conflict()
+    assert isinstance(info.value.__cause__, NoteConflictError)
+    with pytest.raises(ToolError, match="not found"):
+        missing()
+    # A genuine crash is NOT anticipated: it stays an OSError for the SDK to
+    # mask and log with its traceback, exactly as the SDK intends.
+    with pytest.raises(OSError, match="disk on fire"):
+        crash()
