@@ -89,8 +89,7 @@ def repo(tmp_path: Path) -> Path:
     repo.mkdir()
     subprocess.run(["git", "init", "-q", "-b", "main", str(repo)], check=True)
     subprocess.run(
-        ["git", "-C", str(repo), "remote", "add", "origin",
-         "https://github.com/o/some-repo.git"],
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://github.com/o/some-repo.git"],
         check=True,
     )
     return repo
@@ -157,9 +156,7 @@ def test_repo_scoped_rule_needs_a_repo(tmp_path: Path) -> None:
     assert rules.evaluate(_action("git push origin main"), omi, None) is None
 
 
-def test_guard_check_action_denies_via_note_rule(
-    tmp_path: Path, repo: Path, monkeypatch
-) -> None:
+def test_guard_check_action_denies_via_note_rule(tmp_path: Path, repo: Path, monkeypatch) -> None:
     omi = tmp_path / "OMI"
     _note_with_rule(omi)
     monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
@@ -209,3 +206,144 @@ def test_format_rules_lists_seeds_and_invalids(tmp_path: Path) -> None:
     text = rules.format_rules(omi)
     assert "no-direct-push-public-main" in text  # seed present on a fresh vault
     assert "[skipped] Bad.md" in text
+
+
+# --- repo_has_commits (empty-repo exemption) --------------------------------
+#
+# An initial commit into an empty repo has nothing to open a PR against, so the
+# branch+PR deny must be narrowable to repos that actually have history.
+
+
+def _note_with_has_commits(omi: Path, value: str) -> None:
+    omi.mkdir(parents=True, exist_ok=True)
+    (omi / "Guard Rules.md").write_text(
+        "```omind-rule\n"
+        "id: no-direct-push-public-main\n"
+        "tool: Bash\n"
+        'match: "*git push*"\n'
+        "when:\n"
+        "  repo_visibility: public\n"
+        "  branch: [main, master]\n"
+        f"  repo_has_commits: {value}\n"
+        "action: deny\n"
+        'message: "Public repo: branch + PR required."\n'
+        "```\n",
+        encoding="utf-8",
+    )
+
+
+def test_has_commits_parsed_as_bool(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    _note_with_has_commits(omi, "true")
+    rule = rules.load_rules(omi)[0]
+    assert rule.when_has_commits is True
+    assert rule.conditioned_on_has_commits()
+
+    _note_with_has_commits(omi, "false")
+    rules._file_cache.clear()
+    assert rules.load_rules(omi)[0].when_has_commits is False
+
+
+def test_has_commits_absent_means_unconditioned(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    _note_with_rule(omi)
+    rule = rules.load_rules(omi)[0]
+    assert rule.when_has_commits is None
+    assert not rule.conditioned_on_has_commits()
+
+
+def test_has_commits_rejects_non_boolean(tmp_path: Path) -> None:
+    """A quoted "true" is a string, not a bool. Guessing at it would silently
+    flip a deny, so the block is skipped and reported instead."""
+    omi = tmp_path / "OMI"
+    _note_with_has_commits(omi, '"yes please"')
+    everything = rules.load_rules(omi, include_invalid=True)
+    assert any("repo_has_commits" in r.invalid for r in everything)
+    # The bad block does not replace the seed rule -- the guard stays armed
+    # rather than silently vanishing, which is the failure mode that makes a
+    # typo'd exception so dangerous.
+    live = rules.load_rules(omi)
+    assert [r.id for r in live] == ["no-direct-push-public-main"]
+    assert live[0].note == "(seed)"
+    assert live[0].when_has_commits is None
+
+
+def test_deny_fires_when_remote_has_commits(tmp_path: Path, repo: Path, monkeypatch) -> None:
+    omi = tmp_path / "OMI"
+    _note_with_has_commits(omi, "true")
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    monkeypatch.setattr(rules, "_remote_has_commits", lambda r: True)
+    hit = rules.evaluate(_action("git push origin main"), omi, repo)
+    assert hit is not None and hit.outcome == "deny"
+
+
+def test_deny_skipped_when_remote_is_empty(tmp_path: Path, repo: Path, monkeypatch) -> None:
+    """The whole point: an empty remote is exempt from branch+PR."""
+    omi = tmp_path / "OMI"
+    _note_with_has_commits(omi, "true")
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    monkeypatch.setattr(rules, "_remote_has_commits", lambda r: False)
+    assert rules.evaluate(_action("git push origin main"), omi, repo) is None
+
+
+def test_unknown_remote_fails_safe_and_still_denies(
+    tmp_path: Path, repo: Path, monkeypatch
+) -> None:
+    """Opposite of visibility's fail-open. An unreachable remote must never
+    hand out the empty-repo exemption, so unknown keeps the deny."""
+    omi = tmp_path / "OMI"
+    _note_with_has_commits(omi, "true")
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    monkeypatch.setattr(rules, "_remote_has_commits", lambda r: None)
+    hit = rules.evaluate(_action("git push origin main"), omi, repo)
+    assert hit is not None and hit.outcome == "deny"
+
+
+def test_remote_has_commits_probe_reads_the_remote(tmp_path: Path) -> None:
+    """Empty remote -> False; after a commit is pushed -> True. Uses real git
+    against a local bare remote, so the probe itself is exercised."""
+    bare = tmp_path / "bare.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(bare)], check=True)
+    work = tmp_path / "work"
+    work.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(work)], check=True)
+    subprocess.run(["git", "-C", str(work), "remote", "add", "origin", str(bare)], check=True)
+    # Local commit exists, remote is still empty -- the exact case that makes a
+    # local-only probe useless.
+    (work / "f.txt").write_text("x", encoding="utf-8")
+    subprocess.run(["git", "-C", str(work), "add", "-A"], check=True)
+    subprocess.run(
+        [
+            "git",
+            "-C",
+            str(work),
+            "-c",
+            "user.email=t@t",
+            "-c",
+            "user.name=t",
+            "commit",
+            "-qm",
+            "initial",
+        ],
+        check=True,
+    )
+    assert rules._remote_has_commits(work) is False
+
+    subprocess.run(["git", "-C", str(work), "push", "-q", "origin", "main"], check=True)
+    assert rules._remote_has_commits(work) is True
+
+
+def test_remote_has_commits_unknown_without_origin(tmp_path: Path) -> None:
+    solo = tmp_path / "solo"
+    solo.mkdir()
+    subprocess.run(["git", "init", "-q", "-b", "main", str(solo)], check=True)
+    assert rules._remote_has_commits(solo) is None
+
+
+def test_format_rules_shows_has_commits(tmp_path: Path) -> None:
+    omi = tmp_path / "OMI"
+    _note_with_has_commits(omi, "true")
+    assert "has_commits=true" in rules.format_rules(omi)
