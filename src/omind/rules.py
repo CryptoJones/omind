@@ -24,10 +24,27 @@ governing note was force-recalled each time. Operators declare rules in fenced
 raised — a broken rule must never brick the guard. A note rule with the same
 ``id`` as a seed rule replaces it, so exceptions stay operator-editable.
 
-v1 conditions are ``repo_visibility`` (via ``gh repo view``, cached one day,
+Conditions are ``repo_visibility`` (via ``gh repo view``, cached one day,
 **fail-open to UNKNOWN**: a rule conditioned on visibility does not fire when
-visibility cannot be determined) and ``branch`` (the repo's checked-out
-branch). ``except_repos`` matches the origin remote's repository name.
+visibility cannot be determined), ``branch`` (the repo's checked-out branch),
+and ``repo_has_commits`` (whether the *remote* holds any commit yet).
+``except_repos`` matches the origin remote's repository name.
+
+``repo_has_commits`` exists so a deny can be narrowed to repos that actually
+have history — an initial commit into an empty repo has nothing to open a pull
+request against, so the branch+PR ceremony cannot apply to it::
+
+    when:
+      repo_visibility: public
+      branch: [main, master]
+      repo_has_commits: true    # only deny once there IS history to protect
+
+It reads the REMOTE, not the local checkout: you must commit locally before you
+can push, so a local check would never see an empty repo. Unlike visibility this
+condition **fails safe** — when the remote cannot be reached the condition is
+treated as satisfied, so an unreachable network can never silently hand out the
+empty-repo exemption. Narrowing a deny is exactly where fail-open would be
+wrong.
 """
 
 from __future__ import annotations
@@ -69,12 +86,16 @@ class NoteRule:
     message: str
     when_visibility: str = ""
     when_branch: tuple[str, ...] = ()
+    when_has_commits: bool | None = None
     except_repos: tuple[str, ...] = ()
     note: str = "(seed)"
     invalid: str = ""  # non-empty on a skipped block: the reason, for `rules list`
 
     def conditioned_on_visibility(self) -> bool:
         return bool(self.when_visibility)
+
+    def conditioned_on_has_commits(self) -> bool:
+        return self.when_has_commits is not None
 
 
 SEED_NOTE_RULES = (
@@ -128,6 +149,16 @@ def _parse_block(text: str, note: str) -> NoteRule:
         excepts = [excepts]
     excepts = tuple(str(r).strip() for r in excepts or [] if str(r).strip())
     problems = []
+    has_commits: bool | None = None
+    if "repo_has_commits" in when:
+        raw = when.get("repo_has_commits")
+        if isinstance(raw, bool):
+            has_commits = raw
+        else:
+            # A bare `repo_has_commits: yes` parses as bool in YAML, but a typo
+            # like `repo_has_commits: "true"` would silently become truthy, so
+            # anything non-boolean is rejected loudly rather than guessed at.
+            problems.append("repo_has_commits must be true or false")
     if not rule_id:
         problems.append("missing id")
     if not tool:
@@ -150,6 +181,7 @@ def _parse_block(text: str, note: str) -> NoteRule:
         message=message,
         when_visibility=visibility,
         when_branch=branches,
+        when_has_commits=has_commits,
         except_repos=excepts,
         note=note,
     )
@@ -262,6 +294,34 @@ def _repo_name(repo: Path) -> str:
     return name[:-4] if name.endswith(".git") else name
 
 
+def _remote_has_commits(repo: Path) -> bool | None:
+    """Whether ``origin`` holds any commit yet. ``None`` when undeterminable.
+
+    Deliberately reads the remote rather than the local checkout: a push is
+    always preceded by a local commit, so a local probe would report "has
+    commits" every time and the empty-repo case could never be detected.
+
+    Not cached. A repo goes from empty to non-empty exactly once, and that
+    single transition is the whole point of the condition — a stale cache would
+    keep granting the exemption after the first commit landed.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "ls-remote", "--heads", "origin"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+    except (OSError, subprocess.SubprocessError):
+        _breadcrumb(f"rules_has_commits({repo})", "ls-remote failed")
+        return None
+    if proc.returncode != 0:
+        # No origin, no network, or no auth. Unknown, not "empty".
+        _breadcrumb(f"rules_has_commits({repo})", "ls-remote returned non-zero")
+        return None
+    return bool(proc.stdout.strip())
+
+
 def _repo_branch(repo: Path) -> str:
     try:
         proc = subprocess.run(
@@ -347,7 +407,10 @@ def evaluate(
         if not fnmatch.fnmatch(target, rule.match):
             continue
         repo_scoped = (
-            rule.conditioned_on_visibility() or rule.when_branch or rule.except_repos
+            rule.conditioned_on_visibility()
+            or rule.when_branch
+            or rule.except_repos
+            or rule.conditioned_on_has_commits()
         )
         if repo_scoped:
             if repo is None:
@@ -358,6 +421,12 @@ def evaluate(
                 pushed = _pushed_branches(command)
                 branches = pushed if pushed is not None else [_repo_branch(repo)]
                 if not any(branch in rule.when_branch for branch in branches):
+                    continue
+            if rule.conditioned_on_has_commits():
+                has_commits = _remote_has_commits(repo)
+                # Fail SAFE: an undeterminable remote must never widen an
+                # exemption, so unknown is treated as satisfying the condition.
+                if has_commits is not None and has_commits != rule.when_has_commits:
                     continue
             if rule.conditioned_on_visibility():
                 visibility = _repo_visibility(repo)
@@ -382,11 +451,12 @@ def format_rules(omi_dir: Path | str) -> str:
             conditions.append(f"visibility={rule.when_visibility}")
         if rule.when_branch:
             conditions.append(f"branch in {list(rule.when_branch)}")
+        if rule.conditioned_on_has_commits():
+            conditions.append(f"has_commits={str(rule.when_has_commits).lower()}")
         if rule.except_repos:
             conditions.append(f"except {list(rule.except_repos)}")
         cond = f" when {', '.join(conditions)}" if conditions else ""
         lines.append(
-            f"[{rule.action}] {rule.id}: {rule.tool} {rule.match!r}{cond} "
-            f"(from {rule.note})"
+            f"[{rule.action}] {rule.id}: {rule.tool} {rule.match!r}{cond} (from {rule.note})"
         )
     return "\n".join(lines) if lines else "(no rules)"
