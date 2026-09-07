@@ -2,7 +2,8 @@
 // Copyright 2026 Aaron K. Clark
 //
 // Interactive [[wikilink]] graph view for the omind web UI. Dependency-free:
-// a small canvas force-directed layout (no d3 / no graph library), themed from
+// a small canvas force-directed layout with a Barnes-Hut quadtree for the
+// repulsion (no d3 / no graph library), themed from
 // the active [data-theme] CSS variables. Click a node to open that note.
 (function () {
   "use strict";
@@ -98,25 +99,84 @@
     const sy = (y) => y * scale + oy;
 
     // --- force simulation --------------------------------------------------
-    // Above this node count the O(n^2) all-pairs repulsion is skipped (springs +
-    // gravity still lay it out) so a large vault doesn't cost seconds per frame.
-    const REPEL_LIMIT = 1800;
-    const repel = nodes.length <= REPEL_LIMIT;
+    // Repulsion is Barnes-Hut approximated: a quadtree rebuilt each step lets a
+    // distant clump of nodes act as one body at its centre of mass, turning the
+    // all-pairs sum from O(n^2) into O(n log n). That is what lets every vault
+    // keep its repulsion — the old all-pairs loop had to be switched off above
+    // 1800 nodes (#129), so a big graph laid out on springs and gravity alone
+    // and looked worse, not merely slower.
+    const THETA2 = 0.81;   // cell is "far" when size^2 < THETA2 * distance^2
+    const MAX_DEPTH = 20;  // coincident nodes would otherwise subdivide forever
     let alpha = 1;
+
+    const cell = (x0, y0, size) =>
+      ({ x0, y0, size, m: 0, cx: 0, cy: 0, leaf: -1, more: null, kids: null });
+
+    function kidFor(c, p) {
+      const h = c.size / 2;
+      const q = (p.x >= c.x0 + h ? 1 : 0) + (p.y >= c.y0 + h ? 2 : 0);
+      return c.kids[q] ||
+        (c.kids[q] = cell(c.x0 + (q & 1 ? h : 0), c.y0 + (q & 2 ? h : 0), h));
+    }
+
+    function insert(c, i, depth) {
+      const p = nodes[i];
+      c.cx = (c.cx * c.m + p.x) / (c.m + 1);   // running centre of mass
+      c.cy = (c.cy * c.m + p.y) / (c.m + 1);
+      c.m++;
+      if (c.kids) { insert(kidFor(c, p), i, depth + 1); return; }
+      if (c.leaf < 0) { c.leaf = i; return; }
+      if (depth >= MAX_DEPTH) { (c.more || (c.more = [])).push(i); return; }
+      const held = c.leaf;                     // split: push the sitting node down
+      c.leaf = -1;
+      c.kids = [null, null, null, null];
+      insert(kidFor(c, nodes[held]), held, depth + 1);
+      insert(kidFor(c, p), i, depth + 1);
+    }
+
+    function buildTree() {
+      if (!nodes.length) return null;
+      let minx = Infinity, miny = Infinity, maxx = -Infinity, maxy = -Infinity;
+      for (const n of nodes) {
+        if (n.x < minx) minx = n.x;
+        if (n.x > maxx) maxx = n.x;
+        if (n.y < miny) miny = n.y;
+        if (n.y > maxy) maxy = n.y;
+      }
+      // Square root cell, padded so the far corner still falls inside it.
+      const root = cell(minx, miny, Math.max(maxx - minx, maxy - miny, 1) * 1.01);
+      for (let i = 0; i < nodes.length; i++) insert(root, i, 0);
+      return root;
+    }
+
+    // Accumulate onto node i the repulsion the whole subtree `c` exerts on it.
+    function repel(c, i, KREP) {
+      if (!c || c.m === 0) return;
+      const a = nodes[i];
+      let dx = a.x - c.cx, dy = a.y - c.cy;
+      let d2 = dx * dx + dy * dy;
+      if (c.kids && c.size * c.size >= THETA2 * d2) {  // too near to lump together
+        for (const k of c.kids) if (k) repel(k, i, KREP);
+        return;
+      }
+      let mass = c.m;
+      if (!c.kids) {                                   // leaf: never repel myself
+        if (c.leaf === i) mass--;
+        if (c.more && c.more.indexOf(i) >= 0) mass--;
+        if (mass <= 0) return;
+      }
+      if (d2 < 0.01) { d2 = 0.01; dx = i % 2 ? 0.1 : -0.1; dy = 0.1; }
+      const f = ((KREP * mass) / d2) * alpha;
+      const d = Math.sqrt(d2);
+      a.vx += (dx / d) * f; a.vy += (dy / d) * f;
+    }
+
     function step() {
-      const REST = 64, KREP = 3000, KSPR = 0.045, GRAV = 0.03, VCAP = 30;
+      const REST = 64, KSPR = 0.045, GRAV = 0.03, VCAP = 30, KREP = 3000;
+      const root = buildTree();
       for (let i = 0; i < nodes.length; i++) {
         const a = nodes[i];
-        if (repel) {
-          for (let j = i + 1; j < nodes.length; j++) {
-            const b = nodes[j];
-            let dx = a.x - b.x, dy = a.y - b.y;
-            let d2 = dx * dx + dy * dy || 0.01;
-            const f = (KREP / d2) * alpha;
-            const d = Math.sqrt(d2); dx /= d; dy /= d;
-            a.vx += dx * f; a.vy += dy * f; b.vx -= dx * f; b.vy -= dy * f;
-          }
-        }
+        repel(root, i, KREP);
         a.vx -= a.x * GRAV * alpha; a.vy -= a.y * GRAV * alpha;
       }
       for (const [i, j] of edges) {
@@ -248,14 +308,13 @@
     // the nodes actually end up (otherwise they drift out of frame after fit).
     requestAnimationFrame(() => {
       resize();
-      // Bound the SYNCHRONOUS pre-settle by a work budget: step() is O(n^2), so
-      // a large graph would freeze the tab ("page unresponsive") before first
-      // paint. Big graphs get few synchronous iterations; the async loop below
-      // finishes settling without blocking.
+      // Bound the SYNCHRONOUS pre-settle by a work budget, so a large graph
+      // can't freeze the tab ("page unresponsive") before first paint. step()
+      // is O(n log n) now rather than O(n^2), so the same budget buys far more
+      // iterations; the async loop below finishes settling without blocking.
       const budget = 2_000_000;
-      const maxIters = Math.max(
-        1, Math.min(600, Math.floor(budget / (nodes.length * nodes.length + 1)))
-      );
+      const perStep = nodes.length * (Math.log2(nodes.length + 2) + 1) + 1;
+      const maxIters = Math.max(1, Math.min(600, Math.floor(budget / perStep)));
       let guard = 0;
       while (alpha > 0.02 && guard++ < maxIters) step();
       fit();
