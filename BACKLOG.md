@@ -139,6 +139,12 @@ _No open items._
   ([#181](https://github.com/CryptoJones/omind/issues/181)) — _chore (tokens)_ —
   Removed `graph-path`, `graph-orphans`, `graph-dangling`, and `graph-stats`
   after the 5.0 bridge release; `graph-neighbors` stays.
+- [x] **Graph view collapsed into a hairball above 1,800 notes**
+  ([#300](https://github.com/CryptoJones/omind/issues/300)) — _perf (web UI)_ —
+  The O(n^2) all-pairs repulsion was switched off past `REPEL_LIMIT = 1800`, so
+  large vaults laid out on springs and gravity alone (radius of gyration 29 vs
+  461 at n=2,500). Replaced with a Barnes-Hut quadtree, O(n log n): the cap is
+  gone and `graph.js` stays dependency-free — the algorithm, not the library.
 
 ### From the 2026-08-10 ten-model hive review
 

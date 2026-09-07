@@ -7,6 +7,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [8.11.0] - 2026-09-07
+
+### Changed
+
+- **The graph view's repulsion is Barnes-Hut approximated, and no longer switches
+  itself off on large vaults** ([#300](https://github.com/CryptoJones/omind/issues/300)).
+  Repulsion was an O(n^2) all-pairs sum, so #129 capped it at
+  `REPEL_LIMIT = 1800` nodes — past which it was skipped *entirely*. Springs and
+  gravity still ran, so a big vault didn't merely lay out slower, it laid out
+  wrong: with nothing pushing nodes apart everything collapsed toward the spring
+  rest length and rendered as an unreadable ball. On a synthetic 2,500-node vault
+  settled to rest, the radius of gyration was **29 with repulsion off vs 461 with
+  it on** (median edge 55.9 vs 205.6). A quadtree now lets a distant clump act as
+  one body at its centre of mass, which makes the same force O(n log n): the cap
+  is deleted, every vault keeps its repulsion, and settling a 1,500-node graph got
+  ~2x faster (1,260 ms -> 666 ms). Below the old cap the layout is statistically
+  unchanged (median edge 174.0 -> 172.2, radius of gyration 400 -> 397), though
+  the arrangement itself differs — it is a different, equally valid settle. The
+  synchronous pre-settle budget, which also assumed O(n^2), was rescaled to match.
+  This is d3-force's algorithm (theta = 0.9) and not its code: `graph.js` remains
+  dependency-free at 336 lines, with no graph library added.
+
 ### Fixed — from the 2026-08-27 multi-agent review (35 findings, all fixed;
 full report in `docs/reviews/2026-08-27-multi-agent-review.md`)
 
