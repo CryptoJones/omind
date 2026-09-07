@@ -19,6 +19,7 @@ from omind.agents import (
     diagnose_gemini,
     diagnose_hermes,
     diagnose_openclaw,
+    diagnose_poolside,
     run_setup_for,
 )
 from omind.provision import ProvisionError, SetupConfig
@@ -1026,3 +1027,83 @@ def test_command_is_omind_hook_forms() -> None:
     assert command_is_omind_hook(quoted)
     assert not command_is_omind_hook("some-other-tool hook SessionStart")
     assert not command_is_omind_hook("omind guard adapter --harness codex")
+
+
+# -- #302: Poolside (pool CLI) MCP registration -------------------------------
+
+
+def _poolside_installed() -> Path:
+    """Simulate an installed pool CLI: its config dir exists."""
+    root = agents.poolside_config_dir()
+    root.mkdir(parents=True, exist_ok=True)
+    return root
+
+
+def test_poolside_setup_registers_mcp_server(tmp_path: Path) -> None:
+    _poolside_installed()
+    config = _config(tmp_path, "poolside")
+    run_setup_for(config, log=_quiet)
+
+    data = yaml.safe_load(agents.poolside_settings_path().read_text(encoding="utf-8"))
+    entry = data["mcp_servers"]["omi"]
+    # The exact shape `pool mcp add` writes: flat command + args, no `type` key.
+    assert set(entry) == {"command", "args"}
+    assert entry["command"].endswith("omind")
+    assert entry["args"][0] == "node"
+    assert str(tmp_path / "vault") in entry["args"]
+    assert entry["args"][-2:] == ["--folder", config.folder]
+
+
+def test_poolside_setup_preserves_other_settings_and_is_idempotent(tmp_path: Path) -> None:
+    """A real settings.yaml carries `pool` and `agent_servers`; neither may be
+    lost when omind merges its `mcp_servers` table in."""
+    _poolside_installed()
+    settings = agents.poolside_settings_path()
+    original = {
+        "pool": {"api_url": "https://inference.poolside.ai"},
+        "agent_servers": {
+            "Poolside": {
+                "type": "custom",
+                "command": "pool",
+                "args": ["acp"],
+                "default_config_options": {"mode": "always-allow"},
+            }
+        },
+        "mcp_servers": {"other": {"command": "somewhere", "args": ["serve"]}},
+    }
+    settings.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    config = _config(tmp_path, "poolside")
+    run_setup_for(config, log=_quiet)
+    data = yaml.safe_load(settings.read_text(encoding="utf-8"))
+
+    assert data["pool"] == original["pool"]
+    assert data["agent_servers"] == original["agent_servers"]
+    assert data["mcp_servers"]["other"] == original["mcp_servers"]["other"]
+    assert "omi" in data["mcp_servers"]
+
+    # Re-running must not duplicate or churn the file.
+    before = settings.read_text(encoding="utf-8")
+    run_setup_for(_config(tmp_path, "poolside"), log=_quiet)
+    assert settings.read_text(encoding="utf-8") == before
+
+
+def test_poolside_setup_refuses_to_clobber_invalid_yaml(tmp_path: Path) -> None:
+    _poolside_installed()
+    settings = agents.poolside_settings_path()
+    settings.write_text("pool: [unclosed\n", encoding="utf-8")
+    with pytest.raises(ProvisionError, match="not valid YAML"):
+        run_setup_for(_config(tmp_path, "poolside"), log=_quiet)
+
+
+def test_diagnose_poolside_reports_missing_then_wired(tmp_path: Path) -> None:
+    config = _config(tmp_path, "poolside")
+    codes = {c.key: c.level for c in diagnose_poolside(config)}
+    assert codes["poolside_root"] == "fail"  # pool CLI not installed
+    assert codes["poolside_mcp"] == "fail"
+
+    _poolside_installed()
+    run_setup_for(config, log=_quiet)
+    codes = {c.key: c.level for c in diagnose_poolside(config)}
+    assert codes["poolside_root"] == "ok"
+    assert codes["poolside_mcp"] == "ok"

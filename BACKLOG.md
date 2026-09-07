@@ -210,6 +210,24 @@ Each issue below is written to be executable by any agent without further contex
   probe) and a SessionStart "MEMORY WRITES ARE FAILING" banner. The manual FDA grant on
   makemake remains operator work.
 
+### Harness + repo hygiene (2026-09-07)
+
+- [x] **Poolside's `pool` CLI wasn't connected to omind at all**
+  ([#302](https://github.com/CryptoJones/omind/issues/302)) — _feat (agents)_ —
+  `pool mcp list` reported "No MCP servers configured", so the CmdrData/Laguna
+  roundtable lane ran with no memory. `PoolsideProvisioner` registers the omi
+  MCP server in `~/.config/poolside/settings.yaml`.
+- [x] **Nothing enforced the `Co-authored-by` trailer**
+  ([#303](https://github.com/CryptoJones/omind/issues/303)) — _chore (ci)_ —
+  Five commits in `v8.8.0..v8.10.1` carry no trailer, so 8.10.0 and 8.10.1 are
+  unattributable. `scripts/check-attribution.sh` now backs a `commit-msg` hook
+  and a CI job; a commit declares `Co-authored-by:` or `No-agent: true`.
+- [ ] **Poolside can't be hard-blocked — the guard needs an ACP proxy**
+  ([#304](https://github.com/CryptoJones/omind/issues/304)) — _feat (guard)_ —
+  `pool` has no pre-tool hook, so Laguna gets OMI memory but no OMI enforcement.
+  The interception point is `agent_servers.command`: a stdio JSON-RPC proxy that
+  spawns the real `pool acp` and filters ACP traffic.
+
 ## Not planned
 
 - [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
