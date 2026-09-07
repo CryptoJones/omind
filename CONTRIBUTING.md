@@ -97,6 +97,16 @@ the web app build on. Keep it framework-free.
   enforce this; don't route around them.
 - **Tests with changes.** New behavior comes with a test. Bug fixes come with a
   regression test.
+- **Declare authorship.** Every commit carries either a `Co-authored-by:` trailer
+  naming the agent (or person) that helped write it, or `No-agent: true` if it was
+  hand-written. Both are fine; silence is not — attribution is how a regression gets
+  traced back to what caused it, and 8.9.0–8.10.1 shipped on five commits with no
+  trailer at all, so those two releases are permanently unattributable. A
+  `Co-authored-by: Claude …` should carry `Claude-Session:` too, so the transcript
+  stays reachable. Enforced in CI, and locally once you enable the repo's hooks:
+  ```sh
+  git config core.hooksPath .githooks
+  ```
 
 ## Versioning
 

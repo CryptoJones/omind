@@ -1,0 +1,9 @@
+#!/bin/sh
+# SPDX-License-Identifier: Apache-2.0
+# Copyright 2026 Aaron K. Clark
+#
+# Reject a commit that declares no authorship. Enable with:
+#     git config core.hooksPath .githooks
+set -eu
+root=$(git rev-parse --show-toplevel)
+exec "$root/scripts/check-attribution.sh" --message-file "$1"

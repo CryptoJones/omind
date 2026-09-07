@@ -257,6 +257,17 @@ GEMINI_GUARD_MARKER = "guard adapter --harness gemini"
 OPENCLAW_GUARD_MARKER = "guard adapter --harness openclaw"
 
 
+def poolside_config_dir() -> Path:
+    """Poolside's config directory: ``$POOLSIDE_HOME`` or ``~/.config/poolside``."""
+    base = os.environ.get("POOLSIDE_HOME")
+    return Path(base) if base else Path.home() / ".config" / "poolside"
+
+
+def poolside_settings_path() -> Path:
+    """The ``pool`` CLI's settings file — the same one ``pool mcp add`` writes."""
+    return poolside_config_dir() / "settings.yaml"
+
+
 # -- MCP-only agent locations (Claude Desktop, Kiro, VS Code, Amazon Q) --------
 #
 # These four register the omi MCP server into a JSON config file and nothing
@@ -910,6 +921,111 @@ class GeminiProvisioner(AgentProvisioner):
             self.log(
                 "  NOTE: could not confirm the OMI guard in Gemini's settings.json; "
                 "re-run with --force."
+            )
+
+
+# -- Poolside (pool CLI) --------------------------------------------------------
+
+
+class PoolsideProvisioner(AgentProvisioner):
+    """Register the omi MCP server with Poolside's ``pool`` CLI.
+
+    ``pool`` is an Agent Client Protocol client for Poolside's Laguna agent. It
+    reads ``mcp_servers`` out of ``~/.config/poolside/settings.yaml`` — the same
+    table its own ``pool mcp add`` writes — so omind merges into that file and
+    leaves the surrounding ``pool``/``agent_servers`` keys untouched.
+
+    MCP-only, deliberately. ``pool`` exposes no pre-tool hook: it has no
+    ``hooks`` settings key and no ``pool hooks`` command, and its permission
+    flow is the ACP client's own. So there is nowhere to mount
+    ``omind guard adapter``, and Laguna gets OMI *memory* here but not OMI
+    *enforcement*. Hard-blocking would mean shimming ``agent_servers.command``
+    with a stdio JSON-RPC proxy that filters ACP traffic; that is tracked
+    separately rather than faked with a harness entry nothing would ever call.
+    """
+
+    AGENT_LABEL = "Poolside (pool CLI)"
+    INSTALL_HINT = "Install the pool CLI and run `pool login`, then re-run."
+    DONE_MESSAGE = (
+        "Done. Start a new `pool` session to pick up the omi MCP server "
+        "(`pool mcp list` should show it)."
+    )
+
+    def agent_root(self) -> Path:
+        return poolside_config_dir()
+
+    def integrate(self) -> None:
+        # MCP-only: no guard hook to mount, no skill dir, no priming hook.
+        self.register_mcp()
+
+    def _read_config(self) -> dict[str, Any]:
+        """Load settings.yaml as a dict; raise rather than clobber bad YAML."""
+        path = poolside_settings_path()
+        if not path.is_file():
+            return {}
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ProvisionError(
+                f"{path} is not valid YAML ({exc}); refusing to overwrite. "
+                "Fix or remove it and re-run."
+            ) from exc
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ProvisionError(
+                f"{path} does not contain a YAML mapping; refusing to overwrite."
+            )
+        return data
+
+    def desired_server_entry(self) -> dict[str, Any]:
+        """The exact shape ``pool mcp add`` writes: flat command + args list."""
+        return {
+            "command": canonical_omind_exe(),
+            "args": [
+                "node",
+                "--vault",
+                str(self.config.vault),
+                "--folder",
+                self.config.folder,
+            ],
+        }
+
+    def registered_server(self) -> dict[str, Any] | None:
+        try:
+            data = self._read_config()
+        except ProvisionError:
+            return None
+        servers = data.get("mcp_servers")
+        if not isinstance(servers, dict):
+            return None
+        server = servers.get(self.config.server_name)
+        return server if isinstance(server, dict) else None
+
+    def register_mcp(self) -> None:
+        path = poolside_settings_path()
+        data = self._read_config()
+        desired = self.desired_server_entry()
+        if self.registered_server() == desired and not self.config.force:
+            self.log(
+                f"  MCP server '{self.config.server_name}' already points at "
+                f"{self.config.omi_dir}"
+            )
+            return
+        servers = data.get("mcp_servers")
+        if not isinstance(servers, dict):
+            servers = {}
+        self._drop_legacy_entry(servers)
+        servers[self.config.server_name] = desired
+        data["mcp_servers"] = servers
+        self._record(
+            f"register MCP server '{self.config.server_name}' in {path} -> "
+            f"{self.config.omi_dir}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(
+                path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
             )
 
 
@@ -2266,6 +2382,39 @@ def diagnose_deepseek(config: SetupConfig) -> list[CheckResult]:
 
 # -- dispatch -------------------------------------------------------------------
 
+def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
+    """Poolside is MCP-only here (no guard hook exists to check), so the doctor
+    checks that settings.yaml carries an ``mcp_servers`` entry for this vault."""
+    prov = PoolsideProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+    root = poolside_config_dir()
+    if root.is_dir():
+        results.append(CheckResult("poolside_root", "ok", f"pool CLI found: {root}"))
+    else:
+        results.append(
+            CheckResult("poolside_root", "fail", f"pool CLI not found: {root} does not exist")
+        )
+    results.extend(_diagnose_omi_folder(prov.config))
+    if prov.registered_server() == prov.desired_server_entry():
+        results.append(
+            CheckResult(
+                "poolside_mcp",
+                "ok",
+                f"omi MCP server wired into {poolside_settings_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "poolside_mcp",
+                "fail",
+                "omi MCP server not in poolside settings.yaml "
+                "(run `omind setup --agent poolside`)",
+            )
+        )
+    return results
+
+
 PROVISIONERS: dict[str, type[Provisioner]] = {
     "claude": Provisioner,
     "hermes": HermesProvisioner,
@@ -2278,6 +2427,7 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "vscode": VsCodeProvisioner,
     "q": AmazonQProvisioner,
     "deepseek": DeepseekProvisioner,
+    "poolside": PoolsideProvisioner,
 }
 
 DIAGNOSERS = {
@@ -2292,6 +2442,7 @@ DIAGNOSERS = {
     "vscode": diagnose_vscode,
     "q": diagnose_q,
     "deepseek": diagnose_deepseek,
+    "poolside": diagnose_poolside,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)

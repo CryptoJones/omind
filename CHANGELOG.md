@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [9.0.0] - 2026-09-07
+
+A flagship bump rather than a breaking one — nothing here changes an existing
+API. omind gains its first new agent integration since Gemini, and its first
+gate on its own contribution history.
+
+### Added
+
+- **Poolside (`pool` CLI) is a supported agent: `omind setup --agent poolside`**
+  ([#302](https://github.com/CryptoJones/omind/issues/302)). Poolside's ACP
+  client for the Laguna agent had no connection to omind in either direction —
+  `pool mcp list` reported "No MCP servers configured", so a standing
+  FlatlineRoundtable lane was running with no memory at all. A new
+  `PoolsideProvisioner` registers the omi MCP server in
+  `~/.config/poolside/settings.yaml` under `mcp_servers`, in the exact shape
+  `pool mcp add` writes (flat `command` + `args`, no `type` key — confirmed
+  against pool 1.0.16), merging in without disturbing the surrounding `pool:`
+  and `agent_servers:` keys. `omind doctor --agent poolside` checks the wiring.
+- **Commit attribution is enforced, not merely conventional**
+  ([#303](https://github.com/CryptoJones/omind/issues/303)). Every commit must
+  declare either `Co-authored-by:` or `No-agent: true`; silence now fails.
+  `scripts/check-attribution.sh` backs both a `.githooks/commit-msg` hook (opt
+  in with `git config core.hooksPath .githooks`) and a CI job on PRs, so local
+  and CI enforcement cannot drift apart. Merge and revert commits are exempt; a
+  Claude co-author missing its `Claude-Session:` trailer warns without failing.
+  This exists because `v8.8.0..v8.10.1` contains five commits with no trailer at
+  all, leaving 8.10.0 and 8.10.1 permanently unattributable — attribution is what
+  let #300 be traced to its author in seconds.
+
+### Fixed
+
+- `uv.lock` had been left at `8.10.1` through the 8.11.0 release, breaking the
+  version lockstep `CONTRIBUTING.md` requires; it is regenerated here. The test
+  that guards lockstep only compares `__version__` against `pyproject.toml`, so
+  the lock file drifted unnoticed.
+
+### Known gap
+
+- Poolside gets OMI *memory*, not OMI *enforcement*. `pool` exposes no pre-tool
+  hook (no `hooks` settings key, no `pool hooks` command), so no `HarnessSpec` is
+  registered for it — an entry nothing could call would claim coverage that does
+  not exist. Hard-blocking needs a stdio ACP proxy on `agent_servers.command`,
+  tracked in [#304](https://github.com/CryptoJones/omind/issues/304).
+
 ## [8.11.0] - 2026-09-07
 
 ### Changed

@@ -117,6 +117,17 @@ jobs:
             -c "git config --global --add safe.directory /repo && \
                 gitleaks git --redact --verbose /repo"
 
+  attribution:
+    name: Commit attribution
+    runs-on: ubuntu-latest
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0  # needs the base branch to diff against
+      - name: Every commit declares its authorship
+        run: ./scripts/check-attribution.sh --range "origin/${{ github.base_ref }}..HEAD"
+
   conformance:
     name: MCP conformance (live stdio)
     runs-on: ubuntu-latest
