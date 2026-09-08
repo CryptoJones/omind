@@ -298,6 +298,15 @@ Each issue below is written to be executable by any agent without further contex
 
 ## Done
 
+- [x] **`self-update`: post-update heal ran in the outgoing interpreter; immutable hint never fired on macOS** ([#315](https://github.com/CryptoJones/omind/issues/315)) — _bug_ —
+  8.10.1 -> 9.1.1 ended on `re-provision failed (module 'omind.filelock' has no
+  attribute 'exclusive')`: the heal ran in-process after uv had already swapped
+  the package, so new `provision.py` got the old release's `filelock` out of
+  `sys.modules`. It now re-enters a clean interpreter via a hidden
+  `self-update --heal`. Separately, `is_immutable` shelled to `lsattr` (absent on
+  macOS), so a `chflags uchg` hook produced a bare "Operation not permitted"
+  instead of the unlock instructions — it now reads `st_flags` and prints
+  `chflags`, not `chattr`. Shipped in 9.1.2.
 - [x] **Consolidate near-duplicate notes instead of only listing them** ([#172](https://github.com/CryptoJones/omind/issues/172)) — _enhancement (memory)_ —
   `omind consolidate` creates machine-local JSON plans and editable Markdown
   drafts without changing the vault. Explicit `--apply PLAN_ID` revalidates

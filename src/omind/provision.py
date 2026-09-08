@@ -21,6 +21,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -305,12 +306,38 @@ def _entry_command_text(entry: object) -> str:
 _HOOK_EXE_RE = re.compile(r"(?P<exe>\S+)\s+hook\s+\S")
 
 
-def is_immutable(path: Path) -> bool:
-    """True when ``chattr +i`` (or the BSD equivalent) is set on ``path``.
+#: BSD/macOS immutable bits (``chflags uchg`` / ``schg``). Absent on Linux,
+#: where ``stat`` exposes neither name — hence the ``getattr`` defaults.
+_BSD_IMMUTABLE = getattr(stat, "UF_IMMUTABLE", 0) | getattr(stat, "SF_IMMUTABLE", 0)
 
-    Best-effort and Linux-first: any failure reports False, because this only
-    ever *improves* an error message.
+
+def is_immutable(path: Path) -> bool:
+    """True when an immutable flag is set on ``path``.
+
+    Two mechanisms, because a hardened box uses whichever its kernel offers:
+    ``chattr +i`` on Linux (read back with ``lsattr``) and ``chflags uchg``
+    /``schg`` on macOS and the BSDs (read back from ``os.stat().st_flags``).
+
+    This used to *claim* "or the BSD equivalent" in its docstring while the body
+    shelled to ``lsattr`` alone — a binary macOS does not ship. So on a hardened
+    Mac the check always answered False and :func:`_immutable_hint` fell through
+    to the bare "cannot write …: Operation not permitted", which is precisely
+    the silence the hint exists to end (issue #315). Read the BSD flags first: no
+    subprocess,
+    and on Linux the branch compiles away to a falsy ``getattr`` default.
+
+    Best-effort: any failure reports False, because this only ever *improves*
+    an error message.
     """
+    if _BSD_IMMUTABLE:
+        # getattr, not attribute access: `st_flags` exists only in the BSD/macOS
+        # typeshed stub, so `os.stat(path).st_flags` is a mypy error on Linux and
+        # Windows even though the branch is unreachable there.
+        try:
+            if getattr(os.stat(path), "st_flags", 0) & _BSD_IMMUTABLE:
+                return True
+        except OSError:
+            return False
     try:
         result = subprocess.run(
             ["lsattr", "-d", str(path)], capture_output=True, text=True, timeout=5
@@ -352,15 +379,30 @@ def _immutable_hint(path: Path, exc: BaseException) -> str:
     """
     if not is_immutable(path):
         return f"cannot write {path}: {exc}"
+    mechanism, clear, restore = _immutable_commands(path)
     return (
-        f"{path} is IMMUTABLE (chattr +i), so setup cannot repair it.\n"
+        f"{path} is IMMUTABLE ({mechanism}), so setup cannot repair it.\n"
         "  This is deliberate hardening: it stops an agent disabling its own guard.\n"
+        "  If the locked copy carries LOCAL edits, diff it against the shipped one\n"
+        "  first — re-running setup replaces it with omind's version.\n"
         "  To re-provision, clear the flag, re-run setup, then restore it:\n"
-        f"    fleet-sudo chattr -i {path}\n"
+        f"    fleet-sudo {clear}\n"
         "    omind setup\n"
-        f"    fleet-sudo chattr +i {path}\n"
+        f"    fleet-sudo {restore}\n"
         "  (Use sudo directly if this machine has no fleet-sudo wrapper.)"
     )
+
+
+def _immutable_commands(path: Path) -> tuple[str, str, str]:
+    """``(mechanism, clear, restore)`` for this platform's immutable flag.
+
+    macOS and the BSDs use ``chflags uchg``; ``chattr`` does not exist there, so
+    printing it sent the operator to a command their shell rejects — advice as
+    useless as the traceback it replaced.
+    """
+    if sys.platform == "darwin" or "bsd" in sys.platform:
+        return ("chflags uchg", f"chflags nouchg {path}", f"chflags uchg {path}")
+    return ("chattr +i", f"chattr -i {path}", f"chattr +i {path}")
 
 
 def _hook_exe_path(command_text: str) -> str | None:

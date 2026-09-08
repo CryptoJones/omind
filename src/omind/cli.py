@@ -722,6 +722,9 @@ def build_parser() -> argparse.ArgumentParser:
     selfupdate.add_argument(
         "--force", action="store_true", help="reinstall the latest even if not newer"
     )
+    # Internal: how the updater re-enters a clean interpreter for the post-update
+    # heal (see update._post_update_heal). Not something to run by hand.
+    selfupdate.add_argument("--heal", action="store_true", help=argparse.SUPPRESS)
 
     return parser
 
@@ -1618,7 +1621,12 @@ def _run_loop(args: argparse.Namespace) -> int:
 def _run_self_update(args: argparse.Namespace) -> int:
     from omind.update import self_update
 
-    return self_update(check_only=args.check, force=args.force, rollback=args.rollback)
+    return self_update(
+        check_only=args.check,
+        force=args.force,
+        rollback=args.rollback,
+        heal_only=args.heal,
+    )
 
 
 def _run_help(args: argparse.Namespace) -> int:

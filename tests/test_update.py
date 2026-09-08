@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import json
+import sys
 import urllib.error
 from pathlib import Path
 
@@ -172,16 +173,92 @@ def test_self_update_runs_installer(monkeypatch: pytest.MonkeyPatch) -> None:
 
     class _Result:
         returncode = 0
+        stdout = ""
+        stderr = ""
 
     def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Result:
         # monkeypatching update.subprocess patches the SHARED subprocess module,
-        # so the post-update heal's `git -C` calls land here too — collect all.
+        # so the post-update heal's own subprocess lands here too — collect all.
         ran.append(list(cmd))
         return _Result()
 
     monkeypatch.setattr(update.subprocess, "run", fake_run)
     assert self_update(log=lambda _m: None) == 0
     assert any(cmd[:3] == ["uv", "tool", "install"] for cmd in ran)
+
+
+def test_post_update_heal_re_enters_a_clean_interpreter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The heal must run the NEW code in a NEW process, never inline.
+
+    `uv tool install --force` swaps the package under the running interpreter,
+    so after it, modules imported at startup are the outgoing release while
+    anything imported afterwards is the incoming one. Importing `provision`
+    inline handed 9.1.1's code 8.10.1's `omind.filelock` out of `sys.modules`
+    and the update ended on `module 'omind.filelock' has no attribute
+    'exclusive'`. Assert we shell out instead of importing.
+    """
+    ran: list[list[str]] = []
+
+    class _Result:
+        returncode = 0
+        stdout = "re-provisioned wiring (2 change(s)).\n"
+        stderr = ""
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Result:
+        ran.append(list(cmd))
+        return _Result()
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+
+    def exploding_import(*_a: object, **_k: object) -> None:
+        raise AssertionError("the heal must not import provision in this process")
+
+    monkeypatch.setattr(update, "run_post_update_heal", exploding_import)
+    out: list[str] = []
+    update._post_update_heal(log=out.append)
+
+    assert ran == [[sys.executable, "-m", "omind", "self-update", "--heal"]]
+    # The child's report is the operator's report — forwarded, not swallowed.
+    assert "re-provisioned wiring (2 change(s))." in out
+
+
+def test_post_update_heal_reports_a_failing_child(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Fail-open, but never fail-silent: name the repair."""
+
+    class _Result:
+        returncode = 1
+        stdout = ""
+        stderr = "Traceback…\nProvisionError: settings.json is IMMUTABLE\n"
+
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **k: _Result())
+    out: list[str] = []
+    update._post_update_heal(log=out.append)
+    assert any("IMMUTABLE" in line and "omind setup" in line for line in out)
+
+
+def test_heal_only_does_not_spawn_itself(monkeypatch: pytest.MonkeyPatch) -> None:
+    """`--heal` is the bottom of the recursion: it heals, it does not re-enter."""
+
+    def no_subprocess(*_a: object, **_k: object) -> None:
+        raise AssertionError("`--heal` must not spawn another interpreter")
+
+    monkeypatch.setattr(update.subprocess, "run", no_subprocess)
+    healed: list[bool] = []
+    monkeypatch.setattr(update, "run_post_update_heal", lambda **_k: healed.append(True))
+    assert self_update(heal_only=True, log=lambda _m: None) == 0
+    assert healed == [True]
+
+
+def test_autoheal_opt_out_skips_the_subprocess(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("OMIND_NO_AUTOHEAL", "1")
+
+    def no_subprocess(*_a: object, **_k: object) -> None:
+        raise AssertionError("OMIND_NO_AUTOHEAL must skip the heal entirely")
+
+    monkeypatch.setattr(update.subprocess, "run", no_subprocess)
+    update._post_update_heal(log=lambda _m: None)
 
 
 def test_self_update_up_to_date(monkeypatch: pytest.MonkeyPatch) -> None:
