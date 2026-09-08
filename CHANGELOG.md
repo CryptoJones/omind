@@ -9,6 +9,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [9.1.1] - 2026-09-08
+
+### Fixed
+
+- **The consult gate no longer blocks Poolside's `exit` and `todo_action`
+  control tools** ([#313](https://github.com/CryptoJones/omind/issues/313)).
+  `pool exec` ends a run by calling its `exit` tool, so a gated `exit` was a
+  gated "stop": a prompt that needed no other tool was denied at `exit` and the
+  run aborted with `exit_tool_called: encountered unexpected error`. Claude
+  Code's Stop hook was never gated; pool's equivalent now isn't either. Both
+  tools join `ToolSearch` in `_GATE_EXEMPT_TOOLS`. Hard rules still apply to
+  every tool; they match on command text, which these carry none of.
+
 ## [9.1.0] - 2026-09-08
 
 ### Added

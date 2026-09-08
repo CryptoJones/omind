@@ -1703,3 +1703,20 @@ def test_preflight_cli_poolside_emits_snake_case_and_recovers_prompt(
     assert "found nothing relevant" in context
     assert guard.consulted_this_turn("preflight-pool")
     guard.clear_gate("preflight-pool")
+
+
+def test_gate_exempts_poolside_control_tools_but_not_shell() -> None:
+    """#313: pool ends a run through its `exit` tool and books work through
+    `todo_action`; neither is an action on the world, so the consult gate must
+    let them through WITHOUT marking the gate consulted — a real tool call in
+    the same turn still has to consult first."""
+    guard.clear_gate("s313")
+    for tool in ("exit", "todo_action"):
+        assert guard.decide({"tool": tool, "session": "s313", "command": ""}).allow
+        assert not guard.consulted_this_turn("s313")  # exemption is not a consult
+    # The exemption is by tool name only: pool's shell tool stays gated.
+    shell = guard.check_action(
+        {"tool": "shell", "command": "echo hi", "session": "s313", "is_omi_consult": False}
+    )
+    assert not shell.allow and "omi-gate" in shell.reason
+    guard.clear_gate("s313")
