@@ -7,7 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+- **Tool error text survives mcp >= 2.1 (#294).** mcp 2.1.x hands the client a
+  bare `Error executing tool <name>` for any exception that is not a deliberate
+  `ToolError`, which hid every anticipated failure — a missing note, an unsafe
+  name, a bad graph argument, and the stale-version conflict whose message is
+  what tells an agent to re-read before writing. The server now re-raises those
+  domain failures (`NoteError`, `NoteConflictError`, `ValueError`) as `ToolError`
+  at the tool boundary; a real crash stays masked as the SDK intends. `uv.lock`
+  moves to mcp 2.1.1 so a local run sees what CI sees.
+- **Windows CI was broken, and #294 was hiding it**
+  ([#306](https://github.com/CryptoJones/omind/issues/306)). With the mcp
+  masking fixed, the matrix went green everywhere except both Windows jobs,
+  which had been failing on their own all along. Two causes: `rollup_journals`
+  locked each daily and then re-opened it by path to tally it — fine under
+  POSIX `flock`, which is advisory, but `msvcrt.locking` is **mandatory**, so
+  Windows answered `PermissionError` on the second open. It now reads through
+  the descriptor it already holds, which also makes the tally count exactly the
+  bytes the lock protects on every platform. And
+  `test_resolve_finds_a_cli_outside_path` moved home with `HOME` alone, while
+  `expanduser()` reads `USERPROFILE` on Windows — a test bug that the
+  `_isolate_home` fixture already documents the fix for. The archive step also had to drop its locks first on Windows,
+  which refuses to rename a file anyone still holds open ([WinError 32]); POSIX
+  keeps them across the rename, where an open fd doesn't obstruct it.
 
 ## [9.0.0] - 2026-09-07
 

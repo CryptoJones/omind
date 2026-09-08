@@ -55,6 +55,10 @@ else:
 _BINARY = getattr(os, "O_BINARY", 0)
 _NOFOLLOW = getattr(os, "O_NOFOLLOW", 0)
 
+#: Public alias: callers that open their own fd to hold a lock need the same
+#: no-text-mode flag this module uses, and shouldn't re-derive it.
+BINARY = _BINARY
+
 
 @contextlib.contextmanager
 def append_locked(path: Path, *, mode: int = 0o600) -> Iterator[int]:
