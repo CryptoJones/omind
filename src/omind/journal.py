@@ -23,6 +23,7 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import sys
 from collections import Counter
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
@@ -229,6 +230,17 @@ def render_rollup(week: str, days: list[str], stats: JournalStats) -> str:
     return render_fields(fields)
 
 
+def _release(fds: list[int]) -> None:
+    """Unlock and close every fd, then empty the list so a later pass (and the
+    ``finally``) can't double-close a descriptor number the OS has reused."""
+    for fd in fds:
+        with contextlib.suppress(OSError):
+            filelock.unlock_fd(fd)
+        with contextlib.suppress(OSError):
+            os.close(fd)
+    fds.clear()
+
+
 def _read_held(path: Path, fd: int | None) -> str:
     """Read a daily, THROUGH the descriptor when we already hold its lock.
 
@@ -318,6 +330,16 @@ def rollup_journals(
                 days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
                 filename = rollup_name(wk)
                 _atomic_write(directory / filename, render_rollup(wk, days, stats))
+                # Windows refuses to rename or unlink a file that anyone still
+                # holds open, so the locks must go before the archive step —
+                # [WinError 32] otherwise. Dropping them here is not the race
+                # the comment above guards against: on Windows an appending
+                # hook's own open handle is itself what blocks the rename, so
+                # the file cannot be moved out from under a live append. POSIX
+                # keeps the locks across the rename, where an open fd does not
+                # obstruct it and only the lock closes the window.
+                if sys.platform == "win32":
+                    _release(locked_fds)
                 archived: list[str] = []
                 deleted: list[str] = []
                 for _, path in dated_paths:
@@ -329,11 +351,7 @@ def rollup_journals(
                         path.replace(archive_dir / path.name)
                         archived.append(path.name)
             finally:
-                for fd in locked_fds:
-                    with contextlib.suppress(OSError):
-                        filelock.unlock_fd(fd)
-                    with contextlib.suppress(OSError):
-                        os.close(fd)
+                _release(locked_fds)
             results.append(
                 WeekRollup(
                     week=wk,

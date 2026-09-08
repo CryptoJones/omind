@@ -27,7 +27,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   bytes the lock protects on every platform. And
   `test_resolve_finds_a_cli_outside_path` moved home with `HOME` alone, while
   `expanduser()` reads `USERPROFILE` on Windows — a test bug that the
-  `_isolate_home` fixture already documents the fix for.
+  `_isolate_home` fixture already documents the fix for. The archive step also had to drop its locks first on Windows,
+  which refuses to rename a file anyone still holds open ([WinError 32]); POSIX
+  keeps them across the rename, where an open fd doesn't obstruct it.
 
 ## [9.0.0] - 2026-09-07
 
