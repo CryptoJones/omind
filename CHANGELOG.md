@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [9.0.1] - 2026-09-07
+
 ### Fixed
 - **Tool error text survives mcp >= 2.1 (#294).** mcp 2.1.x hands the client a
   bare `Error executing tool <name>` for any exception that is not a deliberate
@@ -30,6 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `_isolate_home` fixture already documents the fix for. The archive step also had to drop its locks first on Windows,
   which refuses to rename a file anyone still holds open ([WinError 32]); POSIX
   keeps them across the rename, where an open fd doesn't obstruct it.
+- **Version lockstep only guarded two of the three files it claims**
+  ([#307](https://github.com/CryptoJones/omind/issues/307)). `test_version_is_set`
+  compared `__version__` against `pyproject.toml` and stopped there, so `uv.lock`
+  drifted silently — 8.11.0 shipped with the lock still declaring 8.10.1. The test
+  now parses the `omind` entry out of `uv.lock` too and names the remedy when it
+  fails.
+
+### Documentation
+
+- Backfilled the `[8.10.0]` and `[8.10.1]` sections, which had existed only as
+  GitHub release bodies while the changelog jumped from `[Unreleased]` to
+  `[8.8.0]` ([#307](https://github.com/CryptoJones/omind/issues/307)).
 
 ## [9.0.0] - 2026-09-07
 
@@ -132,6 +148,41 @@ full report in `docs/reviews/2026-08-27-multi-agent-review.md`)
   the ai-usage ledger rotates at 8 MiB; degraded unencrypted rsync backups
   write a persistent vault warning note; journal rollup holds per-file flocks
   across tally→rename so hook appends are never stranded.
+
+## [8.10.1] - 2026-08-26
+
+### Fixed
+
+- **A model CLI installed outside a hook's PATH was reported as missing.**
+  `resolve_model_backend` used `shutil.which`, which only sees the inherited
+  PATH; hooks run in a non-login context where `~/.local/bin` is routinely
+  absent, so an installed and authenticated CLI was invisible and omind
+  reported "no backend available". It now falls back to the usual user-local
+  bin dirs (`~/.local/bin`, uv tool shims, `~/bin`, `/opt/homebrew/bin`,
+  `/usr/local/bin`). Two tests were patching a seam the code stopped using in
+  #269 and so tested nothing; both retargeted.
+
+## [8.10.0] - 2026-08-26
+
+### Changed
+
+- **The verifier is no longer Claude-only.** Both call paths did
+  `shutil.which("claude")`, so on any box not running Claude Code the ambiguous
+  relevance band had no adjudicator — it failed open silently, and `doctor`
+  blamed a missing Claude binary on machines that were never going to have one.
+  Backends now resolve in order (`claude -p --output-format json`, `agy -p`,
+  `codex exec`), each invocation verified by running it. `OMI_MODEL_CLI` pins
+  one by name and `OMI_MODEL_CMD` accepts any command line containing
+  `{prompt}`, so a new harness needs no patch. The standalone `gemini` CLI is
+  deliberately absent — it returns `IneligibleTierError` for individual
+  accounts, which Google migrated to Antigravity (the `agy` entry).
+
+### Added
+
+- **`omi-model-http`** — a shim exposing any local model as a verifier backend.
+
+_(These two releases shipped with their notes only in the GitHub release bodies;
+backfilled 2026-09-07 from those, which are the authoritative record.)_
 
 ## [8.8.0]
 

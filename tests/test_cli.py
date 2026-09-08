@@ -21,6 +21,16 @@ def test_version_is_set() -> None:
     assert declared is not None
     assert omind.__version__ == declared.group(1)
 
+    # uv.lock is the THIRD file CONTRIBUTING requires in lockstep, and it was
+    # the one nothing checked — 8.11.0 shipped with the lock still saying
+    # 8.10.1 precisely because this test stopped at __version__.
+    lock = (Path(__file__).parent.parent / "uv.lock").read_text(encoding="utf-8")
+    locked = re.search(r'^name = "omind"\nversion = "([^"]+)"', lock, re.MULTILINE)
+    assert locked is not None, "no omind package entry in uv.lock"
+    assert locked.group(1) == declared.group(1), (
+        "uv.lock is behind pyproject.toml — run `uv lock` and commit the result"
+    )
+
 
 def test_serve_help_states_the_unauthenticated_risk() -> None:
     """The `serve` risk model must be reachable without running the server (#190).
