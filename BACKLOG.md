@@ -7,6 +7,11 @@ here so neither side drifts.
 
 ## Open
 
+_Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
+Reconciled 2026-09-08: 44 shipped items that were still sitting here moved to
+[Done](#done), and #297 was closed as a duplicate its own fix (#306) had already
+resolved._
+
 - [ ] **Guard: a git verb inside an ssh payload or a string literal is judged as LOCAL repo work** ([#317](https://github.com/CryptoJones/omind/issues/317)) — _bug_ —
   `_is_repo_sensitive_action` matches a git verb anywhere in the command text, so
   `ssh host '...'` running a commit on another machine is classified as local repo
@@ -15,6 +20,81 @@ here so neither side drifts.
   satisfy is vacuous, and the guard records the remote commit as having a fresh
   base. Same family as the escalation-keyword substring bug; `policy._CMD_POSITION`
   is the existing anchoring primitive. Reproduced four times while filing it.
+- [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
+  measured on hermes across every transcript since 2026-08-24: 362 turns where the
+  per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
+  97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
+  `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
+  prompts, so a long turn is one gate event no matter how much work happens inside it.
+- [ ] **`edit-note` silently guts a note when `details` contains a `## ` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
+  content after the first `## ` is relocated out of `## Details` and re-emitted after
+  `## References`; a second edit leaves both the stale and the new copy. Hit for real
+  on 2026-08-31: a note ended up with two contradictory copies of its body, the
+  superseded one still reading as current, while `## Details` was empty.
+- [ ] **Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — _bug (enforcement)_ —
+  authorization is classified from the *opening* message of a turn, but Claude Code
+  delivers messages sent while a turn is running alongside a tool result. An explicit
+  mid-turn imperative therefore cannot lift a block the opening message armed.
+- [ ] **Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
+  `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
+  branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
+  gap — and if it is the latter, the journal, compliance log and AI-usage log have
+  the same hole on Windows, where a dropped line looks like inaction, not a bug.
+- [ ] **First PyPI publish** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
+  needs CJ's PyPI account; details in [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
+
+## Not planned
+
+- [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
+  they declare every capability's tier, read/write scope, network need, and
+  destructiveness in `config/capabilities.json`, verify it, and state explicitly
+  where no automated verifier exists. omind's `doctor` checks are hand-written per
+  concern with no declaration of what each surface may touch, and nothing fails when
+  code and declaration drift. Natural home for the #190 `serve` risk model.
+  **Closed not-planned 2026-08-02.** The concrete gap it named — nothing states which
+  surfaces can destroy a memory — was closed by other work rather than by a declaration
+  file: `docs/serve.md` (v6.4.0) states the risk model for the unauthenticated destructive
+  API this issue called out as its natural home.
+
+- [ ] **Contextual-prefix indexed chunks (Anthropic Contextual Retrieval)** ([#193](https://github.com/CryptoJones/omind/issues/193), closed not-planned) — _rejected on measurement_ —
+  built behind `OMI_CONTEXTUAL_CHUNKS` and evaluated on the live 784-note vault, both
+  ways, with the semantic leg on. **recall@1 60% → 60%, recall@5 60% → 60%, MRR 0.640 →
+  0.640**, for +31% index size (13,908 → 18,248 KiB) and +20% rebuild time. Of the five
+  labelled cases, three were already rank 1 in both; the two misses went 7→8 and 13→11.
+  Noise, not signal.
+
+  The reason is the part worth remembering: **the issue's premise did not hold for omind.**
+  It assumed a mid-note chunk "competes on its own words alone", which is true of
+  claude-obsidian but not here — `_ingest` has always embedded `title + heading + tags +
+  chunk.text`, and `chunks_fts` has always given BM25 separate title/heading/tags columns.
+  omind already had contextual retrieval without the name. The prefix's only genuine
+  addition is the note's `Summary`, which on descriptive titles is largely a restatement
+  of a signal already indexed. The upstream 35–49% figure is measured against a baseline
+  that indexes bare chunks; omind is not that baseline.
+
+  Caveat kept honest: the labelled set is only 5 cases, so each is worth 20pp and an
+  effect under ~15% could hide. A 25–40 case set is worth building for retrieval work in
+  general — and would be the thing that could reopen this.
+
+- [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
+- [ ] **claude-obsidian's source capture, Canvas/Bases emitters, and methodology filing modes** — _rejected_ —
+  evaluated during the 2026-08-02 comparison. Their `capture` (immutable content-addressed
+  copies of PDFs/images/URLs under `.raw/`), their Obsidian Canvas and `.base` emitters, and
+  their PARA/LYT/Zettelkasten routing modes are all well built, and all solve a problem omind
+  does not have. omind's notes are written *by an agent about its own work*, not ingested from
+  external documents, so there is no source to retain and no filing taxonomy to pick. The
+  Canvas/Bases emitters are Obsidian-presentation features; omind already ships a web graph
+  view and leaves presentation to Obsidian itself. Revisit only if omind ever grows an ingest
+  path for external material.
+- [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
+
+## Done
+
+### Shipped — moved out of Open on 2026-09-08
+
+_These landed and were closed upstream; they sat under `## Open` because the
+box was checked but the item never moved. Grouped by the review round that
+produced them, as they were originally filed._
 
 ### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
 
@@ -259,53 +339,6 @@ Each issue below is written to be executable by any agent without further contex
   `pool exec` ends a run through the `exit` tool; gating it aborted trivial runs
   with `exit_tool_called: unexpected error`. Both are now in `_GATE_EXEMPT_TOOLS`
   beside `ToolSearch`; hard rules still apply.
-
-## Not planned
-
-- [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
-  they declare every capability's tier, read/write scope, network need, and
-  destructiveness in `config/capabilities.json`, verify it, and state explicitly
-  where no automated verifier exists. omind's `doctor` checks are hand-written per
-  concern with no declaration of what each surface may touch, and nothing fails when
-  code and declaration drift. Natural home for the #190 `serve` risk model.
-  **Closed not-planned 2026-08-02.** The concrete gap it named — nothing states which
-  surfaces can destroy a memory — was closed by other work rather than by a declaration
-  file: `docs/serve.md` (v6.4.0) states the risk model for the unauthenticated destructive
-  API this issue called out as its natural home.
-
-- [ ] **Contextual-prefix indexed chunks (Anthropic Contextual Retrieval)** ([#193](https://github.com/CryptoJones/omind/issues/193), closed not-planned) — _rejected on measurement_ —
-  built behind `OMI_CONTEXTUAL_CHUNKS` and evaluated on the live 784-note vault, both
-  ways, with the semantic leg on. **recall@1 60% → 60%, recall@5 60% → 60%, MRR 0.640 →
-  0.640**, for +31% index size (13,908 → 18,248 KiB) and +20% rebuild time. Of the five
-  labelled cases, three were already rank 1 in both; the two misses went 7→8 and 13→11.
-  Noise, not signal.
-
-  The reason is the part worth remembering: **the issue's premise did not hold for omind.**
-  It assumed a mid-note chunk "competes on its own words alone", which is true of
-  claude-obsidian but not here — `_ingest` has always embedded `title + heading + tags +
-  chunk.text`, and `chunks_fts` has always given BM25 separate title/heading/tags columns.
-  omind already had contextual retrieval without the name. The prefix's only genuine
-  addition is the note's `Summary`, which on descriptive titles is largely a restatement
-  of a signal already indexed. The upstream 35–49% figure is measured against a baseline
-  that indexes bare chunks; omind is not that baseline.
-
-  Caveat kept honest: the labelled set is only 5 cases, so each is worth 20pp and an
-  effect under ~15% could hide. A 25–40 case set is worth building for retrieval work in
-  general — and would be the thing that could reopen this.
-
-- [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
-- [ ] **claude-obsidian's source capture, Canvas/Bases emitters, and methodology filing modes** — _rejected_ —
-  evaluated during the 2026-08-02 comparison. Their `capture` (immutable content-addressed
-  copies of PDFs/images/URLs under `.raw/`), their Obsidian Canvas and `.base` emitters, and
-  their PARA/LYT/Zettelkasten routing modes are all well built, and all solve a problem omind
-  does not have. omind's notes are written *by an agent about its own work*, not ingested from
-  external documents, so there is no source to retain and no filing taxonomy to pick. The
-  Canvas/Bases emitters are Obsidian-presentation features; omind already ships a web graph
-  view and leaves presentation to Obsidian itself. Revisit only if omind ever grows an ingest
-  path for external material.
-- [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
-
-## Done
 
 - [x] **`self-update`: post-update heal ran in the outgoing interpreter; immutable hint never fired on macOS** ([#315](https://github.com/CryptoJones/omind/issues/315)) — _bug_ —
   8.10.1 -> 9.1.1 ended on `re-provision failed (module 'omind.filelock' has no
