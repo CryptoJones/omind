@@ -7,6 +7,15 @@ here so neither side drifts.
 
 ## Open
 
+- [ ] **Guard: a git verb inside an ssh payload or a string literal is judged as LOCAL repo work** ([#317](https://github.com/CryptoJones/omind/issues/317)) — _bug_ —
+  `_is_repo_sensitive_action` matches a git verb anywhere in the command text, so
+  `ssh host '...'` running a commit on another machine is classified as local repo
+  work; `_repo_root_for_action` then falls back to `Path.cwd()` and demands a
+  freshness fetch of an unrelated local repo. The check the operator is forced to
+  satisfy is vacuous, and the guard records the remote commit as having a fresh
+  base. Same family as the escalation-keyword substring bug; `policy._CMD_POSITION`
+  is the existing anchoring primitive. Reproduced four times while filing it.
+
 ### From the 2026-08-27 multi-agent review (code round — fixes in the working tree)
 
 _A nine-slice review (memory core, MCP surface, mesh, enforcement, retrieval,
