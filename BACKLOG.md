@@ -212,6 +212,14 @@ Each issue below is written to be executable by any agent without further contex
 
 ### Harness + repo hygiene (2026-09-07)
 
+- [x] **`ToolError` text masked by mcp >= 2.1, reddening CI on every PR**
+  ([#294](https://github.com/CryptoJones/omind/issues/294)) — _fix (server)_ —
+  Anticipated domain failures re-raised as `ToolError` so their message survives.
+- [x] **Windows CI broken underneath #294's redness**
+  ([#306](https://github.com/CryptoJones/omind/issues/306)) — _fix (journal/test)_ —
+  Journal rollup re-opened a file it held a mandatory Windows lock on; and a test
+  moved `HOME` without `USERPROFILE`.
+
 - [x] **Poolside's `pool` CLI wasn't connected to omind at all**
   ([#302](https://github.com/CryptoJones/omind/issues/302)) — _feat (agents)_ —
   `pool mcp list` reported "No MCP servers configured", so the CmdrData/Laguna

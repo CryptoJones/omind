@@ -247,7 +247,11 @@ def test_resolve_finds_a_cli_outside_path(tmp_path, monkeypatch):
     exe.chmod(0o755)
 
     monkeypatch.setattr(ai_usage.shutil, "which", lambda _n: None)  # not on PATH
+    # BOTH vars: expanduser() reads USERPROFILE on Windows and HOME on POSIX, so
+    # setting only HOME left Windows resolving the conftest home and finding
+    # nothing (see the _isolate_home fixture, which sets both for this reason).
     monkeypatch.setenv("HOME", str(fake_home))
+    monkeypatch.setenv("USERPROFILE", str(fake_home))
     monkeypatch.delenv(ai_usage.MODEL_CLI_ENV, raising=False)
     monkeypatch.delenv(ai_usage.MODEL_CMD_ENV, raising=False)
 

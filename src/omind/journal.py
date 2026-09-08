@@ -229,6 +229,26 @@ def render_rollup(week: str, days: list[str], stats: JournalStats) -> str:
     return render_fields(fields)
 
 
+def _read_held(path: Path, fd: int | None) -> str:
+    """Read a daily, THROUGH the descriptor when we already hold its lock.
+
+    Windows byte-range locks (``msvcrt.locking``) are **mandatory**: re-opening
+    a file this process has locked fails with ``PermissionError``. POSIX
+    ``flock`` is advisory, so the old ``path.read_text()`` worked there and the
+    whole Windows matrix broke silently — hidden behind the mcp 2.1 redness of
+    #294 until that was fixed. Reading the held fd also closes a correctness
+    gap on every platform: we now tally exactly the bytes the lock protects,
+    rather than whatever a second open happens to see.
+    """
+    if fd is None:  # archived dailies aren't locked — nothing is appending to them
+        return path.read_text(encoding="utf-8", errors="replace")
+    os.lseek(fd, 0, os.SEEK_SET)
+    chunks: list[bytes] = []
+    while block := os.read(fd, 1 << 16):
+        chunks.append(block)
+    return b"".join(chunks).decode("utf-8", errors="replace")
+
+
 def rollup_journals(
     omi_dir: Path | str,
     *,
@@ -287,12 +307,14 @@ def rollup_journals(
             # wait across weeks.
             locked_fds: list[int] = []
             try:
+                held: dict[Path, int] = {}
                 for _, path in dated_paths:
-                    fd = os.open(path, os.O_RDWR | os.O_CREAT, 0o600)
+                    fd = os.open(path, os.O_RDWR | os.O_CREAT | filelock.BINARY, 0o600)
                     filelock.lock_fd(fd)
                     locked_fds.append(fd)
+                    held[path] = fd
                 for _, path in [*archived_dated, *dated_paths]:
-                    _tally(path.read_text(encoding="utf-8", errors="replace"), stats)
+                    _tally(_read_held(path, held.get(path)), stats)
                 days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
                 filename = rollup_name(wk)
                 _atomic_write(directory / filename, render_rollup(wk, days, stats))

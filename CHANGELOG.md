@@ -16,6 +16,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   domain failures (`NoteError`, `NoteConflictError`, `ValueError`) as `ToolError`
   at the tool boundary; a real crash stays masked as the SDK intends. `uv.lock`
   moves to mcp 2.1.1 so a local run sees what CI sees.
+- **Windows CI was broken, and #294 was hiding it**
+  ([#306](https://github.com/CryptoJones/omind/issues/306)). With the mcp
+  masking fixed, the matrix went green everywhere except both Windows jobs,
+  which had been failing on their own all along. Two causes: `rollup_journals`
+  locked each daily and then re-opened it by path to tally it — fine under
+  POSIX `flock`, which is advisory, but `msvcrt.locking` is **mandatory**, so
+  Windows answered `PermissionError` on the second open. It now reads through
+  the descriptor it already holds, which also makes the tally count exactly the
+  bytes the lock protects on every platform. And
+  `test_resolve_finds_a_cli_outside_path` moved home with `HOME` alone, while
+  `expanduser()` reads `USERPROFILE` on Windows — a test bug that the
+  `_isolate_home` fixture already documents the fix for.
 
 ## [9.0.0] - 2026-09-07
 
