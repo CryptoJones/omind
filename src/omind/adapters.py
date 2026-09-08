@@ -49,7 +49,8 @@ def _derive_command(event: dict[str, Any], tool_input: dict[str, Any]) -> str:
     and an ``input``/``args`` object, not just a plain string — otherwise the
     guard saw an empty command and no hard rule could match the real payload.
     """
-    for source in (event.get("command"), tool_input.get("command")):
+    # Poolside's ``shell`` tool carries the command line as ``cmd``.
+    for source in (event.get("command"), tool_input.get("command"), tool_input.get("cmd")):
         if isinstance(source, str) and source:
             return source
     for container in (event, tool_input):
@@ -108,7 +109,8 @@ def run_adapter(
     """Read a harness event on stdin, normalize it, decide, and render the verdict
     in ``harness``'s block-output format (exit-2 for shell harnesses, a
     ``{"decision":"block"}`` JSON for Hermes, an ``{allow,reason}`` signal for the
-    OpenCode plugin). Returns the exit code the adapter should exit with."""
+    OpenCode plugin, a snake_case ``hook_specific_output`` deny for Poolside).
+    Returns the exit code the adapter should exit with."""
     from omind import harness as harness_mod
 
     src = stream if stream is not None else sys.stdin
@@ -137,6 +139,10 @@ def run_adapter(
         return harness_mod.render_decision(
             blocked, spec.block_format, sys.stdout, sys.stderr, event=""
         )
+    # Poolside's event shape differs from Claude's in three places (tool naming,
+    # ``cmd``, ``tool_output``); translate ONCE here so the guard, verifier, and
+    # accounting all see the Claude-shaped event they were written against.
+    event = harness_mod.translate_event(harness, event)
     action = normalize_action(event)
     verdict = guard.check_action(action, omi_dir=omi_dir)
     # Codex's deny shape depends on which hook fired (PreToolUse vs

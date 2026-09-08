@@ -32,8 +32,8 @@ reads and writes as long-term memory. `omind` does two things with it:
 
 - **`omind setup`** — idempotently registers **omind's own node MCP server**
   (`omind node`) with your agent — **Claude Code** by default, or **Hermes,
-  OpenClaw, OpenCode, Codex CLI, Gemini CLI, Claude Desktop, Kiro, VS Code, and
-  Amazon Q** via `--agent` (see *Other agents* below) —
+  OpenClaw, OpenCode, Codex CLI, Gemini CLI, Poolside, Claude Desktop, Kiro,
+  VS Code, and Amazon Q** via `--agent` (see *Other agents* below) —
   pointed at an OMI folder inside an Obsidian vault, and initializes the folder
   as a **mesh node** (see below). After this, the agent persists memory across
   sessions through the MCP tools — and across machines through the mesh. Setup
@@ -127,7 +127,7 @@ pip install -e ".[dev]"
 ## Quick start
 
 Provision the MCP wiring for your agent — Claude Code by default; add
-`--agent hermes|openclaw|opencode|codex|gemini|claude-desktop|kiro|vscode|q`
+`--agent hermes|openclaw|opencode|codex|gemini|poolside|claude-desktop|kiro|vscode|q`
 for the others (see *Other agents* below). Idempotent; safe to re-run:
 
 ```bash
@@ -475,7 +475,7 @@ to `economy`/`balanced`/`full`. Set `OMI_AI_EXPENSE` for a temporary override.
 The CLI and web app show cache-inclusive OMI share, average priming, exact versus
 estimated usage, per-operation totals, and estimated avoided tokens.
 
-## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Claude Desktop, Kiro, VS Code, Amazon Q
+## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Poolside, Claude Desktop, Kiro, VS Code, Amazon Q
 
 [Claude Code](https://github.com/anthropics/claude-code) is the default, but the
 same OMI folder can back any agent. `omind setup --agent ...` provisions several
@@ -570,10 +570,23 @@ CLI** gets guard, MCP-memory registration, compact SessionStart priming,
 PostToolUse accounting, the `omind` help/recall skill, and the global AGENTS
 bootstrap pointer (see above). **OpenCode** priming is likewise not wired yet (its MCP
 server and skill are). The cross-harness **guard** reaches Claude Code, Hermes,
-OpenCode, Codex, and Gemini as hard-block; **OpenClaw** is wired
+OpenCode, Codex, Gemini, and Poolside as hard-block; **OpenClaw** is wired
 **detect-only** — its POST `/hooks/agent` gateway receives the guard verdict but
 deny-enforcement is unverified against a live gateway, so the verdict is advisory
 until hard-block is proven.
+
+**Poolside** (the `pool` CLI for the Laguna agent, >= 1.0.16) gets the full
+Claude Code treatment from one `omind setup --agent poolside`: the `omi` MCP
+server under `mcp_servers` in `~/.config/poolside/settings.yaml`, plus five
+entries under the same file's `hooks` key — `PreToolUse` (the hard-block guard,
+`omind guard adapter --harness poolside`), `UserPromptSubmit` (the per-turn
+memory preflight + consult gate), and `PostToolUse` / `Stop` / `SessionStart`
+(journal, verifier, accounting, loop guard, priming). `pool`'s hooks speak a
+snake_case twin of Claude's protocol and name MCP tools `<server>__<tool>`; the
+`--harness poolside` flag makes omind translate both ways, so a rule learned
+under Claude Code blocks under Laguna too. Re-runs replace only the entries
+omind owns (named `omind-omi-*`), so hooks you wrote and pool's own
+`stop_hook_max_continuations` are preserved.
 
 ### MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q
 
@@ -597,7 +610,7 @@ as Claude Desktop but `Code/User`; a `servers` block with `type: stdio`); and Am
 Q's `~/.aws/amazonq/mcp.json` (`mcpServers`). Restart the tool afterward to load the
 server.
 
-`omind doctor --agent hermes|openclaw|opencode|codex|gemini|claude-desktop|kiro|vscode|q`
+`omind doctor --agent hermes|openclaw|opencode|codex|gemini|poolside|claude-desktop|kiro|vscode|q`
 diagnoses that agent's wiring, and `omind quickstart --agent <name>` prints the manual
 steps (YAML/JSON snippets personalized to your paths) if you'd rather merge them in
 yourself.

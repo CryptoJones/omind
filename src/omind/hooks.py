@@ -739,18 +739,17 @@ def emit_session_start_context(
     out: TextIO | None = None,
     *,
     cwd: Path | str | None = None,
+    harness: str = "claude",
 ) -> None:
-    """Emit OMI priming-note content as SessionStart ``additionalContext``. Never raises."""
+    """Emit OMI priming-note content as SessionStart ``additionalContext`` (in
+    ``harness``'s output shape — see :func:`omind.harness.render_context`).
+    Never raises."""
+    from omind import harness as harness_mod
+
     sink = out if out is not None else sys.stdout
     context = build_session_start_context(omi_dir, cwd=cwd)
-    payload = {
-        "hookSpecificOutput": {
-            "hookEventName": "SessionStart",
-            "additionalContext": context,
-        }
-    }
     try:
-        sink.write(json.dumps(payload) + "\n")
+        sink.write(harness_mod.render_context(harness, "SessionStart", context))
         from omind import ai_usage
 
         baseline = (
@@ -850,17 +849,26 @@ def run_hook(
     *,
     stdin: TextIO | None = None,
     stdout: TextIO | None = None,
+    harness: str = "claude",
 ) -> int:
-    """Dispatch one hook invocation. ALWAYS returns 0 so the agent never blocks."""
+    """Dispatch one hook invocation. ALWAYS returns 0 so the agent never blocks.
+
+    ``harness`` names the caller (``omind hook … --harness poolside``): its raw
+    event is translated onto the Claude shape first and its stdout replies are
+    rendered in its own shape, so the journal/verifier/accounting/loop-guard
+    bodies below stay harness-agnostic.
+    """
+    from omind import harness as harness_mod
+
     try:
         if event_name == "SessionStart":
-            event = read_event(stdin)
-            emit_session_start_context(omi_dir, out=stdout, cwd=event.get("cwd"))
+            event = harness_mod.translate_event(harness, read_event(stdin))
+            emit_session_start_context(omi_dir, out=stdout, cwd=event.get("cwd"), harness=harness)
             return 0
         if event_name == HERMES_PRIME_EVENT:
             emit_pre_llm_call_context(omi_dir, stdin=stdin, stdout=stdout)
             return 0
-        event = read_event(stdin)
+        event = harness_mod.translate_event(harness, read_event(stdin))
         line = format_entry(event, event_name=event_name)
         if line:
             append_entry(omi_dir, line)
@@ -887,7 +895,7 @@ def run_hook(
             ) or (False, "")
             if blocked:
                 sink = stdout if stdout is not None else sys.stdout
-                sink.write(json.dumps({"decision": "block", "reason": reason}) + "\n")
+                sink.write(harness_mod.render_stop_block(harness, reason))
                 return 0
             # Unwritten-work detector (#221). Isolated like the two above: a
             # nudge that could break the ability to STOP would be a far worse

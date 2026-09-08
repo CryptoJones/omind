@@ -1484,7 +1484,7 @@ def run_guard(
             clear_all_gates()
         return 0
     if action_name == "preflight":
-        return _run_preflight(_load(src), omi_dir)
+        return _run_preflight(_load(src), omi_dir, harness=harness)
     if action_name == "learn":
         return _run_learn(_load(src), omi_dir)
     if action_name == "escalate":
@@ -1694,17 +1694,17 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     return context
 
 
-def _run_preflight(data: dict[str, Any], omi_dir: Path | None) -> int:
-    """Claude UserPromptSubmit adapter: inject preflight beside the user prompt."""
+def _run_preflight(data: dict[str, Any], omi_dir: Path | None, *, harness: str = "claude") -> int:
+    """UserPromptSubmit adapter: inject preflight beside the user prompt, in the
+    calling harness's output shape (Claude camelCase by default; Poolside's
+    snake_case twin under ``--harness poolside``, whose event is also
+    translated first so a prompt missing from the payload is recovered)."""
+    from omind import harness as harness_mod
+
+    data = harness_mod.translate_event(harness, data)
     context = preflight_turn(data, omi_dir)
     if context:
-        payload = {
-            "hookSpecificOutput": {
-                "hookEventName": "UserPromptSubmit",
-                "additionalContext": context,
-            }
-        }
-        sys.stdout.write(json.dumps(payload) + "\n")
+        sys.stdout.write(harness_mod.render_context(harness, "UserPromptSubmit", context))
     return 0
 
 

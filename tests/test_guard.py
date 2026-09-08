@@ -1652,3 +1652,54 @@ def test_preflight_adds_second_title_summary_only(tmp_path: Path) -> None:
         {"session_id": "second-2", "prompt": "token budget usage bounds"}, omi
     )
     assert "Also possibly relevant" not in economy  # skipped on economy
+
+
+# -- #311: Poolside preflight (snake_case reply, prompt from the trajectory) --
+
+
+def test_preflight_cli_poolside_emits_snake_case_and_recovers_prompt(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    traj = tmp_path / "trajectory-standalone_x.ndjson"
+    traj.write_text(
+        json.dumps(
+            {
+                "type": "tool_call.inference.start",
+                "tool_call_inference_start": {
+                    "chat_completion_request": {
+                        "messages": [
+                            {"role": "user", "content": "<user_query>\nunknown\n</user_query>"}
+                        ]
+                    }
+                },
+            }
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    # pool exec's UserPromptSubmit payload carried no `prompt` (live, 1.0.16).
+    rc = guard.run_guard(
+        "preflight",
+        io.StringIO(
+            json.dumps(
+                {
+                    "hook_event_name": "UserPromptSubmit",
+                    "session_id": "preflight-pool",
+                    "trajectory_path": str(traj),
+                }
+            )
+        ),
+        omi_dir=omi,
+        harness="poolside",
+    )
+    assert rc == 0
+    payload = json.loads(capsys.readouterr().out)
+    assert payload["hook_specific_output"]["hook_event_name"] == "UserPromptSubmit"
+    context = payload["hook_specific_output"]["additional_context"]
+    # With the prompt recovered the vault was searched: an empty vault is a MISS
+    # that auto-clears, not the strict "no task captured" branch.
+    assert "found nothing relevant" in context
+    assert guard.consulted_this_turn("preflight-pool")
+    guard.clear_gate("preflight-pool")

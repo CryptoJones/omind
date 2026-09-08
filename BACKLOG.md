@@ -234,11 +234,17 @@ Each issue below is written to be executable by any agent without further contex
   Five commits in `v8.8.0..v8.10.1` carry no trailer, so 8.10.0 and 8.10.1 are
   unattributable. `scripts/check-attribution.sh` now backs a `commit-msg` hook
   and a CI job; a commit declares `Co-authored-by:` or `No-agent: true`.
-- [ ] **Poolside can't be hard-blocked — the guard needs an ACP proxy**
+- [x] **Poolside can't be hard-blocked — the guard needs an ACP proxy**
   ([#304](https://github.com/CryptoJones/omind/issues/304)) — _feat (guard)_ —
-  `pool` has no pre-tool hook, so Laguna gets OMI memory but no OMI enforcement.
-  The interception point is `agent_servers.command`: a stdio JSON-RPC proxy that
-  spawns the real `pool acp` and filters ACP traffic.
+  Superseded by #311: `pool` 1.0.16 does have pre-tool hooks, so no proxy is
+  needed. Closed in favour of the hook mount.
+- [x] **Poolside ships a hooks system; mount the guard directly**
+  ([#311](https://github.com/CryptoJones/omind/issues/311)) — _feat (guard)_ —
+  `pool` >= 1.0.16 runs Claude-shaped `PreToolUse`/`PostToolUse`/
+  `UserPromptSubmit`/`Stop`/`SessionStart` hooks from a `hooks:` key in
+  `settings.yaml`. `omind setup --agent poolside` now mounts all five with
+  `--harness poolside`, which translates pool's payload (`<server>__<tool>`,
+  `tool_input.cmd`, `tool_output`) onto the Claude shape and replies in pool's.
 
 ## Not planned
 

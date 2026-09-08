@@ -598,6 +598,12 @@ def build_parser() -> argparse.ArgumentParser:
         help="the hook event name (Claude Code: PostToolUse/Stop/SessionStart; "
         "Hermes Agent: pre_llm_call)",
     )
+    hook.add_argument(
+        "--harness",
+        default="claude",
+        help="harness whose event shape + reply format this hook speaks "
+        "(claude, poolside); default: claude",
+    )
     _add_vault_args(hook)
 
     loop = sub.add_parser(
@@ -676,7 +682,8 @@ def build_parser() -> argparse.ArgumentParser:
         "--harness",
         default="claude",
         help="harness whose event shape + block-output format the adapter targets "
-        "(claude, hermes, opencode); default: claude",
+        "(claude, hermes, opencode, codex, gemini, deepseek, poolside, openclaw); "
+        "default: claude",
     )
     guard.add_argument(
         "--command",
@@ -1573,7 +1580,8 @@ def _run_consolidate(args: argparse.Namespace) -> int:
 
 def _run_hook(args: argparse.Namespace) -> int:
     omi_dir = (args.vault / args.folder).expanduser()
-    return run_hook(args.event, omi_dir)  # always 0; must never block the agent
+    # always 0; must never block the agent
+    return run_hook(args.event, omi_dir, harness=args.harness)
 
 
 def _run_loop(args: argparse.Namespace) -> int:

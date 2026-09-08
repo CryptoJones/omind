@@ -790,3 +790,39 @@ def test_session_start_no_banner_below_threshold(tmp_path: Path) -> None:
     _write_failure_log([f"{stamp} append_entry(/v/OMI): PermissionError(1, 'op')"])
     ctx = hooks.build_session_start_context(tmp_path)
     assert "MEMORY WRITES ARE FAILING" not in ctx
+
+
+# -- #311: Poolside pool CLI (--harness poolside) -----------------------------
+
+
+def test_run_hook_session_start_poolside_emits_snake_case_context(tmp_path: Path) -> None:
+    out = io.StringIO()
+    rc = hooks.run_hook(
+        "SessionStart",
+        tmp_path,
+        stdin=io.StringIO('{"hook_event_name": "SessionStart", "source": "startup"}'),
+        stdout=out,
+        harness="poolside",
+    )
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert payload["hook_specific_output"]["hook_event_name"] == "SessionStart"
+    assert payload["hook_specific_output"]["additional_context"]
+    assert "hookSpecificOutput" not in out.getvalue()
+
+
+def test_run_hook_post_tool_use_poolside_journals_translated_event(tmp_path: Path) -> None:
+    # pool's shell tool: `cmd` (not `command`) + `tool_output` text. The journal
+    # line must still carry the command, proving the translation ran first.
+    event = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "shell",
+        "tool_input": {"cmd": "echo probe-ok", "description": "step 2"},
+        "tool_output": "Shell shell-echo\nexited with code 0\noutput:\nprobe-ok",
+        "session_id": "01a07fb9-50c4-7363-b6cf-f87f1e6f54bf",
+    }
+    hooks.run_hook(
+        "PostToolUse", tmp_path, stdin=io.StringIO(json.dumps(event)), harness="poolside"
+    )
+    text = (hooks.journal_dir(tmp_path) / hooks.journal_name()).read_text(encoding="utf-8")
+    assert "PostToolUse shell" in text and "echo probe-ok" in text

@@ -255,6 +255,10 @@ GEMINI_GUARD_MARKER = "guard adapter --harness gemini"
 
 #: Substring identifying omind's own OpenClaw guard gateway hook in openclaw.json.
 OPENCLAW_GUARD_MARKER = "guard adapter --harness openclaw"
+#: Poolside hook entries omind owns carry this ``name`` prefix and/or run omind
+#: with ``--harness poolside``; re-runs replace exactly those and nothing else.
+POOLSIDE_HOOK_NAME_PREFIX = "omind-omi-"
+POOLSIDE_HARNESS_FLAG = "--harness poolside"
 
 
 def poolside_config_dir() -> Path:
@@ -928,35 +932,155 @@ class GeminiProvisioner(AgentProvisioner):
 
 
 class PoolsideProvisioner(AgentProvisioner):
-    """Register the omi MCP server with Poolside's ``pool`` CLI.
+    """Wire Poolside's ``pool`` CLI: the omi MCP server plus the OMI guard and
+    memory hooks, both in ``~/.config/poolside/settings.yaml``.
 
     ``pool`` is an Agent Client Protocol client for Poolside's Laguna agent. It
-    reads ``mcp_servers`` out of ``~/.config/poolside/settings.yaml`` — the same
-    table its own ``pool mcp add`` writes — so omind merges into that file and
-    leaves the surrounding ``pool``/``agent_servers`` keys untouched.
+    reads ``mcp_servers`` out of settings.yaml — the same table its own
+    ``pool mcp add`` writes — so omind merges into that file and leaves the
+    surrounding ``pool``/``agent_servers`` keys untouched.
 
-    MCP-only, deliberately. ``pool`` exposes no pre-tool hook: it has no
-    ``hooks`` settings key and no ``pool hooks`` command, and its permission
-    flow is the ACP client's own. So there is nowhere to mount
-    ``omind guard adapter``, and Laguna gets OMI *memory* here but not OMI
-    *enforcement*. Hard-blocking would mean shimming ``agent_servers.command``
-    with a stdio JSON-RPC proxy that filters ACP traffic; that is tracked
-    separately rather than faked with a harness entry nothing would ever call.
+    ``pool`` (>= 1.0.16) also runs Claude-shaped lifecycle hooks declared under a
+    top-level ``hooks`` key in the same file (#311; #302 shipped MCP-only on the
+    belief that no such key existed). omind mounts five of them, each a flat
+    ``{name, matcher, command, timeout}`` entry:
+
+    - ``PreToolUse`` -> ``omind guard adapter --harness poolside`` — HARD-BLOCK:
+      a snake_case ``hook_specific_output`` deny on stdout drops the tool call
+      and the reason is shown to the model (live-verified against pool 1.0.16);
+    - ``UserPromptSubmit`` -> ``omind guard preflight --harness poolside`` — the
+      per-turn memory preflight + consult gate;
+    - ``PostToolUse`` / ``Stop`` / ``SessionStart`` -> ``omind hook <event>
+      --harness poolside`` — journal, verifier, accounting, loop guard, priming.
+
+    The ``--harness poolside`` flag makes omind translate Poolside's payload
+    (``<server>__<tool>`` MCP names, ``tool_input.cmd``, ``tool_output``) onto
+    the Claude shape and answer in Poolside's, so Laguna gets the same OMI
+    enforcement Claude Code does, not just OMI memory.
     """
 
     AGENT_LABEL = "Poolside (pool CLI)"
     INSTALL_HINT = "Install the pool CLI and run `pool login`, then re-run."
     DONE_MESSAGE = (
-        "Done. Start a new `pool` session to pick up the omi MCP server "
-        "(`pool mcp list` should show it)."
+        "Done. Start a new `pool` session to pick up the omi MCP server and the "
+        "OMI guard + memory hooks (`pool mcp list` should show the server)."
     )
+
+    #: The hook events omind mounts in pool's settings.yaml, in file order.
+    HOOK_EVENTS: ClassVar[tuple[str, ...]] = (
+        "PreToolUse",
+        "UserPromptSubmit",
+        "PostToolUse",
+        "Stop",
+        "SessionStart",
+    )
+    #: Per-event hook timeouts (seconds; pool's default is 60). The guard is on
+    #: the synchronous pre-tool path, so it gets the Claude hook-set's budget.
+    HOOK_TIMEOUTS: ClassVar[dict[str, int]] = {
+        "PreToolUse": 15,
+        "UserPromptSubmit": 20,
+        "PostToolUse": 20,
+        "Stop": 20,
+        "SessionStart": 20,
+    }
 
     def agent_root(self) -> Path:
         return poolside_config_dir()
 
     def integrate(self) -> None:
-        # MCP-only: no guard hook to mount, no skill dir, no priming hook.
+        # No skill dir: Laguna reads OMI through the MCP tools and is primed by
+        # the SessionStart hook, like Claude Code.
         self.register_mcp()
+        self.install_hooks()
+
+    def _hook_command(self, event: str) -> str:
+        """The shell command pool runs for one hook event; absolute ``omind``
+        path, quoted folder values (see :meth:`_omind_hook_command`)."""
+        omind = canonical_omind_exe()
+        if event == "PreToolUse":
+            return f"{omind} guard adapter {POOLSIDE_HARNESS_FLAG}"
+        if event == "UserPromptSubmit":
+            return (
+                f'{omind} guard preflight {POOLSIDE_HARNESS_FLAG} --omi-dir "{self.config.omi_dir}"'
+            )
+        return f"{self._omind_hook_command(event)} {POOLSIDE_HARNESS_FLAG}"
+
+    def desired_hook_entries(self) -> dict[str, dict[str, Any]]:
+        """The one entry omind owns per event, in pool's flat hook shape."""
+        return {
+            event: {
+                "name": f"{POOLSIDE_HOOK_NAME_PREFIX}{event.lower()}",
+                "matcher": "*",
+                "command": self._hook_command(event),
+                "timeout": self.HOOK_TIMEOUTS[event],
+            }
+            for event in self.HOOK_EVENTS
+        }
+
+    @staticmethod
+    def _owned_hook(entry: object) -> bool:
+        if not isinstance(entry, dict):
+            return False
+        name = str(entry.get("name") or "")
+        command = str(entry.get("command") or "")
+        return name.startswith(POOLSIDE_HOOK_NAME_PREFIX) or (
+            POOLSIDE_HARNESS_FLAG in command and "omind" in command
+        )
+
+    def install_hooks(self) -> None:
+        """Merge omind's five hook entries into settings.yaml under ``hooks``,
+        replacing only entries omind owns (by name prefix / ``--harness
+        poolside``) so user-authored hooks and pool's own sibling keys (such as
+        ``stop_hook_max_continuations``) are preserved."""
+        path = poolside_settings_path()
+        data = self._read_config()
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            hooks = {}
+        changed = False
+        for event, desired in self.desired_hook_entries().items():
+            existing = hooks.get(event)
+            existing_list = existing if isinstance(existing, list) else []
+            kept = [e for e in existing_list if not self._owned_hook(e)]
+            merged = kept + [desired]
+            if merged != existing_list or self.config.force:
+                hooks[event] = merged
+                changed = True
+        if not changed:
+            self.log(f"  OMI guard + memory hooks already installed in {path}")
+            return
+        data["hooks"] = hooks
+        self._record(f"install OMI guard + memory hooks ({', '.join(self.HOOK_EVENTS)}) in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True))
+
+    def _hooks_wired(self) -> bool:
+        """True when every event carries omind's exact desired entry."""
+        try:
+            data = self._read_config()
+        except ProvisionError:
+            return False
+        hooks = data.get("hooks")
+        if not isinstance(hooks, dict):
+            return False
+        for event, desired in self.desired_hook_entries().items():
+            entries = hooks.get(event)
+            if not isinstance(entries, list) or desired not in entries:
+                return False
+        return True
+
+    def verify(self) -> None:
+        super().verify()
+        if self.config.dry_run:
+            return
+        if self._hooks_wired():
+            self.log(f"  verified: OMI guard + memory hooks wired into {poolside_settings_path()}")
+        else:
+            self.log(
+                "  NOTE: could not confirm the OMI hooks in poolside settings.yaml; "
+                "re-run with --force."
+            )
 
     def _read_config(self) -> dict[str, Any]:
         """Load settings.yaml as a dict; raise rather than clobber bad YAML."""
@@ -2383,8 +2507,8 @@ def diagnose_deepseek(config: SetupConfig) -> list[CheckResult]:
 # -- dispatch -------------------------------------------------------------------
 
 def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
-    """Poolside is MCP-only here (no guard hook exists to check), so the doctor
-    checks that settings.yaml carries an ``mcp_servers`` entry for this vault."""
+    """Doctor for Poolside: the ``mcp_servers`` entry for this vault AND the five
+    OMI hook entries under ``hooks`` in the same settings.yaml (#311)."""
     prov = PoolsideProvisioner(config=config, log=lambda _msg: None)
     results = _diagnose_tools(prov.REQUIRED_TOOLS)
     root = poolside_config_dir()
@@ -2409,6 +2533,23 @@ def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
                 "poolside_mcp",
                 "fail",
                 "omi MCP server not in poolside settings.yaml "
+                "(run `omind setup --agent poolside`)",
+            )
+        )
+    if prov._hooks_wired():
+        results.append(
+            CheckResult(
+                "poolside_guard",
+                "ok",
+                f"OMI guard + memory hooks wired into {poolside_settings_path()}",
+            )
+        )
+    else:
+        results.append(
+            CheckResult(
+                "poolside_guard",
+                "fail",
+                "OMI guard/memory hooks not in poolside settings.yaml "
                 "(run `omind setup --agent poolside`)",
             )
         )
