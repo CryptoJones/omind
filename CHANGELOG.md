@@ -9,6 +9,47 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [9.1.0] - 2026-09-08
+
+### Added
+
+- **Poolside gets OMI *enforcement*, not just OMI memory**
+  ([#311](https://github.com/CryptoJones/omind/issues/311)). 9.0.0 wired
+  Poolside's `pool` CLI for MCP memory only, on the belief that `pool` had no
+  hook system (#304). It does: `pool` >= 1.0.16 runs Claude-shaped lifecycle
+  hooks — `PreToolUse`, `PostToolUse`, `UserPromptSubmit`, `Stop`, `PreCompact`,
+  `SessionStart` — declared under a `hooks:` key in `settings.yaml`, each a flat
+  `{name, matcher, command, timeout}` entry, and documented at
+  docs.poolside.ai/hooks. `omind setup --agent poolside` now mounts five of them
+  next to the MCP registration: the hard-block guard on `PreToolUse`
+  (`omind guard adapter --harness poolside`), the per-turn memory preflight on
+  `UserPromptSubmit`, and the journal / verifier / accounting / loop guard /
+  priming on `PostToolUse`, `Stop`, and `SessionStart`. A new `poolside`
+  `HarnessSpec` (`CAP_HARD_BLOCK`, `FMT_POOLSIDE`) renders the snake_case
+  `hook_specific_output.permission_decision: deny` that `pool` honours;
+  `omind guard selftest` gains a `poolside` row, and
+  `omind doctor --agent poolside` checks the hook wiring. Live-verified against
+  pool 1.0.16: all six events fire, both deny paths (decision JSON and exit 2)
+  drop the tool call, and the block reason reaches the model verbatim.
+- **`--harness` on `omind hook` and `omind guard preflight`.** A harness's raw
+  event is translated onto the Claude shape once, at the edge, and the reply is
+  rendered in the harness's own shape (`omind.harness.translate_event`,
+  `render_context`, `render_stop_block`), so the journal, verifier, accounting,
+  and loop-guard bodies stay harness-agnostic. Poolside differs from Claude Code
+  in four places, all handled there: MCP tools are `<server>__<tool>` with no
+  `mcp__` prefix (the omi consult detectors would otherwise miss every vault read
+  and the gate could never clear); the `shell` tool carries its command line as
+  `tool_input.cmd`; `PostToolUse` carries `tool_output` text instead of
+  `tool_response`; and `UserPromptSubmit` can arrive without `prompt` (it did
+  under `pool exec`), in which case the user query is recovered from the
+  session's `trajectory_path`.
+
+### Fixed
+
+- **The 9.0.0 "Known gap" note was wrong.** `pool` has a `hooks` settings key
+  and honours a pre-tool deny; the ACP proxy proposed in #304 is not needed and
+  that issue is closed in favour of #311.
+
 ## [9.0.1] - 2026-09-07
 
 ### Fixed

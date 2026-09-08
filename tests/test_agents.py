@@ -1107,3 +1107,104 @@ def test_diagnose_poolside_reports_missing_then_wired(tmp_path: Path) -> None:
     codes = {c.key: c.level for c in diagnose_poolside(config)}
     assert codes["poolside_root"] == "ok"
     assert codes["poolside_mcp"] == "ok"
+
+
+# -- #311: Poolside hooks (guard + memory) in settings.yaml -------------------
+
+
+def test_poolside_setup_installs_the_five_hooks(tmp_path: Path) -> None:
+    _poolside_installed()
+    config = _config(tmp_path, "poolside")
+    run_setup_for(config, log=_quiet)
+
+    data = yaml.safe_load(agents.poolside_settings_path().read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    assert list(hooks) == ["PreToolUse", "UserPromptSubmit", "PostToolUse", "Stop", "SessionStart"]
+    for event, entries in hooks.items():
+        assert len(entries) == 1
+        entry = entries[0]
+        # pool's flat hook shape: name + matcher + command + timeout, nothing else.
+        assert set(entry) == {"name", "matcher", "command", "timeout"}
+        assert entry["name"] == f"omind-omi-{event.lower()}"
+        assert entry["matcher"] == "*"
+        assert entry["command"].startswith("/usr/bin/omind ")
+        assert "--harness poolside" in entry["command"]
+    assert hooks["PreToolUse"][0]["command"] == "/usr/bin/omind guard adapter --harness poolside"
+    assert hooks["PreToolUse"][0]["timeout"] == 15
+    preflight = hooks["UserPromptSubmit"][0]["command"]
+    assert preflight.startswith("/usr/bin/omind guard preflight --harness poolside --omi-dir ")
+    assert str(config.omi_dir) in preflight
+    for event in ("PostToolUse", "Stop", "SessionStart"):
+        cmd = hooks[event][0]["command"]
+        assert cmd.startswith(f"/usr/bin/omind hook {event} --vault ")
+        assert cmd.endswith("--harness poolside")
+        assert str(config.vault) in cmd
+    # The MCP registration from #302 is still there alongside.
+    assert "omi" in data["mcp_servers"]
+
+
+def test_poolside_hooks_preserve_user_hooks_and_siblings_and_are_idempotent(
+    tmp_path: Path,
+) -> None:
+    _poolside_installed()
+    settings = agents.poolside_settings_path()
+    theirs = {
+        "name": "block-sudo",
+        "matcher": "shell",
+        "command": "/x/block-sudo.sh",
+        "timeout": 10,
+    }
+    stale_ours = {
+        "name": "omind-omi-pretooluse",
+        "matcher": "*",
+        "command": "/old/omind guard adapter --harness poolside",
+        "timeout": 15,
+    }
+    original = {
+        "pool": {"api_url": "https://inference.poolside.ai"},
+        "hooks": {
+            "stop_hook_max_continuations": 3,
+            "PreToolUse": [theirs, stale_ours],
+            "Stop": [{"matcher": "*", "command": "/x/continue.sh"}],
+        },
+    }
+    settings.write_text(yaml.safe_dump(original, sort_keys=False), encoding="utf-8")
+
+    config = _config(tmp_path, "poolside")
+    run_setup_for(config, log=_quiet)
+    data = yaml.safe_load(settings.read_text(encoding="utf-8"))
+    hooks = data["hooks"]
+    assert hooks["stop_hook_max_continuations"] == 3  # pool's own sibling key kept
+    assert hooks["PreToolUse"][0] == theirs  # user hook kept, first
+    assert len(hooks["PreToolUse"]) == 2  # stale omind entry replaced, not duplicated
+    assert hooks["PreToolUse"][1]["command"] == "/usr/bin/omind guard adapter --harness poolside"
+    assert hooks["Stop"][0] == {"matcher": "*", "command": "/x/continue.sh"}
+    assert hooks["Stop"][1]["name"] == "omind-omi-stop"
+    assert data["pool"] == original["pool"]
+
+    before = settings.read_text(encoding="utf-8")
+    actions = run_setup_for(_config(tmp_path, "poolside"), log=_quiet)
+    assert settings.read_text(encoding="utf-8") == before
+    assert not any("install OMI guard" in a for a in actions)
+
+
+def test_poolside_dry_run_plans_hooks_without_writing(tmp_path: Path) -> None:
+    _poolside_installed()
+    actions = run_setup_for(_config(tmp_path, "poolside", dry_run=True), log=_quiet)
+    assert any("install OMI guard + memory hooks" in a for a in actions)
+    assert not agents.poolside_settings_path().exists()
+
+
+def test_diagnose_poolside_checks_hooks(tmp_path: Path) -> None:
+    config = _config(tmp_path, "poolside")
+    _poolside_installed()
+    # MCP wired by hand but no hooks: the doctor must say so.
+    prov = agents.PoolsideProvisioner(config=config, log=_quiet)
+    prov.register_mcp()
+    codes = {c.key: c.level for c in diagnose_poolside(config)}
+    assert codes["poolside_mcp"] == "ok"
+    assert codes["poolside_guard"] == "fail"
+
+    run_setup_for(config, log=_quiet)
+    codes = {c.key: c.level for c in diagnose_poolside(config)}
+    assert codes["poolside_guard"] == "ok"

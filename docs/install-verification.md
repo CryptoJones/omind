@@ -87,7 +87,7 @@ worse than no guard, because it reads as protection.
 | ID | Command | Pass criterion |
 |----|---------|----------------|
 | D0 | `omind guard status` | **NOT PAUSED.** `guard pause` time-boxes off the consult-gate + verifier; a long pause left armed disables the soft path indefinitely. Also confirm "self-protection: guard config is write-protected" |
-| D1 | `omind guard selftest` | **Every** harness row `[ok]`, and exit 0. Rows: claude/exit2, hermes/claude_json, opencode/json_signal, codex/codex_hook, gemini/gemini, openclaw/openclaw. Beware measuring `$?` through a pipe (`selftest \| head` reports *head's* status) — redirect instead |
+| D1 | `omind guard selftest` | **Every** harness row `[ok]`, and exit 0. Rows: claude/exit2, hermes/claude_json, opencode/json_signal, codex/codex_hook, gemini/gemini, deepseek/json_signal, poolside/poolside, openclaw/openclaw. Beware measuring `$?` through a pipe (`selftest \| head` reports *head's* status) — redirect instead |
 | D2 | `omind guard policy` | Lists the 6 seed rules + any learned rules. Seed count < 6 = a broken policy load |
 | D3 | `omind guard explain --command 'sudo ls'` | `DENY`, rule `sudo-use-fleet-sudo`, tier `sudo` |
 | D4 | `omind guard explain --command 'pkexec id'` / `'doas id'` / `'run0 id'` / `'su -c id root'` | `DENY` on all four, rule `privesc-alternatives` |

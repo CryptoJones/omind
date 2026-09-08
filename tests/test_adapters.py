@@ -224,3 +224,54 @@ def test_normalize_preserves_prompt_context() -> None:
         }
     )
     assert action["prompt"] == "I give you explicit permission to make the change."
+
+
+# -- #311: Poolside pool CLI (PreToolUse hook, snake_case decision JSON) ------
+
+
+def test_run_adapter_poolside_deny_emits_snake_case_decision(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    # pool's shell tool carries the command line as `cmd`, not `command`.
+    payload = {
+        "hook_api_version": "1.0",
+        "hook_event_name": "PreToolUse",
+        "tool_name": "shell",
+        "tool_input": {"cmd": "gh repo delete a/b", "description": "nuke it"},
+        "session_id": "ps1",
+        "tool_call_id": "chatcmpl-tool-1",
+    }
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="poolside")
+    out = capsys.readouterr().out
+    assert code == 0  # the deny rides in the JSON, not the exit code
+    decision = json.loads(out)["hook_specific_output"]
+    assert decision["permission_decision"] == "deny"
+    assert decision["hook_event_name"] == "PreToolUse"
+    assert "BLOCKED by" in decision["permission_decision_reason"]
+
+
+def test_run_adapter_poolside_consult_clears_gate(capsys: pytest.CaptureFixture[str]) -> None:
+    # pool names MCP tools `<server>__<tool>` with no `mcp__` prefix; the consult
+    # must still be recognized or the gate could never clear under pool.
+    guard.clear_gate("ps2")
+    consult = io.StringIO(
+        json.dumps(
+            {
+                "hook_event_name": "PreToolUse",
+                "tool_name": "omi__search-vault",
+                "tool_input": {"query": "poolside hooks", "limit": 1},
+                "session_id": "ps2",
+            }
+        )
+    )
+    assert adapters.run_adapter(consult, harness="poolside") == 0
+    assert capsys.readouterr().out == ""  # allow -> empty stdout
+    assert guard.consulted_this_turn("ps2")
+    guard.clear_gate("ps2")
+
+
+def test_normalize_action_reads_poolside_cmd_key() -> None:
+    action = adapters.normalize_action(
+        {"tool_name": "shell", "tool_input": {"cmd": "gh pr merge 5"}, "session_id": "ps3"}
+    )
+    assert action["command"] == "gh pr merge 5"

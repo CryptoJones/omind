@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
 
 from omind import guard, harness
 
@@ -120,6 +121,7 @@ def test_selftest_all_pass() -> None:
         "codex",
         "gemini",
         "deepseek",
+        "poolside",
         "openclaw",
     }
     assert all(r["ok"] for r in results)
@@ -132,8 +134,127 @@ def test_selftest_all_pass() -> None:
     assert "permissionDecision" in by["codex"]["rendered"]  # codex deny shape rendered
     assert by["gemini"]["format"] == harness.FMT_GEMINI
     assert '"decision": "deny"' in by["gemini"]["rendered"]  # gemini deny shape rendered
+    assert by["poolside"]["format"] == harness.FMT_POOLSIDE
+    assert '"permission_decision": "deny"' in by["poolside"]["rendered"]  # snake_case deny
     assert by["openclaw"]["format"] == harness.FMT_OPENCLAW
 
 
 def test_run_guard_selftest_action() -> None:
     assert guard.run_guard("selftest") == 0
+
+
+# -- #311: Poolside pool CLI -------------------------------------------------
+
+
+def test_poolside_spec_and_render() -> None:
+    spec = harness.spec_for("poolside")
+    assert spec.block_format == harness.FMT_POOLSIDE and spec.can_block() is True
+    deny = guard.Verdict(allow=False, reason="omi-guard (hard): no", rule_id="gh-repo-delete")
+    code, out, err = _render(deny, harness.FMT_POOLSIDE)
+    assert code == 0 and err == ""  # the deny is in the JSON, not the exit code
+    payload = json.loads(out)["hook_specific_output"]
+    assert payload == {
+        "hook_event_name": "PreToolUse",
+        "permission_decision": "deny",
+        "permission_decision_reason": "BLOCKED by omi-guard (hard): no",
+    }
+    # allow -> empty stdout, exit 0 (pool treats empty stdout as "observe only").
+    code, out, err = _render(guard.Verdict(allow=True), harness.FMT_POOLSIDE)
+    assert code == 0 and out == "" and err == ""
+
+
+def test_translate_event_maps_poolside_shape_onto_claude() -> None:
+    raw = {
+        "hook_event_name": "PostToolUse",
+        "tool_name": "omi__search-vault",
+        "tool_input": {"query": "x", "limit": 1},
+        "tool_output": "3 hits",
+        "session_id": "s",
+    }
+    event = harness.translate_event("poolside", raw)
+    assert event["tool_name"] == "mcp__omi__search-vault"  # consult detectors match
+    assert event["tool_response"] == "3 hits"  # accounting/journal read tool_response
+    assert raw["tool_name"] == "omi__search-vault"  # input untouched
+    shell = harness.translate_event(
+        "poolside", {"tool_name": "shell", "tool_input": {"cmd": "ls", "description": "d"}}
+    )
+    assert shell["tool_input"] == {"cmd": "ls", "description": "d", "command": "ls"}
+    # Native pool tools (single underscore) are not MCP and are left alone; an
+    # already-prefixed name is not double-prefixed.
+    assert harness.translate_event("poolside", {"tool_name": "todo_action"})["tool_name"] == (
+        "todo_action"
+    )
+    assert (
+        harness.translate_event("poolside", {"tool_name": "mcp__omi__help"})["tool_name"]
+        == "mcp__omi__help"
+    )
+    # Identity for every other harness.
+    assert harness.translate_event("claude", raw) is raw
+
+
+def test_translate_event_recovers_poolside_prompt_from_trajectory(tmp_path: Path) -> None:
+    traj = tmp_path / "trajectory-standalone_abc.ndjson"
+    older = {
+        "type": "tool_call.inference.start",
+        "tool_call_inference_start": {
+            "chat_completion_request": {
+                "messages": [
+                    {"role": "system", "content": "sys"},
+                    {
+                        "role": "user",
+                        "content": "<context>c</context>\n<user_query>\nold ask\n</user_query>",
+                    },
+                ]
+            }
+        },
+    }
+    newer = json.loads(json.dumps(older))
+    newer["tool_call_inference_start"]["chat_completion_request"]["messages"][1]["content"] = (
+        "<context>c</context>\n\n<user_query>\nrotate the ronin28 wifi password\n</user_query>"
+    )
+    traj.write_text(
+        json.dumps(older)
+        + "\n"
+        + json.dumps({"type": "tool_call.result"})
+        + "\n"
+        + json.dumps(newer)
+        + "\n",
+        encoding="utf-8",
+    )
+    event = harness.translate_event(
+        "poolside",
+        {"hook_event_name": "UserPromptSubmit", "session_id": "s", "trajectory_path": str(traj)},
+    )
+    assert event["prompt"] == "rotate the ronin28 wifi password"  # the LAST query wins
+    # A prompt already present is never overridden; a missing file is not an error.
+    kept = harness.translate_event(
+        "poolside",
+        {"hook_event_name": "UserPromptSubmit", "prompt": "given", "trajectory_path": str(traj)},
+    )
+    assert kept["prompt"] == "given"
+    absent = harness.translate_event(
+        "poolside",
+        {"hook_event_name": "UserPromptSubmit", "trajectory_path": str(tmp_path / "nope")},
+    )
+    assert "prompt" not in absent
+    assert harness.poolside_last_prompt(None) == ""
+
+
+def test_render_context_and_stop_block_per_harness() -> None:
+    claude = json.loads(harness.render_context("claude", "SessionStart", "hi"))
+    assert claude == {
+        "hookSpecificOutput": {"hookEventName": "SessionStart", "additionalContext": "hi"}
+    }
+    pool = json.loads(harness.render_context("poolside", "UserPromptSubmit", "hi"))
+    assert pool == {
+        "hook_specific_output": {"hook_event_name": "UserPromptSubmit", "additional_context": "hi"}
+    }
+    assert json.loads(harness.render_stop_block("claude", "keep going")) == {
+        "decision": "block",
+        "reason": "keep going",
+    }
+    stop = json.loads(harness.render_stop_block("poolside", "keep going"))
+    assert stop["continue"] is True and stop["reason"] == "keep going"
+    assert stop["hook_specific_output"]["additional_context"] == "keep going"
+    # Unknown harnesses fall back to the Claude shape, like spec_for().
+    assert "hookSpecificOutput" in harness.render_context("mystery", "SessionStart", "x")
