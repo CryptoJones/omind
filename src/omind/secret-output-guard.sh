@@ -64,7 +64,7 @@ block() {
 }
 
 # 1) A literal credential pasted into the command text.
-if printf '%s' "$cmd" | grep -Eq 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----'; then
+if printf '%s' "$cmd" | grep -Eq 'gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|glpat-[A-Za-z0-9_-]{18,}|xox[baprs]-[A-Za-z0-9-]{10,}|AKIA[0-9A-Z]{16}|-----BEGIN [A-Z ]*PRIVATE KEY-----|sk-or-v1-[A-Za-z0-9]{24,}|sk-ant-[A-Za-z0-9_-]{24,}|sk-proj-[A-Za-z0-9_-]{24,}|nsec1[02-9ac-hj-np-z]{20,}|mg_[0-9]_[A-Za-z0-9_-]{24,}'; then
   block "the command text contains a literal credential/token."
 fi
 
@@ -97,6 +97,41 @@ if printf '%s' "$bare" | grep -Eq "$READ"; then
     :
   else
     block "a secret read (pass show / pass <path> / gh auth token) prints to stdout."
+  fi
+fi
+
+# 4) A credential-bearing CONFIG FILE read whose stdout reaches the transcript.
+#    Added 2026-08-09 after two leaks the rules above structurally could not see:
+#    an OpenRouter key out of Buzz's global-agent-config.json and a merge gateway
+#    key out of managed-agents.json. Neither command contained a credential or a
+#    `pass` read — the secret arrived in the OUTPUT — so nothing fired.
+#    NARROWED 2026-08-09: v1 matched all of Application Support/Buzz/, which blocked
+#    reading run-agents.zsh -- a script holding NO credentials (it pulls them from
+#    pass at runtime). Over-blocking is how a guard gets muted, so match credential
+#    bearing FILES, not the directory tree they sit in.
+#    Anything matching a known secret-store path must have its stdout redirected,
+#    be visibly redacting, or carry the audited override.
+SECRET_FILES='(managed-agents[^[:space:]]*\.json|global-agent-config\.json|oauth_creds\.json|/\.antigravity/|xyz\.block\.buzz\.app[^[:space:]]*/agents/[^[:space:]]*\.json|/\.env([^[:alnum:]]|$)|credentials\.json|\.netrc|id_[a-z]+[a-z0-9]*(_[a-z0-9]+)?$)'
+if printf '%s' "$flat" | grep -Eq "$SECRET_FILES"; then
+  # Visibly redacting reads are the safe form and stay allowed.
+  if printf '%s' "$flat" | grep -Eqi 'redact|<redacted|_REDACTED|sanitiz'; then
+    :
+  elif printf '%s' "$flat" | grep -Eq '(^|[^0-9])(1?>|&>)[[:space:]]*([^|&[:space:]]|/dev/null)'; then
+    :
+  elif printf '%s' "$flat" | grep -Eq '^[[:space:]]*(ls|stat|file|find|test|\[)([[:space:]]|$)'; then
+    # Path-only operations do not print file CONTENT.
+    :
+  else
+    {
+      printf 'BLOCKED by secret-output-guard: reading a credential-bearing config file.\n\n'
+      printf 'These files hold live keys (Buzz agent definitions, OAuth creds, .env).\n'
+      printf 'Print them only through a redactor:\n\n'
+      printf '  python3 -c "..., print({k: (\x27<redacted>\x27 if any(t in k.upper()\n'
+      printf '      for t in (\x27KEY\x27,\x27TOKEN\x27,\x27SECRET\x27)) else v) ...})"\n\n'
+      printf 'or redirect stdout to a file, or prefix OMI_SECRET_OK=1 if you have\n'
+      printf 'confirmed the file holds no live credential.\n'
+    } >&2
+    exit 2
   fi
 fi
 

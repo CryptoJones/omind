@@ -119,3 +119,65 @@ def test_forged_override_in_string_does_not_bypass(tmp_path: Path) -> None:
 def test_allows_multiline_captured_read(tmp_path: Path) -> None:
     """A multi-line `TOK=$(\\n pass show x \\n)` capture is safe, not a leak."""
     assert _run(_hook(tmp_path), "TOK=$(\n  pass show github/token\n)\necho done") == 0
+
+# -- rule 4: credential-bearing config-file reads --------------------------------
+# Added after two leaks the value/keyword rules structurally could not see: an
+# OpenRouter key out of Buzz's global-agent-config.json and a merge-gateway key out
+# of managed-agents.json. Neither command contained a credential or a `pass` read —
+# the secret arrived in the OUTPUT — so nothing fired. Hardened and proven on
+# makemake from 2026-08-09; upstreamed with #315 so `omind setup` stops fighting
+# the locked local copy and the rest of the fleet gets the same cover.
+
+#: Fake key bodies, assembled at run time. A test vector that LOOKS like a
+#: credential in the source trips gitleaks, this repo's own secret-output guard,
+#: and every scanner downstream — so the prefix and the filler never sit adjacent
+#: on disk.
+_FILLER = "0123456789abcdef" * 2
+
+
+def test_blocks_reading_a_credential_bearing_config_file(tmp_path: Path) -> None:
+    hook = _hook(tmp_path)
+    assert _run(hook, "cat ~/.config/buzz/managed-agents.json") == 2
+    assert _run(hook, "cat global-agent-config.json") == 2
+    # The .env pattern is anchored to a path separator (`/\.env`), so a bare
+    # `.env` with no directory part is deliberately NOT matched.
+    assert _run(hook, "cat ~/.env") == 2
+    assert _run(hook, "cat ~/.netrc") == 2
+    assert _run(hook, "cat ~/.ssh/id_rsa") == 2
+    # `id_[a-z]+…$` could not match the digits in the most common modern key
+    # name, so the rule missed ed25519 keys entirely.
+    assert _run(hook, "cat ~/.ssh/id_ed25519") == 2
+
+
+def test_allows_a_visibly_redacting_read(tmp_path: Path) -> None:
+    assert _run(_hook(tmp_path), "python3 redact.py managed-agents.json") == 0
+
+
+def test_allows_a_credential_file_read_redirected_off_the_transcript(
+    tmp_path: Path,
+) -> None:
+    assert _run(_hook(tmp_path), "cat ~/.env > /tmp/out") == 0
+
+
+def test_allows_path_only_operations_on_a_credential_file(tmp_path: Path) -> None:
+    """Over-blocking is how a guard gets muted: `ls`/`stat`/`find` print no
+    CONTENT, and v1 of this rule blocked reading a sibling script that holds no
+    credential at all (it pulls them from `pass` at run time)."""
+    hook = _hook(tmp_path)
+    assert _run(hook, "ls -l ~/.config/buzz/managed-agents.json") == 0
+    assert _run(hook, "stat ~/.env") == 0
+    assert _run(hook, "cat ~/.config/buzz/run-agents.zsh") == 0
+
+
+@pytest.mark.parametrize("prefix", ["sk-or-v1-", "sk-ant-", "sk-proj-", "mg_1_"])
+def test_blocks_provider_api_keys_beyond_the_original_set(
+    tmp_path: Path, prefix: str
+) -> None:
+    """OpenRouter, Anthropic, OpenAI-project and Mailgun key shapes — the original
+    pattern set only knew GitHub/GitLab/Slack/AWS/PEM."""
+    assert _run(_hook(tmp_path), f"echo {prefix}{_FILLER}") == 2
+
+
+def test_blocks_a_nostr_private_key(tmp_path: Path) -> None:
+    # bech32: no 1/b/i/o in the data part, so the generic filler will not do.
+    assert _run(_hook(tmp_path), "echo nsec1" + "qpzry9x8gf2tvdw0s3jn54khce6mua7l") == 2

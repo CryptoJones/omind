@@ -7,6 +7,7 @@ from __future__ import annotations
 import io
 import json
 import os
+import stat
 import subprocess
 import tempfile
 from pathlib import Path, PurePosixPath
@@ -1158,6 +1159,7 @@ def test_immutable_hint_explains_how_to_unlock(monkeypatch: pytest.MonkeyPatch) 
     machine ran months-stale hooks behind exactly that silence.
     """
     monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
+    monkeypatch.setattr(provision.sys, "platform", "linux")
     target = Path.home() / ".claude" / "settings.json"
     hint = provision._immutable_hint(target, PermissionError(1))
     assert "IMMUTABLE" in hint
@@ -1165,6 +1167,60 @@ def test_immutable_hint_explains_how_to_unlock(monkeypatch: pytest.MonkeyPatch) 
     assert f"chattr -i {target}" in hint
     assert "omind setup" in hint
     assert f"chattr +i {target}" in hint
+
+
+def test_immutable_hint_uses_the_platforms_own_flag_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """macOS has no `chattr`. Printing it sent the operator to a command their
+    shell rejects — advice as useless as the traceback it replaced."""
+    monkeypatch.setattr(provision, "is_immutable", lambda _p: True)
+    monkeypatch.setattr(provision.sys, "platform", "darwin")
+    target = Path.home() / ".claude" / "hooks" / "secret-output-guard.sh"
+    hint = provision._immutable_hint(target, PermissionError(1))
+    assert f"chflags nouchg {target}" in hint
+    assert f"chflags uchg {target}" in hint
+    assert "chattr" not in hint
+    # A locked hook is often locked because it was hand-edited; say so before
+    # the operator unlocks it and lets setup overwrite their work.
+    assert "LOCAL edits" in hint
+
+
+def test_is_immutable_reads_the_bsd_chflags_bit(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Linux-only `lsattr` probe answered False on every hardened Mac, so
+    the hint never fired and setup died on a bare "Operation not permitted"."""
+    monkeypatch.setattr(provision, "_BSD_IMMUTABLE", stat.UF_IMMUTABLE)
+
+    class _Stat:
+        st_flags = stat.UF_IMMUTABLE
+
+    monkeypatch.setattr(provision.os, "stat", lambda _p: _Stat())
+
+    def no_lsattr(*_a: object, **_k: object) -> None:
+        raise AssertionError("the BSD flag answers without shelling out")
+
+    monkeypatch.setattr(provision.subprocess, "run", no_lsattr)
+    assert provision.is_immutable(Path("/anything")) is True
+
+
+def test_is_immutable_falls_through_to_lsattr_when_unflagged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An unflagged file on a BSD kernel is not immutable — but the Linux probe
+    still has to run, or a `chattr +i` file on a dual-checked host reports False."""
+    monkeypatch.setattr(provision, "_BSD_IMMUTABLE", stat.UF_IMMUTABLE)
+
+    class _Stat:
+        st_flags = 0
+
+    monkeypatch.setattr(provision.os, "stat", lambda _p: _Stat())
+
+    class _Result:
+        returncode = 0
+        stdout = "----i--------e------- /x\n"
+
+    monkeypatch.setattr(provision.subprocess, "run", lambda *a, **k: _Result())
+    assert provision.is_immutable(tmp_path / "x") is True
 
 
 def test_immutable_hint_falls_back_for_ordinary_permission_errors(

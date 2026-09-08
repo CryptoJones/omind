@@ -9,6 +9,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [9.1.2] - 2026-09-08
+
+### Fixed
+
+- **`self-update` no longer runs the post-update heal inside the outgoing
+  interpreter** ([#315](https://github.com/CryptoJones/omind/issues/315)).
+  Updating 8.10.1 -> 9.1.1 ended on `warning: re-provision failed (module
+  'omind.filelock' has no attribute 'exclusive')`. By the time the heal ran,
+  `uv tool install --force` had already swapped the package on disk, leaving a
+  chimera process: modules imported at startup were the *outgoing* release,
+  while `from omind.provision import ...` was read fresh off disk and was the
+  *incoming* one — so new code called `filelock.exclusive()`, a function 8.10.1
+  never had. No import order defuses that, and every release pairing mines a
+  fresh version of it. The heal now re-enters a clean interpreter
+  (`sys.executable -m omind self-update --heal`, a hidden flag that heals
+  without spawning, so the recursion has a floor) and forwards the child's
+  report; a failing child still degrades to the "run `omind setup` by hand"
+  warning rather than failing the update.
+- **`secret-output-guard.sh` gains the rules makemake had been carrying alone**
+  ([#315](https://github.com/CryptoJones/omind/issues/315)). The hook on makemake
+  was `root:wheel` + `chflags uchg` and had been hand-hardened on 2026-08-09, so
+  every `omind setup` tried to overwrite it and failed — the shipped copy and the
+  deployed one could never converge. Upstreamed instead of overwritten: five more
+  key shapes (OpenRouter, Anthropic, OpenAI project, nostr, Mailgun) and a new
+  rule 4 blocking reads of credential-bearing config files
+  (`managed-agents*.json`, `global-agent-config.json`, `oauth_creds.json`,
+  `.env`, `.netrc`, `.ssh/id_*`) whose stdout would reach the transcript. Rule 4
+  came from two real leaks the value/keyword rules structurally could not see:
+  the secret arrived in the OUTPUT, so no command text ever matched. Visibly
+  redacting reads, reads redirected off the transcript, path-only operations
+  (`ls`/`stat`/`find`) and the audited `OMI_SECRET_OK=1` override all stay
+  allowed. One fix on top of the deployed version: the SSH rule's
+  `id_[a-z]+(_[a-z0-9]+)?$` could not match the digits in `id_ed25519`, so it
+  missed the most common modern key name.
+- **The immutable-file hint now fires on macOS, and prints commands macOS has**
+  ([#315](https://github.com/CryptoJones/omind/issues/315)). `provision.is_immutable`
+  shelled to `lsattr`, which macOS does not ship, so on a hardened Mac it always
+  answered False — and `omind setup` died on the bare `cannot write
+  .../secret-output-guard.sh: [Errno 1] Operation not permitted` that
+  `_immutable_hint` was written to replace. It now reads the BSD flags from
+  `os.stat().st_flags` (`UF_IMMUTABLE`/`SF_IMMUTABLE`) before falling through to
+  the Linux probe, and emits `chflags nouchg`/`chflags uchg` on darwin and the
+  BSDs instead of a `chattr` their shells reject. The hint also warns that
+  unlocking and re-running setup replaces the file with omind's copy — a locked
+  hook is often locked *because* it was hand-edited.
+
 ## [9.1.1] - 2026-09-08
 
 ### Fixed

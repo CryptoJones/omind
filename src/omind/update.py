@@ -291,13 +291,54 @@ _NO_AUTOHEAL_ENV = "OMIND_NO_AUTOHEAL"
 
 
 def _post_update_heal(*, log: Callable[[str], object] = print) -> None:
+    """Run the post-update heal in a SUBPROCESS of the just-installed code.
+
+    Never inline. By the time we reach here `uv tool install --force` has already
+    swapped the package on disk, so this interpreter is a chimera: modules
+    imported at startup are the OLD release, while anything imported from here on
+    is read fresh off disk and is the NEW one. Importing `provision` therefore
+    handed new code a stale `omind.filelock` out of `sys.modules`, and updating
+    8.10.1 -> 9.1.1 died on `module 'omind.filelock' has no attribute
+    'exclusive'` — a function the outgoing release simply did not have (issue
+    #315). Every
+    release pairing mines a fresh version of that, and no import order defuses
+    it; a clean interpreter is the only fix.
+
+    `sys.executable` is the venv python uv just rebuilt in place, so `-m omind`
+    there loads the new package end to end. Fail-open as before: a successful
+    update must never be reported as a failure because a follow-up chore didn't
+    work. (A rollback to a release predating `--heal` gets the "run `omind setup`
+    by hand" warning rather than a heal — visible, and it names the repair.)
+    """
+    if os.environ.get(_NO_AUTOHEAL_ENV):
+        return
+    cmd = [sys.executable, "-m", "omind", "self-update", "--heal"]
+    try:
+        result = subprocess.run(
+            cmd, check=False, timeout=600, capture_output=True, text=True
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"warning: re-provision failed to launch ({exc}); run `omind setup` by hand.")
+        return
+    for line in (result.stdout or "").splitlines():
+        if line.strip():
+            log(line)
+    if result.returncode != 0:
+        detail = (result.stderr or "").strip().splitlines()
+        why = detail[-1] if detail else f"exit {result.returncode}"
+        log(f"warning: re-provision failed ({why}); run `omind setup` by hand.")
+
+
+def run_post_update_heal(*, log: Callable[[str], object] = print) -> None:
     """Re-provision the wiring and pay any index migration, after an update.
+
+    The heal itself. Always reached through `omind self-update --heal` in a fresh
+    interpreter running the installed code, never inline in the process that did
+    the installing — see :func:`_post_update_heal`.
 
     Both steps are fail-open: a successful update must never be reported as a
     failure because a follow-up chore didn't work.
     """
-    if os.environ.get(_NO_AUTOHEAL_ENV):
-        return
     from omind.provision import Provisioner, SetupConfig, default_vault_path
 
     vault = default_vault_path()
@@ -333,12 +374,18 @@ def self_update(
     check_only: bool = False,
     force: bool = False,
     rollback: bool = False,
+    heal_only: bool = False,
     log: Callable[[str], object] = print,
 ) -> int:
     """``omind self-update``: report, then (unless ``--check``) reinstall the latest
     tag. ``--rollback`` reinstalls the version that was current before the last
     update (2026-08-27 review — a broken release used to strand every machine
-    until a manual downgrade)."""
+    until a manual downgrade). ``--heal`` runs only the post-update heal: it is
+    how :func:`_post_update_heal` re-enters a clean interpreter, and so it must
+    never spawn one itself, or the recursion has no floor."""
+    if heal_only:
+        run_post_update_heal(log=log)
+        return 0
     if rollback:
         return rollback_update(log=log)
     # A user-invoked update gets a generous network timeout, not the 2s nudge
