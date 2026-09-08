@@ -219,6 +219,10 @@ Each issue below is written to be executable by any agent without further contex
   ([#306](https://github.com/CryptoJones/omind/issues/306)) — _fix (journal/test)_ —
   Journal rollup re-opened a file it held a mandatory Windows lock on; and a test
   moved `HOME` without `USERPROFILE`.
+- [x] **Version lockstep unguarded for `uv.lock`; two releases had no CHANGELOG section**
+  ([#307](https://github.com/CryptoJones/omind/issues/307)) — _fix (test/docs)_ —
+  `test_version_is_set` now checks `uv.lock` as well; 8.10.0 and 8.10.1 backfilled
+  from their GitHub release bodies.
 
 - [x] **Poolside's `pool` CLI wasn't connected to omind at all**
   ([#302](https://github.com/CryptoJones/omind/issues/302)) — _feat (agents)_ —
