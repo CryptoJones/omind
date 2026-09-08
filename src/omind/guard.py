@@ -684,7 +684,14 @@ def clear_all_gates() -> None:
 #: callable) must never be gated. Gating them deadlocks the turn: the only way
 #: to clear the gate is to consult OMI, but where the OMI tools are deferred the
 #: consult needs the very schema this tool loads.
-_GATE_EXEMPT_TOOLS = frozenset({"ToolSearch"})
+#:
+#: Poolside's ``exit`` and ``todo_action`` are control flow, not actions on the
+#: world (#313): ``pool exec`` ends a run through the ``exit`` tool, so gating
+#: it is gating "stop" — Claude Code's Stop hook is never gated either — and a
+#: denied ``exit`` aborts the run with ``exit_tool_called: unexpected error``.
+#: Hard rules still apply to everything here; they match on command text, which
+#: none of these tools carry.
+_GATE_EXEMPT_TOOLS = frozenset({"ToolSearch", "exit", "todo_action"})
 _WRITE_TOOLS = frozenset(
     {
         "Edit",

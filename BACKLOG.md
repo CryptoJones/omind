@@ -245,6 +245,11 @@ Each issue below is written to be executable by any agent without further contex
   `settings.yaml`. `omind setup --agent poolside` now mounts all five with
   `--harness poolside`, which translates pool's payload (`<server>__<tool>`,
   `tool_input.cmd`, `tool_output`) onto the Claude shape and replies in pool's.
+- [x] **The consult gate blocks Poolside's `exit`/`todo_action` control tools**
+  ([#313](https://github.com/CryptoJones/omind/issues/313)) — _fix (guard)_ —
+  `pool exec` ends a run through the `exit` tool; gating it aborted trivial runs
+  with `exit_tool_called: unexpected error`. Both are now in `_GATE_EXEMPT_TOOLS`
+  beside `ToolSearch`; hard rules still apply.
 
 ## Not planned
 
