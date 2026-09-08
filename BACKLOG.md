@@ -239,6 +239,13 @@ Each issue below is written to be executable by any agent without further contex
   `pool` has no pre-tool hook, so Laguna gets OMI memory but no OMI enforcement.
   The interception point is `agent_servers.command`: a stdio JSON-RPC proxy that
   spawns the real `pool acp` and filters ACP traffic.
+- [ ] **Poolside client doesn't surface omi MCP tools (upstream interop)**
+  ([#309](https://github.com/CryptoJones/omind/issues/309)) — _bug (upstream)_ —
+  `pool acp` spawns `omind node` and the server handshakes fine (all MCP
+  revisions negotiate; direct `tools/list` works), but no omi tool reaches the
+  Laguna agent and none appear in pool's logs. Client-side; `forge` is private
+  so unreadable. Next: tee the JSON-RPC pipe to see if pool ever sends
+  `tools/list`. Blocks the payoff of #302; not an omind defect.
 
 ## Not planned
 
