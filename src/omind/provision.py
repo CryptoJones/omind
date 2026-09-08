@@ -330,10 +330,13 @@ def is_immutable(path: Path) -> bool:
     an error message.
     """
     if _BSD_IMMUTABLE:
+        # getattr, not attribute access: `st_flags` exists only in the BSD/macOS
+        # typeshed stub, so `os.stat(path).st_flags` is a mypy error on Linux and
+        # Windows even though the branch is unreachable there.
         try:
-            if os.stat(path).st_flags & _BSD_IMMUTABLE:
+            if getattr(os.stat(path), "st_flags", 0) & _BSD_IMMUTABLE:
                 return True
-        except (OSError, AttributeError):
+        except OSError:
             return False
     try:
         result = subprocess.run(
