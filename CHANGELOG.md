@@ -7,6 +7,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+_Nothing yet._
+
+## [9.2.0] - 2026-09-09
+
 ### Changed
 
 - **The per-turn preflight hints instead of injecting** ([#321](https://github.com/CryptoJones/omind/issues/321)).
@@ -3096,6 +3100,7 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
   OMI memory notes, with structured-form and raw-Markdown editing.
 - End-user install methods and a `CONTRIBUTING` guide.
 
+[9.2.0]: https://github.com/CryptoJones/omind/releases/tag/v9.2.0
 [9.1.3]: https://github.com/CryptoJones/omind/releases/tag/v9.1.3
 [1.1.0]: https://github.com/CryptoJones/omind/releases/tag/v1.1.0
 [1.0.0]: https://github.com/CryptoJones/omind/releases/tag/v1.0.0
