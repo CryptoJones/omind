@@ -364,7 +364,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "confidence: high|medium|low, omit if unknown. conflicts_with: a "
             "[[wikilink]] to a memory this one DISAGREES with (use supersedes "
             "instead when this cleanly replaces the older fact). agent: your "
-            "self-declared identity (advisory attribution only)."
+            "self-declared identity (advisory attribution only). scratch: mark a "
+            "machine-local, auto-expiring note (never mesh-synced; archived after "
+            "7 idle days by `omind maintain`)."
         ),
     )
     def create_note(
@@ -382,6 +384,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         references: list[str] | None = None,
         agent: str = "",
         scope: str = "",
+        scratch: bool = False,
     ) -> dict[str, object]:
         # Scoped-write interlock (item #5): deny an out-of-scope write BEFORE it
         # lands. Raises (rendered as a tool error) in deny mode; returns a
@@ -406,7 +409,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             references=references or [],
             scope=note_scope,
         )
-        filename = store.create_note(fields)
+        # scratch=True marks this a machine-local, auto-expiring scratch note
+        # (item #5 part 2): never mesh-replicated, TTL-expired by `omind maintain`.
+        filename = store.create_note(fields, scratch=scratch)
         result: dict[str, object] = {"filename": filename, "agent": fields.agent}
         if scope_warning:
             result["scope_warning"] = scope_warning

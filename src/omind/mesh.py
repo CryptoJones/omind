@@ -79,6 +79,7 @@ Journal/*.md merge=union
 GITIGNORE = """\
 .omi.lock
 .tmp-*
+*.scratch.md
 .obsidian/workspace.json
 .obsidian/workspace-mobile.json
 .obsidian/workspace
