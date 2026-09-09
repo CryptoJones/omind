@@ -93,6 +93,157 @@ _CMD_POSITION = (
     r"(?:[./][^\s;&|`()]*/)?"
 )
 
+#: Interpreters whose heredoc body IS shell code for THIS shell to run, so its
+#: separators are real and its body must stay visible to
+#: :func:`shell_code_text`. Anything else (``cat``, ``python``, ``gh issue
+#: create --body``) receives the body as DATA.
+_SHELL_HEREDOC_BINARIES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"})
+
+#: Tokens that transparently precede the real binary when deciding whether a
+#: heredoc's owner is a shell (``env FOO=1 bash <<EOF``).
+_HEREDOC_OWNER_SKIP = frozenset({"env", "command", "exec", "nohup", "time", "builtin"})
+
+#: A heredoc redirection: ``<<EOF``, ``<<-EOF``, ``<<'EOF'``, ``<<"EOF"``.
+_HEREDOC_RE = re.compile(
+    r"<<(-?)[ \t]*(?:(['\"])([A-Za-z_][A-Za-z0-9_]*)\2|([A-Za-z_][A-Za-z0-9_]*))"
+)
+
+
+def _heredoc_owner_is_shell(command: str, start: int) -> bool:
+    """True when the simple command owning the heredoc at ``start`` is a shell.
+
+    Scans back to the nearest separator and takes the first token that is not a
+    ``VAR=val`` assignment or a transparent wrapper, comparing its basename.
+    """
+    segment = command[:start]
+    cut = max(segment.rfind(c) for c in "\n;&|(`")
+    for token in segment[cut + 1 :].split():
+        base = token.rsplit("/", 1)[-1]
+        if "=" in token and not token.startswith("-"):
+            continue
+        if base in _HEREDOC_OWNER_SKIP:
+            continue
+        return base in _SHELL_HEREDOC_BINARIES
+    return False
+
+
+def shell_code_text(command: str) -> str:
+    """``command`` with every DATA region blanked out, length-preserving.
+
+    A quoted string's body, and a heredoc body fed to something that is not a
+    shell, are payload — text handed to another program or another host. They
+    are *not* commands this shell runs, so the separators inside them are not
+    separators (#317). Blanking them (to spaces, so offsets and any surrounding
+    structure survive) is what lets a command-position test mean what it says.
+
+    This is the anchoring primitive behind ``match="command"`` and the guard's
+    local-repo classifiers. Without it, the ``&&`` inside
+    ``ssh host 'cd /p && git commit …'`` made a REMOTE commit look like local
+    repo work, and a newline inside a ``gh issue create --body "$(cat <<'MD' …``
+    prose block put every line of that prose in command position — both
+    reproduced live while writing #317.
+
+    Deliberately NOT applied to the side-effect classifiers: a
+    ``ssh host 'systemctl restart …'`` is a real side effect, merely a remote
+    one, and masking there would be a fail-open rather than a fix. Shell
+    heredocs (``bash <<EOF``) keep their bodies for the same reason.
+
+    Command substitutions inside a double-quoted string (``"$(cat …)"``,
+    ``"`cmd`"``) are code again — the shell runs them — so the scanner steps
+    back into code context for their extent.
+    """
+    out = list(command)
+    stack: list[str] = []
+    heredocs: list[tuple[str, bool, bool]] = []
+    i, n = 0, len(command)
+    while i < n:
+        ch = command[i]
+        if stack and stack[-1] in "'\"":
+            # --- DATA context: blank everything up to the closing quote. ---
+            if stack[-1] == '"':
+                # Only a double-quoted body re-enters code for a substitution,
+                # and only there does a backslash escape the next character.
+                if ch == "\\" and i + 1 < n:
+                    out[i] = out[i + 1] = " "
+                    i += 2
+                    continue
+                if command.startswith("$(", i):
+                    stack.append("(")
+                    i += 2
+                    continue
+                if ch == "`":
+                    stack.append("`")
+                    i += 1
+                    continue
+            if ch == stack[-1]:
+                stack.pop()
+            else:
+                # The newline is blanked too: it is the separator that put
+                # prose lines in command position.
+                out[i] = " "
+            i += 1
+            continue
+        # --- CODE context. ---
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch in "'\"":
+            stack.append(ch)
+            i += 1
+            continue
+        if command.startswith("$(", i):
+            stack.append("(")
+            i += 2
+            continue
+        if ch == "`":
+            if stack and stack[-1] == "`":
+                stack.pop()
+            else:
+                stack.append("`")
+            i += 1
+            continue
+        if ch == ")" and stack and stack[-1] == "(":
+            stack.pop()
+            i += 1
+            continue
+        match = _HEREDOC_RE.match(command, i)
+        if match:
+            delimiter = match.group(3) or match.group(4)
+            heredocs.append(
+                (delimiter, bool(match.group(1)), not _heredoc_owner_is_shell(command, i))
+            )
+            i = match.end()
+            continue
+        if ch == "\n" and heredocs:
+            i = _blank_heredoc_bodies(command, out, i + 1, heredocs)
+            continue
+        i += 1
+    return "".join(out)
+
+
+def _blank_heredoc_bodies(
+    command: str, out: list[str], pos: int, heredocs: list[tuple[str, bool, bool]]
+) -> int:
+    """Consume the pending heredoc bodies starting at ``pos``, blanking those
+    marked as data. Returns the offset just past the last one. An UNTERMINATED
+    heredoc consumes the rest of the string — it never runs as this shell's
+    code, so leaving its tail in command position would only re-open #317."""
+    n = len(command)
+    for delimiter, strip_tabs, blank in heredocs:
+        while pos < n:
+            eol = command.find("\n", pos)
+            end = n if eol == -1 else eol
+            line = command[pos:end]
+            if (line.lstrip("\t") if strip_tabs else line).strip() == delimiter:
+                pos = end if eol == -1 else eol + 1
+                break
+            if blank:
+                for k in range(pos, end if eol == -1 else eol + 1):
+                    out[k] = " "
+            pos = end if eol == -1 else eol + 1
+    heredocs.clear()
+    return pos
+
 
 @dataclass
 class Rule:
@@ -123,6 +274,18 @@ class Rule:
         if self.match == "command":
             return re.compile(_CMD_POSITION + r"(?:" + self.pattern + r")")
         return re.compile(self.pattern)
+
+    def matches(self, command: str) -> bool:
+        """True when this rule fires on ``command``.
+
+        A ``match="command"`` rule is tested against :func:`shell_code_text`, so
+        the keyword must be in command position in code the LOCAL shell runs —
+        not inside a quoted payload or a prose heredoc body (#317). A
+        ``match="search"`` rule keeps the raw text: those patterns are
+        deliberately substring searches.
+        """
+        subject = shell_code_text(command) if self.match == "command" else command
+        return bool(self.compiled().search(subject))
 
     def label(self) -> str:
         """The parenthetical the guard prints: ``github-push`` for that tier,
