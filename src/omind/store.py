@@ -205,11 +205,21 @@ class NoteFields:
     #: a full copy, so every agent on every machine sees every note — fine for
     #: precision when the vault is small, less so as it grows.
     #:
-    #: NOT A SECURITY BOUNDARY, and must never be described as one. The note is
-    #: still plain Markdown on disk, still replicated to every peer, still
-    #: readable by anything with the file. This narrows what RETRIEVAL returns,
-    #: nothing more. Absent (the default, and every note ever written) means
-    #: unscoped, which stays visible to every query.
+    #: Two roles (2026-08-27 roundtable, item #5): it narrows what RETRIEVAL
+    #: returns, and it is a guard-enforced operational INTERLOCK against
+    #: accidents — when a process declares ``OMIND_SCOPE`` and a note declares a
+    #: different scope, the write tools refuse the write (``OMIND_SCOPE_MODE=warn``
+    #: downgrades that to a warning). Its job is to turn a fat-fingered
+    #: cross-project write into a loud error, nothing more.
+    #:
+    #: NOT A SECURITY BOUNDARY, and must never be described as one. The interlock
+    #: is deliberately BYPASSABLE: unset ``OMIND_SCOPE``, edit the Markdown file
+    #: directly, or run any process that does not go through the guarded write
+    #: tools (mesh sync and other system writes are exempt by design), and it
+    #: does not apply. The note is still plain Markdown on disk, still replicated
+    #: to every peer, still readable by anything with the file. Absent (the
+    #: default, and every note ever written) means unscoped, which stays visible
+    #: to every query and is always writable.
     scope: str = ""
     #: Self-declared identity of the last writer ("Agent: hermes/pluto/dix"),
     #: resolved by the caller (explicit arg > OMIND_AGENT env > empty). 2026-08-27
