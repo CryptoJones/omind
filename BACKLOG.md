@@ -12,39 +12,52 @@ Reconciled 2026-09-08: 44 shipped items that were still sitting here moved to
 [Done](#done), and #297 was closed as a duplicate its own fix (#306) had already
 resolved._
 
-- [ ] **`omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — _enhancement (instrument)_ —
-  every omind surface that spends the agent's context gets a measured number, a
-  declared threshold and a verdict — and the tool must be able to return a failing
-  one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
-  the one surface that happened to get caught. The others are in exactly the state
-  preflight was in the day before #321: instrumented, unexamined, assumed fine —
-  priming 2.88M tokens, MCP responses 2.49M, verifier 642K, none with a threshold.
-  #321 was found by accident after months invisible; the ledger that proved it had
-  been written faithfully since 4.0.0 and never read.
-- [ ] **Preflight injection is a context-rot engine** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
-  the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
-  ~25% precision, framed as binding instruction and never removed. Invisible by
-  construction; surfaced as "the model has gotten worse in long sessions". **The
-  push→pull rework, the framing revert, stale/action-item filtering, the session
-  budget, `omind bench --precision` and `omind rules export` shipped in v9.2.0.**
-  Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
-  depth, preflight on vs off) — the one acceptance criterion that needs an
-  instrument, not a change.
-- [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
-  measured on hermes across every transcript since 2026-08-24: 362 turns where the
-  per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
-  97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
-  `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
-  prompts, so a long turn is one gate event no matter how much work happens inside it.
+Two **tracking issues** group the clustered work; their children are nested below them and
+mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this file agree.
+
+- [ ] **Tracking: memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (0/2)_ —
+  omind detecting and reporting its own retrieval failures instead of assuming its
+  instrumentation is sound. Both children share one thesis: omind was measuring itself
+  the whole time and nobody read the meter.
+  - [ ] **`omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — _enhancement (instrument)_ —
+    every omind surface that spends the agent's context gets a measured number, a
+    declared threshold and a verdict — and the tool must be able to return a failing
+    one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
+    the one surface that happened to get caught. The others are in exactly the state
+    preflight was in the day before #321: instrumented, unexamined, assumed fine —
+    priming 2.88M tokens, MCP responses 2.49M, verifier 642K, none with a threshold.
+    #321 was found by accident after months invisible; the ledger that proved it had
+    been written faithfully since 4.0.0 and never read.
+  - [ ] **Preflight injection is a context-rot engine** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
+    the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
+    ~25% precision, framed as binding instruction and never removed. Invisible by
+    construction; surfaced as "the model has gotten worse in long sessions". **The
+    push→pull rework, the framing revert, stale/action-item filtering, the session
+    budget, `omind bench --precision` and `omind rules export` shipped in v9.2.0.**
+    Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
+    depth, preflight on vs off) — the one acceptance criterion that needs an
+    instrument, not a change.
+
+- [ ] **Tracking: the guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
+  the enforcement gaps where the guard does not see part of the session it governs. Both
+  children are the same defect class: the guard reads a slice of the session, treats it as
+  the whole, and reports itself as functioning.
+  - [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
+    measured on hermes across every transcript since 2026-08-24: 362 turns where the
+    per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
+    97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
+    `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
+    prompts, so a long turn is one gate event no matter how much work happens inside it.
+  - [ ] **Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — _bug (enforcement)_ —
+    authorization is classified from the *opening* message of a turn, but Claude Code
+    delivers messages sent while a turn is running alongside a tool result. An explicit
+    mid-turn imperative therefore cannot lift a block the opening message armed.
+
 - [ ] **`edit-note` silently guts a note when `details` contains a `## ` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
   content after the first `## ` is relocated out of `## Details` and re-emitted after
   `## References`; a second edit leaves both the stale and the new copy. Hit for real
   on 2026-08-31: a note ended up with two contradictory copies of its body, the
   superseded one still reading as current, while `## Details` was empty.
-- [ ] **Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — _bug (enforcement)_ —
-  authorization is classified from the *opening* message of a turn, but Claude Code
-  delivers messages sent while a turn is running alongside a tool result. An explicit
-  mid-turn imperative therefore cannot lift a block the opening message armed.
 - [ ] **Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
   `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
   branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
