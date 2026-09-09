@@ -7,7 +7,69 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Changed
+
+- **The per-turn preflight hints instead of injecting** ([#321](https://github.com/CryptoJones/omind/issues/321)).
+  omind pushed a guessed note into every turn's context window, framed as
+  binding operator instruction, never removed, growing with the vault. On the
+  author's own ledger that was **~3.4M tokens of unrequested recall across
+  5,816 turns**, worst single session ~255K tokens, at roughly **25% precision**
+  on live conversational turns. The failure was invisible by construction — no
+  error, no bad exit code — and surfaced somewhere else entirely as *"the model
+  has gotten worse in long sessions."* It was misdiagnosed for months as model
+  degradation and came within a weekend of triggering an LLM-vendor switch.
+
+  The vault was never the problem; 24MB of hard-won operational memory is an
+  asset. The delivery mechanism was: **omind pushed when it should have let the
+  agent pull.** The preflight now names its candidates in one line (~330 chars,
+  hard-capped at 500) and stops — the body is fetched with `recall-note` when
+  the turn actually needs it. Retrieval costs tokens only when it is useful;
+  injection cost them always. On the reference vault, measured with the new
+  `omind bench --precision`: median per-turn payload **3,239 → 334 chars**,
+  ~16.5K tokens saved across 30 turns.
+
+  Four supporting changes, all measurable:
+
+  - *Framing.* #242 overcorrected. "STANDING OPERATOR INSTRUCTIONS", "not
+    optional background", "the memory governs", "silence is not an override"
+    are gone from the recall path — every turn was planting a fresh,
+    maximally-salient, pre-defended competing system prompt about a topic the
+    operator was usually not working on. The firm framing is kept for the small
+    curated set that earns it: notes compiling an `omind-rule` block, which are
+    exempt from every softening below because they are enforcement, not recall.
+    `SessionStart` now says which capsules are curated instruction and which are
+    dated background.
+  - *Stale notes are never auto-injected.* A note announcing its own
+    `SUPERSEDED` / `CORRECTION` / `PATH UPDATE` is named, not injected. Shipping
+    facts, retractions and corrections in arbitrary order, each stamped "the
+    memory governs", is a confabulation generator.
+  - *Action items are stripped from injections.* An unchecked `- [ ]` reads as a
+    task list assigned to the current turn. It is somebody else's TODO from
+    another day.
+  - *The session gets a budget, not just the turn.* Past 60,000 characters of
+    cumulative omind context, automatic recall tapers to nothing. The telemetry
+    to do this had been recorded since the beginning and nothing consumed it;
+    `ai_usage.session_context_chars()` consumes it.
+
+  `OMIND_PREFLIGHT=inject` restores the old push behavior; `off` silences the
+  preflight entirely. `OMIND_PREFLIGHT_MIN_TERMS` defaults to **3** (was 2),
+  which on the 30 labelled cases moves injection precision 60.7% → 69.6% by
+  declining the turns where a single vocabulary coincidence carried the match.
+
+### Added
+
+- **`omind bench --precision`** — measures what the preflight would say unbidden
+  on a labelled prompt set: how often it speaks, how often it is right, and what
+  hint-versus-inject costs. `--quality` asks whether retrieval can *find* the
+  right note; this asks whether it should have *spoken* at all.
+- **`omind ai usage` reports injection shape** — median/p90/p99/max per-turn
+  recall and the sessions carrying the most omind context, so a regression back
+  to the context-rot regime is visible in one command instead of inferred from
+  vibes about model quality.
+- **`omind rules export`** — the compiled hard rules as Markdown for
+  `CLAUDE.md`/`AGENTS.md`. A behavioral invariant sitting behind probabilistic
+  retrieval is not a rule, it is a coin flip; the vault held three separate
+  filings of one correction, which is the signature of a rule that never fires.
 
 ## [9.1.3] - 2026-09-09
 

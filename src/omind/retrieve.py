@@ -245,7 +245,18 @@ def overlap_score(task: str, text: str) -> float:
 #: per-turn injection. Ratio scores can't gate this (a one-term task trivially
 #: scores 1.0), so the preflight requires an absolute match count instead.
 PREFLIGHT_MIN_TERMS_ENV = "OMIND_PREFLIGHT_MIN_TERMS"
-_PREFLIGHT_MIN_TERMS_DEFAULT = 2
+#: Raised 2 → 3 in 9.2.0 on measurement, not taste (#321). `omind bench
+#: --precision` over the 30 labelled cases on the reference vault:
+#:
+#:   min_terms   preflight speaks   injection precision
+#:       2            93.3%              60.7%
+#:       3            76.7%              69.6%
+#:       4            33.3%              50.0%
+#:
+#: 3 is the knee: it buys nine points of precision by declining the turns where
+#: a single vocabulary coincidence was carrying the match. 4 abstains so often
+#: that the surviving hits are no better than chance.
+_PREFLIGHT_MIN_TERMS_DEFAULT = 3
 
 
 def matched_terms(task: str, text: str) -> int:

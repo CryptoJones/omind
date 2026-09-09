@@ -164,12 +164,12 @@ def test_matched_terms_counts_distinct_stemmed_overlap() -> None:
 def test_preflight_min_terms_env_override(monkeypatch) -> None:
     from omind import retrieve
 
-    assert retrieve.preflight_min_terms() == 2  # default
+    assert retrieve.preflight_min_terms() == 3  # default
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "3")
     assert retrieve.preflight_min_terms() == 3
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
     assert retrieve.preflight_min_terms() == 0
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "junk")
-    assert retrieve.preflight_min_terms() == 2  # bad value -> default
+    assert retrieve.preflight_min_terms() == 3  # bad value -> default
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "-4")
     assert retrieve.preflight_min_terms() == 0  # clamped

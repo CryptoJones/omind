@@ -12,6 +12,15 @@ Reconciled 2026-09-08: 44 shipped items that were still sitting here moved to
 [Done](#done), and #297 was closed as a duplicate its own fix (#306) had already
 resolved._
 
+- [ ] **Preflight injection is a context-rot engine** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
+  the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
+  ~25% precision, framed as binding instruction and never removed. Invisible by
+  construction; surfaced as "the model has gotten worse in long sessions". **The
+  push→pull rework, the framing revert, stale/action-item filtering, the session
+  budget, `omind bench --precision` and `omind rules export` are done (unreleased).**
+  Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
+  depth, preflight on vs off) — the one acceptance criterion that needs an
+  instrument, not a change.
 - [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
   measured on hermes across every transcript since 2026-08-24: 362 turns where the
   per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only

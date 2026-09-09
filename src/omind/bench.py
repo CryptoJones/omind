@@ -368,6 +368,117 @@ def run_quality(
     return report
 
 
+#: Fixed text around a hint / an injection, measured from the strings in
+#: :func:`omind.guard.preflight_turn` so the sizes below are the real payload,
+#: not the note body alone.
+_HINT_OVERHEAD = 180
+_INJECT_OVERHEAD = 200
+
+
+def run_precision(
+    omi_dir: Path | str,
+    *,
+    cases: tuple[tuple[str, str], ...] = QUALITY_CASES,
+) -> Report:
+    """What the per-turn preflight would put in the context window (#321).
+
+    ``--quality`` asks whether the ranking can FIND the right note when the
+    agent goes looking. This asks the different question that #321 turned on:
+    of the turns where preflight speaks unbidden, how often is it right, and
+    what does being wrong cost. The same labelled set answers both, and the
+    same abstain rules the live path uses are applied here — a case preflight
+    would decline is scored as an abstain, not as a miss.
+
+    Read-only: it resolves and reads notes, but never records an access, a
+    consult, a compliance event, or a usage row.
+    """
+    from omind import ai_usage, guard, recall, retrieve
+    from omind.store import OmiStore, parse_note
+
+    omi = Path(omi_dir).expanduser()
+    report = Report(vault=str(omi))
+    available = {path.name for path in omi.glob("*.md")}
+    evaluable = [(query, expected) for query, expected in cases if expected in available]
+    report.add(
+        "precision cases", len(evaluable), "count", f"{len(cases) - len(evaluable)} skipped"
+    )
+    if not evaluable:
+        return report
+
+    min_terms = retrieve.preflight_min_terms()
+    cap = ai_usage.policy(omi).preflight_chars
+    hard_rules = guard.hard_rule_notes(omi)
+    store = OmiStore(omi)
+
+    spoke = 0
+    correct = 0
+    abstained = 0
+    hint_sizes: list[int] = []
+    inject_sizes: list[int] = []
+    wrong: list[str] = []
+    for query, expected in evaluable:
+        titles = retrieve.relevant_titles(query, omi, limit=2)
+        filename = recall.filename_for_title(omi, titles[0]) if titles else None
+        if filename is None:
+            abstained += 1
+            continue
+        try:
+            raw = store.read_note(filename)
+        except Exception:
+            abstained += 1
+            continue
+        fields = parse_note(raw)
+        haystack = f"{fields.title} {fields.summary} {raw}"
+        if min_terms and retrieve.matched_terms(query, haystack) < min_terms:
+            abstained += 1
+            continue
+        if filename not in hard_rules and guard.looks_stale(fields.summary, raw):
+            abstained += 1
+            continue
+        spoke += 1
+        if filename == expected:
+            correct += 1
+        else:
+            wrong.append(f"{query[:28]!r}→{Path(filename).stem[:28]}")
+        names = [titles[0]]
+        if len(titles) > 1 and titles[1] and titles[1] != titles[0]:
+            names.append(titles[1])
+        hint_sizes.append(
+            min(
+                guard.PREFLIGHT_HINT_CHARS,
+                _HINT_OVERHEAD + sum(len(name) + 6 for name in names),
+            )
+        )
+        inject_sizes.append(_INJECT_OVERHEAD + min(cap, len(raw)))
+
+    total = len(evaluable)
+    report.add("preflight speaks", spoke * 100.0 / total, "%", f"{abstained} abstained")
+    report.add(
+        "injection precision",
+        (correct * 100.0 / spoke) if spoke else 0.0,
+        "%",
+        "; ".join(wrong[:3]),
+    )
+    report.add("hint payload, median", _median(hint_sizes), "chars", "shipped default")
+    report.add("inject payload, median", _median(inject_sizes), "chars", "OMIND_PREFLIGHT=inject")
+    report.add("inject payload, max", max(inject_sizes) if inject_sizes else 0, "chars")
+    saved = sum(inject_sizes) - sum(hint_sizes)
+    report.add(
+        f"context saved per {total} turns",
+        saved,
+        "chars",
+        f"~{ai_usage.estimate_tokens(saved):,} tokens",
+    )
+    return report
+
+
+def _median(values: list[int]) -> int:
+    if not values:
+        return 0
+    ordered = sorted(values)
+    return ordered[len(ordered) // 2]
+
+
 def _listing_tokens(notes: list[Any]) -> tuple[int, int]:
     """``(paged, unpaged)`` token estimate for the listing payload — the tool
     result that was ~87k tokens on a 744-note vault before it was paged."""
