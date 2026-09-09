@@ -20,6 +20,16 @@ resolved._
   satisfy is vacuous, and the guard records the remote commit as having a fresh
   base. Same family as the escalation-keyword substring bug; `policy._CMD_POSITION`
   is the existing anchoring primitive. Reproduced four times while filing it.
+- [ ] **Preflight injection is a context-rot engine** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug (context cost) / enhancement_ —
+  measured from omind's own ledger: **~3.4M tokens of `recall` injected across 5,816 turns**
+  (mean 2,313 chars/turn, p90 5KB, max 16KB), ~9.4M tokens once priming + MCP + verifier are
+  counted; worst session carried ~255K tokens of omind-generated context. Injection precision
+  measured at **~25%** on a live 7-turn session and keyword-shaped ("review this git diff"
+  pulls 8KB). Framing from #242 overcorrected — every turn plants a "STANDING OPERATOR
+  INSTRUCTION ... silence is not an override" block, often off-topic, sometimes carrying
+  content already marked SUPERSEDED or WRONG. Fix is push → pull: preflight emits a one-line
+  index hint, the agent calls `recall-note` on need. Same root cause as #296, opposite symptom.
+
 - [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
   measured on hermes across every transcript since 2026-08-24: 362 turns where the
   per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
