@@ -63,6 +63,14 @@ case "${1:---help}" in
     --range)
         [ $# -eq 2 ] || { echo "usage: $0 --range <base>..<head>" >&2; exit 2; }
         for sha in $(git rev-list "$2"); do
+            # Bot commits are generated, not authored — same category as the
+            # merges and reverts exempted above. Dependabot cannot add a
+            # trailer to its own message, so demanding one only guarantees
+            # every dependency PR is permanently red, which teaches the team
+            # to ignore the check rather than to declare authorship.
+            case "$(git log -1 --format='%an <%ae>' "$sha")" in
+                *"[bot]"*) continue ;;
+            esac
             check_message "$(git log -1 --format=%B "$sha")" "$(git log -1 --format='%h %s' "$sha")"
         done
         ;;
