@@ -701,15 +701,22 @@ def build_session_start_context(
     # Framing matters (#242): leading with the hedge taught the model to read
     # memory as an ignorable prior. State what the content IS first; keep the
     # explicit-override clause, but make clear silence is not an override.
+    # #321 narrowed this: the firm framing is correct for the CURATED priming
+    # notes (the operator wrote them to bind) and wrong for the dated project
+    # and handoff capsules, which are recall and go stale. One header covering
+    # both taught the model to read a three-week-old status note as a live
+    # instruction. Say which is which.
     header = (
         "OMI is the durable-memory source of truth for this operator. The "
-        "sections below are STANDING OPERATOR INSTRUCTIONS and context "
-        "distilled from prior sessions — follow them as if the operator had "
-        "typed them at session start. They are not optional background. Full "
-        f"notes remain available from {directory} through OMI MCP search-vault "
-        "and recall-note. If a current, explicit user instruction directly "
-        "conflicts with a memory, the user instruction wins — but silence is "
-        "not a conflict: absent contrary instruction, the memory governs."
+        "unlabelled capsules below are the operator's curated STANDING "
+        "INSTRUCTIONS — follow them as if the operator had typed them at "
+        "session start; if a current, explicit user instruction conflicts with "
+        "one, the user instruction wins, but silence is not a conflict. The "
+        "capsules marked (dynamic core) or (project handoff) are dated context "
+        "from prior sessions: background, not instruction — verify before "
+        "acting on them, they may be stale or already superseded. Full notes "
+        "remain available from "
+        f"{directory} through OMI MCP search-vault and recall-note."
     )
     if not sections:
         fallback = prefix + (

@@ -71,6 +71,46 @@ MISS_STRICT_ENV = "OMI_GATE_MISS_STRICT"
 #: Synthetic rule id for a preflight miss that auto-cleared the gate.
 GATE_NO_MATCH_RULE = "omi-gate-no-match"
 GATE_WEAK_MATCH_RULE = "omi-gate-weak-match"
+#: #321: a stale/superseded note was the best match and was NOT injected.
+GATE_STALE_NOTE_RULE = "omi-gate-stale-note"
+#: #321: this session already spent its whole preflight budget.
+GATE_BUDGET_RULE = "omi-gate-budget-spent"
+
+#: How the per-turn preflight delivers memory (#321).
+#:
+#: ``hint`` (default) names the candidate notes in one line and stops there —
+#: the agent PULLS the body with ``recall-note`` if the turn actually needs it.
+#: ``inject`` is the pre-9.2 push behavior, kept as an escape hatch. ``off``
+#: clears the gate and says nothing.
+#:
+#: Why the default flipped: measured on this operator's own ledger, push
+#: injection had shipped ~3.4M tokens of unrequested recall across 5,816 turns
+#: at roughly 25% precision, framed as binding instruction and never removed.
+#: The cost never surfaced as an omind error — it surfaced as "the model has
+#: gotten worse in long sessions." Retrieval that costs tokens only when it is
+#: useful beats injection that costs them always.
+PREFLIGHT_MODE_ENV = "OMIND_PREFLIGHT"
+PREFLIGHT_MODES = ("hint", "inject", "off")
+DEFAULT_PREFLIGHT_MODE = "hint"
+#: Hard ceiling on an automatic (non-hard-rule) preflight payload.
+PREFLIGHT_HINT_CHARS = 500
+#: Cumulative per-session preflight budget. Past this, automatic injection
+#: tapers to nothing — a session already carrying this much omind context does
+#: not need more of it (#321, fix 6). Hard rules are exempt; they are the
+#: enforcement surface, not recall.
+SESSION_INJECTION_BUDGET_CHARS = 60_000
+#: Notes whose body advertises that part of it is wrong. Injecting one of these
+#: under "the memory governs" is a confabulation generator (#321, fix 3); it is
+#: still reachable by an explicit ``recall-note``, which shows the whole note
+#: including the correction.
+_STALE_MARKER_RE = re.compile(
+    r"(?:^|\n)[ \t>*#-]*(?:\*\*|__)?\s*"
+    r"(?:SUPERSEDED|CORRECTION|PATH UPDATE|OUT OF DATE|NO LONGER TRUE|WAS WRONG)",
+    re.IGNORECASE,
+)
+#: Unchecked checkboxes in an injected excerpt read as a task list assigned to
+#: the current turn. They are somebody else's TODO from another day (#321, fix 4).
+_ACTION_ITEM_RE = re.compile(r"^[ \t]*[-*][ \t]*\[ \][ \t].*$", re.MULTILINE)
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
@@ -1555,6 +1595,59 @@ def _miss_strict() -> bool:
     return bool(os.environ.get(MISS_STRICT_ENV))
 
 
+def preflight_mode() -> str:
+    """How this turn's preflight delivers memory: ``hint``/``inject``/``off``.
+
+    An unrecognised value falls back to the default rather than failing a hook.
+    """
+    value = str(os.environ.get(PREFLIGHT_MODE_ENV, "")).strip().lower()
+    return value if value in PREFLIGHT_MODES else DEFAULT_PREFLIGHT_MODE
+
+
+def looks_stale(*texts: str) -> bool:
+    """True when a note announces its own supersession/correction (#321)."""
+    return any(_STALE_MARKER_RE.search(text or "") for text in texts)
+
+
+def strip_action_items(text: str) -> str:
+    """Drop unchecked ``- [ ]`` lines from an excerpt bound for the context
+    window. An automatic injection is background, not an assignment (#321)."""
+    cleaned = _ACTION_ITEM_RE.sub("", text)
+    return re.sub(r"\n{3,}", "\n\n", cleaned).strip()
+
+
+def hard_rule_notes(omi_dir: Path | str) -> set[str]:
+    """Filenames of notes that carry a compiled ``omind-rule`` block.
+
+    This is the curated always-binds surface: enforcement, not recall. These
+    keep the firm framing and the full excerpt no matter what mode or budget
+    the recall path is under (#321, fix 2 — "keep firm framing only for the
+    small set of true hard rules"). Best-effort; a failure means no carve-out.
+    """
+    try:
+        from omind import rules
+
+        return {rule.note for rule in rules.load_rules(omi_dir) if rule.note}
+    except Exception:
+        return set()
+
+
+def session_context_chars(omi_dir: Path | str, session: str) -> int:
+    """omind context already pushed into ``session``, from omind's own ledger.
+
+    The telemetry that measured #321 was being written and never read; this is
+    what reads it. Best-effort — budgeting must never break a hook.
+    """
+    if not session:
+        return 0
+    try:
+        from omind import ai_usage
+
+        return ai_usage.session_context_chars(omi_dir, session)
+    except Exception:
+        return 0
+
+
 #: Turns that look like an action rather than a conversation (#241). Fixed by
 #: design — an env knob here would be one more thing that silently degrades.
 _ACTION_TURN_RE = re.compile(
@@ -1674,6 +1767,87 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
                 "`search-vault` with a focused query, then `recall-note` on one "
                 "result."
             )
+    title = str(memory.get("title") or Path(filename).stem)
+    summary = str(memory.get("summary") or "").strip()
+    excerpt = str(memory.get("content") or "").strip()
+    # The curated always-binds surface: notes carrying a compiled omind-rule
+    # block. Everything below that treats recall as optional exempts these —
+    # they are enforcement, and enforcement does not get to be probabilistic.
+    hard_rule = filename in hard_rule_notes(omi_dir)
+
+    # #321 fix 3: never auto-inject a note that announces its own correction.
+    # The pipeline used to ship facts, retractions and supersessions in
+    # arbitrary order, each stamped "the memory governs".
+    if not hard_rule and looks_stale(summary, excerpt):
+        record_consult(session, kind="stale-note", target=filename, relevant=False)
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session=session,
+            tool="UserPromptSubmit",
+            rule_id=GATE_STALE_NOTE_RULE,
+            severity="soft",
+            outcome="auto-clear",
+            detail=f"note={filename!r} task={task[:100]!r}",
+        )
+        return (
+            f"OMI turn preflight's best match [[{title}]] carries a supersession "
+            "or correction marker, so it was not injected. Consult gate cleared "
+            "— call OMI MCP `recall-note` on it if this turn needs it, and read "
+            "the correction with the claim."
+        )
+
+    # #321 fix 6: budget the session, not just the turn. Two observed sessions
+    # accumulated ~207K tokens of pure recall injection each; at that volume
+    # omind is not adding context to the session, it substantially IS it.
+    spent = session_context_chars(omi_dir, session)
+    if not hard_rule and spent >= SESSION_INJECTION_BUDGET_CHARS:
+        record_consult(session, kind="budget-spent", target=filename, relevant=False)
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session=session,
+            tool="UserPromptSubmit",
+            rule_id=GATE_BUDGET_RULE,
+            severity="soft",
+            outcome="auto-clear",
+            detail=f"chars={spent} budget={SESSION_INJECTION_BUDGET_CHARS}",
+        )
+        return (
+            f"OMI turn preflight has already pushed {spent:,} characters into "
+            "this session and is over budget — not adding more. Consult gate "
+            "cleared; call OMI MCP `search-vault`/`recall-note` when you need "
+            "memory."
+        )
+
+    mode = preflight_mode()
+    if mode == "off" and not hard_rule:
+        record_consult(session, kind="preflight-off", target="", relevant=None)
+        reset_offtopic(session)
+        return (
+            f"OMI turn preflight is off ({PREFLIGHT_MODE_ENV}=off). Consult gate "
+            "cleared — call OMI MCP `search-vault`/`recall-note` when the turn "
+            "needs memory."
+        )
+
+    record_consult(session, kind="preflight", target=filename, relevant=True)
+    reset_offtopic(session)
+
+    if not hard_rule and mode != "inject":
+        # #321 fix 1, the headline change: push → pull. Name the candidates and
+        # stop. Retrieval costs tokens only when it is useful; injection costs
+        # them on every turn whether the note relates to the work or not.
+        names = [title]
+        if len(titles) > 1 and titles[1] and titles[1] != title:
+            names.append(str(titles[1]))
+        context = (
+            "OMI turn preflight — possibly relevant background from prior "
+            "sessions, not an instruction: "
+            + ", ".join(f"[[{name}]]" for name in names)
+            + ". Call OMI MCP `recall-note` on one if this turn needs it; "
+            "verify before acting, it may be stale."
+        )[:PREFLIGHT_HINT_CHARS]
+        ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
+        return context
+
     version = str(memory.get("version") or "")
     repeated = _injected_versions(session).get(filename) == version
     # #241: the summary-only optimization for repeated notes loses to attention
@@ -1681,28 +1855,32 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     # turn looks like an action (git/deploy/sudo/…), keep the optimization for
     # conversational turns.
     action_shaped = bool(_ACTION_TURN_RE.search(task))
-    summary = str(memory.get("summary") or "").strip()
-    excerpt = str(memory.get("content") or "").strip()
     content = (
         summary
         if repeated and not action_shaped
         else "\n\n".join(part for part in (summary, excerpt) if part and part != summary)
     )
+    content = strip_action_items(content) or content
     if not content:
-        content = str(memory.get("title") or filename)
-    record_consult(session, kind="preflight", target=filename, relevant=True)
-    reset_offtopic(session)
+        content = title
     _record_injected(session, filename, version)
+    framing = (
+        ". This note compiles a hard operational rule — apply it unless the "
+        "user's current message explicitly overrides it. Silence is not an "
+        "override.\n\n"
+        if hard_rule
+        else ". Possibly relevant background from prior sessions — verify "
+        "before acting on it; it may be stale.\n\n"
+    )
     context = (
-        f"OMI turn preflight recalled [[{memory.get('title') or Path(filename).stem}]]"
+        f"OMI turn preflight recalled [[{title}]]"
         + (
             " (full excerpt already injected earlier this session)"
             if repeated and not action_shaped
             else ""
         )
-        + ". This is a standing operator instruction/memory relevant to this "
-        "turn — apply it unless the user's current message explicitly "
-        "overrides it. Silence is not an override.\n\n" + content
+        + framing
+        + content
     )
     context += _second_title_line(omi_dir, titles, filename)
     ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)

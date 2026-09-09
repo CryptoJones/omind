@@ -466,14 +466,9 @@ def test_reset_clears_gate_and_captures_task() -> None:
     assert guard.turn_task("t2") == "do the thing"  # task captured for the verifier
 
 
-def test_turn_preflight_recalls_relevant_memory_and_satisfies_soft_gate(
-    tmp_path: Path,
-) -> None:
-    from omind import ai_usage
+def _token_note(omi: Path) -> None:
     from omind.store import NoteFields, OmiStore
 
-    omi = tmp_path / "OMI"
-    omi.mkdir()
     OmiStore(omi).create_note(
         NoteFields(
             title="Token Usage Strategy",
@@ -481,6 +476,37 @@ def test_turn_preflight_recalls_relevant_memory_and_satisfies_soft_gate(
             details="Use compact recall and avoid duplicate note representations.",
         )
     )
+
+
+def test_turn_preflight_names_the_match_without_injecting_it(tmp_path: Path) -> None:
+    # #321: the default is a pull hint — the title, and an invitation to fetch
+    # the body. The note text itself must NOT land in the context window.
+    from omind import ai_usage
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
+    event = {"session_id": "preflight-1", "prompt": "reduce OMI token usage"}
+    context = guard.preflight_turn(event, omi)
+    assert "[[Token Usage Strategy]]" in context
+    assert "compact recall" not in context  # body stayed in the vault
+    assert "recall-note" in context
+    assert "Silence is not an override" not in context  # framing softened
+    assert len(context) <= guard.PREFLIGHT_HINT_CHARS
+    assert guard.consulted_this_turn("preflight-1")
+    usage = ai_usage.read_events(omi)
+    assert usage[-1]["operation"] == "recall"
+
+
+def test_turn_preflight_inject_mode_recalls_full_memory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import ai_usage
+
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
     event = {"session_id": "preflight-1", "prompt": "reduce OMI token usage"}
     context = guard.preflight_turn(event, omi)
     assert "[[Token Usage Strategy]]" in context
@@ -493,6 +519,134 @@ def test_turn_preflight_recalls_relevant_memory_and_satisfies_soft_gate(
     assert "already injected earlier this session" in repeated
     assert "Keep OMI token usage bounded." in repeated
     assert "compact recall" not in repeated
+
+
+def test_turn_preflight_off_mode_says_nothing_and_clears(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "off")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
+    context = guard.preflight_turn(
+        {"session_id": "preflight-off", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "[[" not in context
+    assert guard.PREFLIGHT_MODE_ENV in context
+    assert guard.consulted_this_turn("preflight-off")
+
+
+def test_turn_preflight_skips_a_note_that_announces_its_own_correction(
+    tmp_path: Path,
+) -> None:
+    # #321 fix 3: shipping a retraction stamped "the memory governs" is a
+    # confabulation generator. Name it, do not inject it.
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Token Usage Strategy",
+            summary="Keep OMI token usage bounded.",
+            details="SUPERSEDED 2026-09-09 — the budget below is no longer true.",
+        )
+    )
+    context = guard.preflight_turn(
+        {"session_id": "preflight-stale", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "supersession" in context
+    assert "no longer true" not in context
+    assert guard.consulted_this_turn("preflight-stale")
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_STALE_NOTE_RULE
+    assert events[-1]["outcome"] == "auto-clear"
+
+
+def test_turn_preflight_tapers_when_the_session_budget_is_spent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #321 fix 6: budget the session, not just the turn.
+    from omind import ai_usage
+
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
+    ai_usage.record_context(
+        omi, "recall", guard.SESSION_INJECTION_BUDGET_CHARS, session_id="preflight-fat"
+    )
+    context = guard.preflight_turn(
+        {"session_id": "preflight-fat", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "over budget" in context
+    assert "compact recall" not in context
+    assert guard.consulted_this_turn("preflight-fat")
+    events = compliance.read_events()
+    assert events[-1]["rule_id"] == guard.GATE_BUDGET_RULE
+
+
+def test_turn_preflight_still_injects_hard_rule_notes_in_full(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The carve-out: a note compiling an omind-rule block is enforcement, not
+    # recall. Hint mode, a spent budget and a stale marker must not silence it.
+    from omind import ai_usage
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Token Usage Strategy",
+            summary="Keep OMI token usage bounded.",
+            details=(
+                "SUPERSEDED in part, but the rule still binds.\n\n"
+                "```omind-rule\n"
+                "id: no-token-bonfire\n"
+                "tool: Bash\n"
+                "match: \"*token bonfire*\"\n"
+                "action: deny\n"
+                "message: \"no\"\n"
+                "```"
+            ),
+        )
+    )
+    ai_usage.record_context(
+        omi, "recall", guard.SESSION_INJECTION_BUDGET_CHARS, session_id="preflight-rule"
+    )
+    context = guard.preflight_turn(
+        {"session_id": "preflight-rule", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "hard operational rule" in context
+    assert "no-token-bonfire" in context
+
+
+def test_turn_preflight_strips_action_items_from_an_injection(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #321 fix 4: an unchecked checkbox from another day is not this turn's job.
+    from omind.store import NoteFields, OmiStore
+
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(
+        NoteFields(
+            title="Token Usage Strategy",
+            summary="Keep OMI token usage bounded.",
+            details=(
+                "Use compact recall.\n\n"
+                "- [ ] Install ROCm on telesto\n"
+                "- [x] Ship the compact-recall change\n"
+            ),
+        )
+    )
+    context = guard.preflight_turn(
+        {"session_id": "preflight-todo", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "Install ROCm" not in context
+    assert "Use compact recall." in context
 
 
 def test_turn_preflight_without_match_auto_clears_gate(tmp_path: Path) -> None:
@@ -1598,9 +1752,12 @@ def test_repo_block_message_survives_a_missing_note(tmp_path: Path) -> None:
     assert "Governing memory" not in verdict.reason
 
 
-def test_preflight_reinjects_full_excerpt_on_action_shaped_turns(tmp_path: Path) -> None:
+def test_preflight_reinjects_full_excerpt_on_action_shaped_turns(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from omind.store import NoteFields, OmiStore
 
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
     omi = tmp_path / "OMI"
     omi.mkdir()
     OmiStore(omi).create_note(
@@ -1619,10 +1776,13 @@ def test_preflight_reinjects_full_excerpt_on_action_shaped_turns(tmp_path: Path)
     assert "already injected earlier this session" not in repeated
 
 
-def test_preflight_adds_second_title_summary_only(tmp_path: Path) -> None:
+def test_preflight_adds_second_title_summary_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     from omind import ai_usage
     from omind.store import NoteFields, OmiStore
 
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
     omi = tmp_path / "OMI"
     omi.mkdir()
     store = OmiStore(omi)
@@ -1652,6 +1812,35 @@ def test_preflight_adds_second_title_summary_only(tmp_path: Path) -> None:
         {"session_id": "second-2", "prompt": "token budget usage bounds"}, omi
     )
     assert "Also possibly relevant" not in economy  # skipped on economy
+
+
+def test_preflight_hint_names_both_candidates_without_bodies(tmp_path: Path) -> None:
+    # The pull hint replaces the runner-up summary line with a second title:
+    # two names cost ~60 chars, two bodies cost thousands (#321).
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    store = OmiStore(omi)
+    store.create_note(
+        NoteFields(
+            title="Token Budget Alpha",
+            summary="primary token budget note",
+            details="ALPHA-BODY token budget usage bounds",
+        )
+    )
+    store.create_note(
+        NoteFields(
+            title="Token Budget Beta",
+            summary="secondary token budget note",
+            details="BETA-BODY token budget usage bounds",
+        )
+    )
+    context = guard.preflight_turn(
+        {"session_id": "hint-2", "prompt": "token budget usage bounds"}, omi
+    )
+    assert "[[Token Budget Alpha]]" in context and "[[Token Budget Beta]]" in context
+    assert "ALPHA-BODY" not in context and "BETA-BODY" not in context
 
 
 # -- #311: Poolside preflight (snake_case reply, prompt from the trajectory) --

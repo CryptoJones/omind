@@ -101,3 +101,26 @@ def test_quality_report_handles_no_matching_labelled_notes(tmp_path: Path) -> No
     by_name = {measurement.name: measurement for measurement in report.measurements}
     assert by_name["quality cases"].value == 0
     assert by_name["MRR"].value == 0
+
+
+def test_precision_report_measures_what_preflight_would_inject(tmp_path: Path) -> None:
+    # #321: the cost of an unbidden injection is the number this reports.
+    report = bench.run_precision(
+        _vault(tmp_path),
+        cases=(
+            ("what to do when a release fails to sign", "Signing Runbook.md"),
+            ("missing target is skipped", "Absent.md"),
+        ),
+    )
+    by_name = {measurement.name: measurement for measurement in report.measurements}
+    assert by_name["precision cases"].value == 1
+    assert by_name["injection precision"].value == 100.0
+    # The hint is the shipped default and must be an order of magnitude cheaper.
+    assert by_name["hint payload, median"].value < by_name["inject payload, median"].value
+    assert by_name["context saved per 1 turns"].value > 0
+
+
+def test_precision_report_handles_no_matching_labelled_notes(tmp_path: Path) -> None:
+    report = bench.run_precision(_vault(tmp_path), cases=(("unknown", "Absent.md"),))
+    by_name = {measurement.name: measurement for measurement in report.measurements}
+    assert by_name["precision cases"].value == 0

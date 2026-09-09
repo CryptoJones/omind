@@ -316,6 +316,56 @@ def read_events(omi_dir: Path | str) -> list[dict[str, Any]]:
     return events
 
 
+#: Operations that put omind's own text into the parent agent's context window.
+CONTEXT_OPERATIONS = ("priming", "recall", "mcp")
+#: Bytes of ledger tail scanned for a per-session total. The ledger is append
+#: ordered and a session's events are contiguous at the end while it is live,
+#: so a bounded tail read answers "how much have I pushed into THIS session"
+#: without parsing megabytes on every turn.
+_SESSION_SCAN_BYTES = 512 * 1024
+
+
+def session_context_chars(
+    omi_dir: Path | str, session_id: str, *, operations: tuple[str, ...] = CONTEXT_OPERATIONS
+) -> int:
+    """Characters of omind-generated context already pushed into ``session_id``.
+
+    This ledger has recorded every injection since the beginning and nothing
+    ever consumed it (#321); the preflight budget does. Never raises.
+    """
+    if not session_id:
+        return 0
+    path = usage_path(omi_dir)
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - _SESSION_SCAN_BYTES))
+            blob = handle.read()
+    except OSError:
+        return 0
+    total = 0
+    # A partial first line after the seek is simply unparseable and skipped.
+    for line in blob.decode("utf-8", errors="replace").splitlines():
+        if session_id not in line:
+            continue
+        try:
+            event = json.loads(line)
+        except (ValueError, TypeError):
+            continue
+        if not isinstance(event, dict):
+            continue
+        if event.get("session_id") != session_id:
+            continue
+        if event.get("operation") not in operations:
+            continue
+        try:
+            total += max(0, int(event.get("characters") or 0))
+        except (ValueError, TypeError):
+            continue
+    return total
+
+
 def parse_window(value: str) -> timedelta | None:
     clean = (value or "").strip().lower()
     if clean == "all":
@@ -407,6 +457,7 @@ def usage_summary(
     )
     priming_events = [e for e in attributable if e.get("operation") == "priming"]
     return {
+        "injection": _injection_stats(attributable),
         "since": since,
         "profile": profile_info(omi_dir),
         "events": len(events),
@@ -430,6 +481,53 @@ def usage_summary(
             "provider_tokens": provider_traffic,
             "omi_share_percent": share,
         },
+    }
+
+
+def _percentile(values: list[int], fraction: float) -> int:
+    """Nearest-rank percentile. No numpy for six numbers."""
+    if not values:
+        return 0
+    index = max(0, min(len(values) - 1, math.ceil(fraction * len(values)) - 1))
+    return values[index]
+
+
+def _injection_stats(events: list[dict[str, Any]]) -> dict[str, Any]:
+    """Per-turn and per-session shape of omind's pushed context (#321).
+
+    The regression this guards against is invisible in token totals — it shows
+    up as a fat tail (a p99 turn carrying 16KB) and as single sessions
+    accumulating six figures of recall — so both are reported.
+    """
+    sizes: list[int] = []
+    per_session: dict[str, int] = {}
+    for event in events:
+        if event.get("operation") not in CONTEXT_OPERATIONS:
+            continue
+        try:
+            chars = max(0, int(event.get("characters") or 0))
+        except (ValueError, TypeError):
+            continue
+        if event.get("operation") == "recall":
+            sizes.append(chars)
+        session = str(event.get("session_id") or "")
+        if session:
+            per_session[session] = per_session.get(session, 0) + chars
+    sizes.sort()
+    top = sorted(per_session.items(), key=lambda item: item[1], reverse=True)[:5]
+    return {
+        "per_turn_recall": {
+            "turns": len(sizes),
+            "mean_chars": round(sum(sizes) / len(sizes)) if sizes else 0,
+            "median_chars": _percentile(sizes, 0.5),
+            "p90_chars": _percentile(sizes, 0.9),
+            "p99_chars": _percentile(sizes, 0.99),
+            "max_chars": sizes[-1] if sizes else 0,
+        },
+        "top_sessions": [
+            {"session_id": session, "chars": chars, "tokens": estimate_tokens(chars)}
+            for session, chars in top
+        ],
     }
 
 

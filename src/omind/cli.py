@@ -415,6 +415,12 @@ def build_parser() -> argparse.ArgumentParser:
         action="store_true",
         help="run the labelled retrieval-quality set and report recall@1, recall@5, and MRR",
     )
+    bench.add_argument(
+        "--precision",
+        action="store_true",
+        help="measure what the per-turn preflight would inject unbidden: how "
+        "often it speaks, how often it is right, and what it costs (#321)",
+    )
     bench.add_argument("--json", action="store_true", help="emit measurements as JSON")
     _add_vault_args(bench)
 
@@ -422,7 +428,11 @@ def build_parser() -> argparse.ArgumentParser:
         "rules",
         help="deterministic note rules compiled into PreToolUse checks (#240)",
     )
-    rules.add_argument("action", choices=["list"], help="list compiled rules")
+    rules.add_argument(
+        "action",
+        choices=["list", "export"],
+        help="list compiled rules, or export them as Markdown for CLAUDE.md/AGENTS.md",
+    )
     _add_vault_args(rules)
 
     lint = sub.add_parser(
@@ -1226,7 +1236,9 @@ def _run_bench(args: argparse.Namespace) -> int:
     from omind import bench
 
     omi_dir = (args.vault / args.folder).expanduser()
-    if args.quality:
+    if args.precision:
+        report = bench.run_precision(omi_dir)
+    elif args.quality:
         report = bench.run_quality(omi_dir)
     else:
         queries = (args.query,) if args.query else bench.SAMPLE_QUERIES
@@ -1440,6 +1452,21 @@ def _run_ai(args: argparse.Namespace) -> int:
         print(
             f"  {name}: input {values['input_tokens']:,}, "
             f"output {values['output_tokens']:,}, avoided {values['avoided_tokens']:,}"
+        )
+    # #321: push volume is invisible in token totals — it shows up as a fat tail
+    # and as single sessions accumulating six figures of recall. Report both, so
+    # a regression back to the context-rot regime is visible in one command.
+    injection = summary["injection"]
+    per_turn = injection["per_turn_recall"]
+    print(
+        f"preflight per turn ({per_turn['turns']:,} turns): "
+        f"median {per_turn['median_chars']:,} | p90 {per_turn['p90_chars']:,} | "
+        f"p99 {per_turn['p99_chars']:,} | max {per_turn['max_chars']:,} chars"
+    )
+    for row in injection["top_sessions"]:
+        print(
+            f"  session {row['session_id'][:12]}: {row['chars']:,} chars "
+            f"(~{row['tokens']:,} tokens) of omind context"
         )
     return 0
 
@@ -1686,7 +1713,11 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "rules":
         from omind import rules as _rules
 
-        print(_rules.format_rules((args.vault / args.folder).expanduser()))
+        omi_dir = (args.vault / args.folder).expanduser()
+        if args.action == "export":
+            print(_rules.export_rules(omi_dir))
+            return 0
+        print(_rules.format_rules(omi_dir))
         return 0
     if args.command == "recover":
         return _run_recover(args)

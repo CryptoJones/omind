@@ -283,11 +283,13 @@ broken hook can never wedge the agent.
 - **Compact priming.** On session start the agent receives a hard-bounded capsule
   of identity, workflow, operator rules, recent-memory titles, and a cwd-matched
   handoff (Claude Code `SessionStart`, Hermes `pre_llm_call`, …).
-- **Proactive turn recall.** Claude's `UserPromptSubmit` and Hermes'
-  `pre_llm_call` deterministically select and inject one compact relevant memory
-  before the model acts. A repeated unchanged note falls back to its summary.
-  This satisfies the ordinary consult gate without asking a smaller model to
-  interpret a `PreToolUse` error. When the vault was searched and genuinely has
+- **Turn recall: a hint, not a shove.** Claude's `UserPromptSubmit` and Hermes'
+  `pre_llm_call` deterministically select the memory most likely to matter and
+  **name** it — one line, ~330 characters, "call `recall-note` if this turn needs
+  it." The agent pulls the body when it is actually useful instead of paying for
+  it on every turn. This satisfies the ordinary consult gate without asking a
+  smaller model to interpret a `PreToolUse` error. When the vault was searched
+  and genuinely has
   nothing relevant to the task, the gate auto-clears for that turn instead of
   forcing a manual `search-vault`/`recall-note` round trip on a note that, by
   construction, wouldn't be relevant — the auto-clear is always logged
@@ -295,6 +297,23 @@ broken hook can never wedge the agent.
   a miss, so it still leaves the gate armed. Set `OMI_GATE_MISS_STRICT=1` to
   restore the old force-a-consult-on-every-miss behavior. Hard rule-specific
   prerequisites remain independent.
+
+  The push-the-whole-note behavior is still there as `OMIND_PREFLIGHT=inject`
+  (`off` silences the preflight entirely), and notes that compile an
+  `omind-rule` block are **always** injected in full with firm framing — those
+  are enforcement, not recall. Three guards keep automatic recall from
+  accumulating: a note that announces its own supersession or correction is
+  named but never injected, unchecked `- [ ]` action items are stripped from any
+  injection (they are somebody else's TODO, not this turn's assignment), and a
+  session that has already absorbed 60,000 characters of omind context stops
+  receiving more. Why the default flipped in 9.2.0: on the author's own ledger
+  the old push path had shipped ~3.4M tokens of unrequested recall across 5,816
+  turns at ~25% precision, framed as binding instruction — a cost that never
+  surfaced as an omind error, only as "the model has gotten worse in long
+  sessions" (#321). Measure it on your own vault with
+  `omind bench --precision`, and watch it over time with `omind ai usage`,
+  which reports median/p90/p99 per-turn injection and the sessions carrying the
+  most omind context.
 - **The verifier.** Clearing the gate by reading *any* note isn't enough, so a
   `PostToolUse` verifier judges whether the consult was actually **relevant** to
   the turn's task — a deterministic keyword-overlap prefilter decides the clear
@@ -374,6 +393,12 @@ when unknown; invalid blocks are skipped with a breadcrumb. Inspect the
 compiled table with `omind rules list`. A note rule with a seed rule's `id`
 replaces the seed, so per-repo exceptions stay operator-editable in the vault.
 
+`omind rules export` emits the same set as Markdown for `CLAUDE.md`/`AGENTS.md`.
+A behavioral invariant that only binds when retrieval happens to surface it is
+not a rule, it is a coin flip — the surest sign is the same correction filed
+three times because it never fired. Invariants belong in the file the harness
+loads unconditionally; the vault keeps the rest.
+
 ## Activity checkpoints
 
 You can't reliably *force* a running agent to do something on a wall clock —
@@ -434,6 +459,8 @@ questions that previously matched nothing now return ranked answers.
 omind search "why did release signing fail" --explain
 omind reindex --index-only     # refresh the derived index (search does this too)
 omind bench                    # latency, MCP schema size, and token cost
+omind bench --quality          # labelled recall@1 / recall@5 / MRR
+omind bench --precision        # what the per-turn preflight would inject unbidden
 ```
 
 The index lives in the state directory, never in the vault — it is disposable

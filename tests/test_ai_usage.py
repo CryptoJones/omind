@@ -268,3 +268,36 @@ def test_resolve_returns_none_when_truly_absent(tmp_path, monkeypatch):
     monkeypatch.delenv(ai_usage.MODEL_CMD_ENV, raising=False)
     monkeypatch.setattr(ai_usage, "_EXTRA_BIN_DIRS", ("~/nope",))
     assert ai_usage.resolve_model_backend() is None
+
+
+def test_session_context_chars_sums_one_session_only(tmp_path: Path) -> None:
+    # #321: this ledger recorded every injection since the beginning and nothing
+    # read it. The per-turn budget reads it.
+    omi = tmp_path / "OMI"
+    ai_usage.record_context(omi, "recall", 1_200, session_id="s-1")
+    ai_usage.record_context(omi, "mcp", 800, session_id="s-1")
+    ai_usage.record_context(omi, "recall", 5_000, session_id="s-2")
+    ai_usage.log_event(omi, "verifier", characters=9_999, session_id="s-1")
+    assert ai_usage.session_context_chars(omi, "s-1") == 2_000
+    assert ai_usage.session_context_chars(omi, "s-2") == 5_000
+    assert ai_usage.session_context_chars(omi, "") == 0
+    assert ai_usage.session_context_chars(tmp_path / "nope", "s-1") == 0
+
+
+def test_usage_summary_reports_injection_shape(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    omi = tmp_path / "OMI"
+    for size in (100, 200, 16_000):
+        ai_usage.record_context(omi, "recall", size, session_id="fat")
+    summary = ai_usage.usage_summary(omi, since="all")
+    per_turn = summary["injection"]["per_turn_recall"]
+    assert per_turn["turns"] == 3
+    assert per_turn["median_chars"] == 200
+    assert per_turn["max_chars"] == 16_000
+    assert summary["injection"]["top_sessions"][0]["session_id"] == "fat"
+
+    assert main(["ai", "usage", "--since", "all", "--vault", str(tmp_path), "--folder", "OMI"]) == 0
+    out = capsys.readouterr().out
+    assert "preflight per turn" in out
+    assert "of omind context" in out
