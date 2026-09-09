@@ -9,6 +9,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [9.1.3] - 2026-09-09
+
+### Fixed
+
+- **The guard no longer judges a payload as command position**
+  ([#317](https://github.com/CryptoJones/omind/issues/317)).
+  `_is_repo_sensitive_action` searched for a git verb after *any* separator with
+  no notion of where it executes, so the `&&` inside
+  `ssh host 'cd /p && git commit ...'` made a commit on another machine look like
+  local repo work. `_repo_root_for_action` then resolved the repo from the local
+  cwd, which is what made it a correctness bug and not merely friction: the
+  freshness fetch the operator was forced to run refreshed an *unrelated* repo,
+  and the guard recorded the remote commit as having a fresh base — two round
+  trips certifying nothing, and a false attestation at the end. The escalation
+  tier had the same defect from the other side: a newline inside a heredoc body
+  is not a separator either, so prose that merely *named* a wrapper was blocked
+  as an invocation of it.
+
+  One primitive fixes both. `policy.shell_code_text()` blanks every DATA region —
+  a quoted string's body, and a heredoc body fed to anything that is not a shell —
+  before any command-position test, so separators inside a payload stop counting
+  as separators. Blanking is length-preserving, and `"$(...)"` / backticks inside
+  a double-quoted string step back into code, so the mask cannot become a bypass.
+  The local-repo classifiers and every `match="command"` rule now go through it
+  (via a new `Rule.matches()`, shared by the hard-block loop, `guard explain`, and
+  the Layer E detector).
+
+  `_is_side_effect_action` deliberately keeps the raw text: it asks "does this
+  carry a consequence", not "is this local repo work", and an
+  `ssh box 'systemctl restart ...'` is a real side effect merely a remote one, so
+  masking there would be a fail-open. Shell heredocs (`bash <<EOF`) keep their
+  bodies for the same reason — `bash <<'EOF' ... sudo` still blocks.
+
 ## [9.1.2] - 2026-09-08
 
 ### Fixed
@@ -3001,6 +3034,7 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
   OMI memory notes, with structured-form and raw-Markdown editing.
 - End-user install methods and a `CONTRIBUTING` guide.
 
+[9.1.3]: https://github.com/CryptoJones/omind/releases/tag/v9.1.3
 [1.1.0]: https://github.com/CryptoJones/omind/releases/tag/v1.1.0
 [1.0.0]: https://github.com/CryptoJones/omind/releases/tag/v1.0.0
 [0.3.0]: https://github.com/CryptoJones/omind/releases/tag/v0.3.0

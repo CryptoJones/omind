@@ -182,3 +182,88 @@ def test_loader_drops_uncompilable_and_universal_patterns() -> None:
     )
     learned = policy.load_learned()
     assert [r.id for r in learned] == ["good"]
+
+
+# --- #317: data regions are not command position -----------------------------
+#
+# CJ's reported shapes are pinned VERBATIM per the dogfood loop: the ssh payload
+# that tripped the freshness gate twice, the heredoc whose script text merely
+# contained a commit command, and the two drafts of issue #317 that were blocked
+# for quoting an example and for naming an escalation wrapper in prose.
+
+SSH_PAYLOAD = "ssh hermes 'cd /home/hermes/Source/repos/tts && git add -A && git commit -m wip'"
+PY_HEREDOC = "python3 <<'PY'\nsubprocess.run('cd /p && git commit -m x')\nPY"
+ISSUE_PROSE = (
+    "gh issue create --title t --body \"$(cat <<'MD'\n"
+    "The guard blocked this shape:\n"
+    "(git commit -m 'example')\n"
+    "and it also blocked prose naming a wrapper:\n"
+    "sudo is what fleet-sudo replaces.\n"
+    'MD\n)"'
+)
+
+
+def test_shell_code_text_blanks_payloads_but_keeps_local_code() -> None:
+    """The primitive behind #317: quoted bodies and non-shell heredoc bodies are
+    DATA, so their separators are not separators. Blanking is length-preserving
+    so nothing downstream sees shifted offsets."""
+    for command in (SSH_PAYLOAD, PY_HEREDOC, ISSUE_PROSE):
+        masked = policy.shell_code_text(command)
+        assert len(masked) == len(command), command
+        assert "git commit" not in masked, command
+    # The wrapper itself survives — only its payload is blanked.
+    assert policy.shell_code_text(SSH_PAYLOAD).startswith("ssh hermes ")
+    # Local code is untouched.
+    for command in ("git commit -m real", "git add -A && git commit -m real", "(git commit -m x)"):
+        assert policy.shell_code_text(command) == command
+
+
+def test_shell_code_text_keeps_shell_heredoc_bodies() -> None:
+    """A heredoc fed to a SHELL is code this shell runs — blanking it would be a
+    fail-open, not a fix. Anything else receives the body as data."""
+    shell = "bash <<'EOF'\nsudo rm -rf /x\nEOF"
+    assert "sudo rm -rf /x" in policy.shell_code_text(shell)
+    wrapped = "env FOO=1 /bin/bash <<EOF\nsudo rm -rf /x\nEOF"
+    assert "sudo rm -rf /x" in policy.shell_code_text(wrapped)
+    assert "sudo" not in policy.shell_code_text("cat <<'EOF'\nsudo rm -rf /x\nEOF")
+    # `<<-` strips leading tabs from the terminator.
+    assert "sudo" not in policy.shell_code_text("cat <<-EOF\n\tsudo x\n\tEOF")
+    # An UNTERMINATED non-shell heredoc consumes the rest: it never runs here.
+    assert "sudo" not in policy.shell_code_text("cat <<'EOF'\nsudo x\n")
+
+
+def test_shell_code_text_re_enters_code_for_substitutions() -> None:
+    """`"$(…)"` and backticks inside a double-quoted string are code the shell
+    runs, so they must stay visible — otherwise the mask becomes a bypass."""
+    assert "sudo rm" in policy.shell_code_text('echo "$(sudo rm -rf /x)"')
+    assert "sudo rm" in policy.shell_code_text('echo "`sudo rm -rf /x`"')
+    # ... but a single-quoted body never interpolates, so it stays data.
+    assert "sudo" not in policy.shell_code_text("echo '$(sudo rm -rf /x)'")
+
+
+def test_command_rules_ignore_payloads_but_not_real_escalation() -> None:
+    """#317: naming an escalation wrapper in prose blocked two drafts of the
+    issue itself. The keyword must be in command position in code THIS shell
+    runs — while every real invocation still blocks."""
+    by_id = {r.id: r for r in policy.SEED_RULES}
+
+    def hit(rule_id: str, cmd: str) -> bool:
+        return by_id[rule_id].matches(cmd)
+
+    # False positives from #317 that must NOT fire.
+    assert not hit("sudo-use-fleet-sudo", ISSUE_PROSE)
+    assert not hit("sudo-use-fleet-sudo", 'git commit -m "note: sudo is blocked here"')
+    assert not hit("sudo-use-fleet-sudo", "ssh box 'sudo systemctl restart x'  # remote, quoted")
+    # Real local escalation still blocks — including through a shell heredoc.
+    assert hit("sudo-use-fleet-sudo", "sudo rm -rf /x")
+    assert hit("sudo-use-fleet-sudo", "cd /x && sudo rm -rf y")
+    assert hit("sudo-use-fleet-sudo", "bash <<'EOF'\nsudo rm -rf /x\nEOF")
+    assert hit("sudo-use-fleet-sudo", 'echo "$(sudo rm -rf /x)"')
+    assert hit("privesc-alternatives", "pkexec rm /x")
+
+
+def test_search_rules_keep_raw_text() -> None:
+    """`match="search"` patterns are deliberately substring searches; masking is
+    only for the command-anchored ones."""
+    rule = policy.Rule(id="raw", pattern=r"needle", message="m")
+    assert rule.matches("echo 'needle'")

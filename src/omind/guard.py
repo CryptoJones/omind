@@ -1075,12 +1075,20 @@ def _is_commit_action(action: dict[str, Any]) -> bool:
     demand is narrowed to commits."""
     if str(action.get("tool") or "") != "Bash":
         return False
-    return bool(_GIT_COMMIT_RE.search(str(action.get("command") or "")))
+    # policy.shell_code_text (#317): a `git commit` inside an ssh payload, a
+    # heredoc body, or a string literal is not a commit onto THIS machine's
+    # base, so demanding a local fetch for it certifies nothing.
+    return bool(_GIT_COMMIT_RE.search(policy.shell_code_text(str(action.get("command") or ""))))
 
 
 def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
     tool = str(action.get("tool") or "")
-    command = str(action.get("command") or "")
+    # Classify LOCAL repo work against code this shell actually runs (#317).
+    # `ssh host 'cd /p && git commit …'` supplied the separator from inside its
+    # payload, so a remote commit was judged local — and the repo was then
+    # resolved from the local cwd, making the freshness fetch it demanded
+    # vacuous: it refreshed an unrelated repo and recorded a false attestation.
+    command = policy.shell_code_text(str(action.get("command") or ""))
     path = _action_path(action)
     if tool in _WRITE_TOOLS or tool in _READ_REVIEW_TOOLS:
         return True
@@ -1225,7 +1233,7 @@ def decide(action: dict[str, Any]) -> Verdict:
         # raised. (Learned rules are also validated at load; this is the belt to
         # that suspenders, covering a bad seed rule or a catastrophic pattern.)
         try:
-            if not rule.compiled().search(command):
+            if not rule.matches(command):
                 continue
         except re.error:
             continue
@@ -1857,7 +1865,7 @@ def _run_explain(command: str) -> int:
         return 1
     matched: list[tuple[policy.Rule, bool]] = []
     for rule in policy.load_policy():
-        if rule.compiled().search(command):
+        if rule.matches(command):
             opted_in = bool(rule.opt_in and _opt_in_satisfied(rule.opt_in, command))
             matched.append((rule, opted_in))
     if not matched:

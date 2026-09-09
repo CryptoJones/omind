@@ -12,14 +12,6 @@ Reconciled 2026-09-08: 44 shipped items that were still sitting here moved to
 [Done](#done), and #297 was closed as a duplicate its own fix (#306) had already
 resolved._
 
-- [ ] **Guard: a git verb inside an ssh payload or a string literal is judged as LOCAL repo work** ([#317](https://github.com/CryptoJones/omind/issues/317)) — _bug_ —
-  `_is_repo_sensitive_action` matches a git verb anywhere in the command text, so
-  `ssh host '...'` running a commit on another machine is classified as local repo
-  work; `_repo_root_for_action` then falls back to `Path.cwd()` and demands a
-  freshness fetch of an unrelated local repo. The check the operator is forced to
-  satisfy is vacuous, and the guard records the remote commit as having a fresh
-  base. Same family as the escalation-keyword substring bug; `policy._CMD_POSITION`
-  is the existing anchoring primitive. Reproduced four times while filing it.
 - [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
   measured on hermes across every transcript since 2026-08-24: 362 turns where the
   per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
@@ -89,6 +81,23 @@ resolved._
 - [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-09-09
+
+- [x] **Guard: a git verb inside an ssh payload or a string literal is judged as LOCAL repo work** ([#317](https://github.com/CryptoJones/omind/issues/317)) — _bug_ —
+  `_is_repo_sensitive_action` matches a git verb anywhere in the command text, so
+  `ssh host '...'` running a commit on another machine is classified as local repo
+  work; `_repo_root_for_action` then falls back to `Path.cwd()` and demands a
+  freshness fetch of an unrelated local repo. The check the operator is forced to
+  satisfy is vacuous, and the guard records the remote commit as having a fresh
+  base. Same family as the escalation-keyword substring bug; `policy._CMD_POSITION`
+  is the existing anchoring primitive. Reproduced four times while filing it.
+  **Fixed** by `policy.shell_code_text()`: a quoted body, and a heredoc body fed to
+  anything that is not a shell, are blanked before any command-position test, so the
+  separators inside a payload stop counting as separators. Routed the local-repo
+  classifiers and every `match="command"` rule through it; the side-effect gate keeps
+  the raw text on purpose (a remote restart is a real side effect). Reproduced three
+  more times by the installed guard while fixing it.
 
 ### Shipped — moved out of Open on 2026-09-08
 

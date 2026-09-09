@@ -1720,3 +1720,57 @@ def test_gate_exempts_poolside_control_tools_but_not_shell() -> None:
     )
     assert not shell.allow and "omi-gate" in shell.reason
     guard.clear_gate("s313")
+
+
+def test_remote_and_quoted_git_verbs_are_not_local_repo_work(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#317: `_is_repo_sensitive_action` searched for a git verb after ANY
+    separator, and the `&&` inside an ssh payload supplied one — so a commit on
+    hermes was judged local repo work. The repo was then resolved from the local
+    cwd, making the freshness fetch it demanded VACUOUS: it refreshed an
+    unrelated repo and recorded a false attestation against the remote commit.
+
+    CJ's exact shapes are pinned verbatim (the ssh payload that tripped the gate
+    twice, and the heredoc whose script text merely contained a commit command).
+    """
+    repo = _mk_repo(tmp_path, "local")
+    monkeypatch.chdir(repo)
+    for command in (
+        "ssh hermes 'cd /home/hermes/Source/repos/tts && git add -A && git commit -m wip'",
+        'ssh hermes "cd /home/hermes/Source/repos/tts && git commit -m wip"',
+        "docker exec box sh -c '(git commit -m x)'",
+        "kubectl exec pod -- sh -c '(git commit -m x)'",
+        "python3 <<'PY'\nsubprocess.run('cd /p && git commit -m x')\nPY",
+        "gh issue create --body \"$(cat <<'MD'\nBroken by:\n(git commit -m x)\nMD\n)\"",
+    ):
+        action = {"tool": "Bash", "command": command}
+        assert not guard._is_repo_sensitive_action(action), command
+        assert not guard._is_commit_action(action), command
+
+    # Local repo work is untouched — including through a SHELL heredoc, whose
+    # body really is code this shell runs.
+    for command in (
+        "git commit -m real",
+        "git add -A && git commit -m real",
+        f"git -C {repo} commit -m real",
+        "git add -A\ngit commit -m real",
+        "(git commit -m real)",
+        "bash <<'EOF'\ngit commit -m real\nEOF",
+    ):
+        action = {"tool": "Bash", "command": command}
+        assert guard._is_repo_sensitive_action(action), command
+        assert guard._is_commit_action(action), command
+
+
+def test_side_effect_gate_keeps_raw_text() -> None:
+    """The #317 masking is scoped to the LOCAL-repo classifiers on purpose.
+
+    `_is_side_effect_action` asks "does this carry a consequence", not "is this
+    local repo work" — a remote restart is a real side effect, merely a remote
+    one — so masking there would be a fail-open rather than a fix. Pinned with
+    the discriminating shape: a risky verb after a separator inside a NON-shell
+    heredoc body, which the mask would hide and this gate must still see.
+    """
+    assert guard._is_side_effect_action({"tool": "Bash", "command": "cat <<'EOF'\nrm -rf /x\nEOF"})
+    assert guard._is_side_effect_action({"tool": "Bash", "command": "echo hi && rm -rf /x"})

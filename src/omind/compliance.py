@@ -320,7 +320,7 @@ def record_post_tool(event: dict[str, Any], *, now: datetime | None = None) -> i
     matched = 0
     try:
         for rule in policy.load_policy():
-            if not rule.compiled().search(command):
+            if not rule.matches(command):
                 continue
             # The STRICT opt-in matcher, not a bare substring: Layer E used to
             # re.search the token, so a forged token in a comment suppressed the
