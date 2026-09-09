@@ -222,7 +222,37 @@ def _has_github_remote(repo: Path) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return proc.returncode == 0 and "github.com" in proc.stdout.lower()
+    if proc.returncode != 0:
+        return False
+    return any(_is_github_host(url) for url in _remote_urls(proc.stdout))
+
+
+def _remote_urls(remote_v: str) -> list[str]:
+    """The URLs out of ``git remote -v`` output (``name<TAB>url (fetch|push)``)."""
+    urls = []
+    for line in remote_v.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            urls.append(parts[1])
+    return urls
+
+
+def _is_github_host(url: str) -> bool:
+    """True only if ``url``'s HOST is github.com (or a subdomain of it).
+
+    A substring test is not enough: ``https://github.com.evil.example/x`` and
+    ``https://not-github.com/x`` both contain the string but are not GitHub, and
+    misclassifying one flips the public-repo branch+PR deny into silence.
+    """
+    host = ""
+    if "://" in url:
+        host = url.split("://", 1)[1].split("/", 1)[0]
+    elif ":" in url:  # scp-like: [user@]host:path
+        host = url.split(":", 1)[0]
+    host = host.rsplit("@", 1)[-1].split("?", 1)[0]  # strip creds, query
+    host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host  # strip :port
+    host = host.strip().lower().rstrip(".")
+    return host == "github.com" or host.endswith(".github.com")
 
 
 def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:

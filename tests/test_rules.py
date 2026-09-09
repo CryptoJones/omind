@@ -273,3 +273,41 @@ def test_github_remote_but_gh_fails_is_unknown_and_breadcrumbed(
 
     assert rules._repo_visibility(repo) == rules._VISIBILITY_UNKNOWN
     assert len(breadcrumbs) == 1
+
+
+def test_github_host_match_is_not_a_substring_test() -> None:
+    """CodeQL py/incomplete-url-substring-sanitization: ``"github.com" in url``
+    also matches hosts that merely CONTAIN it. Misclassifying one of those as
+    GitHub decides repo visibility, which decides whether the public-repo
+    branch+PR deny fires at all — so the host is parsed, not searched."""
+    for url in (
+        "https://github.com/CryptoJones/omind.git",
+        "git@github.com:CryptoJones/omind.git",
+        "https://user:tok@github.com/CryptoJones/omind.git",
+        "ssh://git@ssh.github.com:443/CryptoJones/omind.git",
+        "HTTPS://GitHub.com/CryptoJones/omind",
+    ):
+        assert rules._is_github_host(url), url
+
+    for url in (
+        "https://github.com.evil.example/CryptoJones/omind.git",
+        "https://not-github.com/CryptoJones/omind.git",
+        "git@codeberg.org:akclark/omind.git",
+        "ssh://hermes/srv/git/omi.git",
+        "/srv/git/local.git",
+    ):
+        assert not rules._is_github_host(url), url
+
+
+def test_remote_urls_pulled_out_of_git_remote_v() -> None:
+    out = (
+        "origin\thttps://github.com/CryptoJones/omind.git (fetch)\n"
+        "origin\thttps://github.com/CryptoJones/omind.git (push)\n"
+        "seed\tssh://hermes/srv/git/omi.git (fetch)\n"
+    )
+    assert rules._remote_urls(out) == [
+        "https://github.com/CryptoJones/omind.git",
+        "https://github.com/CryptoJones/omind.git",
+        "ssh://hermes/srv/git/omi.git",
+    ]
+    assert rules._remote_urls("") == []
