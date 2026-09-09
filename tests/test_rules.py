@@ -221,3 +221,93 @@ def test_export_rules_emits_markdown_for_an_always_loaded_file(tmp_path: Path) -
     assert "**NEVER `*git push*`**" in text
     assert "public repos" in text and "on main/master" in text
     assert "Go Big Red" in text  # docs carry the signature line
+
+
+def test_no_github_remote_is_private_not_a_failure(tmp_path: Path, monkeypatch) -> None:
+    """A repo with no GitHub remote (the OMI mesh vault pushes only to pluto/seed)
+    is classified ``private`` and records NO hook failure: ``gh`` cannot classify a
+    non-GitHub repo and that is expected, not an error (fixes the omind-doctor
+    ``rules_visibility: gh visibility lookup failed`` breadcrumb)."""
+    repo = tmp_path / "local-repo"
+    repo.mkdir()
+
+    def fake_run(argv, *a, **k):  # type: ignore[no-untyped-def]
+        if argv and argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 1, "", "no known GitHub host")
+        if argv[:1] == ["git"] and "remote" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, "seed\tssh://akclark@pluto.local/home/akclark/omi-mesh.git (fetch)\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(rules.subprocess, "run", fake_run)
+    breadcrumbs: list = []
+    monkeypatch.setattr(rules, "_breadcrumb", lambda *a, **k: breadcrumbs.append(a))
+    monkeypatch.setattr(rules, "_visibility_cache_path", lambda: tmp_path / "vis.json")
+
+    assert rules._repo_visibility(repo) == "private"
+    assert breadcrumbs == []  # not logged as a failure
+
+
+def test_github_remote_but_gh_fails_is_unknown_and_breadcrumbed(
+    tmp_path: Path, monkeypatch
+) -> None:
+    """A repo that DOES have a GitHub remote but whose ``gh`` lookup fails is a real
+    failure: UNKNOWN + breadcrumb (unchanged fail-open behaviour)."""
+    repo = tmp_path / "gh-repo"
+    repo.mkdir()
+
+    def fake_run(argv, *a, **k):  # type: ignore[no-untyped-def]
+        if argv and argv[0] == "gh":
+            return subprocess.CompletedProcess(argv, 1, "", "auth error")
+        if argv[:1] == ["git"] and "remote" in argv:
+            return subprocess.CompletedProcess(
+                argv, 0, "origin\thttps://github.com/o/r.git (fetch)\n", ""
+            )
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    monkeypatch.setattr(rules.subprocess, "run", fake_run)
+    breadcrumbs: list = []
+    monkeypatch.setattr(rules, "_breadcrumb", lambda *a, **k: breadcrumbs.append(a))
+    monkeypatch.setattr(rules, "_visibility_cache_path", lambda: tmp_path / "vis.json")
+
+    assert rules._repo_visibility(repo) == rules._VISIBILITY_UNKNOWN
+    assert len(breadcrumbs) == 1
+
+
+def test_github_host_match_is_not_a_substring_test() -> None:
+    """CodeQL py/incomplete-url-substring-sanitization: ``"github.com" in url``
+    also matches hosts that merely CONTAIN it. Misclassifying one of those as
+    GitHub decides repo visibility, which decides whether the public-repo
+    branch+PR deny fires at all — so the host is parsed, not searched."""
+    for url in (
+        "https://github.com/CryptoJones/omind.git",
+        "git@github.com:CryptoJones/omind.git",
+        "https://user:tok@github.com/CryptoJones/omind.git",
+        "ssh://git@ssh.github.com:443/CryptoJones/omind.git",
+        "HTTPS://GitHub.com/CryptoJones/omind",
+    ):
+        assert rules._is_github_host(url), url
+
+    for url in (
+        "https://github.com.evil.example/CryptoJones/omind.git",
+        "https://not-github.com/CryptoJones/omind.git",
+        "git@codeberg.org:akclark/omind.git",
+        "ssh://hermes/srv/git/omi.git",
+        "/srv/git/local.git",
+    ):
+        assert not rules._is_github_host(url), url
+
+
+def test_remote_urls_pulled_out_of_git_remote_v() -> None:
+    out = (
+        "origin\thttps://github.com/CryptoJones/omind.git (fetch)\n"
+        "origin\thttps://github.com/CryptoJones/omind.git (push)\n"
+        "seed\tssh://hermes/srv/git/omi.git (fetch)\n"
+    )
+    assert rules._remote_urls(out) == [
+        "https://github.com/CryptoJones/omind.git",
+        "https://github.com/CryptoJones/omind.git",
+        "ssh://hermes/srv/git/omi.git",
+    ]
+    assert rules._remote_urls("") == []

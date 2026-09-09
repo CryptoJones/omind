@@ -206,6 +206,55 @@ def _visibility_cache_path() -> Path:
     return paths.state_dir() / "repo-visibility.json"
 
 
+def _has_github_remote(repo: Path) -> bool:
+    """True if ``repo`` has any git remote pointing at github.com.
+
+    Used to tell a genuine ``gh`` failure apart from a repo that is simply not on
+    GitHub (a local or mesh-only repo, e.g. the OMI vault that pushes to pluto/seed
+    over SSH). The latter must not be logged as a failure — it is expected.
+    """
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), "remote", "-v"],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if proc.returncode != 0:
+        return False
+    return any(_is_github_host(url) for url in _remote_urls(proc.stdout))
+
+
+def _remote_urls(remote_v: str) -> list[str]:
+    """The URLs out of ``git remote -v`` output (``name<TAB>url (fetch|push)``)."""
+    urls = []
+    for line in remote_v.splitlines():
+        parts = line.split()
+        if len(parts) >= 2:
+            urls.append(parts[1])
+    return urls
+
+
+def _is_github_host(url: str) -> bool:
+    """True only if ``url``'s HOST is github.com (or a subdomain of it).
+
+    A substring test is not enough: ``https://github.com.evil.example/x`` and
+    ``https://not-github.com/x`` both contain the string but are not GitHub, and
+    misclassifying one flips the public-repo branch+PR deny into silence.
+    """
+    host = ""
+    if "://" in url:
+        host = url.split("://", 1)[1].split("/", 1)[0]
+    elif ":" in url:  # scp-like: [user@]host:path
+        host = url.split(":", 1)[0]
+    host = host.rsplit("@", 1)[-1].split("?", 1)[0]  # strip creds, query
+    host = host.rsplit(":", 1)[0] if host.count(":") == 1 else host  # strip :port
+    host = host.strip().lower().rstrip(".")
+    return host == "github.com" or host.endswith(".github.com")
+
+
 def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
     """``public`` / ``private`` / ``unknown`` for ``repo``, via ``gh``, cached
     on disk for a day. UNKNOWN on any failure — visibility-conditioned rules
@@ -234,8 +283,17 @@ def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
     except (OSError, subprocess.SubprocessError):
         visibility = ""
     if visibility not in ("public", "private", "internal"):
-        _breadcrumb(f"rules_visibility({repo})", "gh visibility lookup failed")
-        return _VISIBILITY_UNKNOWN
+        if not _has_github_remote(repo):
+            # No GitHub remote at all (e.g. the OMI mesh vault): ``gh`` cannot
+            # classify it and that is expected, not a failure. Such a repo is by
+            # definition not public, so treat it as private — visibility-conditioned
+            # public-repo rules then correctly do not fire — and cache it WITHOUT a
+            # breadcrumb. Only a repo that HAS a GitHub remote yet fails lookup is a
+            # real error worth recording.
+            visibility = "private"
+        else:
+            _breadcrumb(f"rules_visibility({repo})", "gh visibility lookup failed")
+            return _VISIBILITY_UNKNOWN
     cache[str(repo)] = {"visibility": visibility, "ts": now.isoformat(timespec="seconds")}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
