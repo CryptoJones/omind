@@ -749,7 +749,14 @@ _REPO_TEST_RE = re.compile(
 # Optional leading git global options (``-C <dir>``, ``-c key=val``) so a
 # freshness command run with an explicit repo dir — ``git -C <repo> fetch`` — is
 # still recognised as freshness (it previously required a bare ``git fetch``).
-_GIT_GLOBAL_OPTS = r"(?:-C[ \t]+\S+[ \t]+|-c[ \t]+\S+[ \t]+)*"
+# A quoted `-C "<path>"` arrives here with its literal BLANKED by policy.shell_code_text
+# (#317), so the token after -C may be an empty/space-only quoted string. Accept it:
+# without this, `git -C "/abs/repo" commit` — the exact form GIT_FRESHNESS_MESSAGE
+# teaches — was never classified as repo work and sailed past the rules-note demand.
+# One global-option value: a bare token, a blanked quoted literal, or a token with a
+# blanked literal embedded (`-c user.name="…"`).
+_GIT_OPT_VALUE = r"""(?:"[ \t]*"|'[ \t]*'|\S+(?:"[ \t]*"|'[ \t]*')?\S*)"""
+_GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
 # One git subcommand that ESTABLISHES freshness (a fetch, or an ff-only/rebase
 # pull). ``[^|>&;\n]*`` keeps the whole subcommand free of pipes/redirects/chains
 # so a piped write (``git fetch | tee x``) is never mistaken for a pure fetch.

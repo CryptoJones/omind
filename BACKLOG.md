@@ -38,6 +38,10 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
     depth, preflight on vs off) — the one acceptance criterion that needs an
     instrument, not a change.
 
+- [ ] **Guard: `git -C "<quoted path>" commit|push` not classified as repo work** ([#333](https://github.com/CryptoJones/omind/issues/333)) — _bug (enforcement)_ —
+  the literal-blanked command (#317) hides a quoted `-C` path from `_GIT_GLOBAL_OPTS`, and the
+  freshness message teaches that exact form; found in the 2026-09-11 guard experiment. Fix in
+  PR `fix/guard-git-c-quoted-path`; check this box when it merges.
 - [ ] **Tracking: the guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
