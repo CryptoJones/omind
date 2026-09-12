@@ -42,7 +42,7 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
   the literal-blanked command (#317) hid a quoted `-C` path from `_GIT_GLOBAL_OPTS`, and the
   freshness message teaches that exact form; found in the 2026-09-11 guard experiment. Shipped
   in 9.2.1 ([PR #334](https://github.com/CryptoJones/omind/pull/334)).
-- [ ] **Guard: REQUIRE-mode verifier re-closes the gate over the read the guard itself demanded, then demands page-shaped notes** ([#335](https://github.com/CryptoJones/omind/issues/335)) — _bug (enforcement)_ —
+- [x] **Guard: REQUIRE-mode verifier re-closes the gate over the read the guard itself demanded, then demands page-shaped notes** ([#335](https://github.com/CryptoJones/omind/issues/335)) — _bug (enforcement)_ —
   with `OMI_VERIFY_REQUIRE=1` a commit turn became: rules-note demand → read → verifier scores it
   off-topic against pasted page text → re-close → demand whatever the page resembles. Measured
   51 blocks / 85 forced reads / 648K chars in 55 turns, compaction every ~12 turns. WARN mode is fine.

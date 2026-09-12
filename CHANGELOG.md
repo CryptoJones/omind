@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Verifier: reading a compiled hard-rule note is never off-topic** ([#335](https://github.com/CryptoJones/omind/issues/335)).
+  With `OMI_VERIFY_REQUIRE=1`, an agent that read the git-rules note *before* being
+  blocked (obeying early, after one earlier block) was judged off-topic against the
+  pasted page text in its prompt, the gate re-closed, and the guard then demanded
+  whatever note that page resembled — 51 blocks, 85 forced reads, 648K chars, a
+  compaction every ~12 turns in the 2026-09-11 experiment. The git-rules note and any
+  note carrying an `omind-rule` block are enforcement, not recall: their reads are
+  always relevant, so the loop cannot start.
 
 ## [9.2.1] - 2026-09-11
 
