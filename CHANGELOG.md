@@ -7,7 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-_Nothing yet._
+### Fixed
+
+- **Guard: `git -C "<quoted path>" commit|push` is repo work again** ([#333](https://github.com/CryptoJones/omind/issues/333)).
+  The repo-work classifier runs on the literal-blanked command (#317), so a quoted
+  `-C "<path>"` arrived as `-C "       "` and the verb was never reached — and the
+  freshness block message teaches exactly that quoted form. In a 100-turn Opus 5 session
+  the guard demanded the rules note once, then was bypassed on 16-19 of the next 25
+  repo mutations. The global-option value now accepts a blanked literal, including one
+  embedded in `-c key="value"`; regression test pins the quoted, single-quoted and
+  unquoted forms and keeps read-only `-C` commands non-sensitive.
 
 ## [9.2.0] - 2026-09-09
 

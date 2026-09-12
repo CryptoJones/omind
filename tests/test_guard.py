@@ -1963,3 +1963,25 @@ def test_side_effect_gate_keeps_raw_text() -> None:
     """
     assert guard._is_side_effect_action({"tool": "Bash", "command": "cat <<'EOF'\nrm -rf /x\nEOF"})
     assert guard._is_side_effect_action({"tool": "Bash", "command": "echo hi && rm -rf /x"})
+
+
+def test_git_dash_c_with_quoted_path_is_repo_work(tmp_path):
+    """The quoted `git -C "<abs>" commit` form — the one GIT_FRESHNESS_MESSAGE teaches —
+    reaches the classifier with its literal blanked (#317), which used to hide the verb.
+    Found 2026-09-11 in the guard experiment: after one freshness block Opus 5 switched to
+    this form and was never classified as repo work again for the rest of the session."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    for command in (
+        f'git -C "{repo}" commit -m "audit 1" -- CHANGELOG.md',
+        f"git -C '{repo}' push origin main",
+        f'git -C "{repo}" -c user.name="Experiment Runner" commit -m x',
+        f"git -C {repo} commit -m x",
+    ):
+        assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command}), command
+    for command in (
+        f'git -C "{repo}" fetch --all --prune',
+        f'git -C "{repo}" status --short',
+        f'git -C "{repo}" log --oneline -3',
+    ):
+        assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command}), command
