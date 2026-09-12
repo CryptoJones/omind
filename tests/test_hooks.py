@@ -826,3 +826,34 @@ def test_run_hook_post_tool_use_poolside_journals_translated_event(tmp_path: Pat
     )
     text = (hooks.journal_dir(tmp_path) / hooks.journal_name()).read_text(encoding="utf-8")
     assert "PostToolUse shell" in text and "echo probe-ok" in text
+
+
+def test_session_start_primes_once_per_session_and_again_after_compact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#336: a resumed turn of a session that was already primed emits nothing;
+    startup, compact and clear always prime; a resume of a never-primed session
+    (harness started elsewhere, marker reaped) still primes."""
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    (tmp_path / "Memory Workflow.md").write_text("OMI is the source", encoding="utf-8")
+
+    def fire(source: str, session: str) -> str:
+        out = io.StringIO()
+        payload = json.dumps({"session_id": session, "source": source, "cwd": str(tmp_path)})
+        assert hooks.run_hook("SessionStart", tmp_path, stdin=io.StringIO(payload), stdout=out) == 0
+        return out.getvalue()
+
+    assert "additionalContext" in fire("startup", "s1")
+    assert fire("resume", "s1") == ""
+    assert fire("resume", "s1") == ""
+    assert "additionalContext" in fire("compact", "s1")
+    assert fire("resume", "s1") == ""
+    assert "additionalContext" in fire("clear", "s1")
+    assert "additionalContext" in fire("resume", "s2")  # never primed: prime now
+    assert fire("resume", "s2") == ""
+    assert "additionalContext" in fire("startup", "s1")  # a fresh process always primes
+    # No session id: cannot tell turns apart, so prime (never risk never-priming).
+    out = io.StringIO()
+    payload = io.StringIO(json.dumps({"source": "resume"}))
+    hooks.run_hook("SessionStart", tmp_path, stdin=payload, stdout=out)
+    assert "additionalContext" in out.getvalue()

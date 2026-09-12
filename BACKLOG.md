@@ -46,7 +46,7 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
   with `OMI_VERIFY_REQUIRE=1` a commit turn became: rules-note demand → read → verifier scores it
   off-topic against pasted page text → re-close → demand whatever the page resembles. Measured
   51 blocks / 85 forced reads / 648K chars in 55 turns, compaction every ~12 turns. WARN mode is fine.
-- [ ] **Hooks: SessionStart re-primes on every resumed headless turn** ([#336](https://github.com/CryptoJones/omind/issues/336)) — _enhancement (tokens)_ —
+- [x] **Hooks: SessionStart re-primes on every resumed headless turn** ([#336](https://github.com/CryptoJones/omind/issues/336)) — _enhancement (tokens)_ —
   `claude -p --resume` fires `SessionStart:resume` per turn; the capsule (~5.1K chars) was
   most of a guard-on lane's injected volume (~590K chars per 100 turns). Prime on startup and
   compact, and on resume only if the session was never primed.
