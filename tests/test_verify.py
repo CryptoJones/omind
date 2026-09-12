@@ -304,11 +304,14 @@ def test_guard_demanded_note_consult_is_relevant(
     }
     assert verify.verify_consult(event, omi, require=True, out=io.StringIO()) == "relevant"
     assert guard.consults("dmd")[-1]["relevant"] is True
-    # Control: a fresh turn (marker cleared) judges the same read on its merits.
+    # #335: a fresh turn (marker cleared) still credits the git-rules note — reading
+    # the operator's own compiled rules is enforcement, never off-topic. The control
+    # for "judged on its merits" is an ordinary note (see test_hard_rule_note_reads_
+    # are_never_off_topic).
     guard.begin_turn("dmd", "bake a banana smoothie")
     assert guard.demanded_note("dmd") == ""
     guard.mark_consulted("dmd")
-    assert verify.verify_consult(event, omi, require=False, out=io.StringIO()) == "irrelevant"
+    assert verify.verify_consult(event, omi, require=False, out=io.StringIO()) == "relevant"
 
 
 def test_offtopic_log_carries_judgement_detail(
@@ -787,3 +790,32 @@ def test_truncated_read_of_non_demanded_note_changes_no_gate_state(tmp_path: Pat
     }
     verify.verify_consult(event, omi, require=True, out=io.StringIO())
     assert guard.incomplete_consult(session) == ""
+
+
+def test_hard_rule_note_reads_are_never_off_topic(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#335: on a turn whose task shares nothing with the note, reading a note that
+    carries an ``omind-rule`` block is relevant (enforcement, not recall), while an
+    ordinary note with the same zero overlap is judged irrelevant. REQUIRE mode
+    therefore never re-closes the gate over a rules read — the loop's trigger."""
+    monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: None)
+    monkeypatch.setenv("OMI_VERIFY_OFFTOPIC_ESCALATE", "1")
+    omi = _omi(tmp_path)
+    (omi / "Guard Rules - fleet.md").write_text(
+        "# Guard Rules\n\n```omind-rule\nid: no-curl\ntool: Bash\nmatch: '*curl*'\n"
+        "action: deny\nmessage: no curl here\n```\n",
+        encoding="utf-8",
+    )
+    (omi / "Podcast archive.md").write_text(
+        "# Podcast\n\nepisodes transcripts hosts\n", encoding="utf-8"
+    )
+    guard.begin_turn("hr", "bake a banana smoothie")
+    guard.mark_consulted("hr")
+    rules_read = {"tool_name": "mcp__omi__read-note", "session_id": "hr",
+                  "tool_input": {"name": "Guard Rules - fleet"}}
+    assert verify.verify_consult(rules_read, omi, require=True, out=io.StringIO()) == "relevant"
+    assert guard.consulted_this_turn("hr")  # gate untouched
+    other = {"tool_name": "mcp__omi__read-note", "session_id": "hr",
+             "tool_input": {"name": "Podcast archive"}}
+    assert verify.verify_consult(other, omi, require=True, out=io.StringIO()) == "irrelevant"

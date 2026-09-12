@@ -155,6 +155,28 @@ def _update_demanded_completeness(
         guard.clear_incomplete_consult(session)
 
 
+def _hard_rule_note(target: str, omi_dir: Path | str) -> bool:
+    """True when the consult target is a compiled hard-rule note — the git-rules
+    note or any note carrying an ``omind-rule`` block. Reading the operator's own
+    rules is enforcement, not recall, and is never "off-topic" (#335): the guard
+    demands that read on repo work, so an agent that reads it BEFORE being blocked
+    is obeying early, not gaming. Judging that read against pasted page text
+    started a loop — off-topic → REQUIRE re-close → demand whatever the page
+    resembles — measured at 51 blocks / 85 forced reads in 55 turns. Best-effort:
+    a failure to load rules means no carve-out."""
+    low = target.lower()
+    if guard.GIT_RULES_NOTE.lower() in low:
+        return True
+    try:
+        for name in guard.hard_rule_notes(omi_dir):
+            stem = Path(name).stem.lower()
+            if stem and stem in low:
+                return True
+    except Exception:
+        pass
+    return False
+
+
 def _guard_demanded(session: str, target: str) -> bool:
     """True when the consult target is the note a guard block message DEMANDED
     this turn (e.g. the git-rules note before repo work). Obeying the guard is
@@ -515,7 +537,12 @@ def verify_consult(
     judged, score = _judge_scored(
         task, activity, _consult_text(kind, target, omi_dir), pending, omi_dir
     )
-    relevant = _always_relevant(target) or _guard_demanded(session, target) or judged
+    relevant = (
+        _always_relevant(target)
+        or _guard_demanded(session, target)
+        or _hard_rule_note(target, omi_dir)
+        or judged
+    )
     guard.record_consult(session, kind=kind, target=target, relevant=relevant)
     if relevant:
         guard.reset_offtopic(session)  # #98: honest work breaks the off-topic streak
