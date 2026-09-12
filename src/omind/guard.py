@@ -709,6 +709,7 @@ def clear_all_gates() -> None:
         "git-fresh-*",
         "turn-*",
         "injected-*",
+        "session-primed/*",
     ):
         try:
             stale = list(state.glob(pattern))

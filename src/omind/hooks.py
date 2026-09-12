@@ -870,6 +870,19 @@ def run_hook(
     try:
         if event_name == "SessionStart":
             event = harness_mod.translate_event(harness, read_event(stdin))
+            # #336: prime a session ONCE. Claude fires SessionStart with
+            # source=startup|resume|compact|clear. A headless `claude -p --resume`
+            # loop fires source=resume on EVERY turn; re-sending the capsule each
+            # time cost ~5K chars/turn (~590K chars per 100-turn session, most of
+            # omind's injected volume in the 2026-09-11 experiment). The transcript
+            # a resume replays already holds the capsule, so a resumed turn of a
+            # session we have primed emits nothing. startup/clear (fresh context)
+            # and compact (the summary dropped it) always prime, and mark.
+            source = str(event.get("source") or "").strip().lower()
+            session = str(event.get("session_id") or "")
+            primed_before = _already_primed(session) if session else False
+            if source == "resume" and primed_before:
+                return 0
             emit_session_start_context(omi_dir, out=stdout, cwd=event.get("cwd"), harness=harness)
             return 0
         if event_name == HERMES_PRIME_EVENT:

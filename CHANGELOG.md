@@ -18,6 +18,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   note carrying an `omind-rule` block are enforcement, not recall: their reads are
   always relevant, so the loop cannot start.
 
+### Changed
+
+- **SessionStart primes a session once** ([#336](https://github.com/CryptoJones/omind/issues/336)).
+  Claude fires `SessionStart` with `source=resume` on every turn of a headless
+  `claude -p --resume` loop, and omind re-sent the full priming capsule each time —
+  about 5K chars per turn, ~590K chars per 100-turn session, most of omind's injected
+  volume in the 2026-09-11 guard experiment. The transcript a resume replays already
+  holds the capsule, so a resumed turn of a session omind has primed now emits nothing.
+  `startup`, `clear` and `compact` always prime (the compaction summary drops it), a
+  never-primed session primes on resume, and the per-session markers are reaped with
+  the other state files.
+
 ## [9.2.1] - 2026-09-11
 
 ### Fixed
