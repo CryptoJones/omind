@@ -38,10 +38,18 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
     depth, preflight on vs off) — the one acceptance criterion that needs an
     instrument, not a change.
 
-- [ ] **Guard: `git -C "<quoted path>" commit|push` not classified as repo work** ([#333](https://github.com/CryptoJones/omind/issues/333)) — _bug (enforcement)_ —
-  the literal-blanked command (#317) hides a quoted `-C` path from `_GIT_GLOBAL_OPTS`, and the
-  freshness message teaches that exact form; found in the 2026-09-11 guard experiment. Fix in
-  PR `fix/guard-git-c-quoted-path`; check this box when it merges.
+- [x] **Guard: `git -C "<quoted path>" commit|push` not classified as repo work** ([#333](https://github.com/CryptoJones/omind/issues/333)) — _bug (enforcement)_ —
+  the literal-blanked command (#317) hid a quoted `-C` path from `_GIT_GLOBAL_OPTS`, and the
+  freshness message teaches that exact form; found in the 2026-09-11 guard experiment. Shipped
+  in 9.2.1 ([PR #334](https://github.com/CryptoJones/omind/pull/334)).
+- [ ] **Guard: REQUIRE-mode verifier re-closes the gate over the read the guard itself demanded, then demands page-shaped notes** ([#335](https://github.com/CryptoJones/omind/issues/335)) — _bug (enforcement)_ —
+  with `OMI_VERIFY_REQUIRE=1` a commit turn became: rules-note demand → read → verifier scores it
+  off-topic against pasted page text → re-close → demand whatever the page resembles. Measured
+  51 blocks / 85 forced reads / 648K chars in 55 turns, compaction every ~12 turns. WARN mode is fine.
+- [ ] **Hooks: SessionStart re-primes on every resumed headless turn** ([#336](https://github.com/CryptoJones/omind/issues/336)) — _enhancement (tokens)_ —
+  `claude -p --resume` fires `SessionStart:resume` per turn; the capsule (~5.1K chars) was
+  most of a guard-on lane's injected volume (~590K chars per 100 turns). Prime on startup and
+  compact, and on resume only if the session was never primed.
 - [ ] **Tracking: the guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
