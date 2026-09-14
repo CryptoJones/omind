@@ -819,3 +819,53 @@ def test_hard_rule_note_reads_are_never_off_topic(
     other = {"tool_name": "mcp__omi__read-note", "session_id": "hr",
              "tool_input": {"name": "Podcast archive"}}
     assert verify.verify_consult(other, omi, require=True, out=io.StringIO()) == "irrelevant"
+
+
+def test_hard_rule_and_demanded_notes_short_circuit_without_scoring(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Hard-rule, demanded, or always-relevant consults short-circuit before
+    _judge_scored is called."""
+    called = []
+
+    def mock_judge(*args: object, **kwargs: object) -> tuple[bool, float]:
+        called.append(True)
+        return False, 0.0
+
+    monkeypatch.setattr(verify, "_judge_scored", mock_judge)
+    omi = _omi(tmp_path)
+    (omi / "Rules.md").write_text(
+        "# Rules\n\n```omind-rule\nid: no-rm\ntool: Bash\nmatch: '*rm*'\n"
+        "action: deny\nmessage: no rm\n```\n",
+        encoding="utf-8",
+    )
+    guard.begin_turn("sc", "irrelevant task")
+    guard.mark_consulted("sc")
+
+    # Hard-rule note consult
+    rules_read = {
+        "tool_name": "mcp__omi__read-note",
+        "session_id": "sc",
+        "tool_input": {"name": "Rules"},
+    }
+    assert verify.verify_consult(rules_read, omi, out=io.StringIO()) == "relevant"
+    assert len(called) == 0
+
+    # Guard-demanded note consult
+    guard.record_demanded_note("sc", "Any Note")
+    demanded_read = {
+        "tool_name": "mcp__omi__read-note",
+        "session_id": "sc",
+        "tool_input": {"name": "Any Note"},
+    }
+    assert verify.verify_consult(demanded_read, omi, out=io.StringIO()) == "relevant"
+    assert len(called) == 0
+
+    # Ordinary note should call _judge_scored
+    normal_read = {
+        "tool_name": "mcp__omi__read-note",
+        "session_id": "sc",
+        "tool_input": {"name": "Random Note"},
+    }
+    assert verify.verify_consult(normal_read, omi, out=io.StringIO()) == "irrelevant"
+    assert len(called) == 1

@@ -70,6 +70,41 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
   `## References`; a second edit leaves both the stale and the new copy. Hit for real
   on 2026-08-31: a note ended up with two contradictory copies of its body, the
   superseded one still reading as current, while `## Details` was empty.
+- [x] **Merge: 3-way note merge driver silently drops note Scope** ([#341](https://github.com/CryptoJones/omind/issues/341)) — _bug (data loss)_ —
+  `merge_fields()` in `merge.py` omits `scope` when constructing the merged `NoteFields`,
+  causing any 3-way note merge to silently clear the note's `Scope:` field even when all
+  three sides agree.
+- [x] **Notes: `upsert_note` and `omind note` CLI wipe note Scope, Agent, and OKF metadata** ([#342](https://github.com/CryptoJones/omind/issues/342)) — _bug (data loss)_ —
+  `_keep_existing_when_unset` in `notes.py` does not preserve `scope`, `agent`, `confidence`,
+  `conflicts_with`, or OKF fields, and `update_note` in `store.py` does not inherit `scope` or
+  `agent`, permanently wiping them on CLI updates.
+- [x] **Store: `_write_index` leaks machine-local scratch notes into replicated `index.md`** ([#343](https://github.com/CryptoJones/omind/issues/343)) — _bug (invariant)_ —
+  ephemeral `*.scratch.md` notes are gitignored but listed in `index.md`, committing
+  and replicating broken wikilinks to missing local files across the git mesh (violating
+  AGENTS.md Invariant 1).
+- [x] **Store: `safe_name` cannot resolve or recall scratch notes by title** ([#344](https://github.com/CryptoJones/omind/issues/344)) — _bug (store)_ —
+  `_validated_name` and `_name_from_title` only probe `.md` filenames rather than `*.scratch.md`,
+  causing `read-note`, `recall-note`, and wikilinks to fail with `NoteNotFoundError` on scratch note titles.
+- [x] **Rules: `_PUSH_ARGS_RE` fails on quoted or spaced `-C` paths, bypassing public repo push guard** ([#345](https://github.com/CryptoJones/omind/issues/345)) — _bug (enforcement)_ —
+  `\S+` in `_PUSH_ARGS_RE` fails to match quoted/spaced `-C` paths or blanked literals, causing
+  `_pushed_branches` to return `None` and fall back to the worktree branch. Direct pushes of `main`
+  from a feature branch bypass enforcement, and feature pushes while on `main` falsely deny.
+- [x] **Guard: `record_freshness_outcome` retracts freshness from cwd instead of `-C` repo on failed fetch** ([#346](https://github.com/CryptoJones/omind/issues/346)) — _bug (enforcement)_ —
+  `record_freshness_outcome(event)` passes the raw hook event to `_repo_root_for_action`, which expects
+  `action.get("command")` rather than `event["tool_input"]["command"]`, retracting freshness from cwd
+  and leaving the failed target repo marked fresh.
+- [x] **Guard: missing sibling file locks on `repo-visibility.json` and `_git_fresh_path`** ([#347](https://github.com/CryptoJones/omind/issues/347)) — _bug (locking)_ —
+  `_repo_visibility()` and `_record_git_freshness()` perform read-modify-write without sibling `.lock`
+  mutexes, violating the universal locking invariant on small state files.
+- [x] **Maintain: `omind maintain --report-note` silently fails to update on subsequent runs** ([#348](https://github.com/CryptoJones/omind/issues/348)) — _bug (maintain)_ —
+  `_write_report_note` uses `create_note()` which raises `NoteError` when the report note already exists,
+  and exceptions are suppressed, leaving `Maintenance Report.md` frozen on the initial run's output.
+- [x] **Verify: short-circuit always-relevant, demanded, and hard-rule notes before `_judge_scored`** ([#349](https://github.com/CryptoJones/omind/issues/349)) — _enhancement (perf)_ —
+  `verify_consult()` evaluates `_judge_scored()` before checking hard-rule and demanded exemptions,
+  incurring disk I/O, embedding cosine compute, and potential LLM tiebreak latency on notes already known to be relevant.
+- [x] **Deps: resolve 8 known vulnerabilities in `httpx2`, `httpcore2`, and `pip` flagged by `pip-audit`** ([#350](https://github.com/CryptoJones/omind/issues/350)) — _bug (security / CI)_ —
+  `uv run pip-audit` fails with exit code 1 on 6 CVEs in `httpx2`/`httpcore2` 2.9.1 (fixed in 2.12.0)
+  and 2 in `pip` 26.1.2, breaking the CI security gate.
 - [ ] **Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
   `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
   branch and the next `main` run. Either a harness race or a real `msvcrt.locking`

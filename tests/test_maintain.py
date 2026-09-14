@@ -111,6 +111,16 @@ def test_report_note_is_opt_in(omi: Path) -> None:
     assert (omi / "Maintenance Report.md").is_file()
 
 
+def test_report_note_subsequent_runs_update_note(omi: Path) -> None:
+    maintain.run(omi, report_note=True, log=lambda _msg: None)
+    first_content = (omi / "Maintenance Report.md").read_text(encoding="utf-8")
+    assert "propose-consolidations: ok" in first_content
+    # Second run with apply=True should update the report note with reindex step
+    maintain.run(omi, apply=True, report_note=True, log=lambda _msg: None)
+    second_content = (omi / "Maintenance Report.md").read_text(encoding="utf-8")
+    assert "reindex: ok" in second_content
+
+
 def test_run_persists_a_state_file_outside_the_vault(omi: Path) -> None:
     maintain.run(omi, log=lambda _msg: None)
     assert paths.maintain_state_path(omi).is_file()

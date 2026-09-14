@@ -31,7 +31,7 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
 from omind import consolidate, filelock, journal, mesh, paths, searchindex
-from omind.store import LOCK_FILENAME, SCRATCH_SUFFIX, NoteFields, OmiStore
+from omind.store import LOCK_FILENAME, SCRATCH_SUFFIX, NoteFields, OmiStore, render_fields, today
 
 #: Scratch-tier TTL (item #5 part 2): 7 days from LAST MODIFICATION (HAL9000's
 #: clock refinement — not creation). Expiry ARCHIVES, never deletes.
@@ -112,14 +112,21 @@ def _write_report_note(omi_dir: Path, report: MaintainReport) -> None:
     """Opt-in only: a vault note summarising the run. Off by default because a
     report note is itself lint/dedup fodder that then replicates fleet-wide."""
     lines = [f"- {s.name}: {'ok' if s.ok else 'FAILED'} — {s.detail}" for s in report.steps]
-    OmiStore(omi_dir).create_note(
-        NoteFields(
-            title="Maintenance Report",
-            summary="Latest `omind maintain` run.",
-            details="\n".join(lines) or "no steps ran",
-            tags=["omi", "maintenance"],
-        )
+    store = OmiStore(omi_dir)
+    filename = "Maintenance Report.md"
+    target = omi_dir / filename
+    created = today()
+    if target.is_file():
+        with contextlib.suppress(Exception):
+            created = store.read_fields(filename).created or created
+    fields = NoteFields(
+        title="Maintenance Report",
+        created=created,
+        summary="Latest `omind maintain` run.",
+        details="\n".join(lines) or "no steps ran",
+        tags=["omi", "maintenance"],
     )
+    store.write_note(filename, render_fields(fields), must_create=False)
 
 
 def run(

@@ -1985,3 +1985,21 @@ def test_git_dash_c_with_quoted_path_is_repo_work(tmp_path):
         f'git -C "{repo}" log --oneline -3',
     ):
         assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command}), command
+
+
+def test_record_freshness_outcome_retracts_for_dash_c_repo(tmp_path: Path) -> None:
+    # #346: record_freshness_outcome must resolve -C repo from hook event and retract it
+    repo = _mk_repo(tmp_path, "subrepo")
+    guard.begin_turn("sess-f", "some task")
+    guard._record_git_freshness("sess-f", repo, f'git -C "{repo}" fetch')
+    assert guard._git_fresh_for_repo("sess-f", repo)
+
+    failed_event = {
+        "session_id": "sess-f",
+        "tool_name": "Bash",
+        "tool_input": {"command": f'git -C "{repo}" fetch'},
+        "tool_response": {"exit_code": 1, "is_error": True},
+    }
+    guard.record_freshness_outcome(failed_event)
+    # Freshness must be retracted from the -C repo, not from cwd
+    assert not guard._git_fresh_for_repo("sess-f", repo)

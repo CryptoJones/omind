@@ -1009,7 +1009,12 @@ class OmiStore:
         nonexistent note still raises.
         """
         try:
-            return self._validated_name(name)
+            validated = self._validated_name(name)
+            if not validated.exists() and not str(name).endswith(SCRATCH_SUFFIX):
+                scratch_candidate = validated.with_name(validated.stem + SCRATCH_SUFFIX)
+                if scratch_candidate.exists():
+                    return scratch_candidate
+            return validated
         except NoteError:
             fallback = self._name_from_title(name)
             if fallback is not None:
@@ -1020,9 +1025,16 @@ class OmiStore:
         """The existing note whose filename this *title* sanitizes to, if any."""
         try:
             candidate = self._validated_name(self.filename_for_title(name))
+            if candidate.exists():
+                return candidate
+            scratch_candidate = self._validated_name(
+                self.filename_for_title(name, suffix=SCRATCH_SUFFIX)
+            )
+            if scratch_candidate.exists():
+                return scratch_candidate
         except NoteError:
             return None
-        return candidate if candidate.exists() else None
+        return None
 
     def _validated_name(self, name: str) -> Path:
         """Strict filename validation, with no title fallback (see safe_name)."""
@@ -1569,6 +1581,10 @@ class OmiStore:
                 fields.confidence = current.confidence
             if not fields.conflicts_with:
                 fields.conflicts_with = current.conflicts_with
+            if not fields.scope:
+                fields.scope = current.scope
+            if not fields.agent:
+                fields.agent = current.agent
             # A multi-section body supplied through `details` (the only such
             # field the MCP/CLI API exposes) carries ## H2s that read back as
             # extras. Hoist them now so they REPLACE the same-named inherited
@@ -1659,7 +1675,11 @@ class OmiStore:
         else:
             intro = existing.rstrip() or INDEX_INTRO.rstrip()
 
-        notes = [s for s in self.list_notes() if not _JOURNAL_NOTE_RE.match(s.filename)]
+        notes = [
+            s
+            for s in self.list_notes()
+            if not _JOURNAL_NOTE_RE.match(s.filename) and not is_scratch(s.filename)
+        ]
         lines = [intro, "", INDEX_RECENT_HEADING, INDEX_RECENT_COMMENT, _INDEX_GENERATED_MARKER]
         for summary in notes[:RECENT_LIMIT]:
             stem = summary.filename[:-3] if summary.filename.endswith(".md") else summary.filename

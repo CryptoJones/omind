@@ -64,3 +64,17 @@ def _keep_existing_when_unset(fields: NoteFields, existing: NoteFields) -> None:
         fields.references = existing.references
     if not fields.extras:
         fields.extras = existing.extras
+    if not fields.agent:
+        fields.agent = existing.agent
+    if not fields.scope:
+        fields.scope = existing.scope
+    if not fields.confidence:
+        fields.confidence = existing.confidence
+    if not fields.conflicts_with:
+        fields.conflicts_with = existing.conflicts_with
+    if not fields.supersedes:
+        fields.supersedes = existing.supersedes
+    if not fields.superseded_by:
+        fields.superseded_by = existing.superseded_by
+    if not fields.okf_type:
+        fields.okf_type = existing.okf_type

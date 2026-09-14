@@ -530,6 +530,15 @@ def verify_consult(
         return "relevant"
     if kind == "read" and _guard_demanded(session, target):
         _update_demanded_completeness(event, session, target, out=out)
+    if (
+        _always_relevant(target)
+        or _guard_demanded(session, target)
+        or _hard_rule_note(target, omi_dir)
+    ):
+        guard.record_consult(session, kind=kind, target=target, relevant=True)
+        guard.reset_offtopic(session)
+        return "relevant"
+
     task = guard.turn_task(session)
     activity = recent_activity(session, omi_dir, now=now)
     # #96/#97: the gate-blocked action (path noise stripped) — the agent's freshest intent.
@@ -537,14 +546,8 @@ def verify_consult(
     judged, score = _judge_scored(
         task, activity, _consult_text(kind, target, omi_dir), pending, omi_dir
     )
-    relevant = (
-        _always_relevant(target)
-        or _guard_demanded(session, target)
-        or _hard_rule_note(target, omi_dir)
-        or judged
-    )
-    guard.record_consult(session, kind=kind, target=target, relevant=relevant)
-    if relevant:
+    guard.record_consult(session, kind=kind, target=target, relevant=judged)
+    if judged:
         guard.reset_offtopic(session)  # #98: honest work breaks the off-topic streak
         return "relevant"
 

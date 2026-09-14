@@ -58,7 +58,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from omind import paths
+from omind import filelock, paths
 
 ACTION_DENY = "deny"
 ACTION_WARN = "warn"
@@ -326,10 +326,20 @@ def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
         else:
             _breadcrumb(f"rules_visibility({repo})", "gh visibility lookup failed")
             return _VISIBILITY_UNKNOWN
-    cache[str(repo)] = {"visibility": visibility, "ts": now.isoformat(timespec="seconds")}
     try:
         path.parent.mkdir(parents=True, exist_ok=True)
-        paths.atomic_write_text(path, json.dumps(cache) + "\n", mode=0o600)
+        lock_path = path.with_name(path.name + ".lock")
+        with filelock.exclusive(lock_path):
+            latest_cache: dict[str, Any] = {}
+            try:
+                latest_cache = json.loads(path.read_text(encoding="utf-8"))
+            except (OSError, ValueError, TypeError):
+                latest_cache = {}
+            latest_cache[str(repo)] = {
+                "visibility": visibility,
+                "ts": now.isoformat(timespec="seconds"),
+            }
+            paths.atomic_write_text(path, json.dumps(latest_cache) + "\n", mode=0o600)
     except OSError:
         pass
     return visibility
@@ -393,7 +403,11 @@ def _repo_branch(repo: Path) -> str:
         return ""
 
 
-_PUSH_ARGS_RE = re.compile(r"\bgit\s+(?:-C\s+\S+\s+|-c\s+\S+\s+)*push\b(?P<rest>[^;|&`\n]*)")
+# Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
+# literals (#317 / #333 / #345) after -C or -c.
+_GIT_OPT_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+(?:"[^"]*"|'[^']*')?\S*)"""
+_GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
+_PUSH_ARGS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}push\b(?P<rest>[^;|&`\n]*)")
 
 
 def _pushed_branches(command: str) -> list[str] | None:

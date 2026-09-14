@@ -291,6 +291,7 @@ def merge_fields(base: NoteFields, ours: NoteFields, theirs: NoteFields) -> Merg
         superseded_by=str(scalar("superseded_by")),
         confidence=str(scalar("confidence")),
         conflicts_with=str(scalar("conflicts_with")),
+        scope=str(scalar("scope")),
         connections=_union3(base.connections, ours.connections, theirs.connections),
         action_items=_merge_actions(base.action_items, ours.action_items, theirs.action_items),
         references=_union3(base.references, ours.references, theirs.references),

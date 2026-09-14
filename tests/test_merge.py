@@ -370,3 +370,24 @@ def test_merge_driver_writes_atomically(tmp_path: Path) -> None:
     assert "## Summary" in text
     # No leftover temp files beside the target.
     assert [p.name for p in tmp_path.glob(".tmp-*")] == []
+
+
+def test_scope_merged_via_lww_and_preserved() -> None:
+    # Scope should be preserved and follow scalar LWW rules (#341).
+    b = note("1@a")
+    b.scope = "proj-alpha"
+    o = note("2@a")
+    o.scope = "proj-beta"
+    t = note("1@a")
+    t.scope = "proj-alpha"
+    res = merge_fields(b, o, t)
+    assert res.fields.scope == "proj-beta"
+
+    # Concurrent edit where both changed scope, rev wins
+    o2 = note("2@a")
+    o2.scope = "proj-ours"
+    t2 = note("3@b")
+    t2.scope = "proj-theirs"
+    res2 = merge_fields(b, o2, t2)
+    assert res2.fields.scope == "proj-theirs"
+
