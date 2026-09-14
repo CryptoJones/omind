@@ -8,18 +8,38 @@ here so neither side drifts.
 ## Open
 
 _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
-Reconciled 2026-09-08: 44 shipped items that were still sitting here moved to
-[Done](#done), and #297 was closed as a duplicate its own fix (#306) had already
-resolved._
+All open items are sequenced by priority (Priority 1 to 7) so future agents know
+the exact order of operations._
 
-Two **tracking issues** group the clustered work; their children are nested below them and
-mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this file agree.
-
-- [ ] **Tracking: memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (0/2)_ —
+- [ ] **[Priority 1 / P0] `edit-note` silently guts a note when `details` contains a `## ` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
+  content after the first `## ` is relocated out of `## Details` and re-emitted after
+  `## References`; a second edit leaves both the stale and the new copy. Hit for real
+  on 2026-08-31: a note ended up with two contradictory copies of its body, the
+  superseded one still reading as current, while `## Details` was empty.
+- [ ] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
+  `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
+  branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
+  gap — and if it is the latter, the journal, compliance log and AI-usage log have
+  the same hole on Windows, where a dropped line looks like inaction, not a bug.
+- [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
+  the enforcement gaps where the guard does not see part of the session it governs. Both
+  children are the same defect class: the guard reads a slice of the session, treats it as
+  the whole, and reports itself as functioning.
+  - [ ] **[Priority 3 / P1] Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — _bug (enforcement)_ —
+    authorization is classified from the *opening* message of a turn, but Claude Code
+    delivers messages sent while a turn is running alongside a tool result. An explicit
+    mid-turn imperative therefore cannot lift a block the opening message armed.
+  - [ ] **[Priority 4 / P1] Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
+    measured on hermes across every transcript since 2026-08-24: 362 turns where the
+    per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
+    97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
+    `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
+    prompts, so a long turn is one gate event no matter how much work happens inside it.
+- [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (0/2)_ —
   omind detecting and reporting its own retrieval failures instead of assuming its
   instrumentation is sound. Both children share one thesis: omind was measuring itself
   the whole time and nobody read the meter.
-  - [ ] **`omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — _enhancement (instrument)_ —
+  - [ ] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — _enhancement (instrument)_ —
     every omind surface that spends the agent's context gets a measured number, a
     declared threshold and a verdict — and the tool must be able to return a failing
     one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
@@ -28,7 +48,7 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
     priming 2.88M tokens, MCP responses 2.49M, verifier 642K, none with a threshold.
     #321 was found by accident after months invisible; the ledger that proved it had
     been written faithfully since 4.0.0 and never read.
-  - [ ] **Preflight injection is a context-rot engine** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
+  - [ ] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
     the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
     ~25% precision, framed as binding instruction and never removed. Invisible by
     construction; surfaced as "the model has gotten worse in long sessions". **The
@@ -37,80 +57,7 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
     Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
     depth, preflight on vs off) — the one acceptance criterion that needs an
     instrument, not a change.
-
-- [x] **Guard: `git -C "<quoted path>" commit|push` not classified as repo work** ([#333](https://github.com/CryptoJones/omind/issues/333)) — _bug (enforcement)_ —
-  the literal-blanked command (#317) hid a quoted `-C` path from `_GIT_GLOBAL_OPTS`, and the
-  freshness message teaches that exact form; found in the 2026-09-11 guard experiment. Shipped
-  in 9.2.1 ([PR #334](https://github.com/CryptoJones/omind/pull/334)).
-- [x] **Guard: REQUIRE-mode verifier re-closes the gate over the read the guard itself demanded, then demands page-shaped notes** ([#335](https://github.com/CryptoJones/omind/issues/335)) — _bug (enforcement)_ —
-  with `OMI_VERIFY_REQUIRE=1` a commit turn became: rules-note demand → read → verifier scores it
-  off-topic against pasted page text → re-close → demand whatever the page resembles. Measured
-  51 blocks / 85 forced reads / 648K chars in 55 turns, compaction every ~12 turns. WARN mode is fine.
-- [x] **Hooks: SessionStart re-primes on every resumed headless turn** ([#336](https://github.com/CryptoJones/omind/issues/336)) — _enhancement (tokens)_ —
-  `claude -p --resume` fires `SessionStart:resume` per turn; the capsule (~5.1K chars) was
-  most of a guard-on lane's injected volume (~590K chars per 100 turns). Prime on startup and
-  compact, and on resume only if the session was never primed.
-- [ ] **Tracking: the guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
-  the enforcement gaps where the guard does not see part of the session it governs. Both
-  children are the same defect class: the guard reads a slice of the session, treats it as
-  the whole, and reports itself as functioning.
-  - [ ] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
-    measured on hermes across every transcript since 2026-08-24: 362 turns where the
-    per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
-    97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
-    `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
-    prompts, so a long turn is one gate event no matter how much work happens inside it.
-  - [ ] **Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — _bug (enforcement)_ —
-    authorization is classified from the *opening* message of a turn, but Claude Code
-    delivers messages sent while a turn is running alongside a tool result. An explicit
-    mid-turn imperative therefore cannot lift a block the opening message armed.
-
-- [ ] **`edit-note` silently guts a note when `details` contains a `## ` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
-  content after the first `## ` is relocated out of `## Details` and re-emitted after
-  `## References`; a second edit leaves both the stale and the new copy. Hit for real
-  on 2026-08-31: a note ended up with two contradictory copies of its body, the
-  superseded one still reading as current, while `## Details` was empty.
-- [x] **Merge: 3-way note merge driver silently drops note Scope** ([#341](https://github.com/CryptoJones/omind/issues/341)) — _bug (data loss)_ —
-  `merge_fields()` in `merge.py` omits `scope` when constructing the merged `NoteFields`,
-  causing any 3-way note merge to silently clear the note's `Scope:` field even when all
-  three sides agree.
-- [x] **Notes: `upsert_note` and `omind note` CLI wipe note Scope, Agent, and OKF metadata** ([#342](https://github.com/CryptoJones/omind/issues/342)) — _bug (data loss)_ —
-  `_keep_existing_when_unset` in `notes.py` does not preserve `scope`, `agent`, `confidence`,
-  `conflicts_with`, or OKF fields, and `update_note` in `store.py` does not inherit `scope` or
-  `agent`, permanently wiping them on CLI updates.
-- [x] **Store: `_write_index` leaks machine-local scratch notes into replicated `index.md`** ([#343](https://github.com/CryptoJones/omind/issues/343)) — _bug (invariant)_ —
-  ephemeral `*.scratch.md` notes are gitignored but listed in `index.md`, committing
-  and replicating broken wikilinks to missing local files across the git mesh (violating
-  AGENTS.md Invariant 1).
-- [x] **Store: `safe_name` cannot resolve or recall scratch notes by title** ([#344](https://github.com/CryptoJones/omind/issues/344)) — _bug (store)_ —
-  `_validated_name` and `_name_from_title` only probe `.md` filenames rather than `*.scratch.md`,
-  causing `read-note`, `recall-note`, and wikilinks to fail with `NoteNotFoundError` on scratch note titles.
-- [x] **Rules: `_PUSH_ARGS_RE` fails on quoted or spaced `-C` paths, bypassing public repo push guard** ([#345](https://github.com/CryptoJones/omind/issues/345)) — _bug (enforcement)_ —
-  `\S+` in `_PUSH_ARGS_RE` fails to match quoted/spaced `-C` paths or blanked literals, causing
-  `_pushed_branches` to return `None` and fall back to the worktree branch. Direct pushes of `main`
-  from a feature branch bypass enforcement, and feature pushes while on `main` falsely deny.
-- [x] **Guard: `record_freshness_outcome` retracts freshness from cwd instead of `-C` repo on failed fetch** ([#346](https://github.com/CryptoJones/omind/issues/346)) — _bug (enforcement)_ —
-  `record_freshness_outcome(event)` passes the raw hook event to `_repo_root_for_action`, which expects
-  `action.get("command")` rather than `event["tool_input"]["command"]`, retracting freshness from cwd
-  and leaving the failed target repo marked fresh.
-- [x] **Guard: missing sibling file locks on `repo-visibility.json` and `_git_fresh_path`** ([#347](https://github.com/CryptoJones/omind/issues/347)) — _bug (locking)_ —
-  `_repo_visibility()` and `_record_git_freshness()` perform read-modify-write without sibling `.lock`
-  mutexes, violating the universal locking invariant on small state files.
-- [x] **Maintain: `omind maintain --report-note` silently fails to update on subsequent runs** ([#348](https://github.com/CryptoJones/omind/issues/348)) — _bug (maintain)_ —
-  `_write_report_note` uses `create_note()` which raises `NoteError` when the report note already exists,
-  and exceptions are suppressed, leaving `Maintenance Report.md` frozen on the initial run's output.
-- [x] **Verify: short-circuit always-relevant, demanded, and hard-rule notes before `_judge_scored`** ([#349](https://github.com/CryptoJones/omind/issues/349)) — _enhancement (perf)_ —
-  `verify_consult()` evaluates `_judge_scored()` before checking hard-rule and demanded exemptions,
-  incurring disk I/O, embedding cosine compute, and potential LLM tiebreak latency on notes already known to be relevant.
-- [x] **Deps: resolve 8 known vulnerabilities in `httpx2`, `httpcore2`, and `pip` flagged by `pip-audit`** ([#350](https://github.com/CryptoJones/omind/issues/350)) — _bug (security / CI)_ —
-  `uv run pip-audit` fails with exit code 1 on 6 CVEs in `httpx2`/`httpcore2` 2.9.1 (fixed in 2.12.0)
-  and 2 in `pip` 26.1.2, breaking the CI security gate.
-- [ ] **Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
-  `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
-  branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
-  gap — and if it is the latter, the journal, compliance log and AI-usage log have
-  the same hole on Windows, where a dropped line looks like inaction, not a bug.
-- [ ] **First PyPI publish** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
+- [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   needs CJ's PyPI account; details in [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
 
 ## Not planned
@@ -159,6 +106,50 @@ mirror GitHub's sub-issue hierarchy, so the parent's `n/m` progress bar and this
 - [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-09-13 (v9.4.0)
+
+- [x] **Merge: 3-way note merge driver silently drops note Scope** ([#341](https://github.com/CryptoJones/omind/issues/341)) — _bug (data loss)_ —
+  `merge_fields()` in `merge.py` omits `scope` when constructing the merged `NoteFields`,
+  causing any 3-way note merge to silently clear the note's `Scope:` field even when all
+  three sides agree.
+- [x] **Notes: `upsert_note` and `omind note` CLI wipe note Scope, Agent, and OKF metadata** ([#342](https://github.com/CryptoJones/omind/issues/342)) — _bug (data loss)_ —
+  `_keep_existing_when_unset` in `notes.py` does not preserve `scope`, `agent`, `confidence`,
+  `conflicts_with`, or OKF fields, and `update_note` in `store.py` does not inherit `scope` or
+  `agent`, permanently wiping them on CLI updates.
+- [x] **Store: `_write_index` leaks machine-local scratch notes into replicated `index.md`** ([#343](https://github.com/CryptoJones/omind/issues/343)) — _bug (invariant)_ —
+  ephemeral `*.scratch.md` notes are gitignored but listed in `index.md`, committing
+  and replicating broken wikilinks to missing local files across the git mesh (violating
+  AGENTS.md Invariant 1).
+- [x] **Store: `safe_name` cannot resolve or recall scratch notes by title** ([#344](https://github.com/CryptoJones/omind/issues/344)) — _bug (store)_ —
+  `_validated_name` and `_name_from_title` only probe `.md` filenames rather than `*.scratch.md`,
+  causing `read-note`, `recall-note`, and wikilinks to fail with `NoteNotFoundError` on scratch note titles.
+- [x] **Rules: `_PUSH_ARGS_RE` fails on quoted or spaced `-C` paths, bypassing public repo push guard** ([#345](https://github.com/CryptoJones/omind/issues/345)) — _bug (enforcement)_ —
+  `\S+` in `_PUSH_ARGS_RE` fails to match quoted/spaced `-C` paths or blanked literals, causing
+  `_pushed_branches` to return `None` and fall back to the worktree branch. Direct pushes of `main`
+  from a feature branch bypass enforcement, and feature pushes while on `main` falsely deny.
+- [x] **Guard: `record_freshness_outcome` retracts freshness from cwd instead of `-C` repo on failed fetch** ([#346](https://github.com/CryptoJones/omind/issues/346)) — _bug (enforcement)_ —
+  `record_freshness_outcome(event)` passes the raw hook event to `_repo_root_for_action`, which expects
+  `action.get("command")` rather than `event["tool_input"]["command"]`, retracting freshness from cwd
+  and leaving the failed target repo marked fresh.
+- [x] **Guard: missing sibling file locks on `repo-visibility.json` and `_git_fresh_path`** ([#347](https://github.com/CryptoJones/omind/issues/347)) — _bug (locking)_ —
+  `_repo_visibility()` and `_record_git_freshness()` perform read-modify-write without sibling `.lock`
+  mutexes, violating the universal locking invariant on small state files.
+- [x] **Maintain: `omind maintain --report-note` silently fails to update on subsequent runs** ([#348](https://github.com/CryptoJones/omind/issues/348)) — _bug (maintain)_ —
+  `_write_report_note` uses `create_note()` which raises `NoteError` when the report note already exists,
+  and exceptions are suppressed, leaving `Maintenance Report.md` frozen on the initial run's output.
+- [x] **Verify: short-circuit always-relevant, demanded, and hard-rule notes before `_judge_scored`** ([#349](https://github.com/CryptoJones/omind/issues/349)) — _enhancement (perf)_ —
+  `verify_consult()` evaluates `_judge_scored()` before checking hard-rule and demanded exemptions,
+  incurring disk I/O, embedding cosine compute, and potential LLM tiebreak latency on notes already known to be relevant.
+- [x] **Deps: resolve 8 known vulnerabilities in `httpx2`, `httpcore2`, and `pip` flagged by `pip-audit`** ([#350](https://github.com/CryptoJones/omind/issues/350)) — _bug (security / CI)_ —
+  `uv run pip-audit` fails with exit code 1 on 6 CVEs in `httpx2`/`httpcore2` 2.9.1 (fixed in 2.12.0)
+  and 2 in `pip` 26.1.2, breaking the CI security gate.
+- [x] **Guard: `git -C "<quoted path>" commit|push` not classified as repo work** ([#333](https://github.com/CryptoJones/omind/issues/333)) — _bug (enforcement)_ —
+  shipped in 9.2.1 ([PR #334](https://github.com/CryptoJones/omind/pull/334)).
+- [x] **Guard: REQUIRE-mode verifier re-closes the gate over the read the guard itself demanded** ([#335](https://github.com/CryptoJones/omind/issues/335)) — _bug (enforcement)_ —
+  shipped in 9.3.0 ([PR #339](https://github.com/CryptoJones/omind/pull/339)).
+- [x] **Hooks: SessionStart re-primes on every resumed headless turn** ([#336](https://github.com/CryptoJones/omind/issues/336)) — _enhancement (tokens)_ —
+  shipped in 9.3.0 ([PR #338](https://github.com/CryptoJones/omind/pull/338)).
 
 ### Shipped — 2026-09-09
 
