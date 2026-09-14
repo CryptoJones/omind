@@ -164,8 +164,20 @@ def test_scratch_note_gets_the_scratch_suffix_and_is_findable(store: OmiStore) -
     assert (store.omi_dir / name).is_file()
     # Still a top-level *.md, so search/listings find it like any other note...
     assert name in [s.filename for s in store.list_notes()]
-    # ...but the mesh never replicates it.
+    # ...but the mesh never replicates it...
     assert "*.scratch.md" in mesh.GITIGNORE
+    # ...and index.md never references it (avoids replicating broken wikilinks fleet-wide, #343).
+    index_text = (store.omi_dir / paths.INDEX_FILENAME).read_text(encoding="utf-8")
+    assert "Temp Buffer" not in index_text
+    # Scratch notes can be resolved and read by title (#344).
+    assert store.safe_name("Temp Buffer").name == "Temp Buffer.scratch.md"
+    assert store.read_note("Temp Buffer") != ""
+
+    # Scratch note with special characters in title resolves via _name_from_title fallback
+    slash_name = store.create_note(NoteFields(title="Fix / Patch", summary="s"), scratch=True)
+    assert slash_name == "Fix Patch.scratch.md"
+    assert store.safe_name("Fix / Patch").name == "Fix Patch.scratch.md"
+    assert store.read_note("Fix / Patch") != ""
 
 
 def test_list_excludes_reserved_files(store: OmiStore) -> None:
@@ -688,6 +700,10 @@ def test_upsert_keeps_fields_the_caller_left_unset(store: OmiStore) -> None:
             tags=["keep"],
             action_items=[ActionItem("still todo")],
             references=["Source: somewhere"],
+            scope="proj-x",
+            agent="hermes/bot",
+            confidence="high",
+            conflicts_with="Old Memo",
         )
     )
     action, filename = upsert_note(store.omi_dir, NoteFields(title="Sticky Upsert", details="new"))
@@ -699,6 +715,10 @@ def test_upsert_keeps_fields_the_caller_left_unset(store: OmiStore) -> None:
     assert after.tags == ["keep"]
     assert after.action_items == [ActionItem("still todo")]
     assert after.references == ["Source: somewhere"]
+    assert after.scope == "proj-x"
+    assert after.agent == "hermes/bot"
+    assert after.confidence == "high"
+    assert after.conflicts_with == "Old Memo"
 
 
 @pytest.mark.parametrize("title", ["index", "Memory Template"])

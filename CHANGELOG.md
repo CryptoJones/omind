@@ -9,6 +9,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 _Nothing yet._
 
+## [9.4.0] - 2026-09-13
+
+### Fixed
+
+- **Merge driver preserves note Scope** ([#341](https://github.com/CryptoJones/omind/issues/341)).
+  `merge_fields()` in `merge.py` now includes `scope` when constructing the merged `NoteFields`,
+  preventing 3-way note merges from silently clearing the note's `Scope:` metadata.
+- **`upsert_note` and CLI preserve note Scope, Agent, and OKF metadata** ([#342](https://github.com/CryptoJones/omind/issues/342)).
+  `_keep_existing_when_unset` in `notes.py` and `update_note` in `store.py` preserve existing `scope`,
+  `agent`, `confidence`, `conflicts_with`, `supersedes`, `superseded_by`, and `okf_type` fields across
+  programmatic and CLI updates.
+- **`_write_index` excludes machine-local scratch notes from replicated `index.md`** ([#343](https://github.com/CryptoJones/omind/issues/343)).
+  `*.scratch.md` notes are gitignored machine-local scratchpads; `_write_index` now filters them out so
+  broken wikilinks do not leak into the git mesh.
+- **`safe_name` resolves scratch notes by title** ([#344](https://github.com/CryptoJones/omind/issues/344)).
+  `safe_name` and title lookup now fallback to probing `.scratch.md` when no permanent note exists, enabling
+  `read-note`, `recall-note`, and wikilinks to resolve scratch notes by title while preserving precedence
+  for permanent notes.
+- **Public repo push guard handles quoted and spaced `-C` paths** ([#345](https://github.com/CryptoJones/omind/issues/345)).
+  `_PUSH_ARGS_RE` and `_GIT_OPT_VALUE` handle quoted or space-containing `-C` / `-c` arguments, ensuring
+  `_pushed_branches` correctly detects target branches on non-cwd repositories.
+- **`record_freshness_outcome` attributes freshness to `-C` repo on failed fetch** ([#346](https://github.com/CryptoJones/omind/issues/346)).
+  Hook events pass `tool_input["command"]` so `_repo_root_for_action` identifies the targeted repository
+  rather than retracting freshness from cwd.
+- **Universal sibling file locking on state files** ([#347](https://github.com/CryptoJones/omind/issues/347)).
+  `_repo_visibility` and `_record_git_freshness` acquire sibling `.lock` mutexes via `filelock.exclusive`
+  and write via `atomic_write_text`, upholding the small state file concurrency invariant.
+- **`maintain --report-note` updates on subsequent runs** ([#348](https://github.com/CryptoJones/omind/issues/348)).
+  `_write_report_note` uses `write_note` (upsert) instead of `create_note`, allowing subsequent maintenance
+  runs with `--report-note` to update `Maintenance Report.md` cleanly while retaining the note's creation date.
+
+### Changed
+
+- **`verify_consult` short-circuits always-relevant, demanded, and hard-rule notes** ([#349](https://github.com/CryptoJones/omind/issues/349)).
+  Notes that are unconditionally relevant (git rules, notes containing `omind-rule`, guard-demanded notes,
+  or `OMI_VERIFY_ALWAYS_RELEVANT` matches) bypass scoring, embedding cosine computations, and LLM tiebreaks,
+  eliminating latency and unnecessary model calls during enforcement reads.
+
+### Security
+
+- **Dependency vulnerability remediation via `httpx2` and `pip` security floors** ([#350](https://github.com/CryptoJones/omind/issues/350)).
+  Bumped `httpx2` floor to `>=2.12.0,<3.0` (upgrading `httpcore2` and `httpx2` to 2.12.0) and added `pip>=26.2`
+  to dev dependencies, resolving 8 CVEs flagged by `pip-audit`.
+
 ## [9.3.0] - 2026-09-12
 
 ### Fixed
@@ -3138,6 +3182,9 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
   OMI memory notes, with structured-form and raw-Markdown editing.
 - End-user install methods and a `CONTRIBUTING` guide.
 
+[9.4.0]: https://github.com/CryptoJones/omind/releases/tag/v9.4.0
+[9.3.0]: https://github.com/CryptoJones/omind/releases/tag/v9.3.0
+[9.2.1]: https://github.com/CryptoJones/omind/releases/tag/v9.2.1
 [9.2.0]: https://github.com/CryptoJones/omind/releases/tag/v9.2.0
 [9.1.3]: https://github.com/CryptoJones/omind/releases/tag/v9.1.3
 [1.1.0]: https://github.com/CryptoJones/omind/releases/tag/v1.1.0

@@ -357,10 +357,11 @@ def _record_git_freshness(session: str, repo: Path, command: str) -> None:
     with contextlib.suppress(OSError, ValueError):
         path = _git_fresh_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
-        repos = _fresh_repos(session)
-        repos[str(repo)] = int(time.time())
-        payload = {"repos": repos, "command": command}
-        path.write_text(json.dumps(payload), encoding="utf-8")
+        with filelock.exclusive(_sibling_lock(path)):
+            repos = _fresh_repos(session)
+            repos[str(repo)] = int(time.time())
+            payload = {"repos": repos, "command": command}
+            paths.atomic_write_text(path, json.dumps(payload), mode=0o600)
 
 
 def _git_fresh_for_repo(session: str, repo: Path) -> bool:
@@ -373,14 +374,15 @@ def _retract_git_freshness(session: str, repo: Path) -> None:
         return
     with contextlib.suppress(OSError, ValueError):
         path = _git_fresh_path(session)
-        repos = _fresh_repos(session)
-        if str(repo) not in repos:
-            return
-        del repos[str(repo)]
-        if repos:
-            path.write_text(json.dumps({"repos": repos}), encoding="utf-8")
-        else:
-            path.unlink()
+        with filelock.exclusive(_sibling_lock(path)):
+            repos = _fresh_repos(session)
+            if str(repo) not in repos:
+                return
+            del repos[str(repo)]
+            if repos:
+                paths.atomic_write_text(path, json.dumps({"repos": repos}), mode=0o600)
+            else:
+                path.unlink()
 
 
 def _tool_outcome_failed(tool_response: object) -> bool:
@@ -419,7 +421,7 @@ def record_freshness_outcome(event: dict[str, Any]) -> None:
         if not _tool_outcome_failed(event.get("tool_response")):
             return
         session = str(event.get("session_id") or "")
-        repo = _repo_root_for_action(event)
+        repo = _repo_root_for_action({"command": command, **event})
         if session and repo is not None:
             _retract_git_freshness(session, repo)
     except Exception:
@@ -1046,7 +1048,14 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
         # `git -C <other-repo> commit`) to the cwd repo (#147). Honor `-C` for
         # git commands; a `-C` that lands outside any repo falls through to cwd.
         with contextlib.suppress(Exception):
-            dash_c = _git_dash_c_path(str(action.get("command") or ""))
+            cmd = str(action.get("command") or "")
+            if not cmd and isinstance(action.get("tool_input"), dict):
+                cmd = str(
+                    action["tool_input"].get("command")
+                    or action["tool_input"].get("cmd")
+                    or ""
+                )
+            dash_c = _git_dash_c_path(cmd)
             if dash_c is not None:
                 candidates.append(dash_c)
         candidates.append(Path.cwd())

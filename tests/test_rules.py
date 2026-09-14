@@ -449,3 +449,15 @@ def test_format_rules_shows_has_commits(tmp_path: Path) -> None:
     omi = tmp_path / "OMI"
     _note_with_has_commits(omi, "true")
     assert "has_commits=true" in rules.format_rules(omi)
+
+
+def test_pushed_branches_quoted_and_spaced_dash_c() -> None:
+    # #345: _pushed_branches must recognise push commands with quoted/spaced -C / -c options
+    assert rules._pushed_branches('git -C "/repo with spaces" push origin main') == ["main"]
+    assert rules._pushed_branches("git -C '/repo with spaces' push origin feat") == ["feat"]
+    assert rules._pushed_branches('git -C "       " push origin main') == ["main"]
+    assert rules._pushed_branches(
+        'git -C "/path" -c user.name="Aaron Clark" push origin feat:main'
+    ) == ["main"]
+    assert rules._pushed_branches("git push origin --tags") == ["(tags)"]
+    assert rules._pushed_branches('git -C "/repo with spaces" push') is None  # bare push -> None
