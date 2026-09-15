@@ -134,3 +134,42 @@ def test_goose_quickstart_extension_and_hints_match_provisioner(tmp_path: Path) 
     assert len(md_blocks) == 1
     assert GOOSE_HINTS_START in md_blocks[0] and GOOSE_HINTS_END in md_blocks[0]
     assert str(config.omi_dir) in md_blocks[0]
+
+
+def test_agy_quickstart_matches_provisioner(tmp_path: Path) -> None:
+    from omind.agents import (
+        AGY_BOOTSTRAP_END,
+        AGY_BOOTSTRAP_START,
+        AGY_HOOK_NAME,
+        AgyProvisioner,
+    )
+
+    config = SetupConfig(vault=tmp_path / "Vault", folder="OMI", agent="agy")
+    out = build_quickstart(config)
+
+    assert 'omind setup --agent agy --vault "' in out
+    assert "omind doctor --agent agy" in out
+
+    prov = AgyProvisioner(config=config, log=lambda _m: None)
+
+    # JSON blocks: 1) mcpServers, 2) hooks
+    json_blocks = _fenced(out, "json")
+    assert len(json_blocks) == 2
+    assert json.loads(json_blocks[0]) == {
+        "mcpServers": {config.server_name: prov.desired_server_entry()}
+    }
+    assert json.loads(json_blocks[1]) == {
+        AGY_HOOK_NAME: prov.desired_hook_block()
+    }
+
+    # Markdown bootstrap block
+    md_blocks = _fenced(out, "markdown")
+    assert len(md_blocks) == 1
+    assert AGY_BOOTSTRAP_START in md_blocks[0] and AGY_BOOTSTRAP_END in md_blocks[0]
+    assert str(config.omi_dir) in md_blocks[0]
+
+    # Also test antigravity alias
+    config_alias = SetupConfig(vault=tmp_path / "Vault", folder="OMI", agent="antigravity")
+    out_alias = build_quickstart(config_alias)
+    assert 'omind setup --agent antigravity --vault "' in out_alias
+

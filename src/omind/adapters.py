@@ -30,8 +30,9 @@ from omind import guard
 
 #: Tool-name prefixes that denote an OMI consult across harnesses. Most harnesses
 #: namespace MCP tools as ``mcp__<server>__<tool>`` (double underscore); the Gemini
-#: CLI uses ``mcp_<server>_<tool>`` (single underscore), so both forms are listed.
-_OMI_CONSULT_PREFIXES = ("mcp__omi__", "mcp_omi_")
+#: CLI uses ``mcp_<server>_<tool>`` (single underscore); Antigravity / pool use
+#: ``omi_`` or ``omi__``, so all forms are listed.
+_OMI_CONSULT_PREFIXES = ("mcp__omi__", "mcp__omi_", "mcp_omi_", "omi__", "omi_")
 
 
 def _first_str(data: dict[str, Any], keys: tuple[str, ...]) -> str:
@@ -49,8 +50,14 @@ def _derive_command(event: dict[str, Any], tool_input: dict[str, Any]) -> str:
     and an ``input``/``args`` object, not just a plain string — otherwise the
     guard saw an empty command and no hard rule could match the real payload.
     """
-    # Poolside's ``shell`` tool carries the command line as ``cmd``.
-    for source in (event.get("command"), tool_input.get("command"), tool_input.get("cmd")):
+    # Poolside's ``shell`` tool carries the command line as ``cmd``;
+    # Antigravity uses ``CommandLine``.
+    for source in (
+        event.get("command"),
+        tool_input.get("command"),
+        tool_input.get("CommandLine"),
+        tool_input.get("cmd"),
+    ):
         if isinstance(source, str) and source:
             return source
     for container in (event, tool_input):
@@ -63,7 +70,7 @@ def _derive_command(event: dict[str, Any], tool_input: dict[str, Any]) -> str:
                 if joined:
                     return joined
             if isinstance(val, dict):
-                inner = _first_str(val, ("command", "cmd"))
+                inner = _first_str(val, ("command", "CommandLine", "cmd"))
                 if inner:
                     return inner
     return ""
@@ -73,18 +80,26 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
     """Map a harness pre-action event into the guard's action schema.
 
     Tolerant of the field-name variations across Claude Code (``tool_name`` +
-    ``tool_input.command`` + ``session_id``), Hermes, OpenClaw, and OpenCode
-    (``tool``/``name`` + ``command``/``args`` + ``session``), so every harness
-    funnels into the same decision.
+    ``tool_input.command`` + ``session_id``), Hermes, OpenClaw, OpenCode,
+    and Antigravity (``toolCall.name`` + ``toolCall.args.CommandLine`` +
+    ``conversationId``), so every harness funnels into the same decision.
     """
     tool = _first_str(event, ("tool", "tool_name", "name"))
+    if not tool and isinstance(event.get("toolCall"), dict):
+        tool = _first_str(event["toolCall"], ("name", "tool"))
     tool_input = event.get("tool_input")
+    if not isinstance(tool_input, dict) and isinstance(event.get("toolCall"), dict):
+        args = event["toolCall"].get("args")
+        if isinstance(args, dict):
+            tool_input = args
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     command = _derive_command(event, tool_input)
-    file_path = _first_str(tool_input, ("file_path", "path")) or _first_str(
-        event, ("file_path", "path")
+    file_path = _first_str(
+        tool_input, ("file_path", "path", "TargetFile", "AbsolutePath")
+    ) or _first_str(event, ("file_path", "path", "TargetFile", "AbsolutePath"))
+    session = _first_str(
+        event, ("session", "session_id", "conversationId", "conversation_id")
     )
-    session = _first_str(event, ("session", "session_id"))
     prompt = _first_str(event, ("prompt", "user_prompt", "current_prompt", "turn_prompt"))
     is_consult = tool.startswith(_OMI_CONSULT_PREFIXES) or bool(event.get("is_omi_consult"))
     consult_target = (

@@ -35,7 +35,10 @@ FMT_JSON_SIGNAL = "json_signal"  # OpenCode plugin reads {allow, reason} JSON an
 FMT_CODEX_HOOK = "codex_hook"  # Codex PreToolUse/PermissionRequest: hookSpecificOutput deny JSON
 FMT_GEMINI = "gemini"  # Gemini CLI BeforeTool: {"decision":"deny","reason"} on stdout, exit 0
 FMT_OPENCLAW = "openclaw"  # OpenClaw gateway: {allow,reason,rule_id} JSON (detect-only, exit 0)
-FMT_POOLSIDE = "poolside"  # Poolside pool hook: snake_case hook_specific_output deny JSON, exit 0
+# Poolside pool hook: snake_case hook_specific_output deny JSON, exit 0
+FMT_POOLSIDE = "poolside"
+# Antigravity (agy) PreToolUse: {"decision":"deny","reason"} / {"decision":"allow"}, exit 0
+FMT_AGY = "agy"
 
 
 @dataclass(frozen=True)
@@ -75,6 +78,10 @@ HARNESSES: dict[str, HarnessSpec] = {
     # live-verified against pool 1.0.16 on 2026-09-08.
     "poolside": HarnessSpec(
         "poolside", CAP_HARD_BLOCK, FMT_POOLSIDE, "Poolside pool PreToolUse hook"
+    ),
+    "agy": HarnessSpec("agy", CAP_HARD_BLOCK, FMT_AGY, "Antigravity CLI PreToolUse hook"),
+    "antigravity": HarnessSpec(
+        "antigravity", CAP_HARD_BLOCK, FMT_AGY, "Antigravity CLI PreToolUse hook"
     ),
     # Detect-only until a live gateway is confirmed to enforce a deny (issue #88):
     # the verdict is rendered + sent, but we don't yet CLAIM hard-block capability.
@@ -178,6 +185,14 @@ def render_decision(
             + "\n"
         )
         return 0
+    if fmt == FMT_AGY:
+        # Antigravity (agy) PreToolUse hook reads a JSON decision on stdout (exit 0).
+        # On deny emit {"decision":"deny","reason":...}; on allow emit {"decision":"allow"}.
+        if verdict.allow:
+            out.write(json.dumps({"decision": "allow"}) + "\n")
+        else:
+            out.write(json.dumps({"decision": "deny", "reason": verdict.reason}) + "\n")
+        return 0
     # FMT_EXIT2 (default): stderr reason + exit 2 — the Claude/shell contract.
     if not verdict.allow:
         err.write(f"BLOCKED by {verdict.reason}\n")
@@ -249,19 +264,91 @@ def _unwrap_user_query(content: str) -> str:
     return content[start : end if end >= 0 else None].strip()
 
 
+def agy_last_prompt(transcript_path: object) -> str:
+    """The most recent user query in an Antigravity transcript, or ``""``. Best-effort."""
+    if not isinstance(transcript_path, str) or not transcript_path:
+        return ""
+    try:
+        path = Path(transcript_path)
+        if not path.is_file():
+            return ""
+        size = path.stat().st_size
+        with path.open("rb") as fh:
+            if size > 4 * 1024 * 1024:
+                fh.seek(size - 4 * 1024 * 1024)
+            tail = fh.read().decode("utf-8", errors="replace")
+    except OSError:
+        return ""
+    for line in reversed(tail.splitlines()):
+        if '"USER_INPUT"' not in line:
+            continue
+        try:
+            record = json.loads(line)
+            if record.get("type") == "USER_INPUT":
+                content = record.get("content")
+                if isinstance(content, str) and content.strip():
+                    return content.strip()
+        except ValueError:
+            continue
+    return ""
+
+
 def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
     """Map a harness's raw hook event onto the Claude-shaped event the rest of
     omind consumes (journal, verifier, accounting, guard). Identity for every
-    harness but Poolside, whose payload differs in exactly four places (all
-    live-verified against pool 1.0.16, #311):
+    harness but Poolside and Antigravity:
 
-    - MCP tools are ``<server>__<tool>`` with no ``mcp__`` prefix, so the omi
-      consult detectors (``mcp__omi__…``) would miss every vault read;
-    - the ``shell`` tool carries its command line as ``tool_input.cmd``;
-    - ``PostToolUse`` carries ``tool_output`` (text) instead of ``tool_response``;
-    - ``UserPromptSubmit`` may omit ``prompt``; it is recovered from the trajectory.
+    - Poolside: MCP tools are ``<server>__<tool>`` with no ``mcp__`` prefix,
+      shell tool carries ``cmd``, ``PostToolUse`` carries ``tool_output``,
+      prompt recovered from trajectory.
+    - Antigravity: toolCall carries ``name`` and ``args`` (with ``CommandLine`` /
+      ``TargetFile`` / ``AbsolutePath``), session in ``conversationId``, prompt
+      recovered from transcript.
     """
-    if spec_for(harness).name != "poolside" or not isinstance(event, dict):
+    if not isinstance(event, dict):
+        return event
+    spec = spec_for(harness)
+    if spec.block_format == FMT_AGY:
+        out = dict(event)
+        tool_call = out.get("toolCall")
+        if isinstance(tool_call, dict):
+            out["tool_name"] = str(tool_call.get("name") or "")
+            args = tool_call.get("args")
+            if isinstance(args, dict):
+                agy_tool_input = dict(args)
+                if "CommandLine" in agy_tool_input and "command" not in agy_tool_input:
+                    agy_tool_input["command"] = agy_tool_input["CommandLine"]
+                if "TargetFile" in agy_tool_input and "file_path" not in agy_tool_input:
+                    agy_tool_input["file_path"] = agy_tool_input["TargetFile"]
+                elif "AbsolutePath" in agy_tool_input and "file_path" not in agy_tool_input:
+                    agy_tool_input["file_path"] = agy_tool_input["AbsolutePath"]
+                out["tool_input"] = agy_tool_input
+        if "session_id" not in out and "conversationId" in out:
+            out["session_id"] = out["conversationId"]
+        if "cwd" not in out:
+            workspaces = out.get("workspacePaths")
+            if isinstance(workspaces, list) and workspaces and isinstance(workspaces[0], str):
+                out["cwd"] = workspaces[0]
+        if "prompt" not in out:
+            prompt = agy_last_prompt(out.get("transcriptPath"))
+            if prompt:
+                out["prompt"] = prompt
+        tool = str(out.get("tool_name") or "")
+        if tool.startswith("omi__"):
+            out["tool_name"] = "mcp__" + tool
+        elif tool.startswith("omi_"):
+            out["tool_name"] = "mcp__omi__" + tool[4:]
+        elif tool in (
+            "search-vault",
+            "recall-note",
+            "read-note",
+            "create-note",
+            "edit-note",
+            "list-notes",
+        ):
+            out["tool_name"] = "mcp__omi__" + tool
+        return out
+    if spec.name != "poolside":
         return event
     out = dict(event)
     tool = str(out.get("tool_name") or "")
@@ -283,10 +370,19 @@ def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
 
 def render_context(harness: str, event_name: str, text: str) -> str:
     """The stdout line that injects ``text`` as additional context for a
-    ``SessionStart``/``UserPromptSubmit``-style hook: Claude's camelCase
-    ``hookSpecificOutput`` by default, Poolside's snake_case twin."""
-    if spec_for(harness).name == "poolside":
+    ``SessionStart``/``UserPromptSubmit``/``PreInvocation``-style hook: Claude's camelCase
+    ``hookSpecificOutput`` by default, Poolside's snake_case twin, or Antigravity's
+    ``injectSteps`` structure."""
+    if spec_for(harness).block_format == FMT_AGY:
         payload: dict[str, Any] = {
+            "injectSteps": [
+                {
+                    "ephemeralMessage": text,
+                }
+            ]
+        }
+    elif spec_for(harness).name == "poolside":
+        payload = {
             "hook_specific_output": {
                 "hook_event_name": event_name,
                 "additional_context": text,
@@ -305,10 +401,15 @@ def render_context(harness: str, event_name: str, text: str) -> str:
 def render_stop_block(harness: str, reason: str) -> str:
     """The stdout line a ``Stop`` hook emits to refuse the stop (the loop guard).
     Claude Code honours ``{"decision": "block"}``; Poolside's Stop hook honours
-    ``continue: true`` plus ``additional_context`` (bounded by its
-    ``stop_hook_max_continuations`` setting)."""
-    if spec_for(harness).name == "poolside":
+    ``continue: true`` plus ``additional_context``; Antigravity honours
+    ``{"decision": "continue", "reason": reason}``."""
+    if spec_for(harness).block_format == FMT_AGY:
         payload: dict[str, Any] = {
+            "decision": "continue",
+            "reason": reason,
+        }
+    elif spec_for(harness).name == "poolside":
+        payload = {
             "continue": True,
             "reason": reason,
             "hook_specific_output": {
@@ -387,6 +488,17 @@ _SELFTEST_CASES: tuple[tuple[str, dict[str, Any], bool], ...] = (
     (
         "openclaw",
         {"tool": "shell", "command": "gh repo delete a/b", "session": "st"},
+        True,
+    ),
+    (
+        "agy",
+        {
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "gh repo delete acme/widget"},
+            },
+            "conversationId": "st",
+        },
         True,
     ),
 )

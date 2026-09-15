@@ -275,3 +275,89 @@ def test_normalize_action_reads_poolside_cmd_key() -> None:
         {"tool_name": "shell", "tool_input": {"cmd": "gh pr merge 5"}, "session_id": "ps3"}
     )
     assert action["command"] == "gh pr merge 5"
+
+
+# -- Antigravity (agy) --------------------------------------------------------
+
+
+def test_normalize_agy_shape() -> None:
+    action = adapters.normalize_action(
+        {
+            "toolCall": {
+                "name": "run_command",
+                "args": {"CommandLine": "git push origin main --force"},
+            },
+            "conversationId": "agy-sess-1",
+        }
+    )
+    assert action["command"] == "git push origin main --force"
+    assert action["session"] == "agy-sess-1"
+
+    consult = adapters.normalize_action(
+        {
+            "toolCall": {
+                "name": "omi_read-note",
+                "args": {"name": "Instructions"},
+            },
+            "conversationId": "agy-sess-2",
+        }
+    )
+    assert consult["is_omi_consult"] is True
+    assert consult["consult_target"] == "Instructions"
+
+
+def test_run_adapter_agy_deny_emits_json_decision(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    payload = {
+        "toolCall": {
+            "name": "run_command",
+            "args": {"CommandLine": "gh repo delete a/b"},
+        },
+        "conversationId": "agy-deny-1",
+    }
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="agy")
+    out = capsys.readouterr().out
+    assert code == 0  # Antigravity expects exit code 0
+    decision = json.loads(out)
+    assert decision["decision"] == "deny"
+    assert "omi-guard" in decision["reason"]
+
+
+def test_run_adapter_agy_consult_clears_gate(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    guard.clear_gate("agy-gate-1")
+    consult = io.StringIO(
+        json.dumps(
+            {
+                "toolCall": {
+                    "name": "omi_search-vault",
+                    "args": {"query": "auth"},
+                },
+                "conversationId": "agy-gate-1",
+            }
+        )
+    )
+    assert adapters.run_adapter(consult, harness="agy") == 0
+    out = capsys.readouterr().out
+    assert json.loads(out) == {"decision": "allow"}
+    assert guard.consulted_this_turn("agy-gate-1")
+
+    # Following action in same turn is allowed and renders {"decision": "allow"}
+    allowed = io.StringIO(
+        json.dumps(
+            {
+                "toolCall": {
+                    "name": "run_command",
+                    "args": {"CommandLine": "ls -la"},
+                },
+                "conversationId": "agy-gate-1",
+            }
+        )
+    )
+    assert adapters.run_adapter(allowed, harness="agy") == 0
+    out2 = capsys.readouterr().out
+    assert json.loads(out2) == {"decision": "allow"}
+    guard.clear_gate("agy-gate-1")
+

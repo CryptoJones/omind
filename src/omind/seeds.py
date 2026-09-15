@@ -272,3 +272,48 @@ instruction wins for that turn. If OMI is unavailable, proceed from this pointer
 and say that OMI could not be read.
 <!-- omind:goose-bootstrap:end -->
 """
+
+# Managed global AGENTS.md section for Antigravity CLI (agy). Antigravity discovers
+# AGENTS.md rules globally in ~/.gemini/config/AGENTS.md.
+AGY_BOOTSTRAP_START = "<!-- omind:agy-bootstrap:start -->"
+AGY_BOOTSTRAP_END = "<!-- omind:agy-bootstrap:end -->"
+
+AGY_AGENTS_BOOTSTRAP_TEMPLATE = """\
+<!-- omind:agy-bootstrap:start -->
+## OMI Bootstrap
+
+This section is managed by `omind setup --agent agy`. It is a bootstrap
+pointer, not the source of truth.
+
+CryptoJones runs long-term assistant memory out of OMI. Use OMI for durable
+preferences, persona, project memory, and "remember this" requests. Do not rely
+on built-in memory as the only source for required behavior.
+
+- OMI MCP slug: `omi`
+- Local vault root on this machine: `{vault}`
+- OMI folder: `{folder}`
+- OMI directory: `{omi_dir}`
+
+The active persona, voice, and working preferences live in those OMI notes. In
+short: the user may address the assistant as Dix, Dixie Flatline, the Flatline,
+McCoy Pauley, Pauley, or Rom Construct; accept those names naturally.
+
+If OMI and the user's explicit current instruction conflict, the current
+instruction wins for that turn. If OMI is unavailable, proceed from this
+bootstrap and say that OMI could not be read.
+
+Repo and global-config work has extra hard requirements:
+
+- Before reviewing, editing, testing, committing, pushing, or releasing any git
+  repo, read `Operational Rules - Git Repos and Secrets` from OMI in addition to
+  any project note.
+- Before touching repo code, run `git status --short --branch` and a freshness
+  command (`git fetch --all --prune` or `git pull --ff-only`), then resolve the
+  current branch/base state.
+  If neither the current working directory nor the action target is inside a
+  Git repository, skip the Git status and freshness commands.
+- Do not infer permission to edit installed global agent config, hooks, bootstrap
+  files, or JUMPSTART-style instructions from a question. Answer the question
+  first; change those files only after explicit current-turn authorization.
+<!-- omind:agy-bootstrap:end -->
+"""
