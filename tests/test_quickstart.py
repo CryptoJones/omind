@@ -108,3 +108,29 @@ def test_mcp_only_quickstart_block_matches_provisioner(
     prov = MCP_ONLY_PROVISIONERS[agent](config=config, log=lambda _m: None)
     assert data == {block: {config.server_name: prov.desired_server_entry()}}
     assert ("type" in data[block][config.server_name]) is has_type
+
+
+def test_goose_quickstart_extension_and_hints_match_provisioner(tmp_path: Path) -> None:
+    import yaml
+
+    from omind.agents import GOOSE_HINTS_END, GOOSE_HINTS_START, GooseProvisioner
+
+    config = SetupConfig(vault=tmp_path / "Vault", folder="OMI", agent="goose")
+    out = build_quickstart(config)
+
+    assert 'omind setup --agent goose --vault "' in out
+    assert "omind doctor --agent goose" in out
+
+    # The YAML extension block matches exactly what setup would write.
+    yaml_blocks = _fenced(out, "yaml")
+    assert len(yaml_blocks) == 1
+    prov = GooseProvisioner(config=config, log=lambda _m: None)
+    assert yaml.safe_load(yaml_blocks[0]) == {
+        "extensions": {config.server_name: prov.desired_server_entry()}
+    }
+
+    # The .goosehints priming block (with its managed markers) is shown.
+    md_blocks = _fenced(out, "markdown")
+    assert len(md_blocks) == 1
+    assert GOOSE_HINTS_START in md_blocks[0] and GOOSE_HINTS_END in md_blocks[0]
+    assert str(config.omi_dir) in md_blocks[0]
