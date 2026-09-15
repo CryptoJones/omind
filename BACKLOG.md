@@ -21,7 +21,7 @@ the exact order of operations._
   branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
   gap — and if it is the latter, the journal, compliance log and AI-usage log have
   the same hole on Windows, where a dropped line looks like inaction, not a bug.
-- [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
+- [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (1/2)_ —
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
   the whole, and reports itself as functioning.
@@ -29,7 +29,7 @@ the exact order of operations._
     authorization is classified from the *opening* message of a turn, but Claude Code
     delivers messages sent while a turn is running alongside a tool result. An explicit
     mid-turn imperative therefore cannot lift a block the opening message armed.
-  - [ ] **[Priority 4 / P1] Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
+  - [x] **[Priority 4 / P1] Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ — **shipped in this PR** (consult continuity: continuation-aware preflight + retry carry + per-turn action budget). —
     measured on hermes across every transcript since 2026-08-24: 362 turns where the
     per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
     97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —

@@ -32,8 +32,14 @@ export const OmiGuard = async ({ $ }) => {
           .quiet()
           .nothrow();
         const verdict = JSON.parse((res.stdout || "").toString().trim() || "{}");
-        // Enforce only real hard-rule denies — never the consult gate.
-        if (verdict.allow === false && verdict.rule_id && verdict.rule_id !== "omi-gate") {
+        // Enforce only real hard-rule denies — never the consult gate or its
+        // mid-turn re-arm (the omi-gate* family), whose consult signals aren't
+        // verified live on OpenCode.
+        if (
+          verdict.allow === false &&
+          verdict.rule_id &&
+          !String(verdict.rule_id).startsWith("omi-gate")
+        ) {
           throw new Error("OMI guard blocked this action: " + (verdict.reason || verdict.rule_id));
         }
       } catch (e) {

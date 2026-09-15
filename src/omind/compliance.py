@@ -28,7 +28,7 @@ import json
 import os
 import re
 from collections import Counter
-from datetime import datetime
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -265,9 +265,58 @@ CEREMONY_RULES = frozenset(
         "repo-work-read-git-rules",
         "off-topic-consult",
         "omi-gate",
+        "omi-gate-rearm",
         "verify-reclose-floor",
     }
 )
+
+#: The consult-gate continuity decisions (#296), all logged at UserPromptSubmit
+#: or by the mid-turn budget. ``turns`` counts every turn the preflight judged.
+_GATE_INJECT_RULE = "omi-gate-preflight"
+_GATE_AUTO_CLEAR_RULES = frozenset({"omi-gate-no-match", "omi-gate-weak-match"})
+_GATE_CARRY_RULE = "omi-gate-carry"
+_GATE_REARM_RULE = "omi-gate-rearm"
+_GATE_REARM_NO_MATCH_RULE = "omi-gate-rearm-no-match"
+
+
+def gate_continuity(*, days: int = 7, now: datetime | None = None) -> dict[str, Any]:
+    """Rollup of how often a turn started with memory injected vs. auto-cleared,
+    and what the mid-turn budget did, over the last ``days`` (#296)."""
+    since = (now or datetime.now()) - timedelta(days=max(0, days))
+    injected = auto_cleared = carried = denies = injects = no_match = 0
+    for event in read_events():
+        ts = str(event.get("ts") or "")
+        try:
+            if datetime.fromisoformat(ts) < since:
+                continue
+        except ValueError:
+            continue
+        rule_id = str(event.get("rule_id") or "")
+        outcome = str(event.get("outcome") or "")
+        if rule_id == _GATE_INJECT_RULE:
+            injected += 1
+        elif rule_id in _GATE_AUTO_CLEAR_RULES:
+            auto_cleared += 1
+        elif rule_id == _GATE_CARRY_RULE:
+            carried += 1
+        elif rule_id == _GATE_REARM_RULE:
+            if outcome == "inject":
+                injects += 1
+            else:
+                denies += 1
+        elif rule_id == _GATE_REARM_NO_MATCH_RULE:
+            no_match += 1
+    turns = injected + auto_cleared
+    return {
+        "turns": turns,
+        "injected": injected,
+        "auto_cleared": auto_cleared,
+        "carried": carried,
+        "auto_clear_pct": (100.0 * auto_cleared / turns) if turns else 0.0,
+        "rearm_denies": denies,
+        "rearm_injects": injects,
+        "rearm_no_match": no_match,
+    }
 
 
 def summary() -> dict[str, Any]:
