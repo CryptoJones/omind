@@ -67,6 +67,14 @@ def openclaw_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture
+def goose_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    root = tmp_path / "goose-home"
+    root.mkdir()
+    monkeypatch.setattr(agents, "goose_config_dir", lambda: root)
+    return root
+
+
 def _config(tmp_path: Path, agent: str, **kw: object) -> SetupConfig:
     return SetupConfig(vault=tmp_path / "vault", agent=agent, **kw)  # type: ignore[arg-type]
 
@@ -827,6 +835,105 @@ def test_diagnose_gemini_reports_guard_state(tmp_path: Path) -> None:
     after = {r.key: r for r in diagnose_gemini(config)}
     assert after["gemini_guard"].level == "ok"
     assert after["gemini_root"].level == "ok"
+
+
+def test_goose_setup_registers_extension_and_priming(
+    tmp_path: Path, goose_home: Path
+) -> None:
+    config = _config(tmp_path, "goose")
+    run_setup_for(config, log=_quiet)
+
+    # The omi MCP server is registered as a stdio *extension* (goose's `cmd`/`args`
+    # shape, keyed under the top-level `extensions` map), not the `command` shape.
+    data = yaml.safe_load(agents.goose_config_path().read_text(encoding="utf-8"))
+    omi = data["extensions"]["omi"]
+    assert omi["type"] == "stdio" and omi["enabled"] is True and omi["timeout"] == 300
+    assert omi["name"] == "omi"
+    assert "cmd" in omi and "command" not in omi
+    assert omi["args"][0] == "node"
+    assert str(config.vault) in omi["args"]
+
+    # Priming rides the global .goosehints file via a fenced managed block.
+    hints = agents.goose_hints_path().read_text(encoding="utf-8")
+    assert agents.GOOSE_HINTS_START in hints and agents.GOOSE_HINTS_END in hints
+    assert str(config.omi_dir) in hints
+
+
+def test_goose_setup_is_idempotent(tmp_path: Path, goose_home: Path) -> None:
+    config = _config(tmp_path, "goose")
+    run_setup_for(config, log=_quiet)
+    first = agents.goose_config_path().read_text(encoding="utf-8")
+    first_hints = agents.goose_hints_path().read_text(encoding="utf-8")
+
+    run_setup_for(config, log=_quiet)
+    assert agents.goose_config_path().read_text(encoding="utf-8") == first
+    # Exactly one managed block survives a re-run.
+    hints = agents.goose_hints_path().read_text(encoding="utf-8")
+    assert hints == first_hints
+    assert hints.count(agents.GOOSE_HINTS_START) == 1
+
+
+def test_goose_setup_preserves_other_extensions(tmp_path: Path, goose_home: Path) -> None:
+    agents.goose_config_path().write_text(
+        yaml.safe_dump(
+            {
+                "GOOSE_PROVIDER": "anthropic",
+                "extensions": {
+                    "developer": {"type": "builtin", "name": "developer", "enabled": True}
+                },
+            }
+        ),
+        encoding="utf-8",
+    )
+    run_setup_for(_config(tmp_path, "goose"), log=_quiet)
+
+    data = yaml.safe_load(agents.goose_config_path().read_text(encoding="utf-8"))
+    assert data["GOOSE_PROVIDER"] == "anthropic"  # foreign top-level key survives
+    assert data["extensions"]["developer"]["type"] == "builtin"  # sibling extension survives
+    assert data["extensions"]["omi"]["type"] == "stdio"
+
+
+def test_goose_priming_preserves_user_hints(tmp_path: Path, goose_home: Path) -> None:
+    agents.goose_hints_path().write_text("# my hints\n\nAlways use uv.\n", encoding="utf-8")
+    run_setup_for(_config(tmp_path, "goose"), log=_quiet)
+
+    hints = agents.goose_hints_path().read_text(encoding="utf-8")
+    assert "Always use uv." in hints
+    assert agents.GOOSE_HINTS_START in hints
+
+
+def test_goose_setup_refuses_corrupt_yaml(tmp_path: Path, goose_home: Path) -> None:
+    agents.goose_config_path().write_text("extensions: [unterminated\n", encoding="utf-8")
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path, "goose"), log=_quiet)
+
+
+def test_goose_setup_fails_without_goose_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "no-goose"
+    monkeypatch.setattr(agents, "goose_config_dir", lambda: missing)
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path, "goose"), log=_quiet)
+
+
+def test_goose_dry_run_changes_nothing(tmp_path: Path, goose_home: Path) -> None:
+    run_setup_for(_config(tmp_path, "goose", dry_run=True), log=_quiet)
+    assert not agents.goose_config_path().exists()
+    assert not agents.goose_hints_path().exists()
+
+
+def test_diagnose_goose_reports_state(tmp_path: Path, goose_home: Path) -> None:
+    config = _config(tmp_path, "goose")
+    before = {r.key: r for r in agents.diagnose_goose(config)}
+    assert before["goose_mcp_registration"].level == "fail"
+    assert before["goose_priming"].level == "fail"
+
+    run_setup_for(config, log=_quiet)
+    after = {r.key: r for r in agents.diagnose_goose(config)}
+    assert after["goose_root"].level == "ok"
+    assert after["goose_mcp_registration"].level == "ok"
+    assert after["goose_priming"].level == "ok"
 
 
 def test_openclaw_setup_installs_bootstrap_priming(

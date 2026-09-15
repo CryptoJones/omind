@@ -272,6 +272,31 @@ def poolside_settings_path() -> Path:
     return poolside_config_dir() / "settings.yaml"
 
 
+def goose_config_dir() -> Path:
+    """Block goose's config directory: ``$XDG_CONFIG_HOME/goose`` or
+    ``~/.config/goose``."""
+    base = os.environ.get("XDG_CONFIG_HOME")
+    root = Path(base) if base else Path.home() / ".config"
+    return root / "goose"
+
+
+def goose_config_path() -> Path:
+    """goose's config file (``config.yaml``) — the ``extensions`` map lives here."""
+    return goose_config_dir() / "config.yaml"
+
+
+def goose_hints_path() -> Path:
+    """goose's global hints file, injected into every session's system prompt."""
+    return goose_config_dir() / ".goosehints"
+
+
+#: Fence markers for omind's managed OMI block inside goose's ``.goosehints``, so
+#: a re-run replaces only our own text and user-authored hints survive. Kept in
+#: sync with :data:`seeds.GOOSE_HINTS_BOOTSTRAP_TEMPLATE`.
+GOOSE_HINTS_START = "<!-- omind:goose-bootstrap:start -->"
+GOOSE_HINTS_END = "<!-- omind:goose-bootstrap:end -->"
+
+
 # -- MCP-only agent locations (Claude Desktop, Kiro, VS Code, Amazon Q) --------
 #
 # These four register the omi MCP server into a JSON config file and nothing
@@ -1985,6 +2010,179 @@ class CodexProvisioner(AgentProvisioner):
             paths.atomic_write_text(path, tomlkit.dumps(doc))
 
 
+# -- goose (Block) --------------------------------------------------------------
+
+
+class GooseProvisioner(AgentProvisioner):
+    """Wire Block's goose agent: the ``omi`` MCP server as a stdio *extension* in
+    ``~/.config/goose/config.yaml`` plus an OMI priming block in the global
+    ``~/.config/goose/.goosehints`` file.
+
+    goose reads MCP servers from a top-level ``extensions`` map (its own term for
+    MCP servers), each a ``{type: stdio, cmd, args, enabled, timeout, ...}`` entry
+    — the same shape ``goose configure`` writes. It has no blocking pre-tool or
+    session-start shell hooks, so (unlike Claude/Codex/Poolside) omind cannot
+    install the OMI *guard* here: goose gets OMI **memory + priming** only. Priming
+    rides ``.goosehints``, the hints file goose injects into the system prompt on
+    every session, via a managed block that is idempotent and preserves any
+    user-authored hints.
+    """
+
+    AGENT_LABEL = "goose"
+    INSTALL_HINT = (
+        "Install goose (https://block.github.io/goose/) and launch it once "
+        "(creates ~/.config/goose), then re-run."
+    )
+    DONE_MESSAGE = (
+        "Done. Start a new goose session to load the OMI memory tools (the `omi` "
+        "extension) and the .goosehints priming."
+    )
+
+    def agent_root(self) -> Path:
+        return goose_config_dir()
+
+    def _read_config(self) -> dict[str, Any]:
+        """Load config.yaml as a dict; raise rather than clobber bad YAML."""
+        path = goose_config_path()
+        if not path.is_file():
+            return {}
+        try:
+            data = yaml.safe_load(path.read_text(encoding="utf-8"))
+        except yaml.YAMLError as exc:
+            raise ProvisionError(
+                f"{path} is not valid YAML ({exc}); refusing to overwrite. "
+                "Fix or remove it and re-run."
+            ) from exc
+        if data is None:
+            return {}
+        if not isinstance(data, dict):
+            raise ProvisionError(
+                f"{path} does not contain a YAML mapping; refusing to overwrite."
+            )
+        return data
+
+    def desired_server_entry(self) -> dict[str, Any]:
+        """The stdio *extension* entry goose writes for an MCP server (``cmd`` +
+        ``args``, not the ``command`` shape every other agent uses)."""
+        command = self._server_command()
+        return {
+            "type": "stdio",
+            "name": self.config.server_name,
+            "cmd": command[0],
+            "args": command[1:],
+            "enabled": True,
+            "env_keys": [],
+            "envs": {},
+            "timeout": 300,
+        }
+
+    def registered_server(self) -> dict[str, Any] | None:
+        try:
+            data = self._read_config()
+        except ProvisionError:
+            return None
+        extensions = data.get("extensions")
+        if not isinstance(extensions, dict):
+            return None
+        server = extensions.get(self.config.server_name)
+        return server if isinstance(server, dict) else None
+
+    def register_mcp(self) -> None:
+        path = goose_config_path()
+        data = self._read_config()
+        desired = self.desired_server_entry()
+        if self.registered_server() == desired and not self.config.force:
+            self.log(
+                f"  extension '{self.config.server_name}' already points at "
+                f"{self.config.omi_dir}"
+            )
+            return
+        extensions = data.get("extensions")
+        if not isinstance(extensions, dict):
+            extensions = {}
+        self._drop_legacy_entry(extensions)
+        extensions[self.config.server_name] = desired
+        data["extensions"] = extensions
+        self._record(
+            f"register MCP extension '{self.config.server_name}' in {path} -> "
+            f"{self.config.omi_dir}"
+        )
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(
+                path, yaml.safe_dump(data, sort_keys=False, allow_unicode=True)
+            )
+
+    def integrate(self) -> None:
+        # goose has no skills dir and no blocking hooks: MCP + .goosehints priming
+        # only (see the class docstring).
+        self.register_mcp()
+        self.install_priming()
+
+    def bootstrap_content(self) -> str:
+        return seeds.GOOSE_HINTS_BOOTSTRAP_TEMPLATE.format(
+            vault=self.config.vault,
+            folder=self.config.folder,
+            omi_dir=self.config.omi_dir,
+        )
+
+    def bootstrap_installed(self) -> bool:
+        try:
+            text = goose_hints_path().read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return GOOSE_HINTS_START in text and GOOSE_HINTS_END in text
+
+    def install_priming(self) -> None:
+        """Install/update the managed OMI block in goose's global ``.goosehints``
+        while preserving user-authored hints before and after it."""
+        path = goose_hints_path()
+        block = self.bootstrap_content().rstrip()
+        try:
+            current = path.read_text(encoding="utf-8") if path.is_file() else ""
+        except OSError as exc:
+            raise ProvisionError(f"could not read {path}: {exc}") from exc
+
+        start = current.find(GOOSE_HINTS_START)
+        end = current.find(GOOSE_HINTS_END)
+        if start >= 0 and end >= start:
+            before, after = current[:start], current[end + len(GOOSE_HINTS_END) :]
+        else:
+            before, after = current, ""
+        parts = [p for p in (before.rstrip(), block, after.lstrip()) if p]
+        updated = "\n\n".join(parts) + "\n"
+
+        if updated == current and not self.config.force:
+            self.log(f"  OMI priming already installed in {path}")
+            return
+        self._record(f"install OMI priming block in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(path, updated)
+
+    def verify(self) -> None:
+        if self.config.dry_run:
+            return
+        if self.registered_server() == self.desired_server_entry():
+            self.log(
+                f"  verified: '{self.config.server_name}' extension wired into "
+                f"{self.AGENT_LABEL} ({goose_config_path()})"
+            )
+        else:
+            self.log(
+                f"  NOTE: could not confirm '{self.config.server_name}' in goose's "
+                "config.yaml; re-run with --force or wire it manually "
+                "(`omind quickstart`)."
+            )
+        if self.bootstrap_installed():
+            self.log(f"  verified: OMI priming installed in {goose_hints_path()}")
+        else:
+            self.log(
+                "  NOTE: could not confirm the OMI priming block in goose's "
+                ".goosehints; re-run with --force."
+            )
+
+
 # -- MCP-only targets (register the omi server, no guard / skill / priming) -----
 
 
@@ -2504,6 +2702,60 @@ def diagnose_deepseek(config: SetupConfig) -> list[CheckResult]:
     return results
 
 
+def diagnose_goose(config: SetupConfig) -> list[CheckResult]:
+    """Doctor for goose: tools + goose config dir + OMI folder + the ``omi``
+    extension in config.yaml + the .goosehints priming block. No guard check —
+    goose has no blocking hooks (see :class:`GooseProvisioner`)."""
+    prov = GooseProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+    root = goose_config_dir()
+    if root.is_dir():
+        results.append(CheckResult("goose_root", "ok", f"goose found: {root}"))
+    else:
+        results.append(
+            CheckResult("goose_root", "fail", f"goose not found: {root} does not exist")
+        )
+    results.extend(_diagnose_omi_folder(config))
+    name = config.server_name
+    server = prov.registered_server()
+    if server is None:
+        results.append(
+            CheckResult(
+                "goose_mcp_registration",
+                "fail",
+                f"extension '{name}' not in goose's config.yaml "
+                "(run `omind setup --agent goose`)",
+            )
+        )
+    elif server != prov.desired_server_entry():
+        results.append(
+            CheckResult(
+                "goose_mcp_registration",
+                "warn",
+                f"extension '{name}' in goose's config.yaml differs from the "
+                "expected wiring (run `omind setup --agent goose`)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult("goose_mcp_registration", "ok", f"extension '{name}' -> {config.omi_dir}")
+        )
+    if prov.bootstrap_installed():
+        results.append(
+            CheckResult("goose_priming", "ok", f"OMI priming installed in {goose_hints_path()}")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "goose_priming",
+                "fail",
+                f"OMI priming missing from {goose_hints_path()} "
+                "(run `omind setup --agent goose`)",
+            )
+        )
+    return results
+
+
 # -- dispatch -------------------------------------------------------------------
 
 def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
@@ -2569,6 +2821,7 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "q": AmazonQProvisioner,
     "deepseek": DeepseekProvisioner,
     "poolside": PoolsideProvisioner,
+    "goose": GooseProvisioner,
 }
 
 DIAGNOSERS = {
@@ -2584,6 +2837,7 @@ DIAGNOSERS = {
     "q": diagnose_q,
     "deepseek": diagnose_deepseek,
     "poolside": diagnose_poolside,
+    "goose": diagnose_goose,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)
@@ -2591,7 +2845,7 @@ AGENT_CHOICES = tuple(PROVISIONERS)
 
 def run_setup_for(config: SetupConfig, log: Logger = print) -> list[str]:
     """Run the provisioner for ``config.agent`` (claude, hermes, openclaw, opencode,
-    codex, gemini, claude-desktop, kiro, vscode, q)."""
+    codex, gemini, deepseek, poolside, goose, claude-desktop, kiro, vscode, q)."""
     return PROVISIONERS[config.agent](config=config, log=log).run()
 
 

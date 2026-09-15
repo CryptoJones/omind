@@ -27,6 +27,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `omi-gate-carry`, `omi-gate-rearm`, `omi-gate-rearm-no-match`) and the whole
   `omi-gate*` family is excluded from the fine-tune corpus and from the
   OpenCode plugin's enforced denies.
+- **`omind setup --agent goose`** wires Block's [goose](https://block.github.io/goose/)
+  on-machine agent into OMI. goose has no blocking pre-tool or session-start
+  shell hooks, so it gets OMI **memory + priming** (no guard): the `omi` MCP
+  server is registered as a stdio *extension* under the `extensions` map in
+  `~/.config/goose/config.yaml` (goose's `{type: stdio, cmd, args, enabled,
+  timeout}` shape — only omind's own `omi` entry is touched; a config that
+  doesn't parse is never overwritten), and a fenced, managed OMI block is
+  written into the global `~/.config/goose/.goosehints` file goose injects into
+  every session's system prompt (user-authored hints around it are preserved).
+  `omind doctor --agent goose` diagnoses both.
 
 ## [9.4.0] - 2026-09-13
 
