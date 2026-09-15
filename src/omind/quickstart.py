@@ -22,11 +22,14 @@ from omind.agents import (
     AgentProvisioner,
     AmazonQProvisioner,
     ClaudeDesktopProvisioner,
+    GooseProvisioner,
     HermesProvisioner,
     KiroProvisioner,
     McpOnlyProvisioner,
     OpenClawProvisioner,
     VsCodeProvisioner,
+    goose_config_path,
+    goose_hints_path,
     hermes_config_path,
     openclaw_config_path,
 )
@@ -203,10 +206,74 @@ in "{omi}" are never touched by any of this.
 """
 
 
+def _build_goose_quickstart(config: SetupConfig) -> str:
+    """Manual steps for Block's goose: scaffold + mesh + the `omi` stdio
+    extension to merge into config.yaml + the OMI block for `.goosehints`."""
+    prov = GooseProvisioner(config=config, log=lambda _msg: None)
+    omi = config.omi_dir
+    scaffold_block, mesh_block = _scaffold_and_mesh_blocks(config)
+
+    ext_yaml = yaml.safe_dump(
+        {"extensions": {config.server_name: prov.desired_server_entry()}},
+        sort_keys=False,
+    )
+    ext_block = f"```yaml\n{ext_yaml.rstrip()}\n```"
+    hints_block = f"```markdown\n{prov.bootstrap_content().rstrip()}\n```"
+
+    return f"""\
+omind quickstart — manual {prov.AGENT_LABEL} wiring for {omi}
+
+Everything below is exactly what `omind setup --agent {config.agent}` would do
+for you. goose has no blocking hooks, so this is memory + priming (no guard).
+Apply the steps you want by hand; each is independent and safe to re-run.
+Prefer the automated path? Just run:
+
+    omind setup --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
+
+[1/4] Scaffold the memory folder
+Create the folder and a minimal Obsidian config so it opens directly as a
+vault (skip any file you already have):
+
+{scaffold_block}
+
+[2/4] Initialize the mesh node
+Makes the folder a git working tree with omind's field-level merge driver,
+mints this machine's node identity, and locks the folder to owner-only:
+
+{mesh_block}
+
+[3/4] Register the omi MCP server as a goose extension
+goose reads MCP servers from the `extensions` map in {goose_config_path()}
+(its own `cmd`/`args` stdio shape). MERGE this into that file under
+`extensions` (create the file if absent; don't replace other extensions):
+
+{ext_block}
+
+[4/4] Prime goose to read OMI first
+goose injects its global hints file into every session's system prompt. Add
+this block to {goose_hints_path()} (append it; keep any hints you already
+wrote). The markers let a later `omind setup` manage only this block:
+
+{hints_block}
+
+Verify the wiring (pure inspection, changes nothing):
+
+    omind doctor --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
+
+Then start a new goose session to load the tools and priming.
+
+Undo: delete the '{config.server_name}' entry from {goose_config_path()} and
+remove the marked block from {goose_hints_path()}. Your notes in "{omi}" are
+never touched by any of this.
+"""
+
+
 def build_quickstart(config: SetupConfig) -> str:
     """The full quickstart text for one vault/folder/server-name/agent combination."""
     if config.agent in ("hermes", "openclaw"):
         return _build_agent_quickstart(config)
+    if config.agent == "goose":
+        return _build_goose_quickstart(config)
     if config.agent in MCP_ONLY_PROVISIONERS:
         return _build_mcp_only_quickstart(config)
     prov = Provisioner(config=config, log=lambda _msg: None)

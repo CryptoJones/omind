@@ -232,3 +232,43 @@ Repo and global-config work has extra hard requirements:
   first; change those files only after explicit current-turn authorization.
 <!-- omind:codex-bootstrap:end -->
 """
+
+# Managed OMI block for Block's goose agent. goose has no session-start hook, but
+# it injects its global hints file (`~/.config/goose/.goosehints`) into every
+# session's system prompt, so omind uses that as the priming pointer. The block
+# is fenced by markers so re-runs replace only omind's own text and any
+# user-authored hints survive. Placeholders: {vault}, {folder}, {omi_dir}.
+GOOSE_HINTS_BOOTSTRAP_TEMPLATE = """\
+<!-- omind:goose-bootstrap:start -->
+## OMI long-term memory (read this first)
+
+This block is managed by `omind setup --agent goose`. It is a bootstrap pointer,
+not the source of truth.
+
+Your persistent, cross-session memory is the OMI vault at `{omi_dir}`, shared by
+every agent on this machine. Prefer it over any built-in memory.
+
+- **Read OMI first.** Before acting on a task, consult OMI. The `omi` extension
+  (MCP server) is wired up; use `search-vault` then token-bounded `recall-note`
+  to pull what you already know about this machine, its hosts, and the user. The
+  vault's `index.md` lists recent memories.
+- OMI MCP slug: `omi` · vault root: `{vault}` · OMI folder: `{folder}`.
+- **Get live syntax.** For `/omind help` or CLI questions, call OMI MCP `help`;
+  do not rely on syntax embedded in this pointer.
+- **Save memories through omind only.** When something is worth keeping across
+  sessions, persist it with the single-writer CLI (never write files into the
+  OMI folder directly — a raw write can corrupt the index):
+
+  ```bash
+  omind note --title "Short Descriptive Title" \\
+    --summary "one-line summary" --tags "topic,subtopic" \\
+    --vault "{vault}" --folder "{folder}" <<'BODY'
+  The insight in plain Markdown, with [[wikilinks]] to related notes.
+  BODY
+  ```
+
+If OMI and the user's explicit current instruction conflict, the current
+instruction wins for that turn. If OMI is unavailable, proceed from this pointer
+and say that OMI could not be read.
+<!-- omind:goose-bootstrap:end -->
+"""

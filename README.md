@@ -32,8 +32,8 @@ reads and writes as long-term memory. `omind` does two things with it:
 
 - **`omind setup`** — idempotently registers **omind's own node MCP server**
   (`omind node`) with your agent — **Claude Code** by default, or **Hermes,
-  OpenClaw, OpenCode, Codex CLI, Gemini CLI, Poolside, Claude Desktop, Kiro,
-  VS Code, and Amazon Q** via `--agent` (see *Other agents* below) —
+  OpenClaw, OpenCode, Codex CLI, Gemini CLI, Poolside, goose, Claude Desktop,
+  Kiro, VS Code, and Amazon Q** via `--agent` (see *Other agents* below) —
   pointed at an OMI folder inside an Obsidian vault, and initializes the folder
   as a **mesh node** (see below). After this, the agent persists memory across
   sessions through the MCP tools — and across machines through the mesh. Setup
@@ -127,7 +127,7 @@ pip install -e ".[dev]"
 ## Quick start
 
 Provision the MCP wiring for your agent — Claude Code by default; add
-`--agent hermes|openclaw|opencode|codex|gemini|poolside|claude-desktop|kiro|vscode|q`
+`--agent hermes|openclaw|opencode|codex|gemini|poolside|goose|claude-desktop|kiro|vscode|q`
 for the others (see *Other agents* below). Idempotent; safe to re-run:
 
 ```bash
@@ -520,7 +520,7 @@ to `economy`/`balanced`/`full`. Set `OMI_AI_EXPENSE` for a temporary override.
 The CLI and web app show cache-inclusive OMI share, average priming, exact versus
 estimated usage, per-operation totals, and estimated avoided tokens.
 
-## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Poolside, Claude Desktop, Kiro, VS Code, Amazon Q
+## Other agents: Hermes, OpenClaw, OpenCode, Codex, Gemini, Poolside, goose, Claude Desktop, Kiro, VS Code, Amazon Q
 
 [Claude Code](https://github.com/anthropics/claude-code) is the default, but the
 same OMI folder can back any agent. `omind setup --agent ...` provisions several
@@ -633,6 +633,18 @@ under Claude Code blocks under Laguna too. Re-runs replace only the entries
 omind owns (named `omind-omi-*`), so hooks you wrote and pool's own
 `stop_hook_max_continuations` are preserved.
 
+**goose** (Block's on-machine agent) gets OMI **memory + priming** from one
+`omind setup --agent goose` — it has no blocking pre-tool or session-start shell
+hooks, so the guard is not wired here. The `omi` MCP server is registered as a
+stdio **extension** (goose's term for an MCP server) under the `extensions` map
+in `~/.config/goose/config.yaml` — the same `{type: stdio, cmd, args, enabled,
+timeout}` shape `goose configure` writes, so only omind's own `omi` entry is
+touched and a config that doesn't parse is never overwritten. Priming rides
+goose's global hints file: omind writes a fenced, managed OMI block into
+`~/.config/goose/.goosehints` (which goose injects into every session's system
+prompt), preserving any hints you wrote around it. Start a new goose session to
+pick both up.
+
 ### MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q
 
 Four more agents are wired by **MCP registration alone** — omind drops the `omi`
@@ -655,7 +667,7 @@ as Claude Desktop but `Code/User`; a `servers` block with `type: stdio`); and Am
 Q's `~/.aws/amazonq/mcp.json` (`mcpServers`). Restart the tool afterward to load the
 server.
 
-`omind doctor --agent hermes|openclaw|opencode|codex|gemini|poolside|claude-desktop|kiro|vscode|q`
+`omind doctor --agent hermes|openclaw|opencode|codex|gemini|poolside|goose|claude-desktop|kiro|vscode|q`
 diagnoses that agent's wiring, and `omind quickstart --agent <name>` prints the manual
 steps (YAML/JSON snippets personalized to your paths) if you'd rather merge them in
 yourself.
