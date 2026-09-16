@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub (#356).**
+  On a fresh Windows box `python3`/`python` resolve to the Microsoft Store stub
+  (`…\WindowsApps\python3.exe`) that prints `Python was not found` and exits
+  non-zero. `omind setup` now resolves the python command through `_resolve_python`
+  — preferring `python` over `python3` on Windows (real installs create only
+  `python.exe`), and detecting the `WindowsApps` stub path — and fails setup
+  with a clear `winget install --id Python.Python.3.12` instruction instead of
+  silently installing a broken enforcement hook. `omind doctor` gains a
+  `tool:python` check (mirroring the existing `jq` check) and flags stale
+  enforcement-hook commands that still shell out to the stub.
+
 ## [9.5.0] - 2026-09-15
 
 ### Added

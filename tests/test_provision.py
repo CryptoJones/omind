@@ -1346,7 +1346,11 @@ def _wired_settings(tmp_path: Path, vault: Path) -> Path:
     The vault is stringified from the SAME Path the caller passes to
     SetupConfig, so the hook commands match on every platform — a literal "/v"
     renders as "\\v" on Windows and trips the vault-mismatch check instead.
+
+    #356: the enforcement hook command uses the same python resolution
+    ``omind setup`` would bake in, so the doctor stub check sees a clean state.
     """
+    python_cmd = provision._resolve_python() or "python3"
     cmd = f'{provision.canonical_omind_exe()} hook %s --vault "{vault}" --folder "OMI"'
     settings = tmp_path / "settings.json"
     settings.write_text(
@@ -1359,7 +1363,7 @@ def _wired_settings(tmp_path: Path, vault: Path) -> Path:
                                 {"type": "command", "command": cmd % "PostToolUse"},
                                 {
                                     "type": "command",
-                                    "command": f"python3 {provision._enforce_hook_dest()}",
+                                    "command": f"{python_cmd} {provision._enforce_hook_dest()}",
                                 },
                             ]
                         }
@@ -1574,3 +1578,292 @@ def test_windows_diagnose_accepts_direct_commands_and_flags_missing_sh(
 
 def test_posix_diagnose_has_no_sh_check() -> None:
     assert provision._diagnose_windows_sh() == [] or os.name == "nt"
+
+
+# -- #356: Windows Store stub detection for python -----------------------------
+
+
+def test_is_windows_store_stub_detects_windowsapps_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The Microsoft Store app-execution-alias stub lives in WindowsApps/."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    assert provision._is_windows_store_stub(
+        r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+    )
+    assert provision._is_windows_store_stub(
+        r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python.exe"
+    )
+    # A real install lives elsewhere.
+    assert not provision._is_windows_store_stub(r"C:\Python312\python.exe")
+    assert not provision._is_windows_store_stub("/usr/bin/python3")
+
+
+def test_is_windows_store_stub_is_posix_noop(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On POSIX the WindowsApps check is irrelevant — never returns True."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    assert provision._is_windows_store_stub(
+        r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+    ) is False
+
+
+def test_resolve_python_prefers_python_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Real Windows installs create `python.exe` but not `python3.exe`.
+    `python3` only resolves to the Store stub, so prefer `python` (#356)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+
+    def fake_which(name: str) -> str | None:
+        # `python` is a real install; `python3` is the Store stub.
+        if name == "python":
+            return r"C:\Python312\python.exe"
+        if name == "python3":
+            return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+        return None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._resolve_python() == "python"
+
+
+def test_resolve_python_falls_back_to_python3_on_windows_when_python_is_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """If `python` is also the stub, fall back to `python3` if it is real."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+
+    def fake_which(name: str) -> str | None:
+        # Both are stubs.
+        if name in ("python", "python3"):
+            return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python.exe"
+        return None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._resolve_python() is None
+
+
+def test_resolve_python_prefers_python3_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
+    """On POSIX, `python3` is the conventional name — prefer it over `python`."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+
+    def fake_which(name: str) -> str | None:
+        if name == "python3":
+            return "/usr/bin/python3"
+        if name == "python":
+            return "/usr/bin/python"
+        return None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._resolve_python() == "python3"
+
+
+def test_resolve_python_returns_none_when_nothing_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    assert provision._resolve_python() is None
+
+
+def test_resolve_python_returns_none_when_both_are_stubs(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Every candidate resolves to the Store stub → no usable python (#356)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    stub = r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+    monkeypatch.setattr(provision.shutil, "which", lambda name: stub if "python" in name else None)
+    assert provision._resolve_python() is None
+
+
+def test_enforce_hook_python_is_stub_detects_python3(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A bare `python3` command that resolves to the Store stub is flagged."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+        if name == "python3"
+        else None,
+    )
+    dest = provision._enforce_hook_dest()
+    assert provision._enforce_hook_python_is_stub(f"python3 {dest}") == "python3"
+
+
+def test_enforce_hook_python_is_stub_returns_none_for_real_python(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: r"C:\Python312\python.exe" if name == "python" else None,
+    )
+    dest = provision._enforce_hook_dest()
+    assert provision._enforce_hook_python_is_stub(f"python {dest}") is None
+
+
+def test_enforce_hook_python_is_stub_returns_none_on_posix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On POSIX there is no WindowsApps stub."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: "/usr/bin/python3")
+    dest = provision._enforce_hook_dest()
+    assert provision._enforce_hook_python_is_stub(f"python3 {dest}") is None
+
+
+def test_diagnose_python_ok_when_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
+    result = provision._diagnose_python()
+    assert result.level == "ok"
+    assert "python" in result.message
+
+
+def test_diagnose_python_fails_on_windows_stub(monkeypatch: pytest.MonkeyPatch) -> None:
+    """When python resolves only to the Store stub, doctor reports a fail."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    stub = r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+    monkeypatch.setattr(provision.shutil, "which", lambda name: stub if "python" in name else None)
+    result = provision._diagnose_python()
+    assert result.level == "fail"
+    assert "winget install" in result.message
+
+
+def test_diagnose_python_fails_when_no_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    result = provision._diagnose_python()
+    assert result.level == "fail"
+
+
+def test_diagnose_hooks_flags_stale_enforcement_hook_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, isolate_settings: Path
+) -> None:
+    """A pre-fix hook using bare `python3` on Windows must be flagged by doctor."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: (
+            r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+            if name == "python3"
+            else (r"C:\Python312\python.exe" if name == "python" else None)
+        ),
+    )
+    vault = tmp_path / "v"
+    # Build settings.json with a STALE enforcement hook using `python3`.
+    cmd = f'{provision.canonical_omind_exe()} hook %s --vault "{vault}" --folder "OMI"'
+    settings = tmp_path / "settings.json"
+    settings.write_text(
+        json.dumps(
+            {
+                "hooks": {
+                    "PostToolUse": [
+                        {
+                            "hooks": [
+                                {"type": "command", "command": cmd % "PostToolUse"},
+                                {
+                                    "type": "command",
+                                    "command": f"python3 {provision._enforce_hook_dest()}",
+                                },
+                            ]
+                        }
+                    ],
+                    "Stop": [{"hooks": [{"type": "command", "command": cmd % "Stop"}]}],
+                    "SessionStart": [
+                        {"hooks": [{"type": "command", "command": cmd % "SessionStart"}]}
+                    ],
+                }
+            }
+        ),
+        encoding="utf-8",
+    )
+    enforce = provision._enforce_hook_dest()
+    enforce.parent.mkdir(parents=True, exist_ok=True)
+    enforce.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+    assert result.level == "fail"
+    assert "python3" in result.message
+    assert "Store stub" in result.message
+
+
+def test_check_prereqs_raises_on_unresolvable_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Setup must fail (not silently install a broken hook) when python is
+    absent or only the Store stub (#356)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+
+    def fake_which(name: str) -> str | None:
+        # claude/git are present, python is absent — the check_prereqs python
+        # check is what must trip.
+        if name in ("claude", "git"):
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    config = _config(tmp_path)
+    with pytest.raises(ProvisionError) as excinfo:
+        Provisioner(config, log=_quiet).check_prereqs()
+    assert "Python" in str(excinfo.value)
+    assert "winget install" in str(excinfo.value)
+
+
+def test_check_prereqs_warns_not_raises_on_dry_run_when_no_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Dry-run must mirror a real run's diagnosis (#258): warn, not raise."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+
+    def fake_which(name: str) -> str | None:
+        if name in ("claude", "git"):
+            return f"/usr/bin/{name}"
+        return None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    config = _config(tmp_path, dry_run=True)
+    logs: list[str] = []
+    Provisioner(config, log=logs.append).check_prereqs()
+    assert any("WARNING" in line and "Python" in line for line in logs)
+
+
+def test_hook_entries_use_resolved_python_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The enforcement hook command must use the resolved python, not bare
+    `python3` which is the Store stub on Windows (#356)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: r"C:\Python312\python.exe" if name == "python" else None,
+    )
+    config = _config(tmp_path)
+    entries = Provisioner(config, log=_quiet)._omind_hook_entries()
+    post = entries["PostToolUse"][0]["hooks"]
+    enforce_cmd = post[1]["command"]
+    assert enforce_cmd.startswith("python ")  # not python3
+    assert "omi-enforce.py" in enforce_cmd
+
+
+def test_hook_entries_prefer_python3_on_posix(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On POSIX the conventional `python3` is preferred."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: "/usr/bin/python3" if name == "python3" else None,
+    )
+    config = _config(tmp_path)
+    entries = Provisioner(config, log=_quiet)._omind_hook_entries()
+    post = entries["PostToolUse"][0]["hooks"]
+    enforce_cmd = post[1]["command"]
+    assert enforce_cmd.startswith("python3 ")
+    assert "omi-enforce.py" in enforce_cmd
+
+
+def test_doctor_reports_python_check_in_full_diagnose(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_tools: None
+) -> None:
+    """The full diagnose() run includes the new tool:python check."""
+    config = _config(tmp_path)
+    _provision_files(config)
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert "tool:python" in results
+    assert results["tool:python"].level == "ok"
