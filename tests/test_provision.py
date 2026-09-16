@@ -1638,6 +1638,37 @@ def test_resolve_python_falls_back_to_python3_on_windows_when_python_is_stub(
     assert provision._resolve_python() is None
 
 
+def test_resolve_python_uses_python3_on_windows_when_python_is_absent(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The second Windows candidate remains usable when only ``python3`` exists."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    calls: list[str] = []
+
+    def fake_which(name: str) -> str | None:
+        calls.append(name)
+        return r"C:\Python312\python3.exe" if name == "python3" else None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._resolve_python() == "python3"
+    assert calls == ["python", "python3"]
+
+
+def test_resolve_python_uses_real_python3_after_windows_python_stub(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A Store alias for the preferred name must not hide a real fallback."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+
+    def fake_which(name: str) -> str:
+        if name == "python":
+            return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python.exe"
+        return r"C:\Python312\python3.exe"
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._resolve_python() == "python3"
+
+
 def test_resolve_python_prefers_python3_on_posix(monkeypatch: pytest.MonkeyPatch) -> None:
     """On POSIX, `python3` is the conventional name — prefer it over `python`."""
     monkeypatch.setattr(provision, "_windows", lambda: False)
@@ -1651,6 +1682,22 @@ def test_resolve_python_prefers_python3_on_posix(monkeypatch: pytest.MonkeyPatch
 
     monkeypatch.setattr(provision.shutil, "which", fake_which)
     assert provision._resolve_python() == "python3"
+
+
+def test_resolve_python_falls_back_to_python_on_posix(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """POSIX installations exposing only ``python`` still produce a usable hook."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    calls: list[str] = []
+
+    def fake_which(name: str) -> str | None:
+        calls.append(name)
+        return "/usr/bin/python" if name == "python" else None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._resolve_python() == "python"
+    assert calls == ["python3", "python"]
 
 
 def test_resolve_python_returns_none_when_nothing_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1681,6 +1728,34 @@ def test_enforce_hook_python_is_stub_detects_python3(monkeypatch: pytest.MonkeyP
     )
     dest = provision._enforce_hook_dest()
     assert provision._enforce_hook_python_is_stub(f"python3 {dest}") == "python3"
+
+
+@pytest.mark.parametrize("quoted_name", ['"python3.exe"', "'python3.exe'"])
+def test_enforce_hook_python_is_stub_normalizes_quoted_exe_name(
+    monkeypatch: pytest.MonkeyPatch, quoted_name: str
+) -> None:
+    """Doctor accepts the quoted ``.exe`` spelling emitted by Windows tooling."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    seen: list[str] = []
+
+    def fake_which(name: str) -> str:
+        seen.append(name)
+        return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    assert provision._enforce_hook_python_is_stub(f"{quoted_name} hook.py") == "python3"
+    assert seen == ["python3"]
+
+
+def test_enforce_hook_python_is_stub_ignores_empty_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda _name: pytest.fail("an empty hook command must not resolve an executable"),
+    )
+    assert provision._enforce_hook_python_is_stub("  \t  ") is None
 
 
 def test_enforce_hook_python_is_stub_returns_none_for_real_python(
@@ -1731,6 +1806,18 @@ def test_diagnose_python_fails_when_no_python(monkeypatch: pytest.MonkeyPatch) -
     monkeypatch.setattr(provision.shutil, "which", lambda name: None)
     result = provision._diagnose_python()
     assert result.level == "fail"
+
+
+def test_diagnose_python_uses_posix_install_guidance_when_missing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision.shutil, "which", lambda _name: None)
+    result = provision._diagnose_python()
+    assert result.key == "tool:python"
+    assert result.level == "fail"
+    assert "Install Python 3" in result.message
+    assert "winget" not in result.message
 
 
 def test_diagnose_hooks_flags_stale_enforcement_hook_python(
@@ -1825,6 +1912,17 @@ def test_check_prereqs_warns_not_raises_on_dry_run_when_no_python(
     assert any("WARNING" in line and "Python" in line for line in logs)
 
 
+def test_check_prereqs_logs_the_resolved_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
+    logs: list[str] = []
+    Provisioner(_config(tmp_path), log=logs.append).check_prereqs()
+    assert "  prerequisites present: claude, git" in logs
+    assert "  python resolved for enforcement hook: python3" in logs
+
+
 def test_hook_entries_use_resolved_python_on_windows(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1860,6 +1958,16 @@ def test_hook_entries_prefer_python3_on_posix(
     enforce_cmd = post[1]["command"]
     assert enforce_cmd.startswith("python3 ")
     assert "omi-enforce.py" in enforce_cmd
+
+
+def test_hook_entries_fall_back_to_python3_when_resolution_fails(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Dry-run and direct callers still receive a complete hook configuration."""
+    monkeypatch.setattr(provision, "_resolve_python", lambda: None)
+    entries = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)._omind_hook_entries()
+    post_hooks = entries["PostToolUse"][0]["hooks"]
+    assert post_hooks[1]["command"] == f"python3 {provision._enforce_hook_dest()}"
 
 
 def test_doctor_reports_python_check_in_full_diagnose(
