@@ -1654,6 +1654,7 @@ def test_resolve_python_prefers_python3_on_posix(monkeypatch: pytest.MonkeyPatch
 
 
 def test_resolve_python_returns_none_when_nothing_found(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Return no interpreter when neither candidate exists on PATH."""
     monkeypatch.setattr(provision.shutil, "which", lambda name: None)
     assert provision._resolve_python() is None
 
@@ -1685,6 +1686,7 @@ def test_enforce_hook_python_is_stub_detects_python3(monkeypatch: pytest.MonkeyP
 def test_enforce_hook_python_is_stub_returns_none_for_real_python(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """Accept an enforcement hook command backed by a real Python executable."""
     monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(
         provision.shutil,
@@ -1706,6 +1708,7 @@ def test_enforce_hook_python_is_stub_returns_none_on_posix(
 
 
 def test_diagnose_python_ok_when_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a healthy doctor result when Python resolves successfully."""
     monkeypatch.setattr(provision, "_windows", lambda: False)
     monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
     result = provision._diagnose_python()
@@ -1724,6 +1727,7 @@ def test_diagnose_python_fails_on_windows_stub(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_diagnose_python_fails_when_no_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Report a failed doctor result when no Python executable is available."""
     monkeypatch.setattr(provision.shutil, "which", lambda name: None)
     result = provision._diagnose_python()
     assert result.level == "fail"
