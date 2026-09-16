@@ -75,6 +75,18 @@ def goose_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     return root
 
 
+@pytest.fixture
+def agy_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
+    root = tmp_path / "gemini-home"
+    config_dir = root / "config"
+    cli_dir = root / "antigravity-cli"
+    config_dir.mkdir(parents=True)
+    cli_dir.mkdir(parents=True)
+    monkeypatch.setattr(agents, "agy_config_dir", lambda: config_dir)
+    monkeypatch.setattr(agents, "agy_cli_dir", lambda: cli_dir)
+    return root
+
+
 def _config(tmp_path: Path, agent: str, **kw: object) -> SetupConfig:
     return SetupConfig(vault=tmp_path / "vault", agent=agent, **kw)  # type: ignore[arg-type]
 
@@ -1315,3 +1327,143 @@ def test_diagnose_poolside_checks_hooks(tmp_path: Path) -> None:
     run_setup_for(config, log=_quiet)
     codes = {c.key: c.level for c in diagnose_poolside(config)}
     assert codes["poolside_guard"] == "ok"
+
+
+# -- Antigravity CLI (agy) ----------------------------------------------------
+
+
+def test_agy_setup_registers_mcp_hooks_skill_and_bootstrap(
+    tmp_path: Path, agy_home: Path
+) -> None:
+    config = _config(tmp_path, "agy")
+    run_setup_for(config, log=_quiet)
+
+    # 1. MCP registration in mcp_config.json under mcpServers
+    mcp_data = json.loads(agents.agy_mcp_config_path().read_text(encoding="utf-8"))
+    assert "mcpServers" in mcp_data
+    omi = mcp_data["mcpServers"]["omi"]
+    assert "command" in omi
+    assert omi["args"][:3] == ["node", "--vault", str(config.vault)]
+    assert omi["args"][3:] == ["--folder", config.folder]
+
+    # 2. Hooks in hooks.json under omind-omi-memory
+    hooks_data = json.loads(agents.agy_hooks_path().read_text(encoding="utf-8"))
+    assert agents.AGY_HOOK_NAME in hooks_data
+    entry = hooks_data[agents.AGY_HOOK_NAME]
+    assert "PreToolUse" in entry
+    assert "PostToolUse" in entry
+    assert "PreInvocation" in entry
+    assert "Stop" in entry
+    assert "guard adapter --harness agy" in entry["PreToolUse"][0]["hooks"][0]["command"]
+    assert "hook PostToolUse --harness agy" in entry["PostToolUse"][0]["hooks"][0]["command"]
+    assert "hook PreInvocation --harness agy" in entry["PreInvocation"][0]["command"]
+    assert "hook Stop --harness agy" in entry["Stop"][0]["command"]
+
+    # 3. Packaged skill
+    skill = agents.agy_skill_dir() / paths.AGENT_SKILL_FILENAME
+    assert skill.is_file()
+    skill_text = skill.read_text(encoding="utf-8")
+    assert str(config.vault) in skill_text
+    assert config.folder in skill_text
+
+    # 4. Bootstrap in AGENTS.md
+    agents_text = agents.agy_agents_path().read_text(encoding="utf-8")
+    assert seeds.AGY_BOOTSTRAP_START in agents_text
+    assert seeds.AGY_BOOTSTRAP_END in agents_text
+    assert str(config.omi_dir) in agents_text
+
+
+def test_agy_setup_is_idempotent(tmp_path: Path, agy_home: Path) -> None:
+    config = _config(tmp_path, "agy")
+    run_setup_for(config, log=_quiet)
+    mcp_first = agents.agy_mcp_config_path().read_text(encoding="utf-8")
+    hooks_first = agents.agy_hooks_path().read_text(encoding="utf-8")
+    agents_first = agents.agy_agents_path().read_text(encoding="utf-8")
+
+    run_setup_for(config, log=_quiet)
+    assert agents.agy_mcp_config_path().read_text(encoding="utf-8") == mcp_first
+    assert agents.agy_hooks_path().read_text(encoding="utf-8") == hooks_first
+    assert agents.agy_agents_path().read_text(encoding="utf-8") == agents_first
+    assert agents_first.count(seeds.AGY_BOOTSTRAP_START) == 1
+
+
+def test_agy_setup_preserves_foreign_content(tmp_path: Path, agy_home: Path) -> None:
+    # Pre-populate mcp_config.json, hooks.json, and AGENTS.md with user content
+    agents.agy_mcp_config_path().parent.mkdir(parents=True, exist_ok=True)
+    agents.agy_mcp_config_path().write_text(
+        json.dumps({"mcpServers": {"custom": {"command": "/usr/bin/custom"}}}),
+        encoding="utf-8",
+    )
+    agents.agy_hooks_path().write_text(
+        json.dumps({"user-hook": {"PreToolUse": []}}),
+        encoding="utf-8",
+    )
+    agents.agy_agents_path().write_text(
+        "# Custom Instructions\nAlways be concise.\n",
+        encoding="utf-8",
+    )
+
+    run_setup_for(_config(tmp_path, "agy"), log=_quiet)
+
+    mcp_data = json.loads(agents.agy_mcp_config_path().read_text(encoding="utf-8"))
+    assert "custom" in mcp_data["mcpServers"]
+    assert "omi" in mcp_data["mcpServers"]
+
+    hooks_data = json.loads(agents.agy_hooks_path().read_text(encoding="utf-8"))
+    assert "user-hook" in hooks_data
+    assert agents.AGY_HOOK_NAME in hooks_data
+
+    agents_text = agents.agy_agents_path().read_text(encoding="utf-8")
+    assert "Always be concise." in agents_text
+    assert seeds.AGY_BOOTSTRAP_START in agents_text
+
+
+def test_agy_setup_refuses_corrupt_json(tmp_path: Path, agy_home: Path) -> None:
+    agents.agy_mcp_config_path().parent.mkdir(parents=True, exist_ok=True)
+    agents.agy_mcp_config_path().write_text("{not valid json", encoding="utf-8")
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path, "agy"), log=_quiet)
+
+
+def test_agy_setup_fails_without_agy_install(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    missing = tmp_path / "nonexistent"
+    monkeypatch.setattr(agents, "agy_config_dir", lambda: missing)
+    monkeypatch.setattr(agents, "agy_cli_dir", lambda: missing)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path, "agy"), log=_quiet)
+
+
+def test_agy_dry_run_changes_nothing(tmp_path: Path, agy_home: Path) -> None:
+    run_setup_for(_config(tmp_path, "agy", dry_run=True), log=_quiet)
+    assert not agents.agy_mcp_config_path().exists()
+    assert not agents.agy_hooks_path().exists()
+    assert not agents.agy_agents_path().exists()
+    assert not agents.agy_skill_dir().exists()
+
+
+def test_diagnose_agy_reports_state(tmp_path: Path, agy_home: Path) -> None:
+    config = _config(tmp_path, "agy")
+    before = {r.key: r for r in agents.diagnose_agy(config)}
+    assert before["agy_mcp_registration"].level == "fail"
+    assert before["agy_hooks"].level == "fail"
+    assert before["agy_skill"].level == "fail"
+    assert before["agy_bootstrap"].level == "fail"
+
+    run_setup_for(config, log=_quiet)
+    after = {r.key: r for r in agents.diagnose_agy(config)}
+    assert after["agy_root"].level == "ok"
+    assert after["agy_mcp_registration"].level == "ok"
+    assert after["agy_hooks"].level == "ok"
+    assert after["agy_skill"].level == "ok"
+    assert after["agy_bootstrap"].level == "ok"
+
+
+def test_agy_antigravity_alias(tmp_path: Path, agy_home: Path) -> None:
+    config = _config(tmp_path, "antigravity")
+    actions = run_setup_for(config, log=_quiet)
+    assert any("register MCP server 'omi'" in a for a in actions)
+    assert agents.agy_mcp_config_path().is_file()
+

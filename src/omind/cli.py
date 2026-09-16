@@ -5,7 +5,7 @@
 Subcommands:
   * ``omind setup``  — provision the OMI/Obsidian MCP wiring for an AI agent
     (``--agent`` claude (default), hermes, openclaw, opencode, codex, gemini,
-    deepseek, poolside, goose, claude-desktop, kiro, vscode, q).
+    deepseek, poolside, goose, claude-desktop, kiro, vscode, q, agy).
   * ``omind serve``  — run the local web UI over an OMI memory folder.
   * ``omind doctor`` — diagnose the wiring.
   * ``omind export`` — write the entire OMI dataset to a json or tar.gz bundle.
@@ -645,7 +645,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--harness",
         default="claude",
         help="harness whose event shape + reply format this hook speaks "
-        "(claude, poolside); default: claude",
+        "(claude, poolside, agy); default: claude",
     )
     _add_vault_args(hook)
 
@@ -725,7 +725,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--harness",
         default="claude",
         help="harness whose event shape + block-output format the adapter targets "
-        "(claude, hermes, opencode, codex, gemini, deepseek, poolside, openclaw); "
+        "(claude, hermes, opencode, codex, gemini, deepseek, poolside, openclaw, agy); "
         "default: claude",
     )
     guard.add_argument(

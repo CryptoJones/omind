@@ -916,3 +916,77 @@ def test_post_tool_use_injects_midturn_recall_only_for_an_injecting_harness(
     assert specific["hookEventName"] == "PostToolUse"
     assert "[[telesto deploy runbook]]" in specific["additionalContext"]
     assert guard.actions_since_consult(sid) == 0
+
+
+def test_run_hook_pre_invocation_agy_injects_steps(tmp_path: Path) -> None:
+    (tmp_path / "Memory Workflow.md").write_text(
+        "# Memory Workflow\nAlways consult memory.", encoding="utf-8"
+    )
+    transcript = tmp_path / "transcript.jsonl"
+    transcript.write_text(
+        json.dumps({"type": "USER_INPUT", "content": "hello agy"}) + "\n",
+        encoding="utf-8",
+    )
+    event = {
+        "conversationId": "conv-agy-prime-1",
+        "transcriptPath": str(transcript),
+    }
+    out = io.StringIO()
+    rc = hooks.run_hook(
+        "PreInvocation",
+        tmp_path,
+        stdin=io.StringIO(json.dumps(event)),
+        stdout=out,
+        harness="agy",
+    )
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert "injectSteps" in payload
+    steps = payload["injectSteps"]
+    assert len(steps) == 1
+    assert "ephemeralMessage" in steps[0]
+    msg = steps[0]["ephemeralMessage"]
+    assert "Always consult memory." in msg
+
+
+def test_run_hook_post_tool_use_agy_outputs_empty_object(tmp_path: Path) -> None:
+    event = {
+        "toolCall": {
+            "name": "run_command",
+            "args": {"CommandLine": "git status"},
+        },
+        "conversationId": "conv-agy-post-1",
+    }
+    out = io.StringIO()
+    rc = hooks.run_hook(
+        "PostToolUse",
+        tmp_path,
+        stdin=io.StringIO(json.dumps(event)),
+        stdout=out,
+        harness="agy",
+    )
+    assert rc == 0
+    assert json.loads(out.getvalue()) == {}
+    journal = (hooks.journal_dir(tmp_path) / hooks.journal_name()).read_text(encoding="utf-8")
+    assert "run_command" in journal and "git status" in journal
+
+
+def test_run_hook_stop_agy_armed_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from omind import loopguard
+
+    monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+    loopguard.arm(reason="keep working on task")
+    out = io.StringIO()
+    rc = hooks.run_hook(
+        "Stop",
+        tmp_path,
+        stdin=io.StringIO('{"conversationId": "conv-agy-stop-1"}'),
+        stdout=out,
+        harness="agy",
+    )
+    assert rc == 0
+    payload = json.loads(out.getvalue())
+    assert payload["decision"] == "continue"
+    assert "keep working on task" in payload["reason"]
+    loopguard.disarm()
+

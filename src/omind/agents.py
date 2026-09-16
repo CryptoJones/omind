@@ -25,6 +25,7 @@ import importlib.resources
 import json
 import os
 import shlex
+import shutil
 import sys
 from pathlib import Path
 from typing import Any, ClassVar
@@ -33,7 +34,7 @@ import tomlkit
 import tomlkit.exceptions
 import yaml
 
-from omind import paths, seeds
+from omind import filelock, paths, seeds
 from omind.hooks import HOOK_MARKER, command_is_omind_hook
 from omind.provision import (
     LEGACY_SERVER_NAME,
@@ -295,6 +296,56 @@ def goose_hints_path() -> Path:
 #: sync with :data:`seeds.GOOSE_HINTS_BOOTSTRAP_TEMPLATE`.
 GOOSE_HINTS_START = "<!-- omind:goose-bootstrap:start -->"
 GOOSE_HINTS_END = "<!-- omind:goose-bootstrap:end -->"
+
+
+# -- Antigravity CLI (agy) locations -------------------------------------------
+
+
+def agy_config_dir() -> Path:
+    """Antigravity's global customization directory: ``$AGY_CONFIG_DIR``,
+    ``$ANTIGRAVITY_CONFIG_DIR``, or ``~/.gemini/config``."""
+    for env in ("AGY_CONFIG_DIR", "ANTIGRAVITY_CONFIG_DIR"):
+        val = os.environ.get(env)
+        if val:
+            return Path(val).expanduser()
+    return Path.home() / ".gemini" / "config"
+
+
+def agy_cli_dir() -> Path:
+    """Antigravity CLI state directory: ``$AGY_HOME``, ``$ANTIGRAVITY_HOME``,
+    or ``~/.gemini/antigravity-cli``."""
+    for env in ("AGY_HOME", "ANTIGRAVITY_HOME"):
+        val = os.environ.get(env)
+        if val:
+            return Path(val).expanduser()
+    return Path.home() / ".gemini" / "antigravity-cli"
+
+
+def agy_mcp_config_path() -> Path:
+    """Antigravity's MCP configuration file (``mcp_config.json``)."""
+    return agy_config_dir() / "mcp_config.json"
+
+
+def agy_hooks_path() -> Path:
+    """Antigravity's lifecycle hooks file (``hooks.json``)."""
+    return agy_config_dir() / "hooks.json"
+
+
+def agy_agents_path() -> Path:
+    """Antigravity's global rules / instruction file (``AGENTS.md``)."""
+    return agy_config_dir() / "AGENTS.md"
+
+
+def agy_skill_dir() -> Path:
+    """Where omind writes the packaged omind skill for Antigravity."""
+    return agy_config_dir() / "skills" / "omind"
+
+
+AGY_HOOK_NAME = "omind-omi-memory"
+AGY_GUARD_MARKER = "guard adapter --harness agy"
+AGY_HOOK_MARKER = "--harness agy"
+AGY_BOOTSTRAP_START = seeds.AGY_BOOTSTRAP_START
+AGY_BOOTSTRAP_END = seeds.AGY_BOOTSTRAP_END
 
 
 # -- MCP-only agent locations (Claude Desktop, Kiro, VS Code, Amazon Q) --------
@@ -2183,6 +2234,268 @@ class GooseProvisioner(AgentProvisioner):
             )
 
 
+# -- Antigravity CLI (agy) -----------------------------------------------------
+
+
+class AgyProvisioner(AgentProvisioner):
+    """Wire Google Antigravity CLI (agy) into OMI memory, hooks, skill, and bootstrap.
+
+    Antigravity CLI reads:
+    - MCP servers from ``~/.gemini/config/mcp_config.json`` under ``mcpServers``;
+    - Lifecycle hooks from ``~/.gemini/config/hooks.json``;
+    - Custom skills from ``~/.gemini/config/skills/<name>/SKILL.md``;
+    - Global instructions from ``~/.gemini/config/AGENTS.md``.
+
+    omind configures:
+    1. The ``omi`` MCP server in ``mcp_config.json``;
+    2. Lifecycle hooks in ``hooks.json``:
+       - ``PreToolUse`` -> ``omind guard adapter --harness agy`` (hard-block guard);
+       - ``PostToolUse`` -> ``omind hook PostToolUse --harness agy`` (action accounting);
+       - ``PreInvocation`` -> ``omind hook PreInvocation --harness agy`` (OMI priming);
+       - ``Stop`` -> ``omind hook Stop --harness agy`` (loop guard);
+    3. The packaged ``omind`` skill in ``~/.gemini/config/skills/omind/``;
+    4. The global bootstrap instructions in ``~/.gemini/config/AGENTS.md``.
+    """
+
+    AGENT_LABEL = "Antigravity CLI (agy)"
+    INSTALL_HINT = "Install the Antigravity CLI (`agy`), then re-run."
+    DONE_MESSAGE = (
+        "Done. Restart the Antigravity CLI to load the OMI memory tools, hooks, and skill."
+    )
+
+    def agent_root(self) -> Path:
+        root = agy_config_dir()
+        if not root.is_dir() and agy_cli_dir().is_dir():
+            return agy_cli_dir()
+        return root
+
+    def skill_dir(self) -> Path:
+        return agy_skill_dir()
+
+    def config_path(self) -> Path:
+        return agy_mcp_config_path()
+
+    def hooks_path(self) -> Path:
+        return agy_hooks_path()
+
+    def agents_path(self) -> Path:
+        return agy_agents_path()
+
+    def check_prereqs(self) -> None:
+        super().check_prereqs()
+        root = self.agent_root()
+        if not root.is_dir() and not agy_cli_dir().is_dir() and shutil.which("agy") is None:
+            message = (
+                f"{self.AGENT_LABEL} not found: {root} does not exist. "
+                f"{self.INSTALL_HINT}"
+            )
+            if self.config.dry_run:
+                self.log(f"  WARNING: {message}")
+            else:
+                raise ProvisionError(message)
+        else:
+            self.log(f"  {self.AGENT_LABEL} found: {root if root.is_dir() else agy_cli_dir()}")
+
+    def registered_server(self) -> dict[str, Any] | None:
+        try:
+            data = self._read_settings(self.config_path())
+        except ProvisionError:
+            return None
+        servers = data.get("mcpServers")
+        if not isinstance(servers, dict):
+            return None
+        entry = servers.get(self.config.server_name)
+        return entry if isinstance(entry, dict) else None
+
+    def desired_server_entry(self) -> dict[str, Any]:
+        omind = canonical_omind_exe()
+        return {
+            "command": omind,
+            "args": [
+                "node",
+                "--vault",
+                str(self.config.vault),
+                "--folder",
+                self.config.folder,
+            ],
+        }
+
+    def register_mcp(self) -> None:
+        path = self.config_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            data = self._read_settings(path)
+            desired = self.desired_server_entry()
+            if self.registered_server() == desired and not self.config.force:
+                self.log(
+                    f"  MCP server '{self.config.server_name}' already points at "
+                    f"{self.config.omi_dir}"
+                )
+                return
+            servers = data.get("mcpServers")
+            if not isinstance(servers, dict):
+                servers = {}
+            self._drop_legacy_entry(servers)
+            servers[self.config.server_name] = desired
+            data["mcpServers"] = servers
+            self._record(
+                f"register MCP server '{self.config.server_name}' in {path} -> "
+                f"{self.config.omi_dir}"
+            )
+            if not self.config.dry_run:
+                paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
+    def desired_hook_block(self) -> dict[str, Any]:
+        omind = shlex.quote(canonical_omind_exe())
+        omi_dir = shlex.quote(str(self.config.omi_dir))
+        return {
+            "PreToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": f"{omind} guard adapter --harness agy --omi-dir {omi_dir}",
+                            "timeout": 30,
+                        }
+                    ],
+                }
+            ],
+            "PostToolUse": [
+                {
+                    "matcher": "*",
+                    "hooks": [
+                        {
+                            "type": "command",
+                            "command": (
+                                f"{omind} hook PostToolUse --harness agy --omi-dir {omi_dir}"
+                            ),
+                            "timeout": 30,
+                        }
+                    ],
+                }
+            ],
+            "PreInvocation": [
+                {
+                    "type": "command",
+                    "command": f"{omind} hook PreInvocation --harness agy --omi-dir {omi_dir}",
+                    "timeout": 30,
+                }
+            ],
+            "Stop": [
+                {
+                    "type": "command",
+                    "command": f"{omind} hook Stop --harness agy --omi-dir {omi_dir}",
+                    "timeout": 30,
+                }
+            ],
+        }
+
+    def _read_hooks(self) -> dict[str, Any]:
+        return self._read_settings(self.hooks_path())
+
+    def _hooks_wired(self) -> bool:
+        try:
+            data = self._read_hooks()
+        except ProvisionError:
+            return False
+        entry = data.get(AGY_HOOK_NAME)
+        return isinstance(entry, dict) and entry == self.desired_hook_block()
+
+    def install_hooks(self) -> None:
+        path = self.hooks_path()
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            data = self._read_hooks()
+            desired = self.desired_hook_block()
+            if data.get(AGY_HOOK_NAME) == desired and not self.config.force:
+                self.log(f"  OMI hooks already installed in {path}")
+                return
+            data[AGY_HOOK_NAME] = desired
+            self._record(f"install OMI hooks in {path}")
+            if not self.config.dry_run:
+                paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+
+    def bootstrap_content(self) -> str:
+        return seeds.AGY_AGENTS_BOOTSTRAP_TEMPLATE.format(
+            vault=self.config.vault,
+            folder=self.config.folder,
+            omi_dir=self.config.omi_dir,
+        )
+
+    def bootstrap_installed(self) -> bool:
+        path = self.agents_path()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except OSError:
+            return False
+        return AGY_BOOTSTRAP_START in text and AGY_BOOTSTRAP_END in text
+
+    def install_bootstrap(self) -> None:
+        path = self.agents_path()
+        desired = self.bootstrap_content().rstrip() + "\n"
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            try:
+                current = path.read_text(encoding="utf-8") if path.is_file() else ""
+            except OSError as exc:
+                raise ProvisionError(f"could not read {path}: {exc}") from exc
+
+            start = current.find(AGY_BOOTSTRAP_START)
+            end = current.find(AGY_BOOTSTRAP_END)
+            if start >= 0 and end >= start:
+                end += len(AGY_BOOTSTRAP_END)
+                updated = current[:start].rstrip() + "\n\n" + desired + current[end:].lstrip()
+            elif current.strip():
+                updated = current.rstrip() + "\n\n" + desired
+            else:
+                updated = "# Global Antigravity Instructions\n\n" + desired
+
+            if updated == current and not self.config.force:
+                self.log(f"  OMI bootstrap pointer already installed in {path}")
+                return
+
+            self._record(f"install OMI bootstrap pointer in {path}")
+            if not self.config.dry_run:
+                paths.atomic_write_text(path, updated)
+
+    def integrate(self) -> None:
+        self.register_mcp()
+        self.install_hooks()
+        self.install_packaged_skill(self.skill_dir())
+        self.install_bootstrap()
+
+    def verify(self) -> None:
+        if self.config.dry_run:
+            return
+        mcp_ok = self.registered_server() == self.desired_server_entry()
+        hooks_ok = self._hooks_wired()
+        if mcp_ok:
+            self.log(
+                f"  verified: MCP server '{self.config.server_name}' wired into Antigravity "
+                f"({self.config_path()})"
+            )
+        else:
+            self.log(
+                f"  NOTE: could not confirm '{self.config.server_name}' in Antigravity config; "
+                "re-run with --force."
+            )
+        if hooks_ok:
+            self.log(f"  verified: OMI hooks wired into Antigravity ({self.hooks_path()})")
+        else:
+            self.log(
+                "  NOTE: could not confirm OMI hooks in Antigravity hooks.json; "
+                "re-run with --force."
+            )
+        if self.bootstrap_installed():
+            self.log(f"  verified: OMI bootstrap installed in {self.agents_path()}")
+        else:
+            self.log(
+                f"  NOTE: could not confirm OMI bootstrap in {self.agents_path()}; "
+                "re-run with --force."
+            )
+
+
 # -- MCP-only targets (register the omi server, no guard / skill / priming) -----
 
 
@@ -2808,6 +3121,83 @@ def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
     return results
 
 
+def diagnose_agy(config: SetupConfig) -> list[CheckResult]:
+    """Doctor checks for Antigravity (agy): tools + root + OMI folder + MCP + hooks +
+    skill + bootstrap."""
+    prov = AgyProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+    root = prov.agent_root()
+    if root.is_dir() or agy_cli_dir().is_dir() or shutil.which("agy") is not None:
+        results.append(CheckResult("agy_root", "ok", f"Antigravity found: {root}"))
+    else:
+        results.append(
+            CheckResult(
+                "agy_root",
+                "fail",
+                f"Antigravity config directory not found: {root} does not exist",
+            )
+        )
+    results.extend(_diagnose_omi_folder(config))
+    name = config.server_name
+    server = prov.registered_server()
+    if server is None:
+        results.append(
+            CheckResult(
+                "agy_mcp_registration",
+                "fail",
+                f"MCP server '{name}' not in {prov.config_path()} (run `omind setup --agent agy`)",
+            )
+        )
+    elif server != prov.desired_server_entry():
+        results.append(
+            CheckResult(
+                "agy_mcp_registration",
+                "warn",
+                f"MCP server '{name}' in {prov.config_path()} differs from expected wiring "
+                f"(run `omind setup --agent agy`)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult("agy_mcp_registration", "ok", f"MCP server '{name}' -> {config.omi_dir}")
+        )
+    if prov._hooks_wired():
+        results.append(CheckResult("agy_hooks", "ok", f"OMI hooks wired into {prov.hooks_path()}"))
+    else:
+        results.append(
+            CheckResult(
+                "agy_hooks",
+                "fail",
+                f"OMI hooks missing from {prov.hooks_path()} (run `omind setup --agent agy`)",
+            )
+        )
+    skill_file = prov.skill_dir() / paths.AGENT_SKILL_FILENAME
+    if skill_file.is_file():
+        results.append(CheckResult("agy_skill", "ok", f"omind skill found: {skill_file}"))
+    else:
+        results.append(
+            CheckResult(
+                "agy_skill",
+                "fail",
+                f"omind skill missing from {skill_file} (run `omind setup --agent agy`)",
+            )
+        )
+    if prov.bootstrap_installed():
+        results.append(
+            CheckResult("agy_bootstrap", "ok", f"OMI bootstrap pointer in {prov.agents_path()}")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "agy_bootstrap",
+                "fail",
+                f"OMI bootstrap pointer missing from {prov.agents_path()} "
+                "(run `omind setup --agent agy`)",
+            )
+        )
+    return results
+
+
 PROVISIONERS: dict[str, type[Provisioner]] = {
     "claude": Provisioner,
     "hermes": HermesProvisioner,
@@ -2822,6 +3212,8 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "deepseek": DeepseekProvisioner,
     "poolside": PoolsideProvisioner,
     "goose": GooseProvisioner,
+    "agy": AgyProvisioner,
+    "antigravity": AgyProvisioner,
 }
 
 DIAGNOSERS = {
@@ -2838,6 +3230,8 @@ DIAGNOSERS = {
     "deepseek": diagnose_deepseek,
     "poolside": diagnose_poolside,
     "goose": diagnose_goose,
+    "agy": diagnose_agy,
+    "antigravity": diagnose_agy,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)
@@ -2845,7 +3239,7 @@ AGENT_CHOICES = tuple(PROVISIONERS)
 
 def run_setup_for(config: SetupConfig, log: Logger = print) -> list[str]:
     """Run the provisioner for ``config.agent`` (claude, hermes, openclaw, opencode,
-    codex, gemini, deepseek, poolside, goose, claude-desktop, kiro, vscode, q)."""
+    codex, gemini, deepseek, poolside, goose, agy, claude-desktop, kiro, vscode, q)."""
     return PROVISIONERS[config.agent](config=config, log=log).run()
 
 

@@ -70,8 +70,11 @@ INJECTING_HARNESSES = frozenset({"claude"})
 #: this event to inject the same priming the Claude SessionStart hook does — but
 #: only once per session (see :func:`emit_pre_llm_call_context`).
 HERMES_PRIME_EVENT = "pre_llm_call"
-#: Every event the ``omind hook`` CLI accepts (Claude's three + Hermes' one).
-ALL_HOOK_EVENTS = HANDLED_EVENTS + (HERMES_PRIME_EVENT,)
+#: Antigravity has no SessionStart hook; it fires ``PreInvocation`` before every
+#: LLM turn and consumes an ``{"injectSteps": [...]}`` payload on stdout.
+AGY_PRIME_EVENT = "PreInvocation"
+#: Every event the ``omind hook`` CLI accepts (Claude's three + Hermes' one + Antigravity's one).
+ALL_HOOK_EVENTS = HANDLED_EVENTS + (HERMES_PRIME_EVENT, AGY_PRIME_EVENT)
 JOURNAL_DIRNAME = "Journal"  # subfolder keeping dailies out of listings/index
 JOURNAL_TAGS = ("session-journal", "omi")
 _TARGET_LIMIT = 80
@@ -857,6 +860,49 @@ def emit_pre_llm_call_context(
         _record_failure(f"emit_pre_llm_call_context({omi_dir})", exc)
 
 
+def emit_pre_invocation_context(
+    omi_dir: Path | str,
+    *,
+    stdin: TextIO | None = None,
+    stdout: TextIO | None = None,
+    harness: str = "agy",
+) -> None:
+    """Emit OMI priming and turn preflight for Antigravity's ``PreInvocation`` hook."""
+    sink = stdout if stdout is not None else sys.stdout
+    try:
+        from omind import harness as harness_mod
+
+        event = harness_mod.translate_event(harness, read_event(stdin))
+        session = str(event.get("session_id") or "")
+        from omind import guard
+
+        preflight = guard.preflight_turn(event, Path(omi_dir))
+        first = not _already_primed(session) if session else True
+        priming = (
+            build_session_start_context(omi_dir, cwd=event.get("cwd")) if first else ""
+        )
+        context = "\n\n".join(part for part in (priming, preflight) if part)
+        if not context:
+            sink.write(json.dumps({}) + "\n")
+            return
+        sink.write(harness_mod.render_context(harness, "PreInvocation", context))
+        if first:
+            from omind import ai_usage
+
+            baseline = build_session_start_context(
+                omi_dir,
+                _context_cap=_TOTAL_CONTEXT_CHAR_CAP,
+                cwd=event.get("cwd"),
+            )
+            ai_usage.record_priming(
+                omi_dir,
+                len(priming),
+                avoided_characters=max(0, len(baseline) - len(priming)),
+            )
+    except Exception as exc:
+        _record_failure(f"emit_pre_invocation_context({omi_dir})", exc)
+
+
 def run_hook(
     event_name: str,
     omi_dir: Path | str,
@@ -895,6 +941,9 @@ def run_hook(
             return 0
         if event_name == HERMES_PRIME_EVENT:
             emit_pre_llm_call_context(omi_dir, stdin=stdin, stdout=stdout)
+            return 0
+        if event_name == AGY_PRIME_EVENT:
+            emit_pre_invocation_context(omi_dir, stdin=stdin, stdout=stdout, harness=harness)
             return 0
         event = harness_mod.translate_event(harness, read_event(stdin))
         line = format_entry(event, event_name=event_name)
@@ -991,6 +1040,9 @@ def run_hook(
                 "PostToolUse/guard.record_freshness_outcome",
                 lambda: guard.record_freshness_outcome(event),
             )
+            if harness in ("agy", "antigravity"):
+                sink = stdout if stdout is not None else sys.stdout
+                sink.write(json.dumps({}) + "\n")
     except Exception as exc:
         _record_failure(f"run_hook({event_name}, {omi_dir})", exc)
         return 0

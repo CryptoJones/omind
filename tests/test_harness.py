@@ -18,10 +18,13 @@ def test_specs_and_fallback() -> None:
     assert harness.spec_for("codex").block_format == harness.FMT_CODEX_HOOK
     assert harness.spec_for("gemini").block_format == harness.FMT_GEMINI
     assert harness.spec_for("openclaw").block_format == harness.FMT_OPENCLAW
+    assert harness.spec_for("agy").block_format == harness.FMT_AGY
+    assert harness.spec_for("antigravity").block_format == harness.FMT_AGY
     assert harness.spec_for("unknown-harness").name == "claude"  # safe fallback
     # Gemini's BeforeTool hook hard-blocks; OpenClaw is detect-only until a live
     # gateway is confirmed to enforce a deny (issue #88).
     assert harness.spec_for("gemini").can_block() is True
+    assert harness.spec_for("agy").can_block() is True
     assert harness.spec_for("openclaw").can_block() is False
     assert all(
         s.can_block() for k, s in harness.HARNESSES.items() if k != "openclaw"
@@ -101,6 +104,18 @@ def test_render_gemini() -> None:
     assert code == 0 and out == "" and err == ""
 
 
+def test_render_agy() -> None:
+    # Antigravity's PreToolUse hook reads a JSON decision on stdout, exit 0.
+    deny = guard.Verdict(allow=False, reason="omi-guard (hard): blocked")
+    code, out, err = _render(deny, harness.FMT_AGY)
+    assert code == 0 and err == ""
+    assert json.loads(out) == {"decision": "deny", "reason": "omi-guard (hard): blocked"}
+    # allow -> {"decision": "allow"} on stdout, exit 0.
+    code, out, err = _render(guard.Verdict(allow=True), harness.FMT_AGY)
+    assert code == 0 and err == ""
+    assert json.loads(out) == {"decision": "allow"}
+
+
 def test_render_openclaw_detect_only() -> None:
     # OpenClaw's gateway reads an {allow,reason,rule_id} JSON; detect-only means we
     # always exit 0 (advisory) even on a deny — issue #88.
@@ -123,6 +138,7 @@ def test_selftest_all_pass() -> None:
         "deepseek",
         "poolside",
         "openclaw",
+        "agy",
     }
     assert all(r["ok"] for r in results)
     assert all(r["blocked"] for r in results)  # every canned case is a hard rule
@@ -137,6 +153,8 @@ def test_selftest_all_pass() -> None:
     assert by["poolside"]["format"] == harness.FMT_POOLSIDE
     assert '"permission_decision": "deny"' in by["poolside"]["rendered"]  # snake_case deny
     assert by["openclaw"]["format"] == harness.FMT_OPENCLAW
+    assert by["agy"]["format"] == harness.FMT_AGY
+    assert '"decision": "deny"' in by["agy"]["rendered"]
 
 
 def test_run_guard_selftest_action() -> None:
@@ -249,6 +267,8 @@ def test_render_context_and_stop_block_per_harness() -> None:
     assert pool == {
         "hook_specific_output": {"hook_event_name": "UserPromptSubmit", "additional_context": "hi"}
     }
+    agy = json.loads(harness.render_context("agy", "PreInvocation", "hi"))
+    assert agy == {"injectSteps": [{"ephemeralMessage": "hi"}]}
     assert json.loads(harness.render_stop_block("claude", "keep going")) == {
         "decision": "block",
         "reason": "keep going",
@@ -256,5 +276,86 @@ def test_render_context_and_stop_block_per_harness() -> None:
     stop = json.loads(harness.render_stop_block("poolside", "keep going"))
     assert stop["continue"] is True and stop["reason"] == "keep going"
     assert stop["hook_specific_output"]["additional_context"] == "keep going"
+    agy_stop = json.loads(harness.render_stop_block("agy", "keep going"))
+    assert agy_stop == {"decision": "continue", "reason": "keep going"}
     # Unknown harnesses fall back to the Claude shape, like spec_for().
     assert "hookSpecificOutput" in harness.render_context("mystery", "SessionStart", "x")
+
+
+def test_translate_event_maps_agy_shape_onto_claude() -> None:
+    raw = {
+        "toolCall": {
+            "name": "run_command",
+            "args": {"CommandLine": "git status", "Cwd": "/repo"},
+        },
+        "conversationId": "conv-12345",
+    }
+    event = harness.translate_event("agy", raw)
+    assert event["tool_name"] == "run_command"
+    assert event["session_id"] == "conv-12345"
+    assert event["tool_input"]["command"] == "git status"
+    assert event["tool_input"]["CommandLine"] == "git status"
+
+    file_event = {
+        "toolCall": {
+            "name": "view_file",
+            "args": {"AbsolutePath": "/Users/user/notes/test.md"},
+        },
+        "conversationId": "conv-54321",
+    }
+    translated_file = harness.translate_event("agy", file_event)
+    assert translated_file["tool_input"]["file_path"] == "/Users/user/notes/test.md"
+
+    # MCP tool prefix mapping
+    mcp_event = {
+        "toolCall": {
+            "name": "omi_search-vault",
+            "args": {"query": "auth"},
+        },
+        "conversationId": "conv-mcp",
+    }
+    assert harness.translate_event("agy", mcp_event)["tool_name"] == "mcp__omi__search-vault"
+
+    mcp_double_event = {
+        "toolCall": {
+            "name": "omi__read-note",
+            "args": {"name": "test"},
+        },
+        "conversationId": "conv-mcp-double",
+    }
+    assert harness.translate_event("agy", mcp_double_event)["tool_name"] == "mcp__omi__read-note"
+
+
+def test_translate_event_recovers_agy_prompt_from_transcript(tmp_path: Path) -> None:
+    transcript = tmp_path / "transcript.jsonl"
+    lines = [
+        {"type": "SYSTEM", "content": "system prompt"},
+        {"type": "USER_INPUT", "content": "first user query"},
+        {"type": "PLANNER_RESPONSE", "content": "thinking..."},
+        {"type": "USER_INPUT", "content": "second user query: update auth tokens"},
+        {"type": "PLANNER_RESPONSE", "content": "working on it"},
+    ]
+    transcript.write_text("\n".join(json.dumps(line) for line in lines) + "\n", encoding="utf-8")
+
+    event = harness.translate_event(
+        "agy",
+        {
+            "transcriptPath": str(transcript),
+            "conversationId": "conv-transcript",
+        },
+    )
+    assert event["prompt"] == "second user query: update auth tokens"
+
+    # Already provided prompt is preserved
+    kept = harness.translate_event(
+        "agy",
+        {
+            "prompt": "explicit prompt",
+            "transcriptPath": str(transcript),
+        },
+    )
+    assert kept["prompt"] == "explicit prompt"
+
+    assert harness.agy_last_prompt(None) == ""
+    assert harness.agy_last_prompt(str(tmp_path / "absent.jsonl")) == ""
+

@@ -107,6 +107,23 @@ the exact order of operations._
 
 ## Done
 
+### Shipped — 2026-09-15 (v9.5.0)
+
+- [x] **Agents: add Antigravity CLI (`agy`) as an omind setup target** ([#354](https://github.com/CryptoJones/omind/issues/354)) — _enhancement (agents)_ —
+  wire Google Antigravity CLI (`agy` / `antigravity`) into OMI:
+  - Register `omi` MCP server in `~/.gemini/config/mcp_config.json` under `mcpServers`.
+  - Install lifecycle hooks in `~/.gemini/config/hooks.json` (`PreToolUse`, `PostToolUse`, `PreInvocation`, `Stop`).
+  - Install packaged skill in `~/.gemini/config/skills/omind/`.
+  - Install managed bootstrap rules in `~/.gemini/config/AGENTS.md`.
+  - `omind doctor --agent agy` checks wiring and reports status.
+  - `omind guard adapter --harness agy` supports hard blocking, tool call normalization, and self-protection.
+  - `omind hook --harness agy` supports `PreInvocation` context injection (`injectSteps`), `PostToolUse` action accounting, and `Stop` loop control.
+  - `omind quickstart --agent agy` renders copy-paste manual configuration steps.
+- [x] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
+  consult continuity: continuation-aware preflight + retry carry + per-turn action budget.
+- [x] **Agents: add goose (Block) as an omind setup target** ([#353](https://github.com/CryptoJones/omind/issues/353)) — _enhancement (agents)_ —
+  wire Block's `goose` agent into OMI memory + priming.
+
 ### Shipped — 2026-09-13 (v9.4.0)
 
 - [x] **Merge: 3-way note merge driver silently drops note Scope** ([#341](https://github.com/CryptoJones/omind/issues/341)) — _bug (data loss)_ —

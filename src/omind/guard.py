@@ -1190,6 +1190,10 @@ _GLOBAL_CONFIG_FILES = frozenset(
         ".config/opencode/opencode.json",
         ".config/opencode/plugin/omi-guard.js",
         ".gemini/settings.json",
+        ".gemini/config/mcp_config.json",
+        ".gemini/config/hooks.json",
+        ".gemini/config/AGENTS.md",
+        ".gemini/antigravity-cli/settings.json",
         ".openclaw/openclaw.json",
         ".openclaw/omind/MEMORY.md",
     }

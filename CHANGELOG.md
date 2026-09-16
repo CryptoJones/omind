@@ -7,7 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.5.0] - 2026-09-15
+
 ### Added
+- **Antigravity CLI (`agy`) support (#354).** Full OMI memory, lifecycle hooks, guard
+  enforcement, packaged skill, and bootstrap rules for Google Antigravity CLI
+  (`agy` / `antigravity`):
+  - `omind setup --agent agy` wires the `omi` MCP server in
+    `~/.gemini/config/mcp_config.json`, installs lifecycle hooks (`PreToolUse`,
+    `PostToolUse`, `PreInvocation`, `Stop`) into `~/.gemini/config/hooks.json`,
+    installs the packaged skill in `~/.gemini/config/skills/omind/`, and injects
+    global OMI instructions into `~/.gemini/config/AGENTS.md`.
+  - `omind doctor --agent agy` verifies MCP registration, hooks wiring, skill
+    presence, and bootstrap instruction markers.
+  - `omind guard adapter --harness agy` supports hard blocking (`decision: deny`),
+    tool call parsing, and path traversal protection.
+  - `omind hook --harness agy` supports `PreInvocation` context injection
+    (`injectSteps: [{ephemeralMessage: ...}]`), `PostToolUse` action accounting,
+    and `Stop` autonomous-loop control (`decision: continue`).
+  - `omind quickstart --agent agy` outputs personalized copy-paste wiring steps.
 - **Consult continuity across long sessions (#296).** Measured on a live box,
   ~40% of turns started with the consult gate auto-cleared and nothing
   injected, because the preflight ranked notes against the prompt alone and a
@@ -27,7 +45,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `omi-gate-carry`, `omi-gate-rearm`, `omi-gate-rearm-no-match`) and the whole
   `omi-gate*` family is excluded from the fine-tune corpus and from the
   OpenCode plugin's enforced denies.
-- **`omind setup --agent goose`** wires Block's [goose](https://block.github.io/goose/)
+- **`omind setup --agent goose` (#353)** wires Block's [goose](https://block.github.io/goose/)
   on-machine agent into OMI. goose has no blocking pre-tool or session-start
   shell hooks, so it gets OMI **memory + priming** (no guard): the `omi` MCP
   server is registered as a stdio *extension* under the `extensions` map in
@@ -3211,6 +3229,7 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
   OMI memory notes, with structured-form and raw-Markdown editing.
 - End-user install methods and a `CONTRIBUTING` guide.
 
+[9.5.0]: https://github.com/CryptoJones/omind/releases/tag/v9.5.0
 [9.4.0]: https://github.com/CryptoJones/omind/releases/tag/v9.4.0
 [9.3.0]: https://github.com/CryptoJones/omind/releases/tag/v9.3.0
 [9.2.1]: https://github.com/CryptoJones/omind/releases/tag/v9.2.1
