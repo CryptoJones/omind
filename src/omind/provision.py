@@ -79,27 +79,19 @@ def _enforce_hook_dest() -> Path:
 
 
 def _is_windows_store_stub(path: str) -> bool:
-    """True when a resolved executable is the Microsoft Store app-execution-alias stub.
+    """Return whether ``path`` is treated as a Microsoft Store Python alias.
 
-    On Windows, ``python3`` and ``python`` can resolve to the Store stub at
-    ``C:\\Users\\<user>\\AppData\\Local\\Microsoft\\WindowsApps\\python*.exe`` when
-    no real Python is installed. The stub prints ``Python was not found`` and
-    exits non-zero — silently breaking any hook that shells out to it (#356).
+    Only paths containing ``WindowsApps`` on Windows are treated as aliases.
     """
     return _windows() and "WindowsApps" in os.path.normpath(path)
 
 
 def _resolve_python() -> str | None:
-    """Resolve a usable Python interpreter for the enforcement hook command.
+    """Return the preferred Python command that does not resolve to a Store alias.
 
-    On Windows, real Python installs (winget, python.org) create ``python.exe``
-    but NOT ``python3.exe`` — ``python3`` keeps resolving to the Store stub even
-    after a real install. So prefer ``python`` on Windows and fall back to
-    ``python3``; on POSIX prefer ``python3`` (the conventional name) and fall back
-    to ``python`` — skipping any candidate that resolves to the Store stub.
-
-    Returns the bare command name (e.g. ``python`` / ``python3``), or ``None``
-    when every candidate is the Store stub or absent.
+    Prefers ``python`` on Windows and ``python3`` elsewhere, then tries the
+    alternate name. Returns the bare command name, or ``None`` if neither name
+    resolves to a non-Store path.
     """
     candidates = ("python", "python3") if _windows() else ("python3", "python")
     for name in candidates:
@@ -607,6 +599,10 @@ class Provisioner:
         ``self.missing_tools``, the steps that shell out to them skip with a
         warning, and everything else proceeds — the same on a real run as on
         ``--dry-run`` (#258).
+
+        The enforcement hook also requires ``python`` or ``python3`` to resolve
+        outside the Microsoft Store stub. Failure to resolve either command raises
+        :class:`ProvisionError`, or logs a warning during a dry run.
         """
         required = self.REQUIRED_TOOLS
         missing = [tool for tool in required if shutil.which(tool) is None]
@@ -823,7 +819,11 @@ class Provisioner:
         )
 
     def _omind_hook_entries(self) -> dict[str, list[dict[str, Any]]]:
-        """The hooks-array entry omind owns, per handled event."""
+        """Return the hooks-array entry omind owns for each handled event.
+
+        The ``PostToolUse`` entry runs the enforcement script with the resolved
+        Python command, falling back to ``python3`` if none is available.
+        """
         entries: dict[str, list[dict[str, Any]]] = {}
         for event in HANDLED_EVENTS:
             hooks_list: list[dict[str, Any]] = [
@@ -1479,7 +1479,7 @@ def _enforce_hook_python_is_stub(command_text: str) -> str | None:
     Extracts the bare command from the enforcement hook entry
     (e.g. ``python3 /path/omi-enforce.py``) and checks whether ``shutil.which``
     of it lands in ``WindowsApps``. Returns the command name for the diagnostic
-    message, or ``None`` when the command is clean.
+    message, or ``None`` when it is absent, unresolvable, or not a Store stub.
     """
     # The enforcement hook command is ``<python> <path>``; the python command
     # is the first whitespace-delimited token.
@@ -1494,12 +1494,11 @@ def _enforce_hook_python_is_stub(command_text: str) -> str | None:
 
 
 def _diagnose_python() -> CheckResult:
-    """#356: the enforcement hook (omi-enforce.py) shells out to python. On
-    Windows ``python3`` resolves to the Microsoft Store app-execution-alias stub
-    (which prints ``Python was not found`` and exits non-zero), silently breaking
-    the hook on every fresh Windows install. Surface the stub — or a missing
-    Python entirely — at doctor time instead of as a cryptic hook failure
-    mid-session. Mirrors the standalone ``_diagnose_jq`` check."""
+    """Report whether a Python command is available for the enforcement hook.
+
+    A missing command or Store-only resolution produces a failing check with
+    platform-specific installation guidance.
+    """
     resolved = _resolve_python()
     if resolved is not None:
         return CheckResult(
@@ -1632,7 +1631,11 @@ def _diagnose_claude_skill() -> CheckResult:
 
 
 def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
-    """Inspect settings.json for omind's auto-memory hooks (pure read)."""
+    """Inspect settings.json for omind's auto-memory hooks (pure read).
+
+    Also verifies the enforcement hook script and rejects an interpreter that
+    resolves to the Microsoft Store stub on Windows.
+    """
     if not settings_path.is_file():
         return CheckResult(
             "hooks",
