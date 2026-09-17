@@ -99,33 +99,72 @@ def test_update_note_preserves_extras_on_partial_edit(store: OmiStore) -> None:
     assert reread.extras == {"Extra": ["keep me"]}
 
 
-def test_h2_in_details_survives_repeated_edits_without_duplicating(store: OmiStore) -> None:
-    # The corruption that bit the omind roadmap note: the MCP/CLI API can only
-    # express a multi-section body through `details`, but a `## H2` inside details
-    # reads back as an extra — so without normalization, every re-edit rendered the
-    # body's H2s AND the inherited extras, doubling each section on every save.
+def test_unfenced_h2_in_details_is_rejected(store: OmiStore) -> None:
+    # #292: an un-fenced `## H2` inside `details` reads back as its own section —
+    # silently relocating content and, on a re-edit, duplicating it beside its
+    # replacement. The write path refuses the write instead of mangling memory,
+    # naming the offending heading and pointing the caller at `###`.
     body = "intro\n\n## Origin\nA\n\n## Phase\nB"
-    name = store.create_note(NoteFields(title="Roadmap", summary="s", details=body))
+    with pytest.raises(NoteError, match=r"## Origin inside details"):
+        store.create_note(NoteFields(title="Roadmap", summary="s", details=body))
+
+
+def test_unfenced_h2_in_summary_is_rejected(store: OmiStore) -> None:
+    with pytest.raises(NoteError, match=r"## Status inside summary"):
+        store.create_note(NoteFields(title="S", summary="lead\n\n## Status\n\nbody", details="ok"))
+
+
+def test_unfenced_h2_in_re_supplied_details_is_rejected_on_edit(store: OmiStore) -> None:
+    # edit-note must surface the violation (never report clean) when a caller
+    # re-supplies a details body carrying an un-fenced `## H2` — the exact
+    # failure mode from the #292 incident.
+    name = store.create_note(NoteFields(title="Doc", summary="s", details="intro"))
+    with pytest.raises(NoteError, match=r"## Section inside details"):
+        store.update_note(name, NoteFields(title="Doc", summary="s", details="## Section\nv2"))
+
+
+def test_reject_message_names_heading_and_recommends_h3(store: OmiStore) -> None:
+    try:
+        store.create_note(NoteFields(title="X", details="a\n\n## Bad\n"))
+    except NoteError as exc:
+        msg = str(exc)
+    else:  # pragma: no cover - the write above must raise
+        pytest.fail("expected NoteError for an un-fenced ## in details")
+    assert "## Bad" in msg
+    assert "###" in msg  # names the recommended fix
+    assert "details" in msg
+
+
+def test_unfenced_h2_reject_leaves_no_partial_note(store: OmiStore) -> None:
+    # A refused write must not leave a half-written file behind.
+    before = {p.name for p in store.omi_dir.iterdir()}
+    with pytest.raises(NoteError):
+        store.create_note(NoteFields(title="Bad", details="x\n\n## Nope\n"))
+    assert {p.name for p in store.omi_dir.iterdir()} == before
+
+
+def test_clean_details_round_trips_through_write(store: OmiStore) -> None:
+    # #292 regression guard: write(details=X) then read().details == X for a body
+    # free of un-fenced `## H2` — the case Option 1 accepts.
+    details = "Intro.\n\nA paragraph with a [[wikilink]] and a bullet.\n\n* bullet"
+    name = store.create_note(NoteFields(title="Round Trip", details=details))
+    assert store.read_fields(name).details == details
+
+
+def test_deep_subheadings_in_details_round_trip_and_do_not_duplicate(store: OmiStore) -> None:
+    # `###` (a deeper sub-heading) is body text, not a section boundary: it must
+    # survive repeated edits without relocation or duplication.
+    body = "intro\n\n### Origin\nA\n\n### Phase\nB"
+    name = store.create_note(NoteFields(title="Doc", summary="s", details=body))
     for _ in range(3):
-        store.update_note(name, NoteFields(title="Roadmap", summary="s", details=body))
+        store.update_note(name, NoteFields(title="Doc", summary="s", details=body))
     text = store.read_note(name)
-    assert text.count("## Origin") == 1
-    assert text.count("## Phase") == 1
+    assert text.count("### Origin") == 1
+    assert text.count("### Phase") == 1
+    # `###` is body text, not a section — it stays in details and never leaks to extras.
     reread = store.read_fields(name)
-    assert reread.details == "intro"
-    assert reread.extras == {"Origin": ["A"], "Phase": ["B"]}
-
-
-def test_h2_edit_replaces_section_and_keeps_other_extras(store: OmiStore) -> None:
-    # A re-supplied body updates its own section in place; a genuine extra the
-    # body never mentions is preserved (not dropped, not duplicated).
-    name = store.create_note(
-        NoteFields(title="Doc", summary="s", details="## Section\nv1", extras={"Aside": ["keep"]})
-    )
-    store.update_note(name, NoteFields(title="Doc", summary="s", details="## Section\nv2"))
-    reread = store.read_fields(name)
-    assert reread.extras == {"Aside": ["keep"], "Section": ["v2"]}
-    assert store.read_note(name).count("## Section") == 1
+    assert reread.details == body
+    assert reread.extras == {}
 
 
 def test_from_dict_preserves_extras() -> None:
@@ -791,6 +830,37 @@ def test_fenced_h2_is_not_treated_as_a_section(store: OmiStore) -> None:
     fields = store.read_fields(name)
     assert "Not A Heading" not in fields.extras
     assert "## Not A Heading" in fields.details
+    # A fenced `##` round-trips verbatim through the template — the case Option 1
+    # accepts for an X containing `##` (#292 regression guard).
+    assert fields.details == details
+
+
+def test_four_backtick_fence_hides_inner_three_backtick_and_h2(
+    store: OmiStore,
+) -> None:
+    """A closing fence must match the opener length (CommonMark).
+
+    A four-backtick block that contains a *three-backtick* line at line start
+    and a `## H2` is still entirely fenced: the shorter run must not close the
+    longer fence, so the H2 is body text and must NOT trip the field-heading
+    rejection (#292). Before the `_update_fence` length check this was a false
+    positive -- `create_note` raised NoteError on legitimate fenced content.
+    """
+    details = (
+        "lead\n\n"
+        "````md\n"          # 4-backtick opener
+        "```\n"             # 3-backtick line at line start: must NOT close the block
+        "## Example\n"      # inside the fence -> body text, not an H2 section
+        "````\n"            # 4-backtick closer
+        "\n"
+        "real details."
+    )
+    # If the fence-length rule is broken, create_note raises NoteError here.
+    name = store.create_note(NoteFields(title="FourBacktick", details=details))
+    fields = store.read_fields(name)
+    assert "## Example" in fields.details
+    assert "Example" not in fields.extras      # not split out as its own section
+    assert fields.details == details           # exact round-trip
 
 
 def test_reserved_check_is_case_insensitive(store: OmiStore) -> None:

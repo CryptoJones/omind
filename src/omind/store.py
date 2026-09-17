@@ -132,6 +132,35 @@ _TAG_RE = re.compile(r"#(\w[\w/-]*)")
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 _H1_RE = re.compile(r"^#\s+(.*)$")
 _H2_RE = re.compile(r"^##\s+(.*)$")
+
+
+def _update_fence(
+    line: str, in_fence: bool, fence_ch: str, fence_len: int
+) -> tuple[bool, str, int]:
+    """Advance code-fence state across ``line`` under CommonMark semantics.
+
+    A fence opens on any run of 3+ backticks or tildes (a trailing info string
+    is permitted and ignored). It closes only on a run of the *same* character
+    at least as long as the opener with no non-whitespace suffix. Requiring the
+    opener length prevents a shorter same-char run embedded in a longer fence
+    from prematurely closing it (e.g. a three-backtick line inside a
+    four-backtick block), so a subsequent H2 is body text rather than a section
+    split. Shared by :func:`_scan_note` and :func:`_split_field_headings` so the
+    parse round-trip and the field-body heading rejection (#292) agree.
+    """
+    stripped = line.lstrip()
+    m = _FENCE_RE.match(stripped)
+    if not m:
+        return in_fence, fence_ch, fence_len
+    run = m.group(1)
+    ch, n = run[0], len(run)
+    if not in_fence:
+        return True, ch, n
+    if ch == fence_ch and n >= fence_len and stripped[n:].strip() == "":
+        return False, "", 0
+    return in_fence, fence_ch, fence_len
+
+
 # Longest filename we will create. Well under the common 255-*byte* limit so a
 # long LLM-generated title raises a clean NoteError instead of ENAMETOOLONG.
 _MAX_FILENAME_BYTES = 200
@@ -533,18 +562,14 @@ def _scan_note(md: str) -> tuple[str, str, str, dict[str, list[str]]]:
     current: str | None = None
     in_fence = False
     fence_ch = ""
+    fence_len = 0
     while i < n:
         line = lines[i]
         i += 1
-        fence = _FENCE_RE.match(line.lstrip())
-        if fence:
-            ch = fence.group(1)[0]
-            if not in_fence:
-                in_fence, fence_ch = True, ch
-            elif ch == fence_ch:
-                in_fence = False
-            # fence lines are body content — fall through to the append below
-        elif not in_fence:
+        in_fence, fence_ch, fence_len = _update_fence(
+            line, in_fence, fence_ch, fence_len
+        )
+        if not in_fence:
             if not seen_title and (h1 := _H1_RE.match(line)):
                 title = h1.group(1).strip()
                 seen_title = True
@@ -553,6 +578,7 @@ def _scan_note(md: str) -> tuple[str, str, str, dict[str, list[str]]]:
                 current = h2.group(1).strip()
                 sections.setdefault(current, [])
                 continue
+        # fence lines and body text fall through to the append below
         if current is not None:
             sections[current].append(line)
         elif seen_title:
@@ -761,24 +787,24 @@ def _split_field_headings(body: str) -> tuple[str, dict[str, list[str]]]:
     """Split a free-text field body into ``(text before the first ## H2,
     {heading: body lines})``.
 
-    Mirrors how :func:`split_sections` re-reads an ``## H2`` embedded in a
-    Summary/Details body — the H2 opens a new section. Hoisting these out before
-    render (see :func:`_hoist_field_headings`) is what keeps render/parse stable.
+    Mirrors how :func:`_scan_note` re-reads an ``## H2`` embedded in a
+    Summary/Details body — the H2 opens a new section. The write path uses the
+    returned headings to reject an *un-fenced* ``## H2`` inside a field body
+    (the template cannot round-trip it: it reads back as its own section and, on
+    a re-edit, duplicates beside its replacement — #292) while leaving fenced
+    ``##`` (code-block body text) untouched.
     """
     pre: list[str] = []
     sections: dict[str, list[str]] = {}
     current: str | None = None
     in_fence = False
     fence_ch = ""
+    fence_len = 0
     for line in body.splitlines():
-        fence = _FENCE_RE.match(line.lstrip())
-        if fence:
-            ch = fence.group(1)[0]
-            if not in_fence:
-                in_fence, fence_ch = True, ch
-            elif ch == fence_ch:
-                in_fence = False
-        elif not in_fence and (m := _H2_RE.match(line)):
+        in_fence, fence_ch, fence_len = _update_fence(
+            line, in_fence, fence_ch, fence_len
+        )
+        if not in_fence and (m := _H2_RE.match(line)):
             current = m.group(1).strip()
             sections.setdefault(current, [])
             continue
@@ -786,27 +812,47 @@ def _split_field_headings(body: str) -> tuple[str, dict[str, list[str]]]:
     return "\n".join(pre).strip(), {h: _strip_blank_edges(v) for h, v in sections.items()}
 
 
-def _hoist_field_headings(fields: NoteFields) -> None:
-    """Move any ``## H2`` out of ``summary``/``details`` into ``extras`` in place.
+def _field_heading_violation(fields: NoteFields) -> str | None:
+    """The first un-fenced ``## H2`` found in ``summary``/``details``, or None.
 
-    The note format delimits fields with ``## H2``, so an H2 inside a free-text
-    field body is reparsed as its own section on the next read. Normalizing the
-    fields into that shape *before* render (a) makes ``render_fields``
-    round-trip-stable, and (b) stops a caller that re-supplies the whole body
-    through ``details`` (the only multi-section field the MCP/CLI API exposes)
-    from stacking a duplicate of each section onto the inherited extras on every
-    edit. The freshly-supplied body wins a name clash.
+    The note template delimits its own sections with ``## H2`` (Summary,
+    Details, References, …), so an H2 *inside* a free-text field body is
+    re-parsed as a brand-new section on the next read. That silently relocates
+    caller content into ``extras`` and, on a re-edit, leaves a stale duplicate
+    beside its replacement — the worst failure mode for a memory store
+    (Invariant 1: the Markdown files are the source of truth). The write path
+    refuses such writes (see :func:`_reject_field_headings`) instead of silently
+    mangling memory. ``##`` inside a fenced code block is body text and is left
+    alone, so the scan is fence-aware via :func:`_split_field_headings`.
     """
     for attr in ("summary", "details"):
-        body: str = getattr(fields, attr)
+        body = getattr(fields, attr)
         if "##" not in body:  # fast path: no possible heading
             continue
-        pre, hoisted = _split_field_headings(body)
-        if not hoisted:
-            continue
-        setattr(fields, attr, pre)
-        for heading, lines in hoisted.items():
-            fields.extras[heading] = lines
+        _pre, hoisted = _split_field_headings(body)
+        if hoisted:
+            return f"{attr}: ## {next(iter(hoisted))}"
+    return None
+
+
+def _reject_field_headings(fields: NoteFields) -> None:
+    """Refuse an un-fenced ``## H2`` inside ``summary``/``details`` (#292).
+
+    Raises :class:`NoteError` naming the offending heading and recommending
+    ``###`` (a deeper heading inside a field body) so the caller can fix the
+    payload instead of silently corrupting memory. See
+    :func:`_field_heading_violation` for the fence-aware detection that
+    leaves code-block ``##`` in place.
+    """
+    violation = _field_heading_violation(fields)
+    if violation is None:
+        return
+    where, heading = violation.split(": ", 1)
+    raise NoteError(
+        f"{heading} inside {where} is re-parsed as a separate note section and "
+        "cannot round-trip through the template (#292). Use ### for a sub-heading "
+        "inside a field body."
+    )
 
 
 def _collapse(text: str, limit: int) -> str:
@@ -1451,7 +1497,7 @@ class OmiStore:
         # finds it, TTL-expired by `omind maintain`. See SCRATCH_SUFFIX.
         suffix = SCRATCH_SUFFIX if scratch else ".md"
         filename = self.filename_for_title(fields.title, suffix=suffix)
-        _hoist_field_headings(fields)  # canonicalize ## H2-in-body -> extras
+        _reject_field_headings(fields)  # refuse un-fenced ## in field bodies (#292)
         # Existence is re-checked under the write lock (must_create) to close the
         # concurrent-create race, not here.
         return self.write_note(filename, render_fields(fields), must_create=True)
@@ -1492,7 +1538,7 @@ class OmiStore:
         source_paths = [(self.safe_name(name), version) for name, version in sources]
         for path, _version in source_paths:
             self._reject_reserved(path)
-        _hoist_field_headings(fields)
+        _reject_field_headings(fields)  # refuse un-fenced ## in field bodies (#292)
 
         with self.write_lock():
             if target.exists():
@@ -1585,11 +1631,12 @@ class OmiStore:
                 fields.scope = current.scope
             if not fields.agent:
                 fields.agent = current.agent
-            # A multi-section body supplied through `details` (the only such
-            # field the MCP/CLI API exposes) carries ## H2s that read back as
-            # extras. Hoist them now so they REPLACE the same-named inherited
-            # extra instead of rendering twice and accumulating on every edit.
-            _hoist_field_headings(fields)
+            # A `## H2` inside a caller-supplied summary/details body reads back
+            # as its own section — silently relocating content and, on a re-edit,
+            # duplicating it beside its replacement (#292). Refuse the write
+            # up front; the only `##` a note legitimately carries in these fields
+            # is fenced code-block text, which the fence-aware check ignores.
+            _reject_field_headings(fields)
             return render_fields(fields)
 
         return self._mutate_note(name, transform, expected_version=expected_version)

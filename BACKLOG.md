@@ -11,8 +11,8 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **[Priority 1 / P0] `edit-note` silently guts a note when `details` contains a `## ` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
-  content after the first `## ` is relocated out of `## Details` and re-emitted after
+- [x] **[Priority 1 / P0] `edit-note` silently guts a note when `details` contains a `##` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
+  content after the first `##` is relocated out of `## Details` and re-emitted after
   `## References`; a second edit leaves both the stale and the new copy. Hit for real
   on 2026-08-31: a note ended up with two contradictory copies of its body, the
   superseded one still reading as current, while `## Details` was empty.
