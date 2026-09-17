@@ -59,6 +59,7 @@ the exact order of operations._
     instrument, not a change.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   needs CJ's PyPI account; details in [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
+- [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — _bug (hooks)_ — **shipped in this PR** (`_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands). —
 
 ## Not planned
 

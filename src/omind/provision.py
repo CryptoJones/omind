@@ -78,6 +78,32 @@ def _enforce_hook_dest() -> Path:
     return Path.home() / ".claude" / "hooks" / "omi-enforce.py"
 
 
+def _is_windows_store_stub(path: str) -> bool:
+    """Return whether a resolved Python candidate is treated as a Store alias.
+
+    On Windows, candidates whose normalized paths contain ``WindowsApps`` are
+    treated as aliases that prompt for a Store installation and exit non-zero
+    when no interpreter is installed.
+    """
+    return _windows() and "WindowsApps" in os.path.normpath(path)
+
+
+def _resolve_python() -> str | None:
+    """Return the preferred non-Store Python command available on ``PATH``.
+
+    Windows checks ``python`` before ``python3``; other platforms use the reverse
+    order. The result is the bare command name for a hook configuration, or
+    ``None`` if neither candidate resolves or, on Windows, each resolved candidate
+    is a Store alias.
+    """
+    candidates = ("python", "python3") if _windows() else ("python3", "python")
+    for name in candidates:
+        resolved = shutil.which(name)
+        if resolved and not _is_windows_store_stub(resolved):
+            return name
+    return None
+
+
 def _guard_hook_dest() -> Path:
     """Where omind writes the fresh-base git guard hook script on this machine."""
     return Path.home() / ".claude" / "hooks" / "git-fresh-base.sh"
@@ -570,12 +596,12 @@ class Provisioner:
     # -- steps --------------------------------------------------------------
 
     def check_prereqs(self) -> None:
-        """Raise (unless dry-run) when a required executable is missing.
+        """Validate required executables and the enforcement hook's Python command.
 
-        Tools in :data:`SOFT_TOOLS` never raise: their absence is recorded in
-        ``self.missing_tools``, the steps that shell out to them skip with a
-        warning, and everything else proceeds — the same on a real run as on
-        ``--dry-run`` (#258).
+        Missing tools in :data:`SOFT_TOOLS` are recorded in ``missing_tools`` and
+        logged. A missing hard requirement, or the absence of a resolvable,
+        non-Store Python command, raises :class:`ProvisionError` on normal runs;
+        dry runs log a warning instead.
         """
         required = self.REQUIRED_TOOLS
         missing = [tool for tool in required if shutil.which(tool) is None]
@@ -600,6 +626,31 @@ class Provisioner:
                 raise ProvisionError(message)
         if not missing:
             self.log(f"  prerequisites present: {', '.join(required)}")
+
+        # #356: the enforcement hook (omi-enforce.py) shells out to python. On
+        # Windows `python3` resolves to the Microsoft Store stub that exits
+        # non-zero, so verify through the same resolution the hook command uses —
+        # and fail setup with a clear install instruction instead of letting the
+        # hook break silently during normal use.
+        python_cmd = _resolve_python()
+        if python_cmd is not None:
+            self.log(f"  python resolved for enforcement hook: {python_cmd}")
+        else:
+            if _windows():
+                detail = (
+                    "`python3`/`python` resolve to the Microsoft Store stub "
+                    "(or are absent). Install Python: "
+                    "`winget install --id Python.Python.3.12`"
+                )
+            else:
+                detail = (
+                    "`python3`/`python` not found on PATH. Install Python 3."
+                )
+            message = f"no usable Python for the enforcement hook — {detail}"
+            if self.config.dry_run:
+                self.log(f"  WARNING: {message}")
+            else:
+                raise ProvisionError(message)
 
     def ensure_vault(self) -> None:
         self._record(f"create OMI folder {self.config.omi_dir}")
@@ -767,7 +818,11 @@ class Provisioner:
         )
 
     def _omind_hook_entries(self) -> dict[str, list[dict[str, Any]]]:
-        """The hooks-array entry omind owns, per handled event."""
+        """Return the hooks-array entry omind owns for each handled event.
+
+        The ``PostToolUse`` entry runs the enforcement script with the resolved
+        Python command, falling back to ``python3`` if none is available.
+        """
         entries: dict[str, list[dict[str, Any]]] = {}
         for event in HANDLED_EVENTS:
             hooks_list: list[dict[str, Any]] = [
@@ -777,9 +832,16 @@ class Provisioner:
                 # Enforcement hook runs immediately after the omind journal hook so
                 # any built-in memory file written this turn is migrated to OMI
                 # before the file is deleted — guaranteeing no data loss.
+                # #356: resolve the python command through _resolve_python so
+                # Windows picks `python` (not the Store stub `python3`).
+                python_cmd = _resolve_python()
+                if python_cmd is None:
+                    # check_prereqs should have caught this before we get here on
+                    # a real run; fall back to `python3` on dry-run / edge cases.
+                    python_cmd = "python3"
                 hooks_list.append({
                     "type": "command",
-                    "command": f"python3 {_enforce_hook_dest()}",
+                    "command": f"{python_cmd} {_enforce_hook_dest()}",
                 })
                 entry: dict[str, Any] = {"matcher": "*", "hooks": hooks_list}
             else:
@@ -1410,6 +1472,51 @@ def _diagnose_jq() -> CheckResult:
     )
 
 
+def _enforce_hook_python_is_stub(command_text: str) -> str | None:
+    """Return a hook's Python command if it resolves to WindowsApps on Windows.
+
+    The returned name is unquoted and has ``.exe`` removed. ``None`` indicates an
+    empty or unresolved command, or one that does not resolve to a Store alias.
+    """
+    # The enforcement hook command is ``<python> <path>``; the python command
+    # is the first whitespace-delimited token.
+    parts = command_text.strip().split(None, 1)
+    if not parts:
+        return None
+    name = parts[0].strip('"').strip("'").replace(".exe", "")
+    resolved = shutil.which(name)
+    if resolved and _is_windows_store_stub(resolved):
+        return name
+    return None
+
+
+def _diagnose_python() -> CheckResult:
+    """Return the doctor result for the enforcement hook's Python command.
+
+    The check passes with the selected command when a non-Store candidate
+    resolves and otherwise fails with platform-specific installation guidance.
+    """
+    resolved = _resolve_python()
+    if resolved is not None:
+        return CheckResult(
+            "tool:python", "ok", f"python for enforcement hook: `{resolved}`"
+        )
+    if _windows():
+        return CheckResult(
+            "tool:python",
+            "fail",
+            "`python3`/`python` resolve to the Microsoft Store stub (or are "
+            "absent) — the enforcement hook will fail silently. Install Python: "
+            "`winget install --id Python.Python.3.12`, then re-run `omind setup`",
+        )
+    return CheckResult(
+        "tool:python",
+        "fail",
+        "`python3`/`python` not found on PATH — the enforcement hook cannot "
+        "run. Install Python 3, then re-run `omind setup`",
+    )
+
+
 def _diagnose_omi_folder(config: SetupConfig) -> list[CheckResult]:
     """The agent-independent checks: OMI folder, Obsidian config, seed files."""
     results: list[CheckResult] = []
@@ -1456,6 +1563,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
     """
     results = _diagnose_tools(Provisioner.REQUIRED_TOOLS)
     results.append(_diagnose_jq())
+    results.append(_diagnose_python())
     results.extend(_diagnose_windows_sh())
     results.extend(_diagnose_omi_folder(config))
     omi = config.omi_dir
@@ -1520,7 +1628,11 @@ def _diagnose_claude_skill() -> CheckResult:
 
 
 def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
-    """Inspect settings.json for omind's auto-memory hooks (pure read)."""
+    """Inspect settings.json for omind's auto-memory hooks (pure read).
+
+    Also verifies the enforcement hook script and rejects an interpreter that
+    resolves to the Microsoft Store stub on Windows.
+    """
     if not settings_path.is_file():
         return CheckResult(
             "hooks",
@@ -1604,12 +1716,21 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     enforce_dest = _enforce_hook_dest()
     post_entries = hooks_cfg.get("PostToolUse")
     enforce_wired = False
+    enforce_cmd: str | None = None
     if isinstance(post_entries, list):
         for e in post_entries:
             if _entry_has_omind_marker(e):
                 cmd_text = _entry_command_text(e)
                 if ENFORCE_HOOK_MARKER in cmd_text:
                     enforce_wired = True
+                    # Grab the enforcement hook command specifically (the
+                    # hook whose command contains the enforce-hook marker).
+                    for hook in e.get("hooks", []):
+                        if isinstance(hook, dict):
+                            c = hook.get("command")
+                            if isinstance(c, str) and ENFORCE_HOOK_MARKER in c:
+                                enforce_cmd = c
+                                break
                     break
     if not enforce_wired:
         return CheckResult(
@@ -1623,6 +1744,17 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             "warn",
             f"enforcement hook script missing at {enforce_dest} "
             f"(run `omind setup`).{lock_note}",
+        )
+    # #356: catch a stale enforcement hook command that still shells out to a
+    # python resolving to the Windows Store stub (pre-fix setups baked in
+    # bare ``python3``).
+    if enforce_cmd and (stub := _enforce_hook_python_is_stub(enforce_cmd)):
+        return CheckResult(
+            "hooks",
+            "fail",
+            f"enforcement hook shells out to `{stub}`, which resolves to the "
+            "Microsoft Store stub on Windows — re-run `omind setup` to rewrite "
+            f"it to `python`.{lock_note}",
         )
     hardened = f" [hardened: {len(locked)} config file(s) immutable]" if locked else ""
     return CheckResult(
