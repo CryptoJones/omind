@@ -79,19 +79,22 @@ def _enforce_hook_dest() -> Path:
 
 
 def _is_windows_store_stub(path: str) -> bool:
-    """Return whether ``path`` is treated as a Microsoft Store Python alias.
+    """Return whether a resolved Python candidate is treated as a Store alias.
 
-    Only paths containing ``WindowsApps`` on Windows are treated as aliases.
+    On Windows, candidates whose normalized paths contain ``WindowsApps`` are
+    treated as aliases that prompt for a Store installation and exit non-zero
+    when no interpreter is installed.
     """
     return _windows() and "WindowsApps" in os.path.normpath(path)
 
 
 def _resolve_python() -> str | None:
-    """Return the preferred Python command that does not resolve to a Store alias.
+    """Return the preferred non-Store Python command available on ``PATH``.
 
-    Prefers ``python`` on Windows and ``python3`` elsewhere, then tries the
-    alternate name. Returns the bare command name, or ``None`` if neither name
-    resolves to a non-Store path.
+    Windows checks ``python`` before ``python3``; other platforms use the reverse
+    order. The result is the bare command name for a hook configuration, or
+    ``None`` if neither candidate resolves or, on Windows, each resolved candidate
+    is a Store alias.
     """
     candidates = ("python", "python3") if _windows() else ("python3", "python")
     for name in candidates:
@@ -593,16 +596,12 @@ class Provisioner:
     # -- steps --------------------------------------------------------------
 
     def check_prereqs(self) -> None:
-        """Raise (unless dry-run) when a required executable is missing.
+        """Validate required executables and the enforcement hook's Python command.
 
-        Tools in :data:`SOFT_TOOLS` never raise: their absence is recorded in
-        ``self.missing_tools``, the steps that shell out to them skip with a
-        warning, and everything else proceeds — the same on a real run as on
-        ``--dry-run`` (#258).
-
-        The enforcement hook also requires ``python`` or ``python3`` to resolve
-        outside the Microsoft Store stub. Failure to resolve either command raises
-        :class:`ProvisionError`, or logs a warning during a dry run.
+        Missing tools in :data:`SOFT_TOOLS` are recorded in ``missing_tools`` and
+        logged. A missing hard requirement, or the absence of a resolvable,
+        non-Store Python command, raises :class:`ProvisionError` on normal runs;
+        dry runs log a warning instead.
         """
         required = self.REQUIRED_TOOLS
         missing = [tool for tool in required if shutil.which(tool) is None]
@@ -1474,12 +1473,10 @@ def _diagnose_jq() -> CheckResult:
 
 
 def _enforce_hook_python_is_stub(command_text: str) -> str | None:
-    """Return the python command name if it resolves to the Windows Store stub.
+    """Return a hook's Python command if it resolves to WindowsApps on Windows.
 
-    Extracts the bare command from the enforcement hook entry
-    (e.g. ``python3 /path/omi-enforce.py``) and checks whether ``shutil.which``
-    of it lands in ``WindowsApps``. Returns the command name for the diagnostic
-    message, or ``None`` when it is absent, unresolvable, or not a Store stub.
+    The returned name is unquoted and has ``.exe`` removed. ``None`` indicates an
+    empty or unresolved command, or one that does not resolve to a Store alias.
     """
     # The enforcement hook command is ``<python> <path>``; the python command
     # is the first whitespace-delimited token.
@@ -1494,10 +1491,10 @@ def _enforce_hook_python_is_stub(command_text: str) -> str | None:
 
 
 def _diagnose_python() -> CheckResult:
-    """Report whether a Python command is available for the enforcement hook.
+    """Return the doctor result for the enforcement hook's Python command.
 
-    A missing command or Store-only resolution produces a failing check with
-    platform-specific installation guidance.
+    The check passes with the selected command when a non-Store candidate
+    resolves and otherwise fails with platform-specific installation guidance.
     """
     resolved = _resolve_python()
     if resolved is not None:
