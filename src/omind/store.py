@@ -132,6 +132,35 @@ _TAG_RE = re.compile(r"#(\w[\w/-]*)")
 _FENCE_RE = re.compile(r"^(`{3,}|~{3,})")
 _H1_RE = re.compile(r"^#\s+(.*)$")
 _H2_RE = re.compile(r"^##\s+(.*)$")
+
+
+def _update_fence(
+    line: str, in_fence: bool, fence_ch: str, fence_len: int
+) -> tuple[bool, str, int]:
+    """Advance code-fence state across ``line`` under CommonMark semantics.
+
+    A fence opens on any run of 3+ backticks or tildes (a trailing info string
+    is permitted and ignored). It closes only on a run of the *same* character
+    at least as long as the opener with no non-whitespace suffix. Requiring the
+    opener length prevents a shorter same-char run embedded in a longer fence
+    from prematurely closing it (e.g. a three-backtick line inside a
+    four-backtick block), so a subsequent H2 is body text rather than a section
+    split. Shared by :func:`_scan_note` and :func:`_split_field_headings` so the
+    parse round-trip and the field-body heading rejection (#292) agree.
+    """
+    stripped = line.lstrip()
+    m = _FENCE_RE.match(stripped)
+    if not m:
+        return in_fence, fence_ch, fence_len
+    run = m.group(1)
+    ch, n = run[0], len(run)
+    if not in_fence:
+        return True, ch, n
+    if ch == fence_ch and n >= fence_len and stripped[n:].strip() == "":
+        return False, "", 0
+    return in_fence, fence_ch, fence_len
+
+
 # Longest filename we will create. Well under the common 255-*byte* limit so a
 # long LLM-generated title raises a clean NoteError instead of ENAMETOOLONG.
 _MAX_FILENAME_BYTES = 200
@@ -533,18 +562,14 @@ def _scan_note(md: str) -> tuple[str, str, str, dict[str, list[str]]]:
     current: str | None = None
     in_fence = False
     fence_ch = ""
+    fence_len = 0
     while i < n:
         line = lines[i]
         i += 1
-        fence = _FENCE_RE.match(line.lstrip())
-        if fence:
-            ch = fence.group(1)[0]
-            if not in_fence:
-                in_fence, fence_ch = True, ch
-            elif ch == fence_ch:
-                in_fence = False
-            # fence lines are body content — fall through to the append below
-        elif not in_fence:
+        in_fence, fence_ch, fence_len = _update_fence(
+            line, in_fence, fence_ch, fence_len
+        )
+        if not in_fence:
             if not seen_title and (h1 := _H1_RE.match(line)):
                 title = h1.group(1).strip()
                 seen_title = True
@@ -553,6 +578,7 @@ def _scan_note(md: str) -> tuple[str, str, str, dict[str, list[str]]]:
                 current = h2.group(1).strip()
                 sections.setdefault(current, [])
                 continue
+        # fence lines and body text fall through to the append below
         if current is not None:
             sections[current].append(line)
         elif seen_title:
@@ -773,15 +799,12 @@ def _split_field_headings(body: str) -> tuple[str, dict[str, list[str]]]:
     current: str | None = None
     in_fence = False
     fence_ch = ""
+    fence_len = 0
     for line in body.splitlines():
-        fence = _FENCE_RE.match(line.lstrip())
-        if fence:
-            ch = fence.group(1)[0]
-            if not in_fence:
-                in_fence, fence_ch = True, ch
-            elif ch == fence_ch:
-                in_fence = False
-        elif not in_fence and (m := _H2_RE.match(line)):
+        in_fence, fence_ch, fence_len = _update_fence(
+            line, in_fence, fence_ch, fence_len
+        )
+        if not in_fence and (m := _H2_RE.match(line)):
             current = m.group(1).strip()
             sections.setdefault(current, [])
             continue

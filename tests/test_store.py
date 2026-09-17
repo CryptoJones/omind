@@ -835,6 +835,34 @@ def test_fenced_h2_is_not_treated_as_a_section(store: OmiStore) -> None:
     assert fields.details == details
 
 
+def test_four_backtick_fence_hides_inner_three_backtick_and_h2(
+    store: OmiStore,
+) -> None:
+    """A closing fence must match the opener length (CommonMark).
+
+    A four-backtick block that contains a *three-backtick* line at line start
+    and a `## H2` is still entirely fenced: the shorter run must not close the
+    longer fence, so the H2 is body text and must NOT trip the field-heading
+    rejection (#292). Before the `_update_fence` length check this was a false
+    positive -- `create_note` raised NoteError on legitimate fenced content.
+    """
+    details = (
+        "lead\n\n"
+        "````md\n"          # 4-backtick opener
+        "```\n"             # 3-backtick line at line start: must NOT close the block
+        "## Example\n"      # inside the fence -> body text, not an H2 section
+        "````\n"            # 4-backtick closer
+        "\n"
+        "real details."
+    )
+    # If the fence-length rule is broken, create_note raises NoteError here.
+    name = store.create_note(NoteFields(title="FourBacktick", details=details))
+    fields = store.read_fields(name)
+    assert "## Example" in fields.details
+    assert "Example" not in fields.extras      # not split out as its own section
+    assert fields.details == details           # exact round-trip
+
+
 def test_reserved_check_is_case_insensitive(store: OmiStore) -> None:
     """On a case-insensitive filesystem 'Index' == index.md; reject it everywhere."""
     for title in ("Index", "INDEX", "Memory template"):

@@ -57,7 +57,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `omind doctor --agent goose` diagnoses both.
 
 ### Fixed
-- **`edit-note` / `omind note` refuse un-fenced `## ` headings in `details`/`summary` (#292).**
+
+- **`edit-note` / `omind note` refuse un-fenced `##` headings in `details`/`summary` (#292).**
   The note template delimits its own sections with `## H2`, so a `##` inside a
   free-text field body was re-parsed as a new section on the next read: content
   relocated after `## References`, and a re-edit left both the stale and the new
@@ -3251,4 +3252,4 @@ folder being written by Claude Code's MCP and Hermes' cron at the same time.
 [0.2.0]: https://github.com/CryptoJones/omind/releases/tag/v0.2.0
 [0.1.0]: https://github.com/CryptoJones/omind/releases/tag/v0.1.0
 
-Proudly Made in Nebraska. Go Big Red! 🌽 https://xkcd.com/2347/
+*Proudly Made in Nebraska. Go Big Red! 🌽 <https://xkcd.com/2347/>*
