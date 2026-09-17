@@ -1629,13 +1629,14 @@ def test_resolve_python_falls_back_to_python3_on_windows_when_python_is_stub(
     monkeypatch.setattr(provision, "_windows", lambda: True)
 
     def fake_which(name: str) -> str | None:
-        # Both are stubs.
-        if name in ("python", "python3"):
+        if name == "python":
             return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python.exe"
+        if name == "python3":
+            return r"C:\Python312\python3.exe"
         return None
 
     monkeypatch.setattr(provision.shutil, "which", fake_which)
-    assert provision._resolve_python() is None
+    assert provision._resolve_python() == "python3"
 
 
 def test_resolve_python_uses_python3_on_windows_when_python_is_absent(
@@ -1687,17 +1688,28 @@ def test_resolve_python_prefers_python3_on_posix(monkeypatch: pytest.MonkeyPatch
 def test_resolve_python_falls_back_to_python_on_posix(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """POSIX installations exposing only ``python`` still produce a usable hook."""
+    """Minimal POSIX installs may expose only the unversioned executable."""
     monkeypatch.setattr(provision, "_windows", lambda: False)
-    calls: list[str] = []
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: "/usr/bin/python" if name == "python" else None,
+    )
 
-    def fake_which(name: str) -> str | None:
-        calls.append(name)
-        return "/usr/bin/python" if name == "python" else None
-
-    monkeypatch.setattr(provision.shutil, "which", fake_which)
     assert provision._resolve_python() == "python"
-    assert calls == ["python3", "python"]
+
+
+def test_resolve_python_falls_back_to_python_on_windows(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A real ``python`` on Windows still satisfies the enforcement hook."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: r"C:\Python312\python.exe" if name == "python" else None,
+    )
+    assert provision._resolve_python() == "python"
 
 
 def test_resolve_python_returns_none_when_nothing_found(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1780,6 +1792,40 @@ def test_enforce_hook_python_is_stub_returns_none_on_posix(
     monkeypatch.setattr(provision.shutil, "which", lambda name: "/usr/bin/python3")
     dest = provision._enforce_hook_dest()
     assert provision._enforce_hook_python_is_stub(f"python3 {dest}") is None
+
+
+def test_enforce_hook_python_is_stub_handles_quoted_exe(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Doctor accepts the quoted ``python3.exe`` spelling used by some old hooks."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    seen: list[str] = []
+
+    def fake_which(name: str) -> str | None:
+        seen.append(name)
+        return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+
+    result = provision._enforce_hook_python_is_stub(
+        f'"python3.exe" "{provision._enforce_hook_dest()}"'
+    )
+
+    assert result == "python3"
+    assert seen == ["python3"]
+
+
+def test_enforce_hook_python_is_stub_ignores_empty_command(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Malformed empty hook commands should not cause a PATH lookup or failure."""
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda _name: pytest.fail("empty commands must not be resolved"),
+    )
+
+    assert provision._enforce_hook_python_is_stub("  \t  ") is None
 
 
 def test_diagnose_python_ok_when_resolved(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1872,6 +1918,31 @@ def test_diagnose_hooks_flags_stale_enforcement_hook_python(
     assert "Store stub" in result.message
 
 
+def test_diagnose_hooks_accepts_resolved_python_when_python3_is_stub(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A freshly rewritten hook is healthy even if the unused python3 alias is stale."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+
+    def fake_which(name: str) -> str | None:
+        if name == "python":
+            return r"C:\Python312\python.exe"
+        if name == "python3":
+            return r"C:\Users\someone\AppData\Local\Microsoft\WindowsApps\python3.exe"
+        return None
+
+    monkeypatch.setattr(provision.shutil, "which", fake_which)
+    vault = tmp_path / "v"
+    settings = _wired_settings(tmp_path, vault)
+    enforce = provision._enforce_hook_dest()
+    enforce.parent.mkdir(parents=True, exist_ok=True)
+    enforce.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+
+    assert result.level == "ok", result.message
+
+
 def test_check_prereqs_raises_on_unresolvable_python(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
@@ -1892,6 +1963,25 @@ def test_check_prereqs_raises_on_unresolvable_python(
         Provisioner(config, log=_quiet).check_prereqs()
     assert "Python" in str(excinfo.value)
     assert "winget install" in str(excinfo.value)
+
+
+def test_check_prereqs_gives_posix_install_guidance_when_python_is_missing(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(
+        provision.shutil,
+        "which",
+        lambda name: f"/usr/bin/{name}" if name in ("claude", "git") else None,
+    )
+
+    with pytest.raises(ProvisionError) as excinfo:
+        Provisioner(_config(tmp_path), log=_quiet).check_prereqs()
+
+    message = str(excinfo.value)
+    assert "not found on PATH" in message
+    assert "Install Python 3" in message
+    assert "winget" not in message
 
 
 def test_check_prereqs_warns_not_raises_on_dry_run_when_no_python(
@@ -1960,13 +2050,15 @@ def test_hook_entries_prefer_python3_on_posix(
     assert "omi-enforce.py" in enforce_cmd
 
 
-def test_hook_entries_fall_back_to_python3_when_resolution_fails(
+def test_hook_entries_use_documented_fallback_when_python_cannot_be_resolved(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
-    """Dry-run and direct callers still receive a complete hook configuration."""
-    monkeypatch.setattr(provision, "_resolve_python", lambda: None)
-    entries = Provisioner(_config(tmp_path, dry_run=True), log=_quiet)._omind_hook_entries()
+    """Dry-run/edge callers still receive a complete enforcement hook entry."""
+    monkeypatch.setattr(provision.shutil, "which", lambda _name: None)
+
+    entries = Provisioner(_config(tmp_path), log=_quiet)._omind_hook_entries()
     post_hooks = entries["PostToolUse"][0]["hooks"]
+
     assert post_hooks[1]["command"] == f"python3 {provision._enforce_hook_dest()}"
 
 
