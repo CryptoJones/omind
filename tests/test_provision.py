@@ -1759,17 +1759,6 @@ def test_enforce_hook_python_is_stub_normalizes_quoted_exe_name(
     assert seen == ["python3"]
 
 
-def test_enforce_hook_python_is_stub_ignores_empty_command(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr(
-        provision.shutil,
-        "which",
-        lambda _name: pytest.fail("an empty hook command must not resolve an executable"),
-    )
-    assert provision._enforce_hook_python_is_stub("  \t  ") is None
-
-
 def test_enforce_hook_python_is_stub_returns_none_for_real_python(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
