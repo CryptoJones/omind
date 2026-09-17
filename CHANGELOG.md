@@ -56,6 +56,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   every session's system prompt (user-authored hints around it are preserved).
   `omind doctor --agent goose` diagnoses both.
 
+### Fixed
+- **`edit-note` / `omind note` refuse un-fenced `## ` headings in `details`/`summary` (#292).**
+  The note template delimits its own sections with `## H2`, so a `##` inside a
+  free-text field body was re-parsed as a new section on the next read: content
+  relocated after `## References`, and a re-edit left both the stale and the new
+  copy (real data loss on 2026-08-31). The write path now raises `NoteError` —
+  naming the offending heading and recommending `###` — instead of silently
+  mangling memory. `##` inside a fenced code block is still body text and is
+  left in place (fence-aware). Implements Option 1 from the issue.
+
 ## [9.4.0] - 2026-09-13
 
 ### Fixed
