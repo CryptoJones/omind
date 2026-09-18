@@ -99,21 +99,23 @@ the exact order of operations._
 ### Shipped — 2026-09-17 (v9.5.1)
 
 - [x] **Windows: `filelock.lock_fd` returns `EDEADLK` under same-process contention, silently dropping appends (#319)** — _bug (CI / filelock)_ —
-  `msvcrt.locking(LK_LOCK)` — the blocking primitive `lock_fd` used on Windows — routes through
-  the C runtime's `_locking` wrapper, which maintains a per-process lock table. When a second
-  *thread* in the same process attempts to lock a byte range its own process already holds
-  (even via a separate file descriptor), `_locking` returns `EDEADLK` (errno 36) after a ~10 s
-  retry instead of `EACCES`. `append_locked` and `exclusive` swallow that `OSError`, silently
+  `msvcrt.locking(LK_LOCK)` is not a true blocking lock — it is a ten-attempt poll at
+  1-second spacing. Under contention the cadence is 1 Hz, so only ~10 of 40 contending
+  threads drain through in a 10 s window before the rest exhaust their attempts and raise
+  `EDEADLK` (errno 36). `append_locked` and `exclusive` swallow that `OSError`, silently
   dropping the write. Manifested as `test_concurrent_appends_serialize` flaking
   (`assert 39 == 40` on `windows-latest`) — one of 40 concurrent appends lost. The journal,
   compliance log, and AI-usage log shared the same hole.
 
-  `lock_fd` now acquires the lock with `msvcrt.locking(LK_NBLCK)` inside a bounded retry loop:
-  `LK_NBLCK` correctly returns `EACCES` (errno 13) on real contention from another thread or
-  process — without the `EDEADLK` false-positive — so the loop catches it, sleeps ~1 ms, and
-  retries for up to 10 s. A new regression test
-  (`test_lock_fd_serializes_threads_in_same_process`) verifies 40 threads contend on 40
-  separate fds to the same file and that at most one holds the lock at any instant.
+  `lock_fd` now retries `msvcrt.locking(LK_NBLCK, 1)` at ~1 ms inside a bounded retry loop:
+  `LK_NBLCK` maps `ERROR_LOCK_VIOLATION` straight to `EACCES` (errno 13) with no CRT
+  retry, so the loop catches it, sleeps 1 ms, and retries for up to 10 s. `EACCES`/
+  `EDEADLK` are retried; any other `OSError` propagates immediately. Added three regression
+  tests: `test_lock_fd_serializes_threads_in_same_process` (40 threads, 40 fds, `max_held == 1`),
+  `test_lock_fd_raises_after_timeout_on_persistent_contention` (timeout-bound path),
+  and `test_lock_fd_propagates_non_contention_oserror_immediately` (error-propagation path).
+  Reviewed by the Flatline Roundtable on pluto (14 lanes); stress test 0/50 failures
+  (was 37/50).
 
 ### Shipped — 2026-09-15 (v9.5.0)
 

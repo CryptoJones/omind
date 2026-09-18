@@ -7,19 +7,27 @@ region at offset 0.  Both serialize every omind writer that locks the same
 file, which is everything the store's ``.omi.lock`` and the journal append
 path need — no byte of locked region ever overlaps actual data.
 
-Windows: ``lock_fd`` acquires the lock with ``msvcrt.locking(LK_NBLCK)`` inside
-a bounded retry loop instead of ``LK_LOCK``.  ``LK_LOCK`` routes through the C
-runtime's ``_locking`` wrapper, which maintains a per-process lock table and
-returns ``EDEADLK`` (errno 36, "Resource deadlock avoided") when a second
-*thread* in the same process attempts to lock a byte range its own process
-already holds — even though the two threads use separate file descriptors.
-That turns a blocking lock into an immediate ``OSError``, which
-``append_locked`` and ``exclusive`` swallow through ``except OSError`` /
-``contextlib.suppress``, silently dropping the write.  ``LK_NBLCK`` (non-
-blocking) does not suffer the same blind spot: it returns ``EACCES`` on real
-contention from either another thread or another process, so we can catch it,
-sleep briefly, and retry — preserving the ten-second timeout behaviour while
-eliminating the false ``EDEADLK``.
+Windows: ``lock_fd`` retries ``msvcrt.locking(LK_NBLCK)`` every ~1 ms until
+the lock is acquired or ``_LOCK_TIMEOUT`` (10 s) elapses, instead of the
+single ``msvcrt.locking(LK_LOCK)`` call it used to make.  ``LK_LOCK`` is
+not a true blocking lock — it is a ten-attempt poll at one-second spacing:
+the CRT calls ``LockFile``, sleeps 1000 ms, and repeats up to ten times
+before setting ``EDEADLK`` (errno 36, "Resource deadlock avoided").  Under
+contention the poll cadence is therefore 1 Hz, so only ~10 of 40 contending
+threads can drain through in a ten-second window before the rest exhaust
+their attempts and raise.  The callers (``append_locked``, ``exclusive``)
+catch that ``OSError`` and silently drop the write — manifesting as
+``test_concurrent_appends_serialize`` flaking (``assert 39 == 40``) on
+``windows-latest``, where a dropped line looks like inaction.
+
+``LK_NBLCK`` (non-blocking) maps the OS ``ERROR_LOCK_VIOLATION`` straight
+to ``EACCES`` (errno 13) with no internal retry.  Catching ``EACCES`` and
+re-polling at 1 KHz (1 ms) drains the same forty-thread burst in ~1 s with
+zero failures, so the retry loop preserves the ten-second safety valve
+while eliminating the loss.  ``EDEADLK`` is kept in the retry set purely
+defensively: the CRT documentation ties it to ``LK_LOCK`` only, and no
+reproduction surfaced it on ``LK_NBLCK``, but a future CRT build could still
+emit it under same-process contention.
 """
 
 from __future__ import annotations
@@ -37,9 +45,8 @@ if sys.platform == "win32":
 
     _REGION_BYTES = 1
 
-    #: How long ``lock_fd`` will retry before giving up (mirrors the ~10 s
-    #: interior retry that ``msvcrt.locking(LK_LOCK)`` used to do).  omind
-    #: holds locks for milliseconds, so a stall longer than this signals a
+    #: How long ``lock_fd`` will retry before giving up.  omind holds these
+    #: locks for milliseconds, so a stall longer than this signals a
     #: genuinely wedged writer and surfacing the error beats queueing forever.
     _LOCK_TIMEOUT = 10.0
 
@@ -52,12 +59,12 @@ if sys.platform == "win32":
                 msvcrt.locking(fd, msvcrt.LK_NBLCK, _REGION_BYTES)
                 return
             except OSError as exc:
-                # EACCES  — another *process* holds the lock (or, on LK_NBLCK,
-                #            another thread in this process — see module
-                #            docstring).  Wait and retry.
-                # EDEADLK — the CRT occasionally returns this for same-process
-                #            contention even on LK_NBLCK in some builds; treat
-                #            it the same as EACCES and keep retrying.
+                # EACCES  — another thread or process holds the lock on this
+                #            file (LK_NBLCK maps OS ERROR_LOCK_VIOLATION to
+                #            EACCES directly; no CRT retry).  Wait and retry.
+                # EDEADLK — defensively retried too: the CRT docs tie this to
+                #            LK_LOCK only, but keeping it in the retry set is
+                #            harmless if a future build emits it under contention.
                 if exc.errno not in (errno.EACCES, errno.EDEADLK):
                     raise
                 if time.monotonic() > deadline:
