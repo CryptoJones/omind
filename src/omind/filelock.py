@@ -51,7 +51,9 @@ if sys.platform == "win32":
     _LOCK_TIMEOUT = 10.0
 
     def lock_fd(fd: int) -> None:
-        """Block until this process holds the exclusive lock on ``fd``."""
+        """Block until this process holds the exclusive lock on ``fd``, or for up
+        to ``_LOCK_TIMEOUT`` seconds (default 10 s), after which an ``OSError``
+        with the last contention errno is raised."""
         os.lseek(fd, 0, os.SEEK_SET)
         deadline = time.monotonic() + _LOCK_TIMEOUT
         while True:
