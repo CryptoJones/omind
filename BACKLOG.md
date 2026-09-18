@@ -11,17 +11,12 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [x] **[Priority 1 / P0] `edit-note` silently guts a note when `details` contains a `##` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
-  content after the first `##` is relocated out of `## Details` and re-emitted after
-  `## References`; a second edit leaves both the stale and the new copy. Hit for real
-  on 2026-08-31: a note ended up with two contradictory copies of its body, the
-  superseded one still reading as current, while `## Details` was empty.
-- [ ] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
+- [x] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / filelock)_ —
   `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
   branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
   gap — and if it is the latter, the journal, compliance log and AI-usage log have
   the same hole on Windows, where a dropped line looks like inaction, not a bug.
-- [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (1/2)_ —
+- [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (0/2)_ —
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
   the whole, and reports itself as functioning.
@@ -29,12 +24,6 @@ the exact order of operations._
     authorization is classified from the *opening* message of a turn, but Claude Code
     delivers messages sent while a turn is running alongside a tool result. An explicit
     mid-turn imperative therefore cannot lift a block the opening message armed.
-  - [x] **[Priority 4 / P1] Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ — **shipped in this PR** (consult continuity: continuation-aware preflight + retry carry + per-turn action budget). —
-    measured on hermes across every transcript since 2026-08-24: 362 turns where the
-    per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
-    97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
-    `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
-    prompts, so a long turn is one gate event no matter how much work happens inside it.
 - [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (0/2)_ —
   omind detecting and reporting its own retrieval failures instead of assuming its
   instrumentation is sound. Both children share one thesis: omind was measuring itself
@@ -107,7 +96,32 @@ the exact order of operations._
 
 ## Done
 
+### Shipped — 2026-09-17 (v9.5.1)
+
+- [x] **Windows: `filelock.lock_fd` returns `EDEADLK` under same-process contention, silently dropping appends (#319)** — _bug (CI / filelock)_ —
+  `msvcrt.locking(LK_LOCK)` — the blocking primitive `lock_fd` used on Windows — routes through
+  the C runtime's `_locking` wrapper, which maintains a per-process lock table. When a second
+  *thread* in the same process attempts to lock a byte range its own process already holds
+  (even via a separate file descriptor), `_locking` returns `EDEADLK` (errno 36) after a ~10 s
+  retry instead of `EACCES`. `append_locked` and `exclusive` swallow that `OSError`, silently
+  dropping the write. Manifested as `test_concurrent_appends_serialize` flaking
+  (`assert 39 == 40` on `windows-latest`) — one of 40 concurrent appends lost. The journal,
+  compliance log, and AI-usage log shared the same hole.
+
+  `lock_fd` now acquires the lock with `msvcrt.locking(LK_NBLCK)` inside a bounded retry loop:
+  `LK_NBLCK` correctly returns `EACCES` (errno 13) on real contention from another thread or
+  process — without the `EDEADLK` false-positive — so the loop catches it, sleeps ~1 ms, and
+  retries for up to 10 s. A new regression test
+  (`test_lock_fd_serializes_threads_in_same_process`) verifies 40 threads contend on 40
+  separate fds to the same file and that at most one holds the lock at any instant.
+
 ### Shipped — 2026-09-15 (v9.5.0)
+
+- [x] **`edit-note` / `omind note` refuse un-fenced `##` headings in `details`/`summary` (#292).**
+  The note template delimits its own sections with `## H2`, so a `##` inside a free-text field
+  body was re-parsed as a new section on the next read: content relocated after `## References`,
+  and a re-edit left both the stale and the new copy (real data loss on 2026-08-31). The write
+  path now raises `NoteError` instead of silently mangling memory.
 
 - [x] **Agents: add Antigravity CLI (`agy`) as an omind setup target** ([#354](https://github.com/CryptoJones/omind/issues/354)) — _enhancement (agents)_ —
   wire Google Antigravity CLI (`agy` / `antigravity`) into OMI:

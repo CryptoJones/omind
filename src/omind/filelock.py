@@ -3,21 +3,32 @@
 """Portable advisory file locking for the single-writer guarantees.
 
 POSIX gets ``fcntl.flock``; Windows gets ``msvcrt.locking`` over a one-byte
-region at offset 0. Both serialize every omind writer that locks the same
-file, which is all the store's ``.omi.lock`` and the journal append path
-need — no byte of locked region ever overlaps actual data.
+region at offset 0.  Both serialize every omind writer that locks the same
+file, which is everything the store's ``.omi.lock`` and the journal append
+path need — no byte of locked region ever overlaps actual data.
 
-``msvcrt.locking(LK_LOCK)`` retries once a second for ten seconds before
-raising ``OSError``; omind holds these locks for milliseconds, so a ten-second
-stall means something is genuinely wedged and surfacing the error beats
-queueing forever.
+Windows: ``lock_fd`` acquires the lock with ``msvcrt.locking(LK_NBLCK)`` inside
+a bounded retry loop instead of ``LK_LOCK``.  ``LK_LOCK`` routes through the C
+runtime's ``_locking`` wrapper, which maintains a per-process lock table and
+returns ``EDEADLK`` (errno 36, "Resource deadlock avoided") when a second
+*thread* in the same process attempts to lock a byte range its own process
+already holds — even though the two threads use separate file descriptors.
+That turns a blocking lock into an immediate ``OSError``, which
+``append_locked`` and ``exclusive`` swallow through ``except OSError`` /
+``contextlib.suppress``, silently dropping the write.  ``LK_NBLCK`` (non-
+blocking) does not suffer the same blind spot: it returns ``EACCES`` on real
+contention from either another thread or another process, so we can catch it,
+sleep briefly, and retry — preserving the ten-second timeout behaviour while
+eliminating the false ``EDEADLK``.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
 import sys
+import time
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -26,10 +37,32 @@ if sys.platform == "win32":
 
     _REGION_BYTES = 1
 
+    #: How long ``lock_fd`` will retry before giving up (mirrors the ~10 s
+    #: interior retry that ``msvcrt.locking(LK_LOCK)`` used to do).  omind
+    #: holds locks for milliseconds, so a stall longer than this signals a
+    #: genuinely wedged writer and surfacing the error beats queueing forever.
+    _LOCK_TIMEOUT = 10.0
+
     def lock_fd(fd: int) -> None:
         """Block until this process holds the exclusive lock on ``fd``."""
         os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK, _REGION_BYTES)
+        deadline = time.monotonic() + _LOCK_TIMEOUT
+        while True:
+            try:
+                msvcrt.locking(fd, msvcrt.LK_NBLCK, _REGION_BYTES)
+                return
+            except OSError as exc:
+                # EACCES  — another *process* holds the lock (or, on LK_NBLCK,
+                #            another thread in this process — see module
+                #            docstring).  Wait and retry.
+                # EDEADLK — the CRT occasionally returns this for same-process
+                #            contention even on LK_NBLCK in some builds; treat
+                #            it the same as EACCES and keep retrying.
+                if exc.errno not in (errno.EACCES, errno.EDEADLK):
+                    raise
+                if time.monotonic() > deadline:
+                    raise
+                time.sleep(0.001)
 
     def try_lock_fd(fd: int) -> bool:
         """Take the exclusive lock without blocking; ``False`` if held elsewhere."""

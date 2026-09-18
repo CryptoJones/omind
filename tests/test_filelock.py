@@ -10,6 +10,8 @@ platform (including the windows-latest CI legs).
 from __future__ import annotations
 
 import os
+import threading
+import time
 from pathlib import Path
 
 import pytest
@@ -79,3 +81,53 @@ def test_append_locked_refuses_to_follow_a_symlink(tmp_path: Path) -> None:
         os.write(fd, b"redirected\n")
 
     assert victim.read_bytes() == b"untouched\n"
+
+
+def test_lock_fd_serializes_threads_in_same_process(tmp_path: Path) -> None:
+    """``lock_fd`` must BLOCK (not raise EDEADLK) under same-process contention (#319).
+
+    On Windows ``msvcrt.locking(LK_LOCK)`` returns EDEADLK (errno 36) when a
+    second thread in the same process tries to lock a byte range its own
+    process already holds — even with separate fds.  The fix uses ``LK_NBLCK``
+    in a retry loop so contention surfaces as ``EACCES`` (errno 13), which we
+    catch and wait on.  This test verifies that 40 threads, each holding the
+    lock long enough to prove serialization, all complete without losing a
+    single acquisition.
+    """
+    path = tmp_path / "mutex"
+    fds = [
+        os.open(path, os.O_RDWR | os.O_CREAT | _O_BINARY, 0o600) for _ in range(40)
+    ]
+    acquired = [False] * 40
+    held_count = 0
+    max_held = 0
+    guard = threading.Lock()
+    barrier = threading.Barrier(40)
+
+    def worker(i: int) -> None:
+        barrier.wait()  # maximise contention: all threads fire at once
+        filelock.lock_fd(fds[i])
+        try:
+            with guard:
+                nonlocal held_count, max_held
+                held_count += 1
+                max_held = max(max_held, held_count)
+            # hold the lock briefly so other threads block on it
+            time.sleep(0.01)
+            acquired[i] = True
+        finally:
+            with guard:
+                held_count -= 1
+            filelock.unlock_fd(fds[i])
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+
+    for fd in fds:
+        os.close(fd)
+
+    assert all(acquired), "some threads failed to acquire the lock"
+    assert max_held == 1, "lock was not serialized (observed concurrent holders)"
