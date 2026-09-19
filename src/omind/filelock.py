@@ -35,6 +35,19 @@ LOCK_TIMEOUT_S = 10.0
 _POLL_MIN_S = 0.001
 _POLL_MAX_S = 0.05
 
+#: The errnos that mean "someone else holds the lock". ``flock(LOCK_NB)`` reports
+#: ``EWOULDBLOCK``/``EAGAIN``; ``msvcrt.locking(LK_NBLCK)`` maps
+#: ``ERROR_LOCK_VIOLATION`` to ``EACCES``. ``EDEADLK`` is what ``LK_LOCK`` raises
+#: and is kept defensively. Anything else (``EBADF``, ``ENOLCK``, ...) is a real
+#: failure: polling on it would stall the full ceiling and then misreport it as
+#: contention, so it propagates on the first attempt instead.
+_CONTENTION_ERRNOS = frozenset({errno.EACCES, errno.EAGAIN, errno.EWOULDBLOCK, errno.EDEADLK})
+
+
+def _held_elsewhere(exc: OSError) -> bool:
+    """Whether a failed non-blocking lock attempt means the lock is simply held."""
+    return exc.errno in _CONTENTION_ERRNOS
+
 
 def _poll_lock(
     try_once: Callable[[], bool],
@@ -71,7 +84,9 @@ if sys.platform == "win32":
         os.lseek(fd, 0, os.SEEK_SET)
         try:
             msvcrt.locking(fd, msvcrt.LK_NBLCK, _REGION_BYTES)
-        except OSError:
+        except OSError as exc:
+            if not _held_elsewhere(exc):
+                raise
             return False
         return True
 
@@ -91,7 +106,9 @@ else:
         """Take the exclusive lock without blocking; ``False`` if held elsewhere."""
         try:
             fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except OSError:
+        except OSError as exc:
+            if not _held_elsewhere(exc):
+                raise
             return False
         return True
 
@@ -150,10 +167,14 @@ def try_exclusive(path: Path, *, mode: int = 0o600) -> Iterator[bool]:
     janitor's single-instance mutex and its "is a sync in flight?" probe, where
     waiting is exactly the wrong behaviour. Same sibling-``.lock`` discipline as
     :func:`exclusive`.
+
+    Raises ``OSError`` when the attempt fails for any reason other than the lock
+    being held — a broken lock must not read as "someone else has it".
     """
     fd = os.open(path, os.O_RDWR | os.O_CREAT | _BINARY | _NOFOLLOW, mode)
-    acquired = try_lock_fd(fd)
+    acquired = False
     try:
+        acquired = try_lock_fd(fd)
         yield acquired
     finally:
         if acquired:
