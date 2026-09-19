@@ -10,6 +10,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [9.6.0] - 2026-09-19
 
 ### Added
+- **`omind bench --needle`: A/B needle-in-a-haystack replay, preflight on vs off (#321).**
+  The last open acceptance criterion of #321, and the only instrument that
+  measures what the preflight does to the MODEL rather than what it ships. It
+  replays a real transcript (`--transcript`, a Claude Code `.jsonl` or any text
+  file) twice — as it was, and with what the preflight would have pushed after
+  every user prompt — plants a hash-derived fact and instruction at 20/50/80%
+  depth, and scores recall and instruction adherence per depth and arm, plus the
+  on−off delta. `--mode hint|inject` picks the shipped pointer or the pre-9.2.0
+  push; `--trials`, `--max-chars`, `--emit DIR` (write every exact prompt). The
+  replay is read-only: it uses the new `bench.preflight_pick`, a side-effect-free
+  replica of the live choice that `--precision` now shares, so the two cannot
+  drift. With no model backend the arms are built and sized and nothing is
+  scored — never a heuristic in the model's place. See `docs/needle.md`.
 - **`omind audit`: a self-assessment that can indict omind (#326).** One row per
   surface that spends the agent's context or attention — preflight recall,
   SessionStart priming, MCP tool responses, the consult gate, learned + note

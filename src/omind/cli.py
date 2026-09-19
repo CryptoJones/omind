@@ -454,6 +454,37 @@ def build_parser() -> argparse.ArgumentParser:
         help="measure what the per-turn preflight would inject unbidden: how "
         "often it speaks, how often it is right, and what it costs (#321)",
     )
+    bench.add_argument(
+        "--needle",
+        action="store_true",
+        help="A/B needle-in-a-haystack replay of --transcript: a planted fact and "
+        "instruction at 20/50/80%% depth, preflight on vs off (#321)",
+    )
+    bench.add_argument(
+        "--transcript",
+        type=Path,
+        help="--needle: the long transcript to replay (a Claude Code .jsonl session, "
+        "or any text file as a plain haystack)",
+    )
+    bench.add_argument(
+        "--mode",
+        choices=["hint", "inject"],
+        default="hint",
+        help="--needle: which preflight to replay in the ON arm — the shipped `hint`, "
+        "or the pre-9.2.0 full `inject` that #321 measured (default: hint)",
+    )
+    bench.add_argument(
+        "--trials", type=int, default=1, help="--needle: needle sets per depth (default: 1)"
+    )
+    bench.add_argument(
+        "--max-chars",
+        type=int,
+        default=200_000,
+        help="--needle: keep this much of the transcript's tail (default: 200000)",
+    )
+    bench.add_argument(
+        "--emit", type=Path, help="--needle: also write every arm's exact prompt to this directory"
+    )
     bench.add_argument("--json", action="store_true", help="emit measurements as JSON")
     _add_vault_args(bench)
 
@@ -1309,7 +1340,25 @@ def _run_bench(args: argparse.Namespace) -> int:
     from omind import bench
 
     omi_dir = (args.vault / args.folder).expanduser()
-    if args.precision:
+    if args.needle:
+        from omind import needle
+
+        if args.transcript is None:
+            print("omind bench --needle requires --transcript PATH", file=sys.stderr)
+            return 2
+        try:
+            report = needle.run_needle(
+                omi_dir,
+                args.transcript,
+                mode=args.mode,
+                trials=args.trials,
+                max_chars=args.max_chars,
+                emit=args.emit,
+            )
+        except (OSError, ValueError) as exc:
+            print(f"omind bench --needle: {exc}", file=sys.stderr)
+            return 2
+    elif args.precision:
         report = bench.run_precision(omi_dir)
     elif args.quality:
         report = bench.run_quality(omi_dir)
