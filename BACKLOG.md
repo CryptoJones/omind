@@ -33,11 +33,11 @@ the exact order of operations._
     97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
     `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
     prompts, so a long turn is one gate event no matter how much work happens inside it.
-- [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (0/2)_ —
+- [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (1/2)_ —
   omind detecting and reporting its own retrieval failures instead of assuming its
   instrumentation is sound. Both children share one thesis: omind was measuring itself
   the whole time and nobody read the meter.
-  - [ ] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — _enhancement (instrument)_ —
+  - [x] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — **v9.6.0** — _enhancement (instrument)_ —
     every omind surface that spends the agent's context gets a measured number, a
     declared threshold and a verdict — and the tool must be able to return a failing
     one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
@@ -46,6 +46,9 @@ the exact order of operations._
     priming 2.88M tokens, MCP responses 2.49M, verifier 642K, none with a threshold.
     #321 was found by accident after months invisible; the ledger that proved it had
     been written faithfully since 4.0.0 and never read.
+    **Shipped 2026-09-19:** `omind audit` — 14 declared thresholds across 7 surfaces,
+    `ok`/`FAIL`/`unmeasured` verdicts, exit 1 on any fail, `--json`, read-only. First run
+    on the real vault: 6 failing. See [docs/audit.md](docs/audit.md).
   - [ ] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
     the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
     ~25% precision, framed as binding instruction and never removed. Invisible by

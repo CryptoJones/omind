@@ -457,6 +457,17 @@ def build_parser() -> argparse.ArgumentParser:
     bench.add_argument("--json", action="store_true", help="emit measurements as JSON")
     _add_vault_args(bench)
 
+    audit = sub.add_parser(
+        "audit",
+        help="self-assessment: measure every surface that spends the agent's "
+        "context, judge each against a declared threshold, exit 1 if any fails (#326)",
+    )
+    audit.add_argument(
+        "--days", type=int, default=30, help="look-back window in days (default: 30)"
+    )
+    audit.add_argument("--json", action="store_true", help="emit the verdict table as JSON")
+    _add_vault_args(audit)
+
     rules = sub.add_parser(
         "rules",
         help="deterministic note rules compiled into PreToolUse checks (#240)",
@@ -1309,6 +1320,16 @@ def _run_bench(args: argparse.Namespace) -> int:
     return 0
 
 
+def _run_audit(args: argparse.Namespace) -> int:
+    import json
+
+    from omind import audit
+
+    report = audit.run_audit((args.vault / args.folder).expanduser(), days=args.days)
+    print(json.dumps(report.to_dict(), indent=2) if args.json else report.format())
+    return report.exit_code
+
+
 def _run_lint(args: argparse.Namespace) -> int:
     import json
 
@@ -1770,6 +1791,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_search(args)
     if args.command == "bench":
         return _run_bench(args)
+    if args.command == "audit":
+        return _run_audit(args)
     if args.command == "lint":
         return _run_lint(args)
     if args.command == "rules":
