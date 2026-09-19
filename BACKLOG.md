@@ -33,7 +33,7 @@ the exact order of operations._
     97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
     `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
     prompts, so a long turn is one gate event no matter how much work happens inside it.
-- [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (1/2)_ —
+- [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (2/2 — both children shipped; close with #321)_ —
   omind detecting and reporting its own retrieval failures instead of assuming its
   instrumentation is sound. Both children share one thesis: omind was measuring itself
   the whole time and nobody read the meter.
@@ -49,7 +49,7 @@ the exact order of operations._
     **Shipped 2026-09-19:** `omind audit` — 14 declared thresholds across 7 surfaces,
     `ok`/`FAIL`/`unmeasured` verdicts, exit 1 on any fail, `--json`, read-only. First run
     on the real vault: 6 failing. See [docs/audit.md](docs/audit.md).
-  - [ ] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
+  - [x] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — **v9.7.0** — _bug + enhancement_ —
     the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
     ~25% precision, framed as binding instruction and never removed. Invisible by
     construction; surfaced as "the model has gotten worse in long sessions". **The
@@ -58,6 +58,10 @@ the exact order of operations._
     Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
     depth, preflight on vs off) — the one acceptance criterion that needs an
     instrument, not a change.
+    **Shipped 2026-09-19:** `omind bench --needle` — replays a real transcript with and
+    without the preflight, needles at 20/50/80% depth, scoring recall and instruction
+    adherence; read-only replay; verified end-to-end against a live model. See
+    [docs/needle.md](docs/needle.md). The large-window, multi-trial run is operator spend.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   needs CJ's PyPI account; details in [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
 - [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — _bug (hooks)_ — **shipped in this PR** (`_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands). —

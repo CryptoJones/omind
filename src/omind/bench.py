@@ -375,6 +375,57 @@ _HINT_OVERHEAD = 180
 _INJECT_OVERHEAD = 200
 
 
+@dataclass(frozen=True)
+class PreflightPick:
+    """What the per-turn preflight would speak about for one prompt."""
+
+    filename: str
+    titles: list[str]
+    raw: str
+    summary: str
+    hard_rule: bool
+
+
+def preflight_pick(
+    omi: Path,
+    query: str,
+    *,
+    store: Any = None,
+    min_terms: int | None = None,
+    hard_rules: set[str] | None = None,
+) -> PreflightPick | None:
+    """The note preflight would surface for ``query``, or ``None`` if it abstains.
+
+    A READ-ONLY replica of the live path's choice (``guard.preflight_turn``):
+    same retrieval, same minimum-overlap and stale-note abstain rules, but no
+    access recorded, no consult, no compliance event, no usage row. Shared by
+    ``--precision`` and the ``--needle`` replay so the two instruments cannot
+    drift apart on what "preflight would have said" means.
+    """
+    from omind import guard, recall, retrieve
+    from omind.store import OmiStore, parse_note
+
+    store = store if store is not None else OmiStore(omi)
+    min_terms = retrieve.preflight_min_terms() if min_terms is None else min_terms
+    hard_rules = guard.hard_rule_notes(omi) if hard_rules is None else hard_rules
+    titles = retrieve.relevant_titles(query, omi, limit=2)
+    filename = recall.filename_for_title(omi, titles[0]) if titles else None
+    if filename is None:
+        return None
+    try:
+        raw = store.read_note(filename)
+    except Exception:
+        return None
+    fields = parse_note(raw)
+    haystack = f"{fields.title} {fields.summary} {raw}"
+    if min_terms and retrieve.matched_terms(query, haystack) < min_terms:
+        return None
+    hard_rule = filename in hard_rules
+    if not hard_rule and guard.looks_stale(fields.summary, raw):
+        return None
+    return PreflightPick(filename, [str(t) for t in titles], raw, fields.summary, hard_rule)
+
+
 def run_precision(
     omi_dir: Path | str,
     *,
@@ -392,8 +443,8 @@ def run_precision(
     Read-only: it resolves and reads notes, but never records an access, a
     consult, a compliance event, or a usage row.
     """
-    from omind import ai_usage, guard, recall, retrieve
-    from omind.store import OmiStore, parse_note
+    from omind import ai_usage, guard, retrieve
+    from omind.store import OmiStore
 
     omi = Path(omi_dir).expanduser()
     report = Report(vault=str(omi))
@@ -417,24 +468,11 @@ def run_precision(
     inject_sizes: list[int] = []
     wrong: list[str] = []
     for query, expected in evaluable:
-        titles = retrieve.relevant_titles(query, omi, limit=2)
-        filename = recall.filename_for_title(omi, titles[0]) if titles else None
-        if filename is None:
+        pick = preflight_pick(omi, query, store=store, min_terms=min_terms, hard_rules=hard_rules)
+        if pick is None:
             abstained += 1
             continue
-        try:
-            raw = store.read_note(filename)
-        except Exception:
-            abstained += 1
-            continue
-        fields = parse_note(raw)
-        haystack = f"{fields.title} {fields.summary} {raw}"
-        if min_terms and retrieve.matched_terms(query, haystack) < min_terms:
-            abstained += 1
-            continue
-        if filename not in hard_rules and guard.looks_stale(fields.summary, raw):
-            abstained += 1
-            continue
+        filename, titles, raw = pick.filename, pick.titles, pick.raw
         spoke += 1
         if filename == expected:
             correct += 1

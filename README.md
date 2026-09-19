@@ -480,6 +480,7 @@ omind bench                    # latency, MCP schema size, and token cost
 omind bench --quality          # labelled recall@1 / recall@5 / MRR
 omind bench --precision        # what the per-turn preflight would inject unbidden
 omind audit                    # every context-spending surface vs. a declared threshold; exit 1 on a fail
+omind bench --needle --transcript SESSION.jsonl   # A/B: does the preflight cost the model recall?
 ```
 
 `omind audit` is the instrument that can indict omind itself: one row per surface
@@ -488,6 +489,11 @@ the verifier, the MCP tool schema), each with a measured number, a version-contr
 threshold and a verdict that names the remedy — including "turn this off". It reads
 only what omind already records, writes nothing, and reports what it cannot judge as
 `unmeasured` rather than green. See [docs/audit.md](docs/audit.md).
+
+`omind bench --needle` is the A/B the other instruments cannot give you: it replays a
+real long transcript twice — as it was, and with what the preflight would have pushed
+after every prompt — plants a fact and an instruction at 20/50/80% depth, and asks a
+model to retrieve one and obey the other. See [docs/needle.md](docs/needle.md).
 
 The index lives in the state directory, never in the vault — it is disposable
 and rebuildable. Semantic ranking needs the optional `[embed]` extra; without it
