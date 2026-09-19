@@ -11,11 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [x] **[Priority 1 / P0] `edit-note` silently guts a note when `details` contains a `##` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
-  content after the first `##` is relocated out of `## Details` and re-emitted after
-  `## References`; a second edit leaves both the stale and the new copy. Hit for real
-  on 2026-08-31: a note ended up with two contradictory copies of its body, the
-  superseded one still reading as current, while `## Details` was empty.
 - [ ] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
   `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
   branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
@@ -107,6 +102,19 @@ the exact order of operations._
 - [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-09-19
+
+- [x] **[Priority 0 / P0] Guard: repo-work gate demands `Operational Rules - Git Repos and Secrets`, which setup never seeds, and a not-found read clears it** ([#358](https://github.com/CryptoJones/omind/issues/358)) — _bug (enforcement)_ —
+  setup seeds a starter note (never overwrites); `doctor` checks it exists; a failed
+  read is retracted at PostToolUse instead of clearing the gate; a vault that still
+  lacks the note gets a once-per-turn warning plus a `demanded-note-missing`
+  compliance event, with only the read demand waived. A pristine starter yields to
+  the fleet's real note on mesh join.
+- [x] **[Priority 1 / P0] `edit-note` silently guts a note when `details` contains a `##` heading** ([#292](https://github.com/CryptoJones/omind/issues/292)) — _bug (data loss)_ —
+  shipped in [PR #361](https://github.com/CryptoJones/omind/pull/361): the write path
+  refuses an un-fenced `##` heading inside `summary`/`details` (fence-aware) and
+  recommends `###`, instead of silently relocating the content.
 
 ### Shipped — 2026-09-15 (v9.5.0)
 

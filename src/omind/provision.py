@@ -686,6 +686,41 @@ class Provisioner:
         )
         self._write_if_absent(self.config.omi_dir / paths.INDEX_FILENAME, index_seed)
 
+    def seed_git_rules_note(self) -> None:
+        """Seed the note the guard demands before repo work, if absent (#358).
+
+        The repo-work gate hard-blocks until ``guard.GIT_RULES_NOTE`` is read, but
+        nothing used to create it: on a fresh vault every repo turn opened with a
+        block whose instruction could not be completed. Goes through ``OmiStore``
+        (invariant 4) so the note is Rev-stamped and indexed like any other, and
+        NEVER overwrites — an existing note, archived or not, is the operator's.
+        """
+        from omind.store import NoteError, NoteFields, OmiStore
+
+        store = OmiStore(self.config.omi_dir)
+        try:
+            if store.safe_name(seeds.GIT_RULES_NOTE_TITLE).is_file():
+                self.log(f"  exists, leaving untouched: {seeds.GIT_RULES_NOTE_TITLE}")
+                return
+        except NoteError:
+            pass  # unresolvable == absent; create_note settles it under the lock
+        self._record(f"seed starter note '{seeds.GIT_RULES_NOTE_TITLE}'")
+        if self.config.dry_run:
+            return
+        try:
+            store.create_note(
+                NoteFields(
+                    title=seeds.GIT_RULES_NOTE_TITLE,
+                    summary=seeds.GIT_RULES_NOTE_SUMMARY,
+                    details=seeds.GIT_RULES_NOTE_DETAILS.rstrip(),
+                    tags=list(seeds.GIT_RULES_NOTE_TAGS),
+                )
+            )
+        except NoteError as exc:
+            # Lost a create race, or the vault refused the write: setup goes on,
+            # and `omind doctor` (demanded_notes) reports it if it is still absent.
+            self.log(f"  could not seed '{seeds.GIT_RULES_NOTE_TITLE}': {exc}")
+
     def migrate_journal_notes(self) -> None:
         """Move stray daily journals (vault-folder root, legacy ``logs/``) into
         ``Journal/`` and regenerate the index. Idempotent and lock-protected —
@@ -1345,6 +1380,7 @@ class Provisioner:
         self.ensure_vault()
         self.ensure_obsidian_config()
         self.seed_memory_files()
+        self.seed_git_rules_note()
         self.migrate_journal_notes()
         self.ensure_mesh()
         self.integrate()
@@ -1613,6 +1649,7 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
 
     results.append(_diagnose_hook_failures())
     results.append(_diagnose_vault_writes(config))
+    results.append(_diagnose_demanded_notes(config))
 
     return results
 
@@ -2001,6 +2038,26 @@ _MACOS_TCC_HINT = (
     "Full Disk Access), or move the vault outside ~/Documents; then verify "
     "with `omind doctor`."
 )
+
+
+def _diagnose_demanded_notes(config: SetupConfig) -> CheckResult:
+    """Every note the guard can DEMAND must exist, or its gate is theatre (#358).
+
+    Only the git-rules note can be absent: compiled ``omind-rule`` notes are
+    discovered by reading them, so they exist by construction. Pure read."""
+    from omind import guard
+
+    if guard.demanded_note_missing(config.omi_dir):
+        return CheckResult(
+            "demanded_notes",
+            "fail",
+            f"the guard demands the note '{guard.GIT_RULES_NOTE}' before repo work, but "
+            "the vault has none — the git-rules gate is not enforcing anything. Run "
+            "`omind setup` to seed a starter copy, then edit it to hold your rules.",
+        )
+    return CheckResult(
+        "demanded_notes", "ok", f"guard-demanded note present: {guard.GIT_RULES_NOTE}"
+    )
 
 
 def _diagnose_vault_writes(config: SetupConfig) -> CheckResult:

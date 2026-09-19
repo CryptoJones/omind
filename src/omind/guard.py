@@ -147,6 +147,16 @@ GIT_RULES_MESSAGE = (
     "then retry. Repo work requires that specific memory this turn — read it "
     "in full: a truncated read does not clear this gate."
 )
+#: Value of the per-turn demanded-note marker once the git-rules note is known
+#: to be absent (#358). Never a substring of a real consult target, so the
+#: verifier's ``_guard_demanded`` cannot mistake it for an obeyed demand.
+_GIT_RULES_MISSING_MARK = f"(missing) {GIT_RULES_NOTE}"
+GIT_RULES_MISSING_MESSAGE = (
+    f"omi-guard: repo work normally requires reading the OMI note '{GIT_RULES_NOTE}', "
+    "but this vault has no such note, so the git-rules gate is NOT enforcing "
+    "anything. Run `omind setup` to seed a starter copy (it never overwrites an "
+    "existing note), then edit it to hold this operator's real rules."
+)
 GIT_FRESHNESS_MESSAGE = (
     "a git commit requires a same-turn freshness check — refresh the local base "
     "before recording work onto it. (Only the commit is gated; edits, tests, reads, "
@@ -537,6 +547,51 @@ def consults(session: str) -> list[dict[str, Any]]:
     """The consults recorded this turn (each ``{kind, target, relevant}``)."""
     raw = _read_sentinel(session).get("consults")
     return [c for c in raw if isinstance(c, dict)] if isinstance(raw, list) else []
+
+
+def retract_consult(session: str, target: str) -> None:
+    """Mark this turn's consults of ``target`` as failed (#358).
+
+    PreToolUse records a consult BEFORE the read runs, so a ``recall-note`` that
+    came back ``note not found`` used to clear the git-rules gate having read
+    nothing. PostToolUse calls this when the outcome says the read failed — the
+    same record-then-retract shape as :func:`record_freshness_outcome`. The
+    record is kept (flagged) rather than dropped so the turn history still shows
+    the attempt. Never raises."""
+    needle = target.strip().lower()
+    if not needle:
+        return
+
+    def _retract(data: dict[str, Any]) -> dict[str, Any]:
+        existing = data.get("consults")
+        for consult in existing if isinstance(existing, list) else []:
+            if isinstance(consult, dict) and str(consult.get("target") or "").lower() == needle:
+                consult["failed"] = True
+                consult["relevant"] = False
+        return data
+
+    _mutate_sentinel(session, _retract)
+
+
+def demanded_note_missing(omi_dir: Path | str, note: str = GIT_RULES_NOTE) -> bool:
+    """True only when ``note`` is POSITIVELY absent from the vault (#358).
+
+    A gate that demands a read which is guaranteed to fail teaches the agent to
+    perform a ceremony, not to read rules. Conservative like
+    :func:`_repo_has_remote`: any doubt (unreadable vault, resolution error)
+    answers ``False`` so the demand stands. Never raises."""
+    try:
+        from omind.store import NoteError, OmiStore
+
+        root = Path(omi_dir)
+        if not root.is_dir():
+            return False
+        try:
+            return not OmiStore(root).safe_name(note).is_file()
+        except NoteError:
+            return True
+    except Exception:
+        return False
 
 
 def consulted_this_turn(session: str) -> bool:
@@ -1513,6 +1568,10 @@ def _repo_has_remote(repo: Path) -> bool:
 def _has_consulted_git_rules(session: str) -> bool:
     needle = GIT_RULES_NOTE.lower()
     for consult in consults(session):
+        if consult.get("failed"):
+            # The read errored (not-found, locked vault…): the agent has read
+            # zero rules, so crediting it enforces nothing (#358).
+            continue
         target = str(consult.get("target") or "").lower()
         if needle in target:
             # A truncated read of the demanded note is not a consult of it —
@@ -1663,8 +1722,11 @@ def _is_unauthorized_capability_side_effect(action: dict[str, Any], session: str
     )
 
 
-def decide(action: dict[str, Any]) -> Verdict:
-    """The harness-agnostic policy. See the module docstring for the schema."""
+def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdict:
+    """The harness-agnostic policy. See the module docstring for the schema.
+
+    ``git_rules_missing`` (#358) waives ONLY the git-rules read demand, for a
+    vault that positively lacks the note; every other gate still runs."""
     session = str(action.get("session") or "")
     command = str(action.get("command") or "")
     repo = _repo_root_for_action(action)
@@ -1746,7 +1808,7 @@ def decide(action: dict[str, Any]) -> Verdict:
         )
 
     if repo is not None and _is_repo_sensitive_action(action):
-        if not _has_consulted_git_rules(session):
+        if not git_rules_missing and not _has_consulted_git_rules(session):
             record_pending(session, command or _action_path(action))
             # Name the demanded note so the verifier credits the obeying read
             # as relevant instead of re-closing the gate over it (#148).
@@ -1863,7 +1925,35 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
     """
     verdict = _note_rules_verdict(action, omi_dir)
     if verdict is None:
-        verdict = decide(action)
+        session = str(action.get("session") or "")
+        # #358: once a turn has established the git-rules note is absent, the
+        # marker waives the demand for the rest of it — one log line per turn,
+        # not one per tool call.
+        known_missing = demanded_note(session) == _GIT_RULES_MISSING_MARK
+        verdict = decide(action, git_rules_missing=known_missing)
+        if (
+            not verdict.allow
+            and verdict.rule_id == "repo-work-read-git-rules"
+            and omi_dir is not None
+            and demanded_note_missing(omi_dir)
+        ):
+            # The demanded note does not exist, so the read this deny asks for
+            # cannot succeed. Degrade LOUDLY instead of demanding a ceremony:
+            # log the gap where `omind doctor` / an audit can find it, tell the
+            # operator the fix, and re-decide with only that demand waived.
+            record_demanded_note(session, _GIT_RULES_MISSING_MARK)
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=session,
+                tool=str(action.get("tool") or ""),
+                command=str(action.get("command") or ""),
+                rule_id="demanded-note-missing",
+                severity="soft",
+                outcome="allowed",
+                detail=f"missing note: {GIT_RULES_NOTE}",
+            )
+            print(GIT_RULES_MISSING_MESSAGE, file=sys.stderr)
+            verdict = decide(action, git_rules_missing=True)
     if verdict.allow:
         # #296: an allowed action still counts against the turn's budget, and at
         # the budget the core may re-arm the gate around an unseen relevant note.

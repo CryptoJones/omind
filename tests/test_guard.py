@@ -2244,3 +2244,71 @@ def test_midturn_context_injects_the_candidate_and_resets_the_budget(
     assert compliance.read_events()[-1]["rule_id"] == guard.GATE_REARM_NO_MATCH_RULE
     action = {"tool": "Bash", "command": "systemctl restart telesto", "session": sid}
     assert guard.check_action(action, omi_dir=omi).allow
+
+
+# -- #358: the demanded git-rules note is missing, or its read failed ----------
+
+
+def test_failed_read_of_git_rules_does_not_clear_the_gate() -> None:
+    session = "gr358a"
+    guard.begin_turn(session, "open a PR")
+    # PreToolUse credits the consult before the read runs...
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE)
+    assert guard._has_consulted_git_rules(session)
+    # ...and PostToolUse retracts it when the read came back not-found.
+    guard.retract_consult(session, guard.GIT_RULES_NOTE)
+    assert not guard._has_consulted_git_rules(session)
+    blocked = guard.decide({"tool": "Bash", "command": "pytest", "session": session})
+    assert blocked.rule_id == "repo-work-read-git-rules"
+    # A later successful read is a separate record and still clears it.
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    assert guard._has_consulted_git_rules(session)
+    guard.clear_gate(session)
+
+
+def test_missing_git_rules_note_degrades_loudly_instead_of_demanding_it(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    session = "gr358b"
+    guard.begin_turn(session, "run the tests")
+    guard.mark_consulted(session)  # the ordinary consult gate is not under test
+    action = {"tool": "Bash", "command": "pytest", "session": session}
+
+    assert guard.demanded_note_missing(omi)
+    assert guard.check_action(action, omi_dir=omi).allow
+    assert "omind setup" in capsys.readouterr().err
+    events = [e for e in compliance.read_events() if e.get("rule_id") == "demanded-note-missing"]
+    assert len(events) == 1 and events[0]["outcome"] == "allowed"
+
+    # Second repo action in the same turn: still allowed, not logged or warned again.
+    assert guard.check_action(action, omi_dir=omi).allow
+    assert capsys.readouterr().err == ""
+    events = [e for e in compliance.read_events() if e.get("rule_id") == "demanded-note-missing"]
+    assert len(events) == 1
+
+    # Only the read demand is waived — a commit still needs a fresh base.
+    commit = guard.check_action(
+        {"tool": "Bash", "command": "git commit -am x", "session": session}, omi_dir=omi
+    )
+    assert commit.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
+
+
+def test_present_git_rules_note_is_still_demanded(tmp_path: Path) -> None:
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(NoteFields(title=guard.GIT_RULES_NOTE, summary="rules"))
+    assert not guard.demanded_note_missing(omi)
+    # Doubt is not absence: an unreadable / nonexistent vault keeps the demand.
+    assert not guard.demanded_note_missing(tmp_path / "nope")
+    session = "gr358c"
+    guard.begin_turn(session, "run the tests")
+    verdict = guard.check_action(
+        {"tool": "Bash", "command": "pytest", "session": session}, omi_dir=omi
+    )
+    assert verdict.rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)

@@ -391,3 +391,36 @@ def test_scope_merged_via_lww_and_preserved() -> None:
     res2 = merge_fields(b, o2, t2)
     assert res2.fields.scope == "proj-theirs"
 
+
+
+def test_pristine_seeded_git_rules_starter_yields_in_add_add_merge() -> None:
+    """#358: a fresh peer's seeded starter must not conflict with the fleet's
+    real rules note when it joins the mesh — in either direction."""
+    from omind import seeds
+    from omind.merge import merge_note_texts
+    from omind.store import NoteFields, render_fields
+
+    starter = render_fields(
+        NoteFields(
+            title=seeds.GIT_RULES_NOTE_TITLE,
+            summary=seeds.GIT_RULES_NOTE_SUMMARY,
+            details=seeds.GIT_RULES_NOTE_DETAILS.rstrip(),
+            created="2026-09-19",
+        )
+    )
+    real = render_fields(
+        NoteFields(
+            title=seeds.GIT_RULES_NOTE_TITLE,
+            summary="The operator's real rules.",
+            details="### Exceptions\n- repo-x pushes straight to master.",
+            created="2026-06-01",
+        )
+    )
+    for ours, theirs in ((starter, real), (real, starter)):
+        text, clean, _ = merge_note_texts("", ours, theirs)
+        assert clean and text == real
+    # Without the carve-out the generic starter is CONCATENATED into the real
+    # rules ("clean", and wrong). Two real copies still merge the normal way.
+    edited = real.replace("repo-x", "repo-y")
+    text, _clean, _ = merge_note_texts("", real, edited)
+    assert "repo-x" in text and "repo-y" in text
