@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [9.6.0] - 2026-09-19
+## [9.7.0] - 2026-09-19
 
 ### Added
 - **`omind bench --needle`: A/B needle-in-a-haystack replay, preflight on vs off (#321).**
@@ -23,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   replica of the live choice that `--precision` now shares, so the two cannot
   drift. With no model backend the arms are built and sized and nothing is
   scored — never a heuristic in the model's place. See `docs/needle.md`.
+
+## [9.6.0] - 2026-09-19
+
+### Added
 - **`omind audit`: a self-assessment that can indict omind (#326).** One row per
   surface that spends the agent's context or attention — preflight recall,
   SessionStart priming, MCP tool responses, the consult gate, learned + note

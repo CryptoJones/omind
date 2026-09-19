@@ -49,7 +49,7 @@ the exact order of operations._
     **Shipped 2026-09-19:** `omind audit` — 14 declared thresholds across 7 surfaces,
     `ok`/`FAIL`/`unmeasured` verdicts, exit 1 on any fail, `--json`, read-only. First run
     on the real vault: 6 failing. See [docs/audit.md](docs/audit.md).
-  - [x] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — _bug + enhancement_ —
+  - [x] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — **v9.7.0** — _bug + enhancement_ —
     the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
     ~25% precision, framed as binding instruction and never removed. Invisible by
     construction; surfaced as "the model has gotten worse in long sessions". **The
