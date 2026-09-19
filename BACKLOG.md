@@ -115,8 +115,10 @@ the exact order of operations._
   a real lock gap, not a harness race: `msvcrt.locking(LK_LOCK)` retries ten times in
   lockstep one second apart, so a herd of writers can starve one out and its
   best-effort caller swallows the `OSError`. Replaced with a jittered non-blocking poll
-  under the same 10 s ceiling. Diagnosed by analysis and covered by platform-independent
-  tests of the poll loop; the Windows CI run on the PR is the live confirmation.
+  under the same 10 s ceiling. **Reproduced and verified on real Windows** (pluto Win11 VM,
+  Python 3.13, `scripts/stress_append_lock.py`): unpatched, 40 threads x 30 trials lost
+  466 of 1,200 lines with every trial stalling ~9.2 s; patched, 0 lost at 40, 200 and 400
+  threads, worst trial 0.54 s. Flaky test 50/50, full suite 1,161 passed / 33 skipped.
 - [x] **[Priority 0 / P0] Guard: repo-work gate demands `Operational Rules - Git Repos and Secrets`, which setup never seeds, and a not-found read clears it** ([#358](https://github.com/CryptoJones/omind/issues/358)) — **v9.5.2** — _bug (enforcement)_ —
   setup seeds a starter note (never overwrites); `doctor` checks it exists; a failed
   read is retracted at PostToolUse instead of clearing the gate; a vault that still
