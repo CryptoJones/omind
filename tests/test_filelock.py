@@ -9,7 +9,10 @@ platform (including the windows-latest CI legs).
 
 from __future__ import annotations
 
+import errno
 import os
+import sys
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
@@ -120,3 +123,92 @@ def test_poll_lock_raises_oserror_at_the_deadline_with_jittered_backoff() -> Non
     assert len(sleeps) > 10  # many attempts, not LK_LOCK's fixed ten
     assert max(sleeps) <= filelock._POLL_MAX_S * 1.5
     assert len(set(sleeps)) > len(sleeps) // 2  # jittered, not lockstep
+
+
+# -- a real lock failure is not contention -------------------------------------
+
+
+def _fail_lock_primitive(monkeypatch: pytest.MonkeyPatch, fail: Callable[[], None]) -> None:
+    """Route the platform's non-blocking lock call through ``fail``."""
+
+    def fake(*_args: object) -> None:
+        fail()
+
+    if sys.platform == "win32":
+        monkeypatch.setattr(filelock.msvcrt, "locking", fake)
+    else:
+        monkeypatch.setattr(filelock.fcntl, "flock", fake)
+
+
+@pytest.mark.parametrize("code", sorted(filelock._CONTENTION_ERRNOS))
+def test_try_lock_fd_reports_contention_as_false(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, code: int
+) -> None:
+    def fail() -> None:
+        raise OSError(code, os.strerror(code))
+
+    _fail_lock_primitive(monkeypatch, fail)
+    fd = os.open(tmp_path / "mutex", os.O_RDWR | os.O_CREAT | _O_BINARY, 0o600)
+    try:
+        assert filelock.try_lock_fd(fd) is False
+    finally:
+        os.close(fd)
+
+
+def test_try_lock_fd_propagates_a_non_contention_error(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """``ENOLCK`` is a broken lock, not a held one — it must not read as ``False``."""
+
+    def fail() -> None:
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    _fail_lock_primitive(monkeypatch, fail)
+    fd = os.open(tmp_path / "mutex", os.O_RDWR | os.O_CREAT | _O_BINARY, 0o600)
+    try:
+        with pytest.raises(OSError) as raised:
+            filelock.try_lock_fd(fd)
+    finally:
+        os.close(fd)
+    assert raised.value.errno == errno.ENOLCK
+
+
+def test_poll_lock_stops_on_the_first_non_contention_error() -> None:
+    """The poll loop must not burn its ten-second ceiling on a real failure and
+    then relabel it as contention (the Windows ``lock_fd`` path)."""
+    calls = 0
+    sleeps: list[float] = []
+
+    def try_once() -> bool:
+        nonlocal calls
+        calls += 1
+        raise OSError(errno.EBADF, os.strerror(errno.EBADF))
+
+    with pytest.raises(OSError) as raised:
+        filelock._poll_lock(try_once, sleep=sleeps.append)
+    assert raised.value.errno == errno.EBADF
+    assert calls == 1
+    assert sleeps == []
+
+
+def test_try_exclusive_closes_the_fd_when_the_lock_attempt_fails(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    opened: list[int] = []
+    real_open = os.open
+
+    def tracking_open(*args: object, **kwargs: object) -> int:
+        fd: int = real_open(*args, **kwargs)  # type: ignore[arg-type]
+        opened.append(fd)
+        return fd
+
+    def fail() -> None:
+        raise OSError(errno.ENOLCK, os.strerror(errno.ENOLCK))
+
+    monkeypatch.setattr(filelock.os, "open", tracking_open)
+    _fail_lock_primitive(monkeypatch, fail)
+    with pytest.raises(OSError), filelock.try_exclusive(tmp_path / "mutex.lock"):
+        pytest.fail("the block must not run when the lock attempt errors")
+    assert len(opened) == 1
+    with pytest.raises(OSError):
+        os.fstat(opened[0])  # closed, not leaked

@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.7.4] - 2026-09-19
+
+### Fixed
+- **A real lock failure is no longer polled for ten seconds and misreported as
+  contention (#371).** `filelock.try_lock_fd` returned `False` for *every* `OSError`.
+  On Windows that sent `EBADF` / `ENOLCK` through the #319 poll loop for its full
+  ceiling and re-raised them as `EDEADLK "still contended"`; in `try_exclusive` it made
+  `omind maintain` refuse with "another `omind maintain` is already running" when the
+  lock itself was broken. Only the contention errnos (`EACCES`, `EAGAIN` /
+  `EWOULDBLOCK`, `EDEADLK`) mean "held elsewhere" now; anything else propagates on the
+  first attempt. `try_exclusive` also closes its fd when the attempt raises. This is the
+  error classification from #362, which #368 superseded without carrying it over.
+
 ## [9.7.3] - 2026-09-19
 
 ### Fixed

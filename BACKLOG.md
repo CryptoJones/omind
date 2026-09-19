@@ -11,7 +11,7 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (2/2 — both children shipped; close with #290)_ —
+- [x] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (2/2 — both children shipped; closed 2026-09-19 with #290)_ —
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
   the whole, and reports itself as functioning.
@@ -28,7 +28,7 @@ the exact order of operations._
     97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
     `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
     prompts, so a long turn is one gate event no matter how much work happens inside it.
-- [ ] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (2/2 — both children shipped; close with #321)_ —
+- [x] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (2/2 — both children shipped; closed 2026-09-19 with #321)_ —
   omind detecting and reporting its own retrieval failures instead of assuming its
   instrumentation is sound. Both children share one thesis: omind was measuring itself
   the whole time and nobody read the meter.
@@ -60,6 +60,12 @@ the exact order of operations._
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   publish workflow shipped 2026-09-19 (trusted publishing, no token); what remains needs CJ's
   PyPI account — see [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
+- [x] **filelock: a real lock failure is polled for 10 s and misreported as contention** ([#371](https://github.com/CryptoJones/omind/issues/371)) — **v9.7.4** — _bug_ —
+  `try_lock_fd` returned `False` for every `OSError`, so `EBADF`/`ENOLCK` stalled the Windows
+  `lock_fd` poll for its full ceiling and came back as `EDEADLK`, and made `omind maintain`
+  refuse with "already running". **Shipped 2026-09-19:** only the contention errnos mean
+  "held elsewhere"; anything else propagates on the first attempt, and `try_exclusive` no
+  longer leaks its fd on that path. The one piece of #362 that #368 did not carry over.
 - [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — _bug (hooks)_ — **shipped in this PR** (`_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands). —
 
 ## Not planned
@@ -551,8 +557,10 @@ Each issue below is written to be executable by any agent without further contex
      owner `CryptoJones`, repository `omind`, workflow `publish.yml`, environment `pypi`.
      (A pending publisher needs no existing project, but it does NOT reserve the name —
      the name is only yours after the first successful upload, so do step 4 promptly.)
-  2. **[operator]** On GitHub, create the `pypi` environment (Settings → Environments);
-     add yourself as a required reviewer if you want a manual gate on every upload.
+  2. [x] **GitHub `pypi` environment** — exists (verified via the API 2026-09-19; it was
+     created when the v9.7.3 publish run referenced it). It has no protection rules:
+     **[operator, optional]** add yourself as a required reviewer in Settings →
+     Environments if you want a manual gate on every upload.
   3. [x] **Publish workflow** — `.github/workflows/publish.yml` (2026-09-19): trusted
      publishing over OIDC, so there is **no API token** to mint, store or rotate. Builds
      sdist + wheel, refuses a release whose tag does not match the `pyproject` version,
