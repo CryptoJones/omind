@@ -60,6 +60,11 @@ the exact order of operations._
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   publish workflow shipped 2026-09-19 (trusted publishing, no token); what remains needs CJ's
   PyPI account — see [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
+- [x] **doctor: search index always reads "corrupt or incompatible" when embeddings are on** ([#373](https://github.com/CryptoJones/omind/issues/373)) — **v9.7.5** — _bug_ —
+  the index stores the encoder identity (`name:digest`), but `searchindex.health` compared it
+  to the bare model name, so every `omind[embed]` machine got a permanent false alarm that
+  `reindex --rebuild` could not clear. Found on makemake after the 9.4.0 → 9.7.3 upgrade.
+  **Shipped 2026-09-19:** health matches on the configured name, with or without a digest.
 - [x] **filelock: a real lock failure is polled for 10 s and misreported as contention** ([#371](https://github.com/CryptoJones/omind/issues/371)) — **v9.7.4** — _bug_ —
   `try_lock_fd` returned `False` for every `OSError`, so `EBADF`/`ENOLCK` stalled the Windows
   `lock_fd` poll for its full ceiling and came back as `EDEADLK`, and made `omind maintain`

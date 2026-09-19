@@ -462,6 +462,37 @@ def test_health_reports_size_age_counts_and_staleness(omi: Path) -> None:
     assert searchindex.health(omi).stale == 1
 
 
+def _set_stored_model(omi: Path, value: str) -> None:
+    with sqlite3.connect(searchindex.index_path(omi)) as db:
+        db.execute("UPDATE meta SET value = ? WHERE key = 'model'", (value,))
+
+
+def test_health_accepts_the_encoder_identity_the_index_stores(omi: Path) -> None:
+    """With embeddings on the index stores ``name:digest``; health compared it to
+    the bare name, so doctor called every healthy index corrupt and no rebuild
+    could clear it (#373)."""
+    _note(omi, "Fine", "content here", ["x"])
+    idx = searchindex.SearchIndex(omi)
+    assert idx.refresh() is not None
+    idx.close()
+    _set_stored_model(omi, f"{embed._DEFAULT_MODEL}:9266e569e8b0752866a772accbdcc5eb")
+
+    result = searchindex.health(omi)
+    assert result.corrupt == ""
+    assert result.notes == 1  # counts are reported, not skipped by an early return
+
+
+def test_health_still_flags_a_different_embedding_model(omi: Path) -> None:
+    _note(omi, "Fine", "content here", ["x"])
+    idx = searchindex.SearchIndex(omi)
+    assert idx.refresh() is not None
+    idx.close()
+
+    for other in ("some/other-model", f"{embed._DEFAULT_MODEL}-v2:abc", ""):
+        _set_stored_model(omi, other)
+        assert "embedding model" in searchindex.health(omi).corrupt
+
+
 def test_health_explains_a_corrupt_index(omi: Path) -> None:
     path = searchindex.index_path(omi)
     path.parent.mkdir(parents=True, exist_ok=True)
