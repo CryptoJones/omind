@@ -20,7 +20,7 @@ the exact order of operations._
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
   the whole, and reports itself as functioning.
-  - [x] **[Priority 3 / P1] Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — _bug (enforcement)_ —
+  - [x] **[Priority 3 / P1] Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — **v9.5.3** — _bug (enforcement)_ —
     authorization is classified from the *opening* message of a turn, but Claude Code
     delivers messages sent while a turn is running alongside a tool result. An explicit
     mid-turn imperative therefore cannot lift a block the opening message armed.

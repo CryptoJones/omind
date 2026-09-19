@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [9.5.2] - 2026-09-19
+## [9.5.3] - 2026-09-19
 
 ### Fixed
 - **Guard: a message the user sends mid-turn can now lift a turn-level authorization block (#290).**
@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   destructive hard rules never consult it. The Claude hook passes
   `transcript_path` through (re-run `omind setup` to refresh the installed
   hook), and both block messages now say a mid-turn go-ahead counts.
+
+## [9.5.2] - 2026-09-19
+
+### Fixed
 - **Guard: the repo-work gate demanded a note nothing creates, and a not-found read cleared it (#358).**
   `omind setup` now seeds a starter `Operational Rules - Git Repos and Secrets`
   through `OmiStore` when the vault has none (never overwriting an existing one),
