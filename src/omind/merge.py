@@ -381,12 +381,18 @@ def _merge_extras(
 
 
 def _is_pristine_seed(fields: NoteFields) -> bool:
-    """True for the setup-seeded git-rules starter exactly as seeded (#358)."""
+    """True for the setup-seeded git-rules starter exactly as seeded (#358).
+
+    EVERY field the seed writes is compared: a pristine starter yields whole to
+    the other side, so an operator who edited only the summary or the tags must
+    not read as pristine — that edit would be silently discarded."""
     from omind import seeds
 
     return (
         fields.title.strip() == seeds.GIT_RULES_NOTE_TITLE
+        and fields.summary.strip() == seeds.GIT_RULES_NOTE_SUMMARY.strip()
         and fields.details.strip() == seeds.GIT_RULES_NOTE_DETAILS.strip()
+        and sorted(fields.tags) == sorted(seeds.GIT_RULES_NOTE_TAGS)
     )
 
 

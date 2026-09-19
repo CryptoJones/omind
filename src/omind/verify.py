@@ -127,6 +127,8 @@ def _read_failed(event: dict[str, Any]) -> bool:
             # about this bug) from reading as a failure and wedging the gate.
             return "note not found:" in blob[:400] and "filename" not in blob
     except Exception:
+        # Fail open: an outcome we cannot parse is treated as "not a failure", so
+        # a surprise here can never retract a consult the agent really made.
         pass
     return False
 

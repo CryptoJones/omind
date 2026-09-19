@@ -100,8 +100,10 @@ top — a rule below the fold loses to the one read first._
 ### Working-tree freshness
 - `git fetch` updates remote-tracking refs only; it does not change checked-out
   files. Before committing or building a derived artifact, confirm the working
-  tree matches the branch you think you are on (`git status`, and
-  `git log --oneline origin/main..HEAD` both ways).
+  tree matches the branch you think you are on: `git status`, then
+  `git log --oneline origin/main..HEAD` (what you have that main lacks) AND
+  `git log --oneline HEAD..origin/main` (what main has that you lack — a branch
+  that is merely behind prints nothing for the first).
 
 ### Before committing
 - Run everything CI runs — tests, formatters, linters, type checks — not just

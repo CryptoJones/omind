@@ -552,27 +552,46 @@ def consults(session: str) -> list[dict[str, Any]]:
 
 
 def retract_consult(session: str, target: str) -> None:
-    """Mark this turn's consults of ``target`` as failed (#358).
+    """Retract the consult PreToolUse credited for a read that then FAILED (#358).
 
     PreToolUse records a consult BEFORE the read runs, so a ``recall-note`` that
     came back ``note not found`` used to clear the git-rules gate having read
     nothing. PostToolUse calls this when the outcome says the read failed — the
-    same record-then-retract shape as :func:`record_freshness_outcome`. The
-    record is kept (flagged) rather than dropped so the turn history still shows
-    the attempt. Never raises."""
+    same record-then-retract shape as :func:`record_freshness_outcome`.
+
+    Only the ATTEMPT is retracted: the latest still-unjudged record for
+    ``target`` (``relevant is None`` is what PreToolUse writes; a read that
+    succeeded has since gained a judged record, which is left alone). The
+    record is flagged rather than dropped so the turn history shows the attempt.
+
+    The sentinel's *existence* is the ordinary consult gate, so flagging alone
+    would leave that gate open: ``recall-note`` on any made-up name would clear
+    it, the same dodge as re-reading ``index.md``. When no un-failed consult is
+    left the sentinel is removed and the gate re-arms; any successful consult
+    (or a preflight that spoke) keeps it open. Never raises."""
     needle = target.strip().lower()
     if not needle:
         return
-
-    def _retract(data: dict[str, Any]) -> dict[str, Any]:
+    path = _sentinel_path(session)
+    with contextlib.suppress(OSError), filelock.exclusive(_sibling_lock(path)):
+        data = _read_sentinel(session)
         existing = data.get("consults")
-        for consult in existing if isinstance(existing, list) else []:
-            if isinstance(consult, dict) and str(consult.get("target") or "").lower() == needle:
+        records = [c for c in existing if isinstance(c, dict)] if isinstance(existing, list) else []
+        for consult in reversed(records):
+            if (
+                str(consult.get("target") or "").lower() == needle
+                and consult.get("relevant") is None
+                and not consult.get("failed")
+            ):
                 consult["failed"] = True
                 consult["relevant"] = False
-        return data
-
-    _mutate_sentinel(session, _retract)
+                break
+        else:
+            return  # nothing was credited for this read; nothing to retract
+        if any(not c.get("failed") for c in records):
+            _write_sentinel(session, data)
+        else:
+            path.unlink()
 
 
 def demanded_note_missing(omi_dir: Path | str, note: str = GIT_RULES_NOTE) -> bool:

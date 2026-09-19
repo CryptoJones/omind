@@ -405,6 +405,7 @@ def test_pristine_seeded_git_rules_starter_yields_in_add_add_merge() -> None:
             title=seeds.GIT_RULES_NOTE_TITLE,
             summary=seeds.GIT_RULES_NOTE_SUMMARY,
             details=seeds.GIT_RULES_NOTE_DETAILS.rstrip(),
+            tags=list(seeds.GIT_RULES_NOTE_TAGS),  # exactly what `omind setup` seeds
             created="2026-09-19",
         )
     )
@@ -419,6 +420,23 @@ def test_pristine_seeded_git_rules_starter_yields_in_add_add_merge() -> None:
     for ours, theirs in ((starter, real), (real, starter)):
         text, clean, _ = merge_note_texts("", ours, theirs)
         assert clean and text == real
+    # An operator who edited ONLY the summary, or ONLY the tags, is not pristine:
+    # yielding whole would silently discard that edit (#363 review).
+    for edited_fields in (
+        {"summary": "My own summary.", "tags": list(seeds.GIT_RULES_NOTE_TAGS)},
+        {"summary": seeds.GIT_RULES_NOTE_SUMMARY, "tags": ["omi", "mine"]},
+    ):
+        touched = render_fields(
+            NoteFields(
+                title=seeds.GIT_RULES_NOTE_TITLE,
+                details=seeds.GIT_RULES_NOTE_DETAILS.rstrip(),
+                created="2026-09-19",
+                **edited_fields,
+            )
+        )
+        text, _clean, _ = merge_note_texts("", touched, real)
+        assert text != real  # took the normal merge path instead of yielding whole
+
     # Without the carve-out the generic starter is CONCATENATED into the real
     # rules ("clean", and wrong). Two real copies still merge the normal way.
     edited = real.replace("repo-x", "repo-y")

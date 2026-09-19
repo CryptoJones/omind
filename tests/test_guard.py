@@ -2408,3 +2408,38 @@ def test_midturn_authorization_never_lifts_a_destructive_hard_rule(tmp_path: Pat
     assert not verdict.allow
     assert verdict.rule_id not in ("", "capability-question-explicit-auth")
     guard.clear_gate(session)
+
+
+# -- #363 review: retraction is narrow, and a failed read re-arms the gate ------
+
+
+def test_failed_read_re_arms_the_ordinary_consult_gate() -> None:
+    """`recall-note` on a made-up name must not clear the gate — the same dodge
+    as re-reading index.md."""
+    session = "rv363a"
+    guard.begin_turn(session, "do some work")
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target="No Such Note")  # PreToolUse credit
+    assert guard.consulted_this_turn(session)
+    guard.retract_consult(session, "No Such Note")
+    assert not guard.consulted_this_turn(session)
+    guard.clear_gate(session)
+
+
+def test_failed_read_does_not_undo_an_earlier_successful_consult() -> None:
+    session = "rv363b"
+    guard.begin_turn(session, "do some work")
+    guard.clear_gate(session)
+    # A successful read: the PreToolUse credit, then the judged PostToolUse record.
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    # A later attempt at the SAME note fails (a locked vault, a transient error).
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE)
+    guard.retract_consult(session, guard.GIT_RULES_NOTE)
+    assert guard.consulted_this_turn(session)  # the real consult still stands
+    assert guard._has_consulted_git_rules(session)
+    assert sum(1 for c in guard.consults(session) if c.get("failed")) == 1
+    # Retracting a read nothing credited is a no-op, not a gate clear.
+    guard.retract_consult(session, "Some Other Note")
+    assert guard.consulted_this_turn(session)
+    guard.clear_gate(session)
