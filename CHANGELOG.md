@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.6.0] - 2026-09-19
+
+### Added
+- **`omind audit`: a self-assessment that can indict omind (#326).** One row per
+  surface that spends the agent's context or attention — preflight recall,
+  SessionStart priming, MCP tool responses, the consult gate, learned + note
+  rules, the verifier, the MCP tool schema — each with a measured number, a
+  declared threshold and a verdict that names the remedy, up to "turn this off".
+  Exits 1 when any surface fails; `--json` for cron/CI; `--days` sets the
+  look-back. Thresholds live in one version-controlled table
+  (`audit.THRESHOLDS`, mirrored in `docs/audit.md` and pinned by a test),
+  anchored to omind's own budgets and the targets in the issues that found each
+  problem — never inferred from current numbers. Three verdicts, not two: a
+  surface with too few samples, an instrument that errored, or a question the
+  telemetry cannot answer is `unmeasured`, never rounded up to `ok`. Read-only
+  and collects nothing new. First run on the author's vault: 6 failing, 6 ok,
+  4 unmeasured.
+
 ## [9.5.3] - 2026-09-19
 
 ### Fixed

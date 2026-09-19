@@ -37,7 +37,7 @@ the exact order of operations._
   omind detecting and reporting its own retrieval failures instead of assuming its
   instrumentation is sound. Both children share one thesis: omind was measuring itself
   the whole time and nobody read the meter.
-  - [x] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — _enhancement (instrument)_ —
+  - [x] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — **v9.6.0** — _enhancement (instrument)_ —
     every omind surface that spends the agent's context gets a measured number, a
     declared threshold and a verdict — and the tool must be able to return a failing
     one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
