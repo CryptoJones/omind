@@ -7,19 +7,55 @@ region at offset 0. Both serialize every omind writer that locks the same
 file, which is all the store's ``.omi.lock`` and the journal append path
 need — no byte of locked region ever overlaps actual data.
 
-``msvcrt.locking(LK_LOCK)`` retries once a second for ten seconds before
-raising ``OSError``; omind holds these locks for milliseconds, so a ten-second
-stall means something is genuinely wedged and surfacing the error beats
-queueing forever.
+Windows has no blocking lock worth using. ``msvcrt.locking(LK_LOCK)`` is ten
+attempts exactly one second apart, so every waiter that lost round one sleeps
+the same second and wakes on the same timer tick: the herd re-collides each
+round, and with enough writers one of them loses all ten and gets ``OSError``.
+Every append caller here is best-effort, so that surfaced as a silently dropped
+journal / compliance / AI-usage line (#319 — 39 of 40 concurrent appends).
+:func:`_poll_lock` polls the non-blocking lock with jittered backoff instead:
+hundreds of de-synchronised attempts inside the same ceiling. omind holds these
+locks for milliseconds, so a ten-second stall still means something is
+genuinely wedged, and surfacing the error still beats queueing forever.
 """
 
 from __future__ import annotations
 
 import contextlib
+import errno
 import os
+import random
 import sys
-from collections.abc import Iterator
+import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
+
+#: Ceiling on waiting for a contended lock, and the backoff bounds inside it.
+LOCK_TIMEOUT_S = 10.0
+_POLL_MIN_S = 0.001
+_POLL_MAX_S = 0.05
+
+
+def _poll_lock(
+    try_once: Callable[[], bool],
+    *,
+    timeout: float = LOCK_TIMEOUT_S,
+    sleep: Callable[[float], None] = time.sleep,
+    clock: Callable[[], float] = time.monotonic,
+) -> None:
+    """Call ``try_once`` until it takes the lock; ``OSError`` after ``timeout``.
+
+    The jitter is the point, not a nicety: waiters that sleep identical
+    intervals stay in lockstep and keep colliding (see the module docstring).
+    """
+    deadline = clock() + timeout
+    delay = _POLL_MIN_S
+    while not try_once():
+        if clock() >= deadline:
+            raise OSError(errno.EDEADLK, f"file lock still contended after {timeout:g}s")
+        sleep(delay * (0.5 + random.random()))
+        delay = min(delay * 2, _POLL_MAX_S)
+
 
 if sys.platform == "win32":
     import msvcrt
@@ -28,8 +64,7 @@ if sys.platform == "win32":
 
     def lock_fd(fd: int) -> None:
         """Block until this process holds the exclusive lock on ``fd``."""
-        os.lseek(fd, 0, os.SEEK_SET)
-        msvcrt.locking(fd, msvcrt.LK_LOCK, _REGION_BYTES)
+        _poll_lock(lambda: try_lock_fd(fd))
 
     def try_lock_fd(fd: int) -> bool:
         """Take the exclusive lock without blocking; ``False`` if held elsewhere."""

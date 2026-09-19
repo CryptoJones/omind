@@ -79,3 +79,44 @@ def test_append_locked_refuses_to_follow_a_symlink(tmp_path: Path) -> None:
         os.write(fd, b"redirected\n")
 
     assert victim.read_bytes() == b"untouched\n"
+
+
+# -- #319: the contended-lock wait must not starve a waiter --------------------
+
+
+def test_poll_lock_serves_every_waiter_under_a_thundering_herd() -> None:
+    """40 waiters on one non-blocking lock all get it — the property
+    ``msvcrt.locking(LK_LOCK)``'s ten lockstep retries could not provide."""
+    import threading
+
+    mutex = threading.Lock()
+    served: list[int] = []
+
+    def worker(i: int) -> None:
+        filelock._poll_lock(lambda: mutex.acquire(blocking=False))
+        try:
+            served.append(i)
+        finally:
+            mutex.release()
+
+    threads = [threading.Thread(target=worker, args=(i,)) for i in range(40)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert sorted(served) == list(range(40))
+
+
+def test_poll_lock_raises_oserror_at_the_deadline_with_jittered_backoff() -> None:
+    now = [0.0]
+    sleeps: list[float] = []
+
+    def fake_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        now[0] += seconds
+
+    with pytest.raises(OSError, match="still contended"):
+        filelock._poll_lock(lambda: False, timeout=1.0, sleep=fake_sleep, clock=lambda: now[0])
+    assert len(sleeps) > 10  # many attempts, not LK_LOCK's fixed ten
+    assert max(sleeps) <= filelock._POLL_MAX_S * 1.5
+    assert len(set(sleeps)) > len(sleeps) // 2  # jittered, not lockstep

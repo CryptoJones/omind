@@ -11,11 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (CI / possibly filelock)_ —
-  `assert 39 == 40` on `main` run 34268329669; the same content passed on its PR
-  branch and the next `main` run. Either a harness race or a real `msvcrt.locking`
-  gap — and if it is the latter, the journal, compliance log and AI-usage log have
-  the same hole on Windows, where a dropped line looks like inaction, not a bug.
 - [ ] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (2/2 — both children shipped; close with #290)_ —
   the enforcement gaps where the guard does not see part of the session it governs. Both
   children are the same defect class: the guard reads a slice of the session, treats it as
@@ -116,6 +111,14 @@ the exact order of operations._
 
 ### Shipped — 2026-09-19
 
+- [x] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — **v9.7.2** — _bug (filelock)_ —
+  a real lock gap, not a harness race: `msvcrt.locking(LK_LOCK)` retries ten times in
+  lockstep one second apart, so a herd of writers can starve one out and its
+  best-effort caller swallows the `OSError`. Replaced with a jittered non-blocking poll
+  under the same 10 s ceiling. **Reproduced and verified on real Windows** (pluto Win11 VM,
+  Python 3.13, `scripts/stress_append_lock.py`): unpatched, 40 threads x 30 trials lost
+  466 of 1,200 lines with every trial stalling ~9.2 s; patched, 0 lost at 40, 200 and 400
+  threads, worst trial 0.54 s. Flaky test 50/50, full suite 1,161 passed / 33 skipped.
 - [x] **[Priority 0 / P0] Guard: repo-work gate demands `Operational Rules - Git Repos and Secrets`, which setup never seeds, and a not-found read clears it** ([#358](https://github.com/CryptoJones/omind/issues/358)) — **v9.5.2** — _bug (enforcement)_ —
   setup seeds a starter note (never overwrites); `doctor` checks it exists; a failed
   read is retracted at PostToolUse instead of clearing the gate; a vault that still

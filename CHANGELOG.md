@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.7.2] - 2026-09-19
+
+### Fixed
+- **Windows: a contended file lock could starve a writer and silently drop its append (#319).**
+  `msvcrt.locking(LK_LOCK)` is ten attempts exactly one second apart, so waiters
+  that lose a round sleep the same second, wake on the same timer tick and
+  re-collide; with enough concurrent writers one loses all ten and raises
+  `OSError`, which every best-effort append caller swallows — a missing journal,
+  compliance or AI-usage line that looks like inaction, not a bug
+  (`test_concurrent_appends_serialize`: `assert 39 == 40` on `windows-latest`).
+  `filelock.lock_fd` now polls the non-blocking lock with jittered exponential
+  backoff (1–50 ms) under the same ten-second ceiling: hundreds of
+  de-synchronised attempts instead of ten lockstep ones. POSIX is unchanged
+  (`flock` blocks fairly in the kernel). Reproduced and verified on a real
+  Windows 11 host with the new `scripts/stress_append_lock.py`: unpatched, 40
+  threads x 30 trials lost 466 of 1,200 lines and every trial stalled ~9.2 s
+  (the ten one-second retries); patched, 0 lines lost at 40, 200 and 400 threads.
+
 ## [9.7.1] - 2026-09-19
 
 ### Added
