@@ -105,7 +105,7 @@ the exact order of operations._
 
 ### Shipped — 2026-09-19
 
-- [x] **[Priority 0 / P0] Guard: repo-work gate demands `Operational Rules - Git Repos and Secrets`, which setup never seeds, and a not-found read clears it** ([#358](https://github.com/CryptoJones/omind/issues/358)) — _bug (enforcement)_ —
+- [x] **[Priority 0 / P0] Guard: repo-work gate demands `Operational Rules - Git Repos and Secrets`, which setup never seeds, and a not-found read clears it** ([#358](https://github.com/CryptoJones/omind/issues/358)) — **v9.5.2** — _bug (enforcement)_ —
   setup seeds a starter note (never overwrites); `doctor` checks it exists; a failed
   read is retracted at PostToolUse instead of clearing the gate; a vault that still
   lacks the note gets a once-per-turn warning plus a `demanded-note-missing`

@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.5.2] - 2026-09-19
+
 ### Fixed
 - **Guard: the repo-work gate demanded a note nothing creates, and a not-found read cleared it (#358).**
   `omind setup` now seeds a starter `Operational Rules - Git Repos and Secrets`
@@ -21,6 +23,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the gap is visible instead of papered over. Mesh: a pristine seeded starter
   yields whole to the fleet's real note in an add/add merge, in either direction,
   instead of being concatenated into it.
+
+## [9.5.1] - 2026-09-16
+
+### Fixed
 - **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub (#356).**
   On a fresh Windows box `python3`/`python` resolve to the Microsoft Store stub
   (`…\WindowsApps\python3.exe`) that prints `Python was not found` and exits
