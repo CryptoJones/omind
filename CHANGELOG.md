@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-## [9.7.0] - 2026-09-19
+## [9.7.1] - 2026-09-19
 
 ### Added
 - **CI: PyPI publish workflow using trusted publishing (#267).**
@@ -18,6 +18,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `release: published`; `workflow_dispatch` defaults to a build-and-verify dry
   run. Inert until the pending publisher is registered on pypi.org (operator
   step; see BACKLOG.md).
+
+## [9.7.0] - 2026-09-19
+
+### Added
 - **`omind bench --needle`: A/B needle-in-a-haystack replay, preflight on vs off (#321).**
   The last open acceptance criterion of #321, and the only instrument that
   measures what the preflight does to the MODEL rather than what it ships. It
