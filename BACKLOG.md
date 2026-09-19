@@ -111,7 +111,7 @@ the exact order of operations._
 
 ### Shipped — 2026-09-19
 
-- [x] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — _bug (filelock)_ —
+- [x] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — **v9.7.2** — _bug (filelock)_ —
   a real lock gap, not a harness race: `msvcrt.locking(LK_LOCK)` retries ten times in
   lockstep one second apart, so a herd of writers can starve one out and its
   best-effort caller swallows the `OSError`. Replaced with a jittered non-blocking poll
