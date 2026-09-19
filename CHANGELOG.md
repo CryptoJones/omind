@@ -10,6 +10,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [9.7.0] - 2026-09-19
 
 ### Added
+- **CI: PyPI publish workflow using trusted publishing (#267).**
+  `.github/workflows/publish.yml` builds the sdist and wheel, refuses a release
+  whose tag does not match the packaged version, runs `twine check --strict`,
+  and uploads over OIDC from a separate job that alone holds `id-token: write`
+  inside a `pypi` environment — no API token exists to leak or rotate. Fires on
+  `release: published`; `workflow_dispatch` defaults to a build-and-verify dry
+  run. Inert until the pending publisher is registered on pypi.org (operator
+  step; see BACKLOG.md).
 - **`omind bench --needle`: A/B needle-in-a-haystack replay, preflight on vs off (#321).**
   The last open acceptance criterion of #321, and the only instrument that
   measures what the preflight does to the MODEL rather than what it ships. It

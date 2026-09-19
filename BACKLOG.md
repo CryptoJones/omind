@@ -63,7 +63,8 @@ the exact order of operations._
     adherence; read-only replay; verified end-to-end against a live model. See
     [docs/needle.md](docs/needle.md). The large-window, multi-trial run is operator spend.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
-  needs CJ's PyPI account; details in [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
+  publish workflow shipped 2026-09-19 (trusted publishing, no token); what remains needs CJ's
+  PyPI account — see [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
 - [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — _bug (hooks)_ — **shipped in this PR** (`_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands). —
 
 ## Not planned
@@ -533,19 +534,27 @@ Each issue below is written to be executable by any agent without further contex
 
 ## PyPI Publish Setup (2026-08-24) ([#267](https://github.com/CryptoJones/omind/issues/267))
 
-- [ ] **`omind` is not yet on PyPI — first publish pending.** The package
-  (now at v8.8.0 with DSH agent support) has never been uploaded to PyPI
-  (HTTP 404 on the simple index). To publish:
-  1. Register the `omind` package name on https://pypi.org/ (account required)
-  2. Create a PyPI API token (`pypi-…`) or set up [trusted publishing](https://docs.pypi.org/trusted-publishers/)
-     (recommended: GitHub Actions with `permissions: id-token: write` +
-     `uv publish --trusted-publishing always` in a `publish` job)
-  3. Add a `publish` job to `.github/workflows/test.yml` (see the trusted-publishing
-     snippet in the PR description)
-  4. Run `uv publish dist/omind-8.8.0-py3-none-any.whl --token pypi-…` (or
-     `uv publish --trusted-publishing always` in CI)
-  - No credentials exist on any machine (Ronin28, makemake, pluto, telesto) or in
-    the `pass` keyring, macOS keychains, GitHub secrets, or `.pypirc` files.
-  - Build artifacts are ready in `dist/` (8.8.0 wheel + sdist).
+- [ ] **`omind` is not yet on PyPI — first publish pending.** The package has never
+  been uploaded (HTTP 404 on the simple index, re-checked 2026-09-19). Everything
+  that does not need a PyPI account is done; what is left is operator-only:
+  1. **[operator]** Log in to https://pypi.org/ with the account that will own the
+     project, then *Publishing → Add a pending publisher → GitHub*:
+     owner `CryptoJones`, repository `omind`, workflow `publish.yml`, environment `pypi`.
+     (A pending publisher needs no existing project, but it does NOT reserve the name —
+     the name is only yours after the first successful upload, so do step 4 promptly.)
+  2. **[operator]** On GitHub, create the `pypi` environment (Settings → Environments);
+     add yourself as a required reviewer if you want a manual gate on every upload.
+  3. [x] **Publish workflow** — `.github/workflows/publish.yml` (2026-09-19): trusted
+     publishing over OIDC, so there is **no API token** to mint, store or rotate. Builds
+     sdist + wheel, refuses a release whose tag does not match the `pyproject` version,
+     runs `twine check --strict`, and uploads from a separate job that alone holds
+     `id-token: write`. Actions pinned by commit SHA like the rest of CI.
+  4. **[operator]** Publish: cut the next GitHub release (the workflow fires on
+     `release: published`), or run the workflow by hand with `dry_run` unchecked.
+     Running it with `dry_run` checked (the default) builds and verifies without uploading.
+  - Until step 1 exists the upload step fails closed with `invalid-publisher`; nothing is
+    uploaded and nothing else is affected.
+  - Verified locally 2026-09-19: `omind-9.5.1` sdist + wheel build and pass
+    `twine check --strict`.
 
 *Proudly Made in Nebraska. Go Big Red! 🌽 <https://xkcd.com/2347/>*
