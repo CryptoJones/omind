@@ -380,11 +380,31 @@ def _merge_extras(
 # -- whole-note merge ----------------------------------------------------------------
 
 
+def _is_pristine_seed(fields: NoteFields) -> bool:
+    """True for the setup-seeded git-rules starter exactly as seeded (#358)."""
+    from omind import seeds
+
+    return (
+        fields.title.strip() == seeds.GIT_RULES_NOTE_TITLE
+        and fields.details.strip() == seeds.GIT_RULES_NOTE_DETAILS.strip()
+    )
+
+
 def merge_note_texts(base_md: str, ours_md: str, theirs_md: str) -> tuple[str, bool, list[str]]:
     """Merge three versions of a note's Markdown. Returns (text, clean, messages)."""
     base = parse_note(base_md)
     ours = parse_note(ours_md)
     theirs = parse_note(theirs_md)
+    # #358: `omind setup` seeds a starter git-rules note on every fresh vault, so
+    # a new peer joining the mesh add/adds it against the fleet's real one. With
+    # no common base that is a Details conflict on the one note the guard forces
+    # every agent to read. A starter nobody has edited carries no information:
+    # it yields whole to the other side, in either direction (so both peers
+    # converge on the same bytes).
+    if not base_md.strip():
+        ours_pristine, theirs_pristine = _is_pristine_seed(ours), _is_pristine_seed(theirs)
+        if ours_pristine != theirs_pristine:
+            return (theirs_md if ours_pristine else ours_md), True, []
     result = merge_fields(base, ours, theirs)
     extras, extras_clean, extra_msgs = _merge_extras(
         base_md, ours_md, theirs_md, Rev.parse(ours.rev), Rev.parse(theirs.rev)

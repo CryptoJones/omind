@@ -869,3 +869,38 @@ def test_hard_rule_and_demanded_notes_short_circuit_without_scoring(
     }
     assert verify.verify_consult(normal_read, omi, out=io.StringIO()) == "irrelevant"
     assert len(called) == 1
+
+
+# -- #358: a read that failed is not a consult ---------------------------------
+
+
+def test_not_found_read_retracts_the_pre_tool_consult(tmp_path: Path) -> None:
+    from omind import guard, verify
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    session = "v358"
+    guard.begin_turn(session, "open a PR")
+    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE)
+    event = {
+        "session_id": session,
+        "tool_name": "mcp__omi__recall-note",
+        "tool_input": {"name": guard.GIT_RULES_NOTE, "max_chars": 8000},
+        "tool_response": (
+            f"Error executing tool recall-note: note not found: {guard.GIT_RULES_NOTE!r}"
+        ),
+    }
+    assert verify.verify_consult(event, omi) is None
+    assert not guard._has_consulted_git_rules(session)
+
+
+def test_successful_read_quoting_the_error_text_is_not_a_failure() -> None:
+    from omind import verify
+
+    event = {
+        "tool_name": "mcp__omi__recall-note",
+        "tool_response": {"filename": "Bug.md", "summary": "note not found: 'X' cleared the gate"},
+    }
+    assert not verify._read_failed(event)
+    assert verify._read_failed({"tool_name": "Read", "tool_response": {"is_error": True}})

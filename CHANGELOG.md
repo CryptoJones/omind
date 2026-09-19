@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.5.2] - 2026-09-19
+
+### Fixed
+- **Guard: the repo-work gate demanded a note nothing creates, and a not-found read cleared it (#358).**
+  `omind setup` now seeds a starter `Operational Rules - Git Repos and Secrets`
+  through `OmiStore` when the vault has none (never overwriting an existing one),
+  and `omind doctor` gains a `demanded_notes` check that fails when it is absent.
+  A read that FAILED no longer counts as a consult: PostToolUse retracts the
+  credit PreToolUse recorded (`guard.retract_consult`), the same
+  record-then-retract shape as the freshness grant. If the note is still missing
+  at gate time the guard stops demanding a read that cannot succeed — it waives
+  only that demand (freshness and every other gate still run), warns once per
+  turn naming the fix, and logs a `demanded-note-missing` compliance event so
+  the gap is visible instead of papered over. Mesh: a pristine seeded starter
+  yields whole to the fleet's real note in an add/add merge, in either direction,
+  instead of being concatenated into it.
+
+## [9.5.1] - 2026-09-16
+
 ### Fixed
 - **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub (#356).**
   On a fresh Windows box `python3`/`python` resolve to the Microsoft Store stub

@@ -113,6 +113,8 @@ def _provision_files(config: SetupConfig) -> None:
     (obs / "app.json").write_text("{}")
     (config.omi_dir / paths.MEMORY_TEMPLATE_FILENAME).write_text("x")
     (config.omi_dir / paths.INDEX_FILENAME).write_text("x")
+    # The note the guard demands before repo work (#358) is part of "provisioned".
+    (config.omi_dir / f"{seeds.GIT_RULES_NOTE_TITLE}.md").write_text("x")
 
 
 def _install_hooks(config: SetupConfig) -> None:
@@ -2060,3 +2062,47 @@ def test_doctor_reports_python_check_in_full_diagnose(
     results = {r.key: r for r in provision.diagnose(config)}
     assert "tool:python" in results
     assert results["tool:python"].level == "ok"
+
+
+# -- #358: the note the guard demands must exist --------------------------------
+
+
+def test_setup_seeds_the_git_rules_note_and_never_overwrites_it(
+    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
+) -> None:
+    from omind import guard, seeds
+    from omind.store import OmiStore
+
+    assert seeds.GIT_RULES_NOTE_TITLE == guard.GIT_RULES_NOTE  # one name, two modules
+    config = _config(tmp_path)
+    Provisioner(config, log=_quiet).run()
+    assert not guard.demanded_note_missing(config.omi_dir)
+    store = OmiStore(config.omi_dir)
+    seeded = store.read_fields(guard.GIT_RULES_NOTE)
+    # Round-trips exactly — the mesh's pristine-starter check depends on it.
+    assert seeded.details.strip() == seeds.GIT_RULES_NOTE_DETAILS.strip()
+
+    path = store.safe_name(guard.GIT_RULES_NOTE)
+    path.write_text(path.read_text().replace("### Repo safety", "### MY RULES"))
+    Provisioner(config, log=_quiet).run()
+    assert "### MY RULES" in path.read_text()
+
+
+def test_dry_run_does_not_seed_the_git_rules_note(
+    tmp_path: Path, fake_tools: None, fake_subprocess: list[list[str]], isolate_claude: Path
+) -> None:
+    config = _config(tmp_path, dry_run=True)
+    Provisioner(config, log=_quiet).run()
+    assert not config.omi_dir.exists()
+
+
+def test_doctor_fails_when_the_demanded_note_is_missing(tmp_path: Path) -> None:
+    from omind import guard
+    from omind.store import NoteFields, OmiStore
+
+    config = _config(tmp_path)
+    config.omi_dir.mkdir(parents=True)
+    result = provision._diagnose_demanded_notes(config)
+    assert result.level == "fail" and "omind setup" in result.message
+    OmiStore(config.omi_dir).create_note(NoteFields(title=guard.GIT_RULES_NOTE, summary="r"))
+    assert provision._diagnose_demanded_notes(config).level == "ok"

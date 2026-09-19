@@ -112,6 +112,25 @@ def _always_relevant(target: str) -> bool:
     return False
 
 
+def _read_failed(event: dict[str, Any]) -> bool:
+    """True when a note read reports an EXPLICIT failure (#358): the harness's
+    own error flag, or omind's ``note not found`` ToolError text. A response
+    that says nothing about its outcome is trusted (fail open). Never raises."""
+    try:
+        response = event.get("tool_response")
+        if guard._tool_outcome_failed(response):
+            return True
+        if str(event.get("tool_name") or "").startswith("mcp__omi__"):
+            blob = response if isinstance(response, str) else json.dumps(response, default=str)
+            # A successful read always carries the note's ``filename``; requiring
+            # its absence keeps a note that merely QUOTES the error (e.g. one
+            # about this bug) from reading as a failure and wedging the gate.
+            return "note not found:" in blob[:400] and "filename" not in blob
+    except Exception:
+        pass
+    return False
+
+
 def _update_demanded_completeness(
     event: dict[str, Any], session: str, target: str, out: Any = None
 ) -> None:
@@ -520,6 +539,12 @@ def verify_consult(
         return None
     kind, target = target_info
     session = str(event.get("session_id") or "")
+    if kind == "read" and _read_failed(event):
+        # #358: PreToolUse credited this read before it ran. It returned nothing,
+        # so retract the credit — a not-found read of the demanded note must not
+        # clear the gate that demanded it — and judge nothing.
+        guard.retract_consult(session, target)
+        return None
     if guard.gate_paused():
         # Operator pause (`omind guard pause`): the gate is open anyway, so skip
         # relevance judging entirely — no overlap compute, no model tiebreak,

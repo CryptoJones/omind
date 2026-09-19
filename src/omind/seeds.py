@@ -72,6 +72,48 @@ MEMORY_TEMPLATE = """\
 - Source:
 """
 
+# Starter copy of the note the guard demands before repo work (#358). The gate
+# names this note in its block message, so a vault without it blocks on a read
+# that cannot succeed. Seeded by `omind setup` ONLY when absent — the operator's
+# own copy is the rules; this is a floor, deliberately generic. Title must stay
+# in sync with ``guard.GIT_RULES_NOTE``. No ``## `` headings in the bodies: the
+# store refuses them (#292).
+GIT_RULES_NOTE_TITLE = "Operational Rules - Git Repos and Secrets"
+GIT_RULES_NOTE_TAGS = ["omi", "rules", "git", "secrets"]
+GIT_RULES_NOTE_SUMMARY = (
+    "Starter rules for git, repos, and secrets, seeded by `omind setup`. The omind "
+    "guard requires reading this note before repo work each turn. EDIT IT: replace "
+    "these defaults with this operator's real rules, and put per-repo exceptions at "
+    "the top so they are read first."
+)
+GIT_RULES_NOTE_DETAILS = """### Per-repo exceptions
+_None yet. List any repo whose rules differ from the defaults below HERE, at the
+top — a rule below the fold loses to the one read first._
+
+### Repo safety
+- Never delete a repository, force-push a shared branch, or rewrite published
+  history without the operator's explicit confirmation in this conversation.
+- Work on a feature branch and open a pull request; do not commit straight to the
+  default branch of a shared or public repo unless the operator says so.
+- Commit and push only when asked.
+
+### Working-tree freshness
+- `git fetch` updates remote-tracking refs only; it does not change checked-out
+  files. Before committing or building a derived artifact, confirm the working
+  tree matches the branch you think you are on (`git status`, and
+  `git log --oneline origin/main..HEAD` both ways).
+
+### Before committing
+- Run everything CI runs — tests, formatters, linters, type checks — not just
+  "does it compile". Report a failing gate with its output.
+
+### Secrets
+- Never print a credential VALUE into the transcript (`pass show X | head`,
+  `gh auth token`, `cat .env`). Capture into a variable or pass by reference.
+- Never commit secrets. If one leaks, tell the operator immediately: rotating it
+  is the fix, deleting the commit is not.
+"""
+
 # Heading that begins the auto-maintained wikilink list in index.md. Everything
 # before it is preserved verbatim on update; everything after is regenerated.
 INDEX_RECENT_HEADING = "## Recent Memories"
