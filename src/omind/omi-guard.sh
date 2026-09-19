@@ -55,6 +55,9 @@ tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)"
 sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
 [ -z "$sid" ] && sid="nosid"
 prompt="$(printf '%s' "$input" | jq -r '.prompt // .user_prompt // .current_prompt // .turn_prompt // empty' 2>/dev/null)"
+# #290: the core reads mid-turn user messages from the transcript, so a "fix it"
+# typed while the turn is running can lift a block the opening message armed.
+transcript="$(printf '%s' "$input" | jq -r '.transcript_path // empty' 2>/dev/null)"
 SENT="$STATE/gate-$sid"
 
 # Consulting OMI clears the per-turn gate (always allowed — the clear-path).
@@ -124,8 +127,8 @@ if [ "$tool" = "Bash" ]; then
     printf 'omi-guard: omind not found at %s — BLOCKING this Bash command (fail-closed).\n' "$OMIND" >&2
     exit 2
   fi
-  jq -nc --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" \
-    '{tool:"Bash", command:$c, session:$s, prompt:$prompt, is_omi_consult:false}' 2>/dev/null \
+  jq -nc --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" --arg tp "$transcript" \
+    '{tool:"Bash", command:$c, session:$s, prompt:$prompt, transcript_path:$tp, is_omi_consult:false}' 2>/dev/null \
     | "$OMIND" guard check --omi-dir "$OMI_DIR"
   rc=$?
   # Only a clean allow(0) / block(2) from the core is authoritative. ANY other
@@ -153,8 +156,8 @@ fi
 # inspect file paths. This is slower than the old sentinel-only fast path, but the
 # policy now needs more context than "has OMI been consulted".
 fp="$(printf '%s' "$input" | jq -r '.tool_input.file_path // .tool_input.path // .file_path // .path // empty' 2>/dev/null)"
-jq -nc --arg t "$tool" --arg s "$sid" --arg fp "$fp" --arg prompt "$prompt" \
-  '{tool:$t, command:"", session:$s, prompt:$prompt, is_omi_consult:false, file_path:$fp}' 2>/dev/null \
+jq -nc --arg t "$tool" --arg s "$sid" --arg fp "$fp" --arg prompt "$prompt" --arg tp "$transcript" \
+  '{tool:$t, command:"", session:$s, prompt:$prompt, transcript_path:$tp, is_omi_consult:false, file_path:$fp}' 2>/dev/null \
   | "$OMIND" guard check --omi-dir "$OMI_DIR"
 rc=$?
 case "$rc" in

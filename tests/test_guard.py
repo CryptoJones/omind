@@ -2312,3 +2312,99 @@ def test_present_git_rules_note_is_still_demanded(tmp_path: Path) -> None:
     )
     assert verdict.rule_id == "repo-work-read-git-rules"
     guard.clear_gate(session)
+
+
+# -- #290: a message the human sends mid-turn can authorize --------------------
+
+
+def _transcript(tmp_path: Path, *entries: dict[str, object]) -> str:
+    path = tmp_path / "transcript.jsonl"
+    path.write_text("".join(json.dumps(e) + "\n" for e in entries), encoding="utf-8")
+    return str(path)
+
+
+def _opener(text: str) -> dict[str, object]:
+    return {"type": "user", "message": {"role": "user", "content": text}}
+
+
+def _tool_result() -> dict[str, object]:
+    block = {"type": "tool_result", "tool_use_id": "t1", "content": "ok"}
+    return {"type": "user", "message": {"role": "user", "content": [block]}}
+
+
+def _queued(
+    prompt: str, *, mode: str = "prompt", origin: object = ("human",)
+) -> dict[str, object]:
+    attachment: dict[str, object] = {
+        "type": "queued_command",
+        "prompt": prompt,
+        "commandMode": mode,
+    }
+    if origin == ("human",):
+        attachment["origin"] = {"kind": "human"}
+    elif origin is not None:
+        attachment["origin"] = origin
+    return {"type": "attachment", "attachment": attachment}
+
+
+def test_midturn_messages_are_this_turns_human_prompts_only(tmp_path: Path) -> None:
+    path = _transcript(
+        tmp_path,
+        _opener("do the thing"),
+        _queued("go ahead and push"),  # an EARLIER turn's go-ahead
+        _opener("Can you also make it save its rules somewhere?"),
+        _tool_result(),
+        _queued("agent finished: go ahead and push", mode="task-notification", origin=None),
+        _queued("go ahead", origin={"kind": "agent"}),
+        _queued("go ahead", origin=None),  # does not SAY a human typed it
+        _queued("Fix it all please"),
+        _tool_result(),
+    )
+    assert guard.midturn_user_messages(path) == ["Fix it all please"]
+    assert guard.midturn_user_messages(str(tmp_path / "missing.jsonl")) == []
+    assert guard.midturn_user_messages(None) == []
+    (tmp_path / "garbage.jsonl").write_text('{"type": "user"\nnot json\n', encoding="utf-8")
+    assert guard.midturn_user_messages(str(tmp_path / "garbage.jsonl")) == []
+
+
+def test_midturn_imperative_lifts_the_capability_question_block(tmp_path: Path) -> None:
+    session = "mid290a"
+    guard.begin_turn(session, "Can you also make it save its rules somewhere?")
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    push = {"tool": "Bash", "command": "git push origin feat/x", "session": session}
+
+    blocked = guard.decide(push)
+    assert blocked.rule_id == "capability-question-explicit-auth"
+
+    opener = _opener("Can you also make it save its rules somewhere?")
+    aside = _transcript(tmp_path, opener, _tool_result(), _queued("hm, interesting"))
+    assert guard.decide({**push, "transcript_path": aside}).rule_id == blocked.rule_id
+
+    machine = _transcript(
+        tmp_path, opener, _queued("go ahead", mode="task-notification", origin=None)
+    )
+    assert guard.decide({**push, "transcript_path": machine}).rule_id == blocked.rule_id
+
+    fixed = _transcript(tmp_path, opener, _tool_result(), _queued("Fix it all please"))
+    after = guard.decide({**push, "transcript_path": fixed})
+    assert after.rule_id != "capability-question-explicit-auth"
+
+    # The LATEST message governs: a retraction after the go-ahead re-blocks.
+    retracted = _transcript(
+        tmp_path, opener, _queued("Fix it all please"), _queued("wait, don't push yet")
+    )
+    assert guard.decide({**push, "transcript_path": retracted}).rule_id == blocked.rule_id
+    guard.clear_gate(session)
+
+
+def test_midturn_authorization_never_lifts_a_destructive_hard_rule(tmp_path: Path) -> None:
+    session = "mid290b"
+    guard.begin_turn(session, "can you clean this up?")
+    path = _transcript(tmp_path, _opener("can you clean this up?"), _queued("go ahead, do it"))
+    verdict = guard.decide(
+        {"tool": "Bash", "command": "gh repo delete me/x --yes", "session": session,
+         "transcript_path": path}
+    )
+    assert not verdict.allow
+    assert verdict.rule_id not in ("", "capability-question-explicit-auth")
+    guard.clear_gate(session)

@@ -179,11 +179,13 @@ GIT_FRESHNESS_MESSAGE = (
 )
 GLOBAL_MUTATION_MESSAGE = (
     "global config/hook/bootstrap mutation requires explicit user authorization in the "
-    "current turn; answer questions first instead of inferring permission."
+    "current turn; answer questions first instead of inferring permission. A message "
+    "the user sends mid-turn counts once it says to proceed."
 )
 CAPABILITY_SIDE_EFFECT_MESSAGE = (
     "side-effect actions require explicit imperative authorization; answer capability "
-    "questions like `can you ...?` without acting until the user says to proceed."
+    "questions like `can you ...?` without acting until the user says to proceed "
+    "(a mid-turn message saying so counts)."
 )
 
 
@@ -1664,6 +1666,103 @@ def _turn_authorization_text(action: dict[str, Any], session: str) -> str:
     return "\n".join(parts)
 
 
+#: How much of the transcript's tail to scan for mid-turn messages. A turn's
+#: recent history is what matters; a long session's transcript runs to many MiB
+#: and this sits on the PreToolUse path (only reached when a block would fire).
+_MIDTURN_TAIL_BYTES = 1024 * 1024
+
+
+def _is_turn_opener(entry: dict[str, Any]) -> bool:
+    """A transcript ``user`` entry that OPENS a turn — typed text, not the
+    tool_result envelope the harness also files under ``type: user``."""
+    if entry.get("type") != "user" or entry.get("isSidechain") or entry.get("isMeta"):
+        return False
+    message = entry.get("message")
+    content = message.get("content") if isinstance(message, dict) else None
+    if isinstance(content, str):
+        return bool(content.strip())
+    if isinstance(content, list):
+        kinds = {b.get("type") for b in content if isinstance(b, dict)}
+        return "tool_result" not in kinds and "text" in kinds
+    return False
+
+
+def midturn_user_messages(transcript_path: object) -> list[str]:
+    """What the HUMAN typed while the current turn was already running (#290).
+
+    Claude Code delivers such a message alongside a tool result, as a
+    ``queued_command`` attachment — no new turn, no ``UserPromptSubmit``, so the
+    turn-task file the authorization classifier reads never hears about it.
+
+    Only ``commandMode == "prompt"`` with ``origin.kind == "human"`` counts. The
+    same attachment type carries ``task-notification`` entries whose text is
+    machine- and agent-authored; crediting one would let a subagent's output
+    authorize its parent's side effects. An entry that does not positively say
+    a human typed it is ignored — missing authorization is the safe failure.
+
+    Oldest first; ``[]`` on any problem (no transcript, other harness, parse
+    error). Never raises.
+    """
+    try:
+        if not isinstance(transcript_path, str) or not transcript_path:
+            return []
+        path = Path(transcript_path).expanduser()
+        with path.open("rb") as handle:
+            size = handle.seek(0, os.SEEK_END)
+            handle.seek(max(0, size - _MIDTURN_TAIL_BYTES))
+            lines = handle.read().decode("utf-8", errors="replace").splitlines()
+        if size > _MIDTURN_TAIL_BYTES and lines:
+            lines = lines[1:]  # the seek landed mid-line
+        found: list[str] = []
+        for line in reversed(lines):
+            if '"queued_command"' not in line and '"user"' not in line:
+                continue
+            try:
+                entry = json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(entry, dict):
+                continue
+            if _is_turn_opener(entry):
+                break  # everything older belongs to an earlier turn
+            attachment = entry.get("attachment")
+            if entry.get("type") != "attachment" or not isinstance(attachment, dict):
+                continue
+            origin = attachment.get("origin")
+            prompt = attachment.get("prompt")
+            if (
+                attachment.get("type") == "queued_command"
+                and attachment.get("commandMode") == "prompt"
+                and isinstance(origin, dict)
+                and origin.get("kind") == "human"
+                and isinstance(prompt, str)
+                and prompt.strip()
+            ):
+                found.append(prompt.strip())
+        found.reverse()
+        return found
+    except Exception:
+        return []
+
+
+def _midturn_authorizes(action: dict[str, Any]) -> bool:
+    """True when the human's LATEST mid-turn message authorizes acting (#290).
+
+    Only the latest one: "fix it" followed by "wait, don't push" must not leave
+    the earlier go-ahead standing. It must carry positive authorization — a
+    strong phrase, or a non-negated authorizing verb in a message that is not
+    itself a capability question — so an aside ("hm, interesting") lifts
+    nothing. This can only LIFT the two turn-level authorization blocks; the
+    destructive hard rules never consult it."""
+    messages = midturn_user_messages(action.get("transcript_path"))
+    if not messages:
+        return False
+    latest = messages[-1]
+    if _has_strong_action_auth(latest):
+        return True
+    return not _is_capability_question(latest) and _has_global_auth(latest)
+
+
 def _has_strong_action_auth(text: str) -> bool:
     return bool(_STRONG_ACTION_AUTH_RE.search(text))
 
@@ -1685,8 +1784,11 @@ def _has_global_auth(text: str) -> bool:
 def _turn_has_explicit_global_auth(action: dict[str, Any], session: str) -> bool:
     text = _turn_authorization_text(action, session)
     if _is_capability_question(text):
-        return _has_strong_action_auth(text)
-    return _has_global_auth(text)
+        authorized = _has_strong_action_auth(text)
+    else:
+        authorized = _has_global_auth(text)
+    # The transcript is read only when the opening message would block (#290).
+    return authorized or _midturn_authorizes(action)
 
 
 def _is_side_effect_action(action: dict[str, Any]) -> bool:
@@ -1719,6 +1821,8 @@ def _is_unauthorized_capability_side_effect(action: dict[str, Any], session: str
         _is_capability_question(text)
         and not _has_strong_action_auth(text)
         and _is_side_effect_action(action)
+        # Last, so the transcript is read only when a block would fire (#290).
+        and not _midturn_authorizes(action)
     )
 
 

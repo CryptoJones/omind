@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.5.3] - 2026-09-19
+
+### Fixed
+- **Guard: a message the user sends mid-turn can now lift a turn-level authorization block (#290).**
+  Authorization was classified from the turn's OPENING message only. Claude Code
+  delivers a message typed while a turn is running alongside a tool result — no
+  new turn, no `UserPromptSubmit` — so "Fix it all please" after "Can you …?"
+  left the `capability-question-explicit-auth` block armed for the rest of the
+  turn. When (and only when) one of the two turn-level authorization blocks
+  would fire, the guard now reads the transcript tail for this turn's
+  `queued_command` entries and lets the human's LATEST one authorize, if it
+  carries a positive go-ahead. Only `commandMode: "prompt"` with
+  `origin.kind: "human"` counts: the same attachment type carries
+  `task-notification` text that agents author, and that must never authorize
+  anything. A later "wait, don't push" re-blocks; an aside lifts nothing; the
+  destructive hard rules never consult it. The Claude hook passes
+  `transcript_path` through (re-run `omind setup` to refresh the installed
+  hook), and both block messages now say a mid-turn go-ahead counts.
+
 ## [9.5.2] - 2026-09-19
 
 ### Fixed

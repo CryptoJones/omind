@@ -23,6 +23,7 @@ def test_normalize_claude_shape() -> None:
         "is_omi_consult": False,
         "file_path": "",
         "prompt": "",
+        "transcript_path": "",
         "consult_target": "",
         "consult_kind": "search",
     }
@@ -361,3 +362,12 @@ def test_run_adapter_agy_consult_clears_gate(
     assert json.loads(out2) == {"decision": "allow"}
     guard.clear_gate("agy-gate-1")
 
+
+
+def test_normalize_carries_the_transcript_path_for_midturn_authorization() -> None:
+    """#290: without it the guard cannot see a message the human sent mid-turn."""
+    from omind import adapters
+
+    event = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "transcript_path": "/t.jsonl"}
+    assert adapters.normalize_action(event)["transcript_path"] == "/t.jsonl"
+    assert adapters.normalize_action({"tool_name": "Bash"})["transcript_path"] == ""
