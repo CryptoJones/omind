@@ -479,7 +479,15 @@ omind reindex --index-only     # refresh the derived index (search does this too
 omind bench                    # latency, MCP schema size, and token cost
 omind bench --quality          # labelled recall@1 / recall@5 / MRR
 omind bench --precision        # what the per-turn preflight would inject unbidden
+omind audit                    # every context-spending surface vs. a declared threshold; exit 1 on a fail
 ```
+
+`omind audit` is the instrument that can indict omind itself: one row per surface
+(preflight, SessionStart priming, MCP responses, the consult gate, learned rules,
+the verifier, the MCP tool schema), each with a measured number, a version-controlled
+threshold and a verdict that names the remedy — including "turn this off". It reads
+only what omind already records, writes nothing, and reports what it cannot judge as
+`unmeasured` rather than green. See [docs/audit.md](docs/audit.md).
 
 The index lives in the state directory, never in the vault — it is disposable
 and rebuildable. Semantic ranking needs the optional `[embed]` extra; without it
