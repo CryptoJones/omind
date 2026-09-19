@@ -111,6 +111,12 @@ the exact order of operations._
 
 ### Shipped — 2026-09-19
 
+- [x] **Guard/merge: review findings on #363 — pristine-seed check ignored summary/tags; a failed read still cleared the ordinary gate** ([#369](https://github.com/CryptoJones/omind/issues/369)) — **v9.7.3** — _bug (data loss + enforcement)_ —
+  found by the automated review of #363, read only after it merged. An operator's
+  summary-only or tags-only edit to the starter git-rules note was discarded on mesh
+  join; `recall-note` on a made-up name cleared the consult gate; retraction also
+  flagged earlier successful reads; the seed text named one revision range. All fixed
+  and pinned by tests before any of it reached a tagged release.
 - [x] **[Priority 2 / P1] Flaky: `test_concurrent_appends_serialize` drops one append on `windows-latest`** ([#319](https://github.com/CryptoJones/omind/issues/319)) — **v9.7.2** — _bug (filelock)_ —
   a real lock gap, not a harness race: `msvcrt.locking(LK_LOCK)` retries ten times in
   lockstep one second apart, so a herd of writers can starve one out and its

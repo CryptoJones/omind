@@ -2081,6 +2081,9 @@ def test_setup_seeds_the_git_rules_note_and_never_overwrites_it(
     seeded = store.read_fields(guard.GIT_RULES_NOTE)
     # Round-trips exactly — the mesh's pristine-starter check depends on it.
     assert seeded.details.strip() == seeds.GIT_RULES_NOTE_DETAILS.strip()
+    from omind import merge
+
+    assert merge._is_pristine_seed(seeded)  # what setup writes IS what merge yields
 
     path = store.safe_name(guard.GIT_RULES_NOTE)
     path.write_text(path.read_text().replace("### Repo safety", "### MY RULES"))

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.7.3] - 2026-09-19
+
+### Fixed
+- **Review findings on #363, fixed before any of it reached a tagged release (#369).**
+  - *Mesh data loss:* `merge._is_pristine_seed` compared only title and details, so an
+    operator who edited only the starter git-rules note's **summary or tags** still
+    read as pristine and had that edit silently discarded on mesh join. Every field
+    the seed writes is now compared, and a test pins that what `omind setup` writes
+    is exactly what the merge driver treats as pristine.
+  - *Gate dodge:* a read that FAILED still cleared the ordinary consult gate —
+    `retract_consult` flagged the record but kept the sentinel, and the sentinel's
+    existence is the gate, so `recall-note` on a made-up name cleared it (the same
+    dodge as re-reading `index.md`, #109). When no un-failed consult is left the
+    sentinel is removed and the gate re-arms; a successful consult, or a preflight
+    that spoke, keeps it open.
+  - *Retraction too broad:* it flagged every consult of the target this turn,
+    including an earlier successful read. Only the latest still-unjudged attempt is
+    retracted now.
+  - *Seed text:* the starter note named one revision range
+    (`origin/main..HEAD`), which prints nothing for a branch that is merely behind;
+    it now names both directions.
+
 ## [9.7.2] - 2026-09-19
 
 ### Fixed
