@@ -400,8 +400,15 @@ def health(omi_dir: Path | str) -> Health:
                 return result
             from omind import embed
 
+            # The index stores the encoder IDENTITY (``name:digest``) whenever a
+            # backend loads, and the bare name otherwise. Match on the name: loading
+            # the model here just to compare digests would make doctor slow, and a
+            # digest from another snapshot is wiped by ``_connect`` on the next open.
             expected_model = os.environ.get(_MODEL_ENV) or embed._DEFAULT_MODEL
-            if model is None or str(model[0]) != expected_model:
+            stored_model = "" if model is None else str(model[0])
+            if stored_model != expected_model and not stored_model.startswith(
+                f"{expected_model}:"
+            ):
                 result.corrupt = "search-index embedding model does not match configuration"
                 return result
             rows = {

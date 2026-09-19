@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [9.7.5] - 2026-09-19
+
+### Fixed
+- **`omind doctor` no longer calls a healthy search index corrupt on every machine
+  with embeddings on (#373).** The index has stored the encoder *identity*
+  (`name:digest`) since the 2026-08-27 review, but `searchindex.health` still compared
+  it to the bare model name. With `omind[embed]` installed that comparison could never
+  succeed: doctor reported "search index is corrupt or incompatible … run `omind
+  reindex --rebuild`", and the rebuild wrote the identity straight back. Health now
+  matches on the configured name with or without a digest, and stays cheap — it does
+  not load the model. A different model name is still flagged.
+
 ## [9.7.4] - 2026-09-19
 
 ### Fixed
