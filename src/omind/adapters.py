@@ -113,6 +113,8 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
         "is_omi_consult": is_consult,
         "file_path": file_path,
         "prompt": prompt,
+        # #290: lets the guard see messages the human sent mid-turn.
+        "transcript_path": _first_str(event, ("transcript_path", "transcriptPath")),
         "consult_target": consult_target,
         "consult_kind": "read" if "read" in tool.lower() else "search",
     }
