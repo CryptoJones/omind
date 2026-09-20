@@ -231,7 +231,7 @@ def test_self_update_refuses_in_place_on_windows(monkeypatch: pytest.MonkeyPatch
     [
         (1, "", "does not install"),
         (0, "", "does not start"),  # builds, then dies on import
-        (0, "omind 2.36.0\n", "does not run"),  # some OTHER omind answered
+        (0, "omind 2.36.0\n", "does not start as omind 2.37.0"),  # some OTHER omind answered
     ],
 )
 def test_self_update_refuses_a_release_that_fails_its_trial(
