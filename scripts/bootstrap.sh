@@ -162,8 +162,12 @@ UV_TOOL_DIR="$CANARY/tools" UV_TOOL_BIN_DIR="$CANARY/bin" uv tool install --quie
 ok "trial install runs: $("$CANARY/bin/omind" --version)"
 
 info "Installing omind from ${REMOTE} @ ${REF} (${GIT_URL})"
+# The trial makes a failure here unlikely, not impossible (disk full, a file
+# locked since the probe) — and with --force uv has already removed the old
+# environment by then. uv tool environments are not relocatable, so there is no
+# stage-and-swap; the honest fallback is to say so and name the repair.
 # shellcheck disable=SC2086  # $FORCE is deliberately unquoted: empty means no flag
-uv tool install $FORCE "$GIT_URL"
+uv tool install $FORCE "$GIT_URL" || die "the install failed${FORCE:+ AFTER the previous omind was removed — omind is not installed right now}. Fix the error above and re-run this script; it repairs a partial install."
 omind --version >/dev/null 2>&1 \
   || die "omind was installed but does not start — is $(uv tool dir --bin 2>/dev/null || echo '~/.local/bin') on PATH?"
 ok "omind installed: $(omind --version)"

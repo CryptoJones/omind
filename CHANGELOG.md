@@ -22,11 +22,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - **on Windows the in-place replace is refused outright**, and the refusal prints
     the route that works — the exact `uv tool install` line to run from a plain
     terminal, plus the pids still running out of the environment;
-  - everywhere else the target release is first installed into a **throwaway tool
-    dir and started** (`omind --version` must answer with the target version). A
-    release that cannot resolve, build or import on this machine, or a network that
-    drops mid-download, is now a refusal with the old version intact rather than an
-    uninstall. The trial also warms uv's cache, so the real install is mostly offline;
+  - everywhere else the target release is first installed **somewhere throwaway and
+    started** (`omind --version` must answer with exactly the target version) — a
+    scratch `UV_TOOL_DIR` for uv-tool installs, which also warms uv's cache so the real
+    install is mostly offline; a scratch venv for pip installs. A release that cannot
+    resolve, build or import on this machine, or a network that drops mid-download, is
+    now a refusal with the old version intact rather than an uninstall;
   - afterwards the result is started in a fresh interpreter. If the installer still
     broke the install, self-update says **BROKEN** and prints the repair command
     instead of an exit status.

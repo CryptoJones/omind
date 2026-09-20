@@ -127,7 +127,7 @@ the exact order of operations._
   cannot delete a running `python.exe` on Windows, so 9.4.0 -> 9.7.5 left no omind at
   all. Self-update and `bootstrap.sh` now preflight and refuse: tools present, no
   in-place replace on Windows (the manual route is printed), a trial install in a
-  throwaway tool dir everywhere else, and a post-install start check. Also fixed: the
+  throwaway tool dir (uv) or venv (pip) everywhere else, and a post-install start check. Also fixed: the
   uv receipt was looked up at an XDG-only path, dropping `omind[embed]` on Windows.
   **Open follow-up:** a hand-off updater (a helper outside the venv that waits for
   omind to exit) would let Windows self-update for real instead of refusing.

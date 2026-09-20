@@ -223,7 +223,9 @@ def tool_env_dir(install: InstallInfo) -> Path | None:
             if (parent / _RECEIPT_NAME).is_file():
                 return parent
     except OSError:
-        pass
+        # An unreadable or looping path just means "not found": the callers
+        # treat that as "no extras / no process list", never as an error.
+        return None
     return None
 
 
@@ -374,45 +376,58 @@ def _last_line(text: str | None) -> str:
     return lines[-1].strip() if lines else ""
 
 
-def _canary_install(cmd: list[str], version: str, timeout: float = 600.0) -> str | None:
-    """Install the target into a THROWAWAY tool dir and run it. None = it works;
+def _reports_version(output: str | None, version: str) -> bool:
+    """``omind 10.0.0`` reports 10.0.0; ``omind 110.0.0`` and ``10.0.01`` do not."""
+    pattern = rf"(?<![\d.]){re.escape(version)}(?![\d.])"
+    return re.search(pattern, output or "") is not None
+
+
+def _canary_install(
+    install: InstallInfo, cmd: list[str], version: str, timeout: float = 600.0
+) -> str | None:
+    """Install the target somewhere THROWAWAY and run it. None = it works;
     otherwise why it doesn't.
 
     `uv tool install --force` deletes the live environment before it builds the
     replacement, so a release that cannot resolve, build, or import on this
     machine — or a network that drops mid-download — leaves no omind at all.
     Proving the install somewhere disposable first turns every one of those into
-    a refusal with the old version still in place. It also warms uv's cache, so
-    the real install that follows is mostly offline."""
-    spec = cmd[cmd.index("--from") + 1]
+    a refusal with the old version still in place. For a `uv tool` install that
+    is a scratch ``UV_TOOL_DIR`` (which also warms uv's cache, so the real install
+    is mostly offline); for a pip install it is a scratch venv built by the same
+    interpreter, so the wheel tags it resolves are the live environment's."""
     with tempfile.TemporaryDirectory(prefix="omind-canary-", ignore_cleanup_errors=True) as tmp:
-        bin_dir = Path(tmp) / "bin"
-        env = {
-            **os.environ,
-            "UV_TOOL_DIR": str(Path(tmp) / "tools"),
-            "UV_TOOL_BIN_DIR": str(bin_dir),
-        }
+        steps: list[list[str]]
+        env = dict(os.environ)
+        if install.method == "pip":
+            venv = Path(tmp) / "venv"
+            python = venv / ("Scripts/python.exe" if _is_windows() else "bin/python")
+            steps = [
+                [sys.executable, "-m", "venv", str(venv)],
+                [str(python), "-m", "pip", "install", "--quiet", cmd[-1]],
+            ]
+            probe = [str(python), "-m", "omind", "--version"]
+        else:
+            bin_dir = Path(tmp) / "bin"
+            env["UV_TOOL_DIR"] = str(Path(tmp) / "tools")
+            env["UV_TOOL_BIN_DIR"] = str(bin_dir)
+            spec = cmd[cmd.index("--from") + 1]
+            steps = [["uv", "tool", "install", "--quiet", "--from", spec, "omind"]]
+            probe = [str(bin_dir / ("omind.exe" if _is_windows() else "omind")), "--version"]
         try:
-            built = subprocess.run(
-                ["uv", "tool", "install", "--quiet", "--from", spec, "omind"],
-                env=env,
-                capture_output=True,
-                text=True,
-                timeout=timeout,
-                check=False,
-            )
-            if built.returncode != 0:
-                why = _last_line(built.stderr) or f"uv exit {built.returncode}"
-                return f"it does not install ({why})"
-            exe = bin_dir / ("omind.exe" if _is_windows() else "omind")
-            ran = subprocess.run(
-                [str(exe), "--version"], capture_output=True, text=True, timeout=120, check=False
-            )
+            for step in steps:
+                built = subprocess.run(
+                    step, env=env, capture_output=True, text=True, timeout=timeout, check=False
+                )
+                if built.returncode != 0:
+                    why = _last_line(built.stderr) or f"exit {built.returncode}"
+                    return f"it does not install ({why})"
+            ran = subprocess.run(probe, capture_output=True, text=True, timeout=120, check=False)
         except subprocess.TimeoutExpired:
             return "the trial install timed out (network stall?)"
         except (OSError, subprocess.SubprocessError) as exc:
             return f"the trial install could not run ({exc})"
-        if ran.returncode != 0 or version not in (ran.stdout or ""):
+        if ran.returncode != 0 or not _reports_version(ran.stdout, version):
             why = _last_line(ran.stderr or ran.stdout) or f"exit {ran.returncode}"
             return f"it installs but does not start as omind {version} ({why})"
     return None
@@ -430,10 +445,12 @@ def preflight(install: InstallInfo, cmd: list[str], version: str) -> list[str]:
     if install.method == "pip":
         if importlib.util.find_spec("pip") is None:
             problems.append(f"`pip` is not available in {sys.executable}.")
-        return problems
-    if shutil.which("uv") is None:
+    elif shutil.which("uv") is None:
         problems.append("`uv` is not on PATH — this is a `uv tool` install.")
-    if _is_windows():
+    # pip replaces files one package at a time and moves the old ones aside, so
+    # it survives a running interpreter; only uv's delete-the-environment-first
+    # needs the Windows refusal.
+    if install.method != "pip" and _is_windows():
         # Windows will not delete a running executable, and uv only finds that out
         # after it has already removed the rest of the environment. This process
         # runs from that environment, so an in-place update can never succeed
@@ -456,7 +473,7 @@ def preflight(install: InstallInfo, cmd: list[str], version: str) -> list[str]:
         return problems
     if problems:
         return problems
-    failure = _canary_install(cmd, version)
+    failure = _canary_install(install, cmd, version)
     if failure is not None:
         problems.append(f"omind {version} was tried in a throwaway environment and {failure}.")
     return problems
@@ -475,13 +492,14 @@ def _install_works(version: str) -> bool:
         )
     except (OSError, subprocess.SubprocessError):
         return False
-    return result.returncode == 0 and version in (result.stdout or "")
+    return result.returncode == 0 and _reports_version(result.stdout, version)
 
 
 def _refused(
     install: InstallInfo, cmd: list[str], version: str, *, what: str, log: Callable[[str], object]
 ) -> bool:
     """Run :func:`preflight`; report and return True when the install must not run."""
+    log(f"preflight: checking omind {version} can be installed here (may take a minute)…")
     problems = preflight(install, cmd, version)
     if problems:
         log(f"refusing to {what} — nothing was changed:")

@@ -248,7 +248,10 @@ and tells you the steps below instead.
    ```
    If uv still reports `Access is denied`, something is still running out of
    `%APPDATA%\uv\tools\omind\Scripts` — find it in Task Manager, end it, and re-run.
-   If you installed with an extra, use `--from "omind[embed] @ git+https://…@v10.0.0"`.
+   If you installed with an extra, keep it — the full command is:
+   ```
+   uv tool install --force --from "omind[embed] @ git+https://github.com/CryptoJones/omind@v10.0.0" omind
+   ```
 3. Restart your agent sessions. Notes, state and wiring live outside the tool
    environment and are untouched.
 

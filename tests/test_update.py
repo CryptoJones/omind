@@ -273,6 +273,64 @@ def test_self_update_refuses_without_its_tools(
     assert any(f"`{missing}` is not on PATH" in line for line in out)
 
 
+def test_pip_installs_get_a_trial_venv_before_the_live_reinstall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pip gets the same proof as uv — in a scratch venv built by THIS interpreter,
+    so the wheels it resolves are the ones the live environment would get. And no
+    Windows refusal: pip moves old files aside rather than deleting the env."""
+    _updatable(monkeypatch, windows=True)
+    monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("pip", "x"))
+    ran: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        ran.append(list(cmd))
+        return _Proc(stdout="omind 2.37.0\n")
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    assert self_update(log=lambda _m: None) == 0
+    kinds = [
+        "venv" if cmd[1:3] == ["-m", "venv"] else "live" if "--force-reinstall" in cmd else "trial"
+        for cmd in ran
+        if cmd[1:3] == ["-m", "venv"] or cmd[1:3] == ["-m", "pip"]
+    ]
+    assert kinds == ["venv", "trial", "live"]
+    trial = next(cmd for cmd in ran if cmd[1:3] == ["-m", "pip"] and "--force-reinstall" not in cmd)
+    assert trial[0] != sys.executable  # the scratch venv's python, never the live one
+
+
+def test_pip_install_that_fails_its_trial_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _updatable(monkeypatch)
+    monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("pip", "x"))
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        if "--force-reinstall" in cmd:
+            raise AssertionError("the live install must not be touched after a failed trial")
+        if cmd[1:3] == ["-m", "pip"]:
+            return _Proc(returncode=1, stderr="ERROR: No matching distribution found\n")
+        return _Proc()
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    out: list[str] = []
+    assert self_update(log=out.append) == 1
+    assert any("does not install" in line and "No matching distribution" in line for line in out)
+
+
+@pytest.mark.parametrize(
+    ("output", "reports"),
+    [
+        ("omind 10.0.0\n", True),
+        ("omind 110.0.0\n", False),  # a substring match accepted this
+        ("omind 10.0.01\n", False),
+        ("omind 10.0.0.1\n", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_reported_version_must_match_exactly(output: str | None, reports: bool) -> None:
+    assert update._reports_version(output, "10.0.0") is reports
+
+
 def test_self_update_reports_an_install_it_broke(monkeypatch: pytest.MonkeyPatch) -> None:
     """If the installer still dies half-way, say the install is broken and how to
     repair it — the old code printed an exit status and left a dead shim for the
