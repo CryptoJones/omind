@@ -25,11 +25,15 @@ network check entirely (offline/privacy).
 from __future__ import annotations
 
 import contextlib
+import importlib.util
 import json
 import os
 import re
+import shlex
+import shutil
 import subprocess
 import sys
+import tempfile
 import time
 import urllib.error
 import urllib.request
@@ -191,7 +195,9 @@ def detect_install() -> InstallInfo:
 
     loc = str(getattr(omind, "__file__", "") or "")
     posix = loc.replace("\\", "/")
-    if "uv/tools/omind" in posix:
+    # The receipt catches a relocated tool dir ($UV_TOOL_DIR), which the path
+    # heuristic alone filed under "pip" — and pip cannot update a uv tool env.
+    if "uv/tools/omind" in posix or tool_env_dir(InstallInfo("uv-tool", loc)) is not None:
         return InstallInfo("uv-tool", loc)
     repo = Path(loc).resolve().parent.parent.parent  # …/src/omind/__init__.py -> repo
     if loc and (repo / "pyproject.toml").is_file() and (repo / ".git").exists():
@@ -201,7 +207,27 @@ def detect_install() -> InstallInfo:
     return InstallInfo("unknown", loc)
 
 
-def installed_extras() -> list[str]:
+_RECEIPT_NAME = "uv-receipt.toml"
+
+
+def tool_env_dir(install: InstallInfo) -> Path | None:
+    """The `uv tool` environment omind runs from, or None when it can't be found.
+
+    Found by walking up from the package to the directory holding uv's receipt,
+    not assumed: uv keeps tools under ``%APPDATA%\\uv\\tools`` on Windows and
+    wherever ``$UV_TOOL_DIR`` points anywhere else."""
+    if install.method != "uv-tool" or not install.detail:
+        return None
+    try:
+        for parent in Path(install.detail).resolve().parents:
+            if (parent / _RECEIPT_NAME).is_file():
+                return parent
+    except OSError:
+        pass
+    return None
+
+
+def installed_extras(env: Path | None = None) -> list[str]:
     """Extras the current `uv tool` install was created with (``[]`` if none).
 
     ``uv tool install --force --from <ref> omind`` installs the BARE package, so
@@ -210,8 +236,14 @@ def installed_extras() -> list[str]:
     keyword path with no error, only a doctor warning nobody was watching for. uv
     records the original request in its receipt, so read the extras back and
     reinstate them. Fail-open — no receipt, no extras, behaviour unchanged.
+
+    ``env`` is the located tool environment (:func:`tool_env_dir`); the XDG path
+    is only the fallback, because it does not exist on Windows — where the extras
+    were therefore dropped on every update.
     """
-    receipt = Path.home() / ".local" / "share" / "uv" / "tools" / "omind" / "uv-receipt.toml"
+    receipt = Path.home() / ".local" / "share" / "uv" / "tools" / "omind" / _RECEIPT_NAME
+    if env is not None and (env / _RECEIPT_NAME).is_file():
+        receipt = env / _RECEIPT_NAME
     try:
         # tomlkit, not tomllib: the latter is 3.11+ and this project floors at
         # 3.10. tomlkit is already a runtime dependency.
@@ -275,7 +307,7 @@ def update_command(install: InstallInfo, version: str) -> list[str] | None:
     if sha:
         ref = f"git+https://github.com/{GITHUB_REPO}@{sha}"
     if install.method == "uv-tool":
-        extras = installed_extras()
+        extras = installed_extras(tool_env_dir(install))
         # The PEP 508 `omind[embed] @ git+…` form, so uv keeps the extras it was
         # originally installed with instead of silently downgrading to bare.
         spec = f"omind[{','.join(extras)}] @ {ref}" if extras else ref
@@ -283,6 +315,208 @@ def update_command(install: InstallInfo, version: str) -> list[str] | None:
     if install.method == "pip":
         return [sys.executable, "-m", "pip", "install", "--upgrade", "--force-reinstall", ref]
     return None  # editable -> git pull; unknown -> manual
+
+
+def _is_windows() -> bool:
+    return os.name == "nt"
+
+
+def _shell_join(cmd: list[str]) -> str:
+    """``cmd`` as one copy-pasteable line — the extras spec contains spaces."""
+    return subprocess.list2cmdline(cmd) if _is_windows() else shlex.join(cmd)
+
+
+def _env_processes(env: Path) -> list[str]:
+    """Windows: ``"pid 1234 (omind.exe node …)"`` for every OTHER process running
+    out of ``env``. Informational and fail-open — ``[]`` when the query fails."""
+    script = (
+        "Get-CimInstance Win32_Process | Select-Object ProcessId,ParentProcessId,"
+        "ExecutablePath,CommandLine | ConvertTo-Json -Compress"
+    )
+    try:
+        result = subprocess.run(
+            ["powershell", "-NoProfile", "-NonInteractive", "-Command", script],
+            capture_output=True,
+            text=True,
+            timeout=30,
+            check=False,
+        )
+        rows = json.loads(result.stdout or "[]")
+    except (OSError, subprocess.SubprocessError, ValueError):
+        return []
+    if isinstance(rows, dict):
+        rows = [rows]
+    if not isinstance(rows, list):
+        return []
+    rows = [r for r in rows if isinstance(r, dict)]
+    parents = {r.get("ProcessId"): r.get("ParentProcessId") for r in rows}
+    # This process and the launcher chain above it are the caller, not a blocker.
+    mine: set[object] = set()
+    pid: object = os.getpid()
+    while pid is not None and pid not in mine:
+        mine.add(pid)
+        pid = parents.get(pid)
+    prefix = os.path.normcase(str(env)) + os.sep
+    found: list[str] = []
+    for row in rows:
+        exe = os.path.normcase(str(row.get("ExecutablePath") or ""))
+        if exe.startswith(prefix) and row.get("ProcessId") not in mine:
+            # The tail: the head is the same long interpreter path every time,
+            # the end is what says `node` / `serve` / `hook`.
+            what = str(row.get("CommandLine") or exe).strip()
+            what = what if len(what) <= 80 else "…" + what[-79:]
+            found.append(f"pid {row.get('ProcessId')} ({what})")
+    return found
+
+
+def _last_line(text: str | None) -> str:
+    lines = (text or "").strip().splitlines()
+    return lines[-1].strip() if lines else ""
+
+
+def _canary_install(cmd: list[str], version: str, timeout: float = 600.0) -> str | None:
+    """Install the target into a THROWAWAY tool dir and run it. None = it works;
+    otherwise why it doesn't.
+
+    `uv tool install --force` deletes the live environment before it builds the
+    replacement, so a release that cannot resolve, build, or import on this
+    machine — or a network that drops mid-download — leaves no omind at all.
+    Proving the install somewhere disposable first turns every one of those into
+    a refusal with the old version still in place. It also warms uv's cache, so
+    the real install that follows is mostly offline."""
+    spec = cmd[cmd.index("--from") + 1]
+    with tempfile.TemporaryDirectory(prefix="omind-canary-", ignore_cleanup_errors=True) as tmp:
+        bin_dir = Path(tmp) / "bin"
+        env = {
+            **os.environ,
+            "UV_TOOL_DIR": str(Path(tmp) / "tools"),
+            "UV_TOOL_BIN_DIR": str(bin_dir),
+        }
+        try:
+            built = subprocess.run(
+                ["uv", "tool", "install", "--quiet", "--from", spec, "omind"],
+                env=env,
+                capture_output=True,
+                text=True,
+                timeout=timeout,
+                check=False,
+            )
+            if built.returncode != 0:
+                why = _last_line(built.stderr) or f"uv exit {built.returncode}"
+                return f"it does not install ({why})"
+            exe = bin_dir / ("omind.exe" if _is_windows() else "omind")
+            ran = subprocess.run(
+                [str(exe), "--version"], capture_output=True, text=True, timeout=120, check=False
+            )
+        except subprocess.TimeoutExpired:
+            return "the trial install timed out (network stall?)"
+        except (OSError, subprocess.SubprocessError) as exc:
+            return f"the trial install could not run ({exc})"
+        if ran.returncode != 0 or version not in (ran.stdout or ""):
+            why = _last_line(ran.stderr or ran.stdout) or f"exit {ran.returncode}"
+            return f"it installs but does not start as omind {version} ({why})"
+    return None
+
+
+def preflight(install: InstallInfo, cmd: list[str], version: str) -> list[str]:
+    """Why this machine must NOT run ``cmd`` right now (``[]`` = go).
+
+    Every check runs BEFORE anything is touched, because the installers this
+    drives are not transactional: a refusal costs nothing, while a failure
+    half-way costs the install. Cheap checks first; the trial install last."""
+    problems: list[str] = []
+    if shutil.which("git") is None:
+        problems.append("`git` is not on PATH — the release is installed from a git ref.")
+    if install.method == "pip":
+        if importlib.util.find_spec("pip") is None:
+            problems.append(f"`pip` is not available in {sys.executable}.")
+        return problems
+    if shutil.which("uv") is None:
+        problems.append("`uv` is not on PATH — this is a `uv tool` install.")
+    if _is_windows():
+        # Windows will not delete a running executable, and uv only finds that out
+        # after it has already removed the rest of the environment. This process
+        # runs from that environment, so an in-place update can never succeed
+        # here: 9.4.0 -> 9.7.5 left `Scripts\python.exe` and nothing else.
+        manual = _shell_join(cmd)
+        env = tool_env_dir(install)
+        others = _env_processes(env) if env is not None else []
+        problems.append(
+            "on Windows omind cannot replace the environment it is running from "
+            "(uv deletes it first, then fails on the locked python.exe). Update from "
+            "outside omind instead:\n"
+            "    1. close every agent session / MCP server / `omind serve` using omind"
+            + (
+                "\n       still running: " + "; ".join(others)
+                if others
+                else ""
+            )
+            + f"\n    2. {manual}\n    3. omind setup"
+        )
+        return problems
+    if problems:
+        return problems
+    failure = _canary_install(cmd, version)
+    if failure is not None:
+        problems.append(f"omind {version} was tried in a throwaway environment and {failure}.")
+    return problems
+
+
+def _install_works(version: str) -> bool:
+    """Does the install on disk start and report ``version``? A fresh interpreter,
+    for the reason :func:`_post_update_heal` gives."""
+    try:
+        result = subprocess.run(
+            [sys.executable, "-m", "omind", "--version"],
+            capture_output=True,
+            text=True,
+            timeout=120,
+            check=False,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0 and version in (result.stdout or "")
+
+
+def _refused(
+    install: InstallInfo, cmd: list[str], version: str, *, what: str, log: Callable[[str], object]
+) -> bool:
+    """Run :func:`preflight`; report and return True when the install must not run."""
+    problems = preflight(install, cmd, version)
+    if problems:
+        log(f"refusing to {what} — nothing was changed:")
+        for problem in problems:
+            log(f"  - {problem}")
+    return bool(problems)
+
+
+def _run_install(cmd: list[str], version: str, *, what: str, log: Callable[[str], object]) -> int:
+    """Run ``cmd``, then confirm the result actually starts."""
+    try:
+        # A watchdog timeout so a hung `uv tool install git+…` (a stalled clone,
+        # a dead network) can't wedge the update pass forever when run from
+        # fleet automation.
+        result = subprocess.run(cmd, check=False, timeout=600)  # streams to terminal
+    except subprocess.TimeoutExpired:
+        log(f"{what} timed out after 600s (network stall?) — try again.")
+        result = None
+    except (OSError, subprocess.SubprocessError) as exc:
+        log(f"{what} failed to launch: {exc}")
+        result = None
+    if result is not None and result.returncode == 0 and _install_works(version):
+        return 0
+    if result is not None and result.returncode != 0:
+        log(f"{what} command exited {result.returncode}.")
+    elif result is not None:
+        log(f"{what} command succeeded, but the installed omind does not start.")
+    # Say which it is: an installer that failed cleanly left the old version
+    # working; one that failed half-way left nothing, and the next hook or MCP
+    # start would be the first anyone heard of it.
+    if not _install_works(__version__):
+        log("the omind install is now BROKEN. Once the cause above is dealt with,")
+        log("repair it from a plain terminal (no agent sessions open) with:")
+        log(f"    {_shell_join(cmd)}")
+    return (result.returncode if result is not None else 0) or 1
 
 
 #: Shared opt-out with the `omind node` startup self-heal — one switch for
@@ -414,26 +648,16 @@ def self_update(
                 f"({install.detail}); reinstall by hand."
             )
         return 1
-    log(f"updating: {' '.join(cmd)}")
+    if _refused(install, cmd, status.latest, what="update", log=log):
+        return 1
+    log(f"updating: {_shell_join(cmd)}")
     _record_rollback(status.current, status.latest, cmd)
-    try:
-        # A watchdog timeout so a hung `uv tool install git+…` (a stalled clone,
-        # a dead network) can't wedge the update pass forever when run from
-        # fleet automation.
-        result = subprocess.run(cmd, check=False, timeout=600)  # streams to terminal
-    except subprocess.TimeoutExpired:
-        log("update timed out after 600s (network stall?) — try again.")
-        return 1
-    except (OSError, subprocess.SubprocessError) as exc:
-        log(f"update failed to launch: {exc}")
-        return 1
-    if result.returncode == 0:
+    code = _run_install(cmd, status.latest, what="update", log=log)
+    if code == 0:
         log(f"updated to {status.latest}.")
         _post_update_heal(log=log)
         log("Restart the MCP server / agent session to load it.")
-        return 0
-    log(f"update command exited {result.returncode}.")
-    return result.returncode
+    return code
 
 
 _ROLLBACK_NAME = "last-install.json"
@@ -476,18 +700,11 @@ def rollback_update(*, log: Callable[[str], object] = print) -> int:
         else:
             log(f"cannot auto-install {previous} on a {install.method!r} install.")
         return 1
-    log(f"rolling back to omind {previous}: {' '.join(cmd)}")
-    try:
-        result = subprocess.run(cmd, check=False, timeout=600)  # streams to terminal
-    except subprocess.TimeoutExpired:
-        log("rollback timed out after 600s (network stall?) — try again.")
+    if _refused(install, cmd, previous, what="roll back", log=log):
         return 1
-    except (OSError, subprocess.SubprocessError) as exc:
-        log(f"rollback failed to launch: {exc}")
-        return 1
-    if result.returncode == 0:
+    log(f"rolling back to omind {previous}: {_shell_join(cmd)}")
+    code = _run_install(cmd, previous, what="rollback", log=log)
+    if code == 0:
         _post_update_heal(log=log)
         log(f"rolled back to {previous}. Restart the MCP server / agent session to load it.")
-        return 0
-    log(f"rollback command exited {result.returncode}.")
-    return result.returncode
+    return code

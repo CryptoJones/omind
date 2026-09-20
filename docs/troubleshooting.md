@@ -218,6 +218,40 @@ blocked Bash hook to break the loop:
 Because the fixed hook self-heals on a jq-less host, after step 2's `omind setup`
 no manual `settings.json` edit is needed on subsequent fresh machines.
 
+## After `omind self-update` on Windows: `ModuleNotFoundError: No module named 'omind'`
+
+### Symptoms
+
+- `omind --version` prints a traceback ending in `ModuleNotFoundError: No module
+  named 'omind'`; hooks fail; the `omi` MCP server will not connect.
+- `uv tool list` prints ``Failed find package `omind` in tool environment``.
+- `%APPDATA%\uv\tools\omind` contains `Scripts\python.exe`, `pyvenv.cfg` and
+  `uv-receipt.toml` — and no `Lib\`.
+
+### Root cause (omind <= 9.7.5)
+
+`omind self-update` ran `uv tool install --force` from inside the environment it was
+replacing. uv deletes the old environment first; Windows refused to delete the running
+`python.exe` (`Access is denied (os error 5)`), and uv stopped there — after everything
+else was already gone (#375). The release itself is fine. 10.0.0 refuses to do this
+and tells you the steps below instead.
+
+### Recovery
+
+1. Close every agent session (Claude Code and friends) so nothing holds the old
+   `python.exe`.
+2. From a plain PowerShell or cmd window:
+   ```
+   uv tool install --force --from git+https://github.com/CryptoJones/omind@v10.0.0 omind
+   omind --version
+   omind setup
+   ```
+   If uv still reports `Access is denied`, something is still running out of
+   `%APPDATA%\uv\tools\omind\Scripts` — find it in Task Manager, end it, and re-run.
+   If you installed with an extra, use `--from "omind[embed] @ git+https://…@v10.0.0"`.
+3. Restart your agent sessions. Notes, state and wiring live outside the tool
+   environment and are untouched.
+
 ## Memory writes are silently failing (`vault_writes` doctor check)
 
 A machine can keep *reading* the vault while every *write* fails — on macOS the

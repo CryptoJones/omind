@@ -81,9 +81,27 @@ pkg_hint() {
   elif command -v apt-get >/dev/null 2>&1; then echo "sudo apt-get install -y $tool"
   elif command -v pacman >/dev/null 2>&1; then echo "sudo pacman -S $tool"
   elif command -v brew >/dev/null 2>&1; then echo "brew install $tool"
+  elif command -v winget >/dev/null 2>&1; then echo "winget install $tool"
   else echo "install '$tool' with your system package manager"
   fi
 }
+
+# ---- 0. preflight: refuse before anything is installed or replaced ----------
+# Everything after this block changes the machine, and `uv tool install --force`
+# is not transactional: it deletes the existing environment BEFORE it builds the
+# new one. So every reason not to proceed is checked while a refusal is still free.
+info "Preflight"
+case "$(uname -s)" in
+  Linux|Darwin) WINDOWS=0 ;;
+  MINGW*|MSYS*|CYGWIN*) WINDOWS=1 ;;
+  *) die "unsupported system '$(uname -s)' — omind runs on Linux, macOS, and Windows" ;;
+esac
+# uv clones the repo, so without git the install itself cannot proceed.
+command -v git >/dev/null 2>&1 || die "git is required to install omind — $(pkg_hint git)"
+if ! command -v uv >/dev/null 2>&1 && ! command -v curl >/dev/null 2>&1; then
+  die "neither uv nor curl is present — install uv by hand: https://docs.astral.sh/uv/"
+fi
+ok "system supported; git present"
 
 # ---- 1. uv (auto-install; user-local, no root) -----------------------------
 info "Checking uv"
@@ -99,14 +117,11 @@ else
   warn "Ensure ~/.local/bin is on your PATH in new shells (add to ~/.bashrc if needed)."
 fi
 
-# ---- 2. git / claude (checked; not force-installed) ------------------------
-# Exactly what `omind setup` requires (provision.REQUIRED_TOOLS): git + claude.
-# node/npm are NOT omind dependencies — they're only one way to install claude.
+# ---- 2. claude (checked; not force-installed) ------------------------------
+# `omind setup` requires git + claude (provision.REQUIRED_TOOLS); git was settled
+# in preflight. node/npm are NOT omind dependencies — only one way to get claude.
 MISSING=0
-info "Checking runtime dependencies (git, claude)"
-if command -v git >/dev/null 2>&1; then ok "git: $(git --version)"
-else warn "git missing — $(pkg_hint git)"; MISSING=1; fi
-
+info "Checking runtime dependencies (claude)"
 if command -v claude >/dev/null 2>&1; then ok "claude CLI present"
 else
   warn "claude CLI missing — install Claude Code:"
@@ -115,12 +130,43 @@ else
 fi
 
 # ---- 3. install omind ------------------------------------------------------
-# uv clones the repo, so without git the install itself cannot proceed.
-command -v git >/dev/null 2>&1 || die "git is required to install omind; install it and re-run"
 [ "$REF" = "main" ] && warn "no release tag found — installing the moving 'main' HEAD"
+
+# An existing install is REPLACED, and that is the dangerous half. Windows will
+# not delete a running executable, and uv only finds that out after removing the
+# rest of the environment — a 9.4.0 -> 9.7.5 update left Scripts\python.exe and
+# nothing else. Opening for append is denied on a running image and writes nothing.
+EXISTING="$(uv tool dir 2>/dev/null || true)/omind"
+FORCE=""
+if [ -d "$EXISTING" ]; then
+  FORCE="--force"
+  if [ "$WINDOWS" -eq 1 ]; then
+    for exe in "$EXISTING"/Scripts/*.exe; do
+      [ -e "$exe" ] || continue
+      ( : >> "$exe" ) 2>/dev/null || die "omind is running from $EXISTING ($(basename "$exe") is in use) — close every agent session, MCP server, and 'omind serve', then re-run. Nothing was changed."
+    done
+  fi
+fi
+
+# Prove the release installs AND starts here, somewhere disposable, before the
+# live environment is touched. A ref that cannot resolve, build, or import on
+# this machine — or a network that drops mid-download — becomes a refusal with
+# the old install intact. It also warms uv's cache for the real install.
+info "Trial install of ${REF} in a throwaway environment"
+CANARY="$(mktemp -d)"
+trap 'rm -rf "$CANARY"' EXIT
+UV_TOOL_DIR="$CANARY/tools" UV_TOOL_BIN_DIR="$CANARY/bin" uv tool install --quiet "$GIT_URL" \
+  || die "omind ${REF} does not install on this system — nothing was changed"
+"$CANARY/bin/omind" --version >/dev/null 2>&1 \
+  || die "omind ${REF} installs but does not start on this system — nothing was changed"
+ok "trial install runs: $("$CANARY/bin/omind" --version)"
+
 info "Installing omind from ${REMOTE} @ ${REF} (${GIT_URL})"
-uv tool install --force "$GIT_URL"
-ok "omind installed: $(omind --version 2>/dev/null || echo 'run: omind --version')"
+# shellcheck disable=SC2086  # $FORCE is deliberately unquoted: empty means no flag
+uv tool install $FORCE "$GIT_URL"
+omind --version >/dev/null 2>&1 \
+  || die "omind was installed but does not start — is $(uv tool dir --bin 2>/dev/null || echo '~/.local/bin') on PATH?"
+ok "omind installed: $(omind --version)"
 
 # ---- 4. setup + verify -----------------------------------------------------
 if [ "$MISSING" -ne 0 ]; then

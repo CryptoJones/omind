@@ -95,8 +95,11 @@ Everything runs locally. No accounts, no cloud, no cost.
 scripts/bootstrap.sh                       # or: --remote codeberg, --vault PATH
 ```
 
-It auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
-you), checks for `git`/`claude` with install guidance if either is missing,
+It refuses what it cannot safely do — an unsupported system, no `git`, an existing
+install that is still running on Windows, a release that does not install *and
+start* in a throwaway environment — before it installs or replaces omind. It
+auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
+you), checks for `claude` with install guidance if it is missing,
 then runs `omind setup` + `omind doctor`. Note: omind itself has **no Docker and
 no Node.js dependency** — it needs only `git` and an agent CLI (Claude Code on
 the default path; Hermes, OpenClaw, OpenCode, and Codex are each wired with
