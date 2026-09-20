@@ -165,26 +165,247 @@ def test_self_update_check_only(monkeypatch: pytest.MonkeyPatch) -> None:
     assert any("update available" in line for line in out)
 
 
-def test_self_update_runs_installer(monkeypatch: pytest.MonkeyPatch) -> None:
+class _Proc:
+    def __init__(self, returncode: int = 0, stdout: str = "", stderr: str = "") -> None:
+        self.returncode, self.stdout, self.stderr = returncode, stdout, stderr
+
+
+def _is_canary(cmd: list[str], kwargs: dict[str, object]) -> bool:
+    env = kwargs.get("env")
+    return cmd[:3] == ["uv", "tool", "install"] and isinstance(env, dict) and "UV_TOOL_DIR" in env
+
+
+def _updatable(monkeypatch: pytest.MonkeyPatch, *, windows: bool = False) -> None:
+    """A uv-tool install with 2.37.0 available and every prerequisite present."""
     monkeypatch.setattr(update, "check_for_update", _fixed_status("2.36.0", "2.37.0"))
     monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("uv-tool", "x"))
     monkeypatch.setattr(update, "_resolve_tag_sha", lambda v, timeout=60.0: "abc123")
-    ran: list[list[str]] = []
+    monkeypatch.setattr(update, "_is_windows", lambda: windows)
+    monkeypatch.setattr(update.shutil, "which", lambda name: f"/usr/bin/{name}")
 
-    class _Result:
-        returncode = 0
-        stdout = ""
-        stderr = ""
 
-    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Result:
+def test_self_update_runs_installer(monkeypatch: pytest.MonkeyPatch) -> None:
+    _updatable(monkeypatch)
+    ran: list[tuple[list[str], bool]] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
         # monkeypatching update.subprocess patches the SHARED subprocess module,
-        # so the post-update heal's own subprocess lands here too — collect all.
-        ran.append(list(cmd))
-        return _Result()
+        # so the trial install, the version probes, and the post-update heal all
+        # land here too — collect all.
+        ran.append((list(cmd), _is_canary(cmd, kwargs)))
+        return _Proc(stdout="omind 2.37.0\n")
 
     monkeypatch.setattr(update.subprocess, "run", fake_run)
     assert self_update(log=lambda _m: None) == 0
-    assert any(cmd[:3] == ["uv", "tool", "install"] for cmd in ran)
+    installs = [(cmd, canary) for cmd, canary in ran if cmd[:3] == ["uv", "tool", "install"]]
+    # The throwaway install comes FIRST and never carries --force; only then is
+    # the live environment replaced.
+    assert [canary for _cmd, canary in installs] == [True, False]
+    assert "--force" not in installs[0][0] and "--force" in installs[1][0]
+
+
+def test_self_update_refuses_in_place_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The 9.4.0 -> 9.7.5 incident: on Windows this process runs from the tool
+    environment, `uv tool install --force` deletes that environment and only then
+    fails on the locked python.exe, and omind is gone. Refuse; touch nothing."""
+    _updatable(monkeypatch, windows=True)
+    monkeypatch.setattr(update, "tool_env_dir", lambda _i: Path("C:/uv/tools/omind"))
+    monkeypatch.setattr(update, "_env_processes", lambda _env: ["pid 42 (omind.exe node)"])
+
+    def no_install(cmd: list[str], *_a: object, **_k: object) -> _Proc:
+        raise AssertionError(f"nothing may run on a refused update: {cmd}")
+
+    monkeypatch.setattr(update.subprocess, "run", no_install)
+    out: list[str] = []
+    assert self_update(log=out.append) == 1
+    text = "\n".join(out)
+    assert "refusing to update" in text and "nothing was changed" in text
+    # The way out is spelled out, including who is still holding the files.
+    assert "uv tool install --force --from" in text and "pid 42" in text
+    # A refused update is not an update: `--rollback` must not learn from it.
+    assert not update._rollback_path().exists()
+
+
+@pytest.mark.parametrize(
+    ("install_rc", "version_out", "expected"),
+    [
+        (1, "", "does not install"),
+        (0, "", "does not start"),  # builds, then dies on import
+        (0, "omind 2.36.0\n", "does not start as omind 2.37.0"),  # some OTHER omind answered
+    ],
+)
+def test_self_update_refuses_a_release_that_fails_its_trial(
+    monkeypatch: pytest.MonkeyPatch, install_rc: int, version_out: str, expected: str
+) -> None:
+    """A release that cannot install or start here is found out in a throwaway
+    environment — not after the working one has been deleted."""
+    _updatable(monkeypatch)
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        if _is_canary(cmd, kwargs):
+            return _Proc(returncode=install_rc, stderr="error: no wheel for this platform\n")
+        if "--force" in cmd:
+            raise AssertionError("the live install must not be touched after a failed trial")
+        return _Proc(stdout=version_out)
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    out: list[str] = []
+    assert self_update(log=out.append) == 1
+    assert any(expected in line for line in out)
+    assert not update._rollback_path().exists()
+
+
+@pytest.mark.parametrize("missing", ["uv", "git"])
+def test_self_update_refuses_without_its_tools(
+    monkeypatch: pytest.MonkeyPatch, missing: str
+) -> None:
+    _updatable(monkeypatch)
+    monkeypatch.setattr(
+        update.shutil, "which", lambda name: None if name == missing else f"/usr/bin/{name}"
+    )
+
+    def no_install(cmd: list[str], *_a: object, **_k: object) -> _Proc:
+        raise AssertionError(f"nothing may run without {missing}: {cmd}")
+
+    monkeypatch.setattr(update.subprocess, "run", no_install)
+    out: list[str] = []
+    assert self_update(log=out.append) == 1
+    assert any(f"`{missing}` is not on PATH" in line for line in out)
+
+
+def test_pip_installs_get_a_trial_venv_before_the_live_reinstall(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """pip gets the same proof as uv — in a scratch venv built by THIS interpreter,
+    so the wheels it resolves are the ones the live environment would get. And no
+    Windows refusal: pip moves old files aside rather than deleting the env."""
+    _updatable(monkeypatch, windows=True)
+    monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("pip", "x"))
+    ran: list[list[str]] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        ran.append(list(cmd))
+        return _Proc(stdout="omind 2.37.0\n")
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    assert self_update(log=lambda _m: None) == 0
+    kinds = [
+        "venv" if cmd[1:3] == ["-m", "venv"] else "live" if "--force-reinstall" in cmd else "trial"
+        for cmd in ran
+        if cmd[1:3] == ["-m", "venv"] or cmd[1:3] == ["-m", "pip"]
+    ]
+    assert kinds == ["venv", "trial", "live"]
+    trial = next(cmd for cmd in ran if cmd[1:3] == ["-m", "pip"] and "--force-reinstall" not in cmd)
+    assert trial[0] != sys.executable  # the scratch venv's python, never the live one
+
+
+def test_pip_install_that_fails_its_trial_is_refused(monkeypatch: pytest.MonkeyPatch) -> None:
+    _updatable(monkeypatch)
+    monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("pip", "x"))
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        if "--force-reinstall" in cmd:
+            raise AssertionError("the live install must not be touched after a failed trial")
+        if cmd[1:3] == ["-m", "pip"]:
+            return _Proc(returncode=1, stderr="ERROR: No matching distribution found\n")
+        return _Proc()
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    out: list[str] = []
+    assert self_update(log=out.append) == 1
+    assert any("does not install" in line and "No matching distribution" in line for line in out)
+
+
+@pytest.mark.parametrize(
+    ("output", "reports"),
+    [
+        ("omind 10.0.0\n", True),
+        ("omind 110.0.0\n", False),  # a substring match accepted this
+        ("omind 10.0.01\n", False),
+        ("omind 10.0.0.1\n", False),
+        ("", False),
+        (None, False),
+    ],
+)
+def test_reported_version_must_match_exactly(output: str | None, reports: bool) -> None:
+    assert update._reports_version(output, "10.0.0") is reports
+
+
+def test_self_update_reports_an_install_it_broke(monkeypatch: pytest.MonkeyPatch) -> None:
+    """If the installer still dies half-way, say the install is broken and how to
+    repair it — the old code printed an exit status and left a dead shim for the
+    next hook to trip over."""
+    _updatable(monkeypatch)
+    replaced: list[bool] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        if "--force" in cmd:
+            replaced.append(True)
+            return _Proc(returncode=2)
+        # Healthy until the live install is replaced; nothing answers afterwards.
+        return _Proc(returncode=1) if replaced else _Proc(stdout="omind 2.37.0\n")
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    out: list[str] = []
+    assert self_update(log=out.append) == 2
+    text = "\n".join(out)
+    assert "BROKEN" in text and "uv tool install --force" in text
+    assert "updated to" not in text
+
+
+def test_rollback_is_preflighted_too(monkeypatch: pytest.MonkeyPatch) -> None:
+    _updatable(monkeypatch, windows=True)
+    monkeypatch.setattr(update, "_env_processes", lambda _env: [])
+    update._record_rollback("2.35.0", "2.36.0", [])
+
+    def no_install(cmd: list[str], *_a: object, **_k: object) -> _Proc:
+        raise AssertionError(f"nothing may run on a refused rollback: {cmd}")
+
+    monkeypatch.setattr(update.subprocess, "run", no_install)
+    out: list[str] = []
+    assert self_update(rollback=True, log=out.append) == 1
+    assert any("refusing to roll back" in line for line in out)
+
+
+def test_env_processes_ignores_its_own_launcher_chain(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """omind.exe -> Scripts/python.exe -> this process are all the CALLER; only an
+    unrelated process in the environment (an `omind node`) is someone to close."""
+    exe = str(tmp_path / "Scripts" / "python.exe")
+    me = update.os.getpid()
+    rows = [
+        {"ProcessId": me, "ParentProcessId": 11, "ExecutablePath": exe, "CommandLine": "self"},
+        {"ProcessId": 11, "ParentProcessId": 1, "ExecutablePath": exe, "CommandLine": "shim"},
+        {"ProcessId": 42, "ParentProcessId": 1, "ExecutablePath": exe, "CommandLine": "omind node"},
+        {"ProcessId": 43, "ParentProcessId": 1, "ExecutablePath": "C:/o.exe", "CommandLine": "x"},
+    ]
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **k: _Proc(stdout=json.dumps(rows)))
+    assert update._env_processes(tmp_path) == ["pid 42 (omind node)"]
+    # Informational only: a failed query must not turn into a crash.
+    monkeypatch.setattr(update.subprocess, "run", lambda *a, **k: _Proc(stdout="not json"))
+    assert update._env_processes(tmp_path) == []
+
+
+def test_extras_are_read_from_the_located_tool_env(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """uv keeps tools under %APPDATA% on Windows (and $UV_TOOL_DIR anywhere), so
+    the hard-coded XDG receipt path found nothing there and every update silently
+    dropped `omind[embed]` — the very thing `installed_extras` exists to stop."""
+    env = tmp_path / "AppData" / "Roaming" / "uv" / "tools" / "omind"
+    package = env / "Lib" / "site-packages" / "omind"
+    package.mkdir(parents=True)
+    (package / "__init__.py").write_text("", encoding="utf-8")
+    (env / "uv-receipt.toml").write_text(
+        '[tool]\nrequirements = [{ name = "omind", extras = ["embed"] }]\n', encoding="utf-8"
+    )
+    monkeypatch.setattr(update.Path, "home", classmethod(lambda _cls: tmp_path / "nowhere"))
+    monkeypatch.setattr(update, "_resolve_tag_sha", lambda v, timeout=60.0: None)
+    install = InstallInfo("uv-tool", str(package / "__init__.py"))
+    assert update.tool_env_dir(install) == env.resolve()
+    cmd = update_command(install, "9.9.9")
+    assert cmd is not None and cmd[cmd.index("--from") + 1].startswith("omind[embed] @ git+")
 
 
 def test_post_update_heal_re_enters_a_clean_interpreter(

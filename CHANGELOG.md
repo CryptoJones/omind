@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.0.0] - 2026-09-20
+
+### Changed
+- **BREAKING: `omind self-update` and `scripts/bootstrap.sh` check prerequisites and
+  refuse, instead of forcing the install (#375).** `uv tool install --force` is not
+  transactional — it deletes the existing environment *first* and builds the new one
+  after. On Windows a running executable cannot be deleted, and `omind self-update`
+  itself runs from `tools\omind\Scripts\python.exe`: uv removed everything it could,
+  died on `Access is denied (os error 5)`, and a 9.4.0 -> 9.7.5 update left a machine
+  with `ModuleNotFoundError: No module named 'omind'` and every hook and MCP server
+  dead. Nothing is touched now until a preflight passes:
+  - `git`, and `uv` (or `pip`), must be on hand;
+  - **on Windows the in-place replace is refused outright**, and the refusal prints
+    the route that works — the exact `uv tool install` line to run from a plain
+    terminal, plus the pids still running out of the environment;
+  - everywhere else the target release is first installed **somewhere throwaway and
+    started** (`omind --version` must answer with exactly the target version) — a
+    scratch `UV_TOOL_DIR` for uv-tool installs, which also warms uv's cache so the real
+    install is mostly offline; a scratch venv for pip installs. A release that cannot
+    resolve, build or import on this machine, or a network that drops mid-download, is
+    now a refusal with the old version intact rather than an uninstall;
+  - afterwards the result is started in a fresh interpreter. If the installer still
+    broke the install, self-update says **BROKEN** and prints the repair command
+    instead of an exit status.
+
+  `--rollback` goes through the same preflight, and a refused update no longer
+  overwrites the rollback record. `bootstrap.sh` refuses unsupported systems, checks
+  `git` before it installs anything, refuses to replace an install that is in use on
+  Windows, runs the same trial install, passes `--force` only when there is something
+  to replace, and fails if the installed `omind` does not start (it used to print
+  "run: omind --version" and carry on).
+
+  **Windows machines on 9.7.5 or older still carry the old updater: do not run
+  `omind self-update` there.** Close every agent session, then from a plain terminal:
+  `uv tool install --force --from git+https://github.com/CryptoJones/omind@v10.0.0 omind`
+  followed by `omind setup`. The same command repairs an install that was already
+  gutted. See docs/troubleshooting.md.
+
+### Fixed
+- **`omind[embed]` was silently dropped on every self-update on Windows, and under
+  `$UV_TOOL_DIR` anywhere (#375).** `installed_extras()` read uv's receipt from the
+  hard-coded XDG path `~/.local/share/uv/tools/omind`, which does not exist there. The
+  tool environment is now located by walking up from the running package to the
+  receipt, which also lets `detect_install` recognise a relocated `uv tool` install
+  instead of filing it under `pip`.
+
 ## [9.7.5] - 2026-09-19
 
 ### Fixed

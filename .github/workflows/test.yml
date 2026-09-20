@@ -103,6 +103,77 @@ jobs:
           print(f"OK: {len(required)} data files + {len(fonts)} fonts present in the wheel")
           PY
 
+  upgrade:
+    # Every PR proves that people can still UPGRADE, against a real uv on a real
+    # filesystem, on every OS omind is installed on. The unit tests mock uv, and
+    # the failure this guards (#375) does not exist in a mock: `uv tool install
+    # --force` deletes the environment before it builds the new one, and on
+    # Windows cannot delete the python.exe that `omind self-update` runs from —
+    # 9.4.0 -> 9.7.5 left a machine with no omind at all.
+    #
+    # Path walked: install an OLD release the way a user did -> upgrade it to this
+    # checkout -> run this checkout's `omind self-update` -> re-run the installer
+    # over the result. The invariant after EVERY step: omind still starts.
+    name: Upgrade from ${{ matrix.from }} (${{ matrix.os }})
+    runs-on: ${{ matrix.os }}
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        # A pinned old release (the one #375 started from) and whatever is the
+        # newest tag today, so the baseline moves forward with every release.
+        from: [v9.4.0, latest]
+    defaults:
+      run:
+        shell: bash
+    env:
+      # The heal re-provisions ~/.claude and needs the claude CLI; not under test.
+      OMIND_NO_AUTOHEAL: '1'
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: '3.12'
+      - run: python -m pip install -U pip uv
+      - name: Install the old release with bootstrap.sh, on a clean machine
+        run: |
+          bin="$(uv tool dir --bin)"
+          echo "$bin" >> "$GITHUB_PATH"
+          # Git Bash splits PATH on ':', so C:\... must become /c/... for this step.
+          if command -v cygpath >/dev/null 2>&1; then bin="$(cygpath -u "$bin")"; fi
+          export PATH="$bin:$PATH"
+          ref=()
+          [ "${{ matrix.from }}" = "latest" ] || ref=(--ref "${{ matrix.from }}")
+          # Exits 1 only because the runner has no `claude` CLI to set up.
+          scripts/bootstrap.sh --no-setup "${ref[@]}" || true
+          omind --version
+      - name: Upgrade it to this checkout
+        run: |
+          uv tool install --force --from . omind
+          want="$(grep -m1 '^version = ' pyproject.toml | cut -d'"' -f2)"
+          omind --version | tee version.txt
+          grep -qF "$want" version.txt
+      - name: omind self-update, for real
+        run: |
+          set +e
+          omind self-update --force 2>&1 | tee update.log
+          code=${PIPESTATUS[0]}
+          set -e
+          if grep -q "could not reach GitHub" update.log; then
+            echo "::warning::GitHub API unreachable/rate-limited from this runner; self-update not exercised"
+          elif [ "$RUNNER_OS" = "Windows" ]; then
+            # In-place replacement cannot work on Windows: it must refuse, not try.
+            [ "$code" -eq 1 ] && grep -q "refusing to update" update.log
+          else
+            [ "$code" -eq 0 ] && grep -q "updated to" update.log
+          fi
+      - name: Whatever self-update decided, omind still starts
+        run: omind --version
+      - name: bootstrap.sh over an existing install leaves a working omind
+        run: |
+          scripts/bootstrap.sh --no-setup || true
+          omind --version
+
   secrets:
     name: Secret scan (gitleaks, full history)
     runs-on: ubuntu-latest

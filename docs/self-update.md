@@ -36,9 +36,44 @@ release auto-deployed everywhere is the failure mode we refuse to risk.
     - **uv-tool** → `uv tool install --force --from git+https://github.com/CryptoJones/omind@<tag> omind`
     - **pip** → `python -m pip install --upgrade --force-reinstall git+…@<tag>`
     - **editable** checkout → tells you to `git pull` (nothing to reinstall)
-  - `--force` reinstalls even when not newer.
+  - `--force` reinstalls even when not newer. It does **not** skip the preflight
+    below — nothing does.
   - The update takes effect on the **next** server/agent start — a running
     process can't hot-swap its own code (which is why notify+restart, not magic).
+
+## Preflight — refuse, don't force
+
+`uv tool install --force` is **not transactional**: it deletes the existing tool
+environment first and builds the replacement after. Anything that goes wrong in
+between costs the working install, and on a machine where omind backs every agent's
+memory and hooks, that is an outage. So before the install command runs, `self-update`
+(and `--rollback`, and `scripts/bootstrap.sh`) checks everything that can be checked
+while a refusal is still free:
+
+| Check | Why |
+|---|---|
+| `git` on `PATH`; `uv` on `PATH` (uv-tool) or `pip` importable (pip) | The release is installed from a git ref by that tool |
+| **Windows + uv-tool: always refused** | `omind self-update` runs from `tools\omind\Scripts\python.exe`. Windows will not delete a running executable, and uv discovers that only after removing the rest of the environment. 9.4.0 -> 9.7.5 left `Scripts\python.exe` and nothing else (#375). Dropping `--force` is no better: uv swaps the package, then fails on the existing `omind.exe` and leaves a broken shim |
+| **Trial install** (every install that is not refused above) | The target is installed somewhere throwaway and started; `omind --version` must answer with *exactly* the target version. Catches a release that cannot resolve, build, or import *on this machine*, and a network that drops mid-download. **uv-tool:** a scratch `UV_TOOL_DIR`, which also warms uv's cache so the real install is mostly offline. **pip:** a scratch venv built by the same interpreter (slower — a minute or two — since pip has no shared build cache). pip installs are not refused on Windows: pip moves old files aside package by package instead of deleting the environment first |
+| Post-install start check | The result is run in a fresh interpreter. If it does not start, self-update says the install is **BROKEN** and prints the repair command |
+
+A refusal exits 1, changes nothing, and does not overwrite the `--rollback` record.
+
+### Updating on Windows
+
+Self-update refuses and prints these steps with the exact command filled in:
+
+1. Close every agent session, MCP server and `omind serve` — anything running out of
+   the tool environment (the refusal lists the pids it can see).
+2. From a plain terminal: `uv tool install --force --from git+https://github.com/CryptoJones/omind@<ref> omind`
+3. `omind setup`
+
+`scripts/bootstrap.sh` (Git Bash) does the same with guards: it refuses while any
+executable in the environment is in use, and runs the trial install first.
+
+**Windows machines on 9.7.5 or older carry the old updater — do not run
+`omind self-update` there;** use the steps above. They also repair an install the old
+updater already gutted (see [troubleshooting](troubleshooting.md)).
 
 ## Channel & trust
 
@@ -51,5 +86,6 @@ becomes the native path and `update_command` gains that branch.
 ## Not (yet) done
 
 - Silent/scheduled auto-apply (intentionally — notify-first).
-- Rollback automation (the prior wheel remains in `dist/` for a manual revert).
+- A hand-off updater for Windows (a helper outside the venv that waits for omind to
+  exit, then installs) — today Windows refuses and prints the manual route.
 - Signature/lockfile verification of the pulled ref.

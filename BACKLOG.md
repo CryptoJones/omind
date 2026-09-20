@@ -120,6 +120,18 @@ the exact order of operations._
 
 ## Done
 
+### Shipped — 2026-09-20 (v10.0.0)
+
+- [x] **`self-update` on Windows deleted the install it was running from** ([#375](https://github.com/CryptoJones/omind/issues/375)) — **v10.0.0** — _bug (installer, data-plane outage)_ —
+  `uv tool install --force` deletes the environment before building the new one and
+  cannot delete a running `python.exe` on Windows, so 9.4.0 -> 9.7.5 left no omind at
+  all. Self-update and `bootstrap.sh` now preflight and refuse: tools present, no
+  in-place replace on Windows (the manual route is printed), a trial install in a
+  throwaway tool dir (uv) or venv (pip) everywhere else, and a post-install start check. Also fixed: the
+  uv receipt was looked up at an XDG-only path, dropping `omind[embed]` on Windows.
+  **Open follow-up:** a hand-off updater (a helper outside the venv that waits for
+  omind to exit) would let Windows self-update for real instead of refusing.
+
 ### Shipped — 2026-09-19
 
 - [x] **Guard/merge: review findings on #363 — pristine-seed check ignored summary/tags; a failed read still cleared the ordinary gate** ([#369](https://github.com/CryptoJones/omind/issues/369)) — **v9.7.3** — _bug (data loss + enforcement)_ —
