@@ -493,6 +493,20 @@ def _omind_entries(settings: Path, event: str) -> list[dict[str, object]]:
     return [e for e in data["hooks"][event] if provision._entry_has_omind_marker(e)]
 
 
+def test_hook_commands_quote_the_windows_exe_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Git Bash strips the backslashes of an unquoted path (C:\\Users\\x -> C:Usersx)."""
+    exe = "C:\\Users\\ci\\.local\\bin\\omind.EXE"
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: exe)
+
+    for event in provision.HANDLED_EVENTS:
+        cmd = Provisioner(_config(tmp_path), log=_quiet)._hook_command(event)
+        assert cmd.startswith(f'"{exe}" hook {event} ')
+        assert provision._command_is_omind_hook(cmd)
+        assert provision._hook_exe_path(cmd) == exe
+
+
 def test_setup_installs_hooks_idempotently(tmp_path: Path, isolate_settings: Path) -> None:
     config = _config(tmp_path)
     _install_hooks(config)
