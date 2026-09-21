@@ -848,7 +848,7 @@ class Provisioner:
         # per harness on purpose: see hooks.INJECTING_HARNESSES.
         harness = " --harness claude" if event == "PostToolUse" else ""
         return (
-            f'{omind_exe} hook {event} --vault "{self.config.vault}" '
+            f'"{omind_exe}" hook {event} --vault "{self.config.vault}" '
             f'--folder "{self.config.folder}"{harness}'
         )
 

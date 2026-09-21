@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.0.2] - 2026-09-21
+
+### Fixed
+- **`omind setup` still wrote the omind executable unquoted in the PostToolUse, Stop and
+  SessionStart hooks on Windows.** 10.0.1 quoted only the `omi-enforce.py` script path and missed
+  the exe path in `_hook_command`; Git Bash turned `C:\Users\x\.local\bin\omind.EXE hook Stop ...`
+  into `C:Usersx.localbinomind.EXE: command not found`, so the journal and Stop hooks failed after
+  every turn. The exe path is now quoted too. Re-run `omind setup` to rewrite existing entries.
+
+### Added
+- **CI now proves every hook command survives a POSIX shell** (`tests/test_hook_shell_safety.py`).
+  Each command `setup` writes into settings.json (journal hooks, enforcement hook, guard adapter and
+  preflight) is handed to a real bash for word-splitting, and the executable and script paths must
+  arrive intact — with Windows-shaped paths on every OS, and with real backslash paths on
+  `windows-latest` against Git Bash. A `CI` run with no bash fails rather than skips.
+
 ## [10.0.1] - 2026-09-21
 
 ### Fixed
