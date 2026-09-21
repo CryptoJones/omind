@@ -1365,7 +1365,7 @@ def _wired_settings(tmp_path: Path, vault: Path) -> Path:
                                 {"type": "command", "command": cmd % "PostToolUse"},
                                 {
                                     "type": "command",
-                                    "command": f"{python_cmd} {provision._enforce_hook_dest()}",
+                                    "command": f'{python_cmd} "{provision._enforce_hook_dest()}"',
                                 },
                             ]
                         }
@@ -1885,7 +1885,7 @@ def test_diagnose_hooks_flags_stale_enforcement_hook_python(
                                 {"type": "command", "command": cmd % "PostToolUse"},
                                 {
                                     "type": "command",
-                                    "command": f"python3 {provision._enforce_hook_dest()}",
+                                    "command": f'python3 "{provision._enforce_hook_dest()}"',
                                 },
                             ]
                         }
@@ -2050,7 +2050,7 @@ def test_hook_entries_use_documented_fallback_when_python_cannot_be_resolved(
     entries = Provisioner(_config(tmp_path), log=_quiet)._omind_hook_entries()
     post_hooks = entries["PostToolUse"][0]["hooks"]
 
-    assert post_hooks[1]["command"] == f"python3 {provision._enforce_hook_dest()}"
+    assert post_hooks[1]["command"] == f'python3 "{provision._enforce_hook_dest()}"'
 
 
 def test_doctor_reports_python_check_in_full_diagnose(
