@@ -7,6 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.0.1] - 2026-09-21
+
+### Fixed
+- **`omind setup` wrote the Windows enforcement hook with an unquoted script path.** Claude Code
+  can run hook commands through Git Bash, which eats the backslashes of an unquoted path
+  (`C:\Users\x\.claude\hooks\omi-enforce.py` became `C:Usersx.claudehooksomi-enforce.py`), so the
+  PostToolUse enforcement hook failed with a blocking error after every tool call. The script path
+  is now quoted. Existing installs pick the fix up on the next `omind setup`.
+
 ## [10.0.0] - 2026-09-20
 
 ### Changed

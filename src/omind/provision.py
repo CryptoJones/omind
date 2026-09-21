@@ -876,7 +876,10 @@ class Provisioner:
                     python_cmd = "python3"
                 hooks_list.append({
                     "type": "command",
-                    "command": f"{python_cmd} {_enforce_hook_dest()}",
+                    # Quoted: Claude Code may run the string through Git Bash on
+                    # Windows, which eats the backslashes of an unquoted path
+                    # (C:\Users\x -> C:Usersx) and the hook fails every tool call.
+                    "command": f'{python_cmd} "{_enforce_hook_dest()}"',
                 })
                 entry: dict[str, Any] = {"matcher": "*", "hooks": hooks_list}
             else:
