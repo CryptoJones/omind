@@ -97,7 +97,10 @@ def _check_paths(words: list[str], exe: str, script: str, *, must_exist: bool) -
             assert (not must_exist) or Path(token).exists()
         if token.endswith("omi-enforce.py"):
             assert token == script, f"script path mangled by the shell: {token!r}"
-    assert words[0] in (exe, "python"), f"argv[0] not intact: {words[0]!r}"
+    # POSIX setup wires the omi-guard.sh adapters where Windows calls omind directly.
+    assert words[0] in (exe, "python") or words[0].endswith(".sh"), (
+        f"argv[0] not intact: {words[0]!r}"
+    )
 
 
 def test_hook_commands_survive_bash_with_windows_style_paths(
@@ -128,7 +131,7 @@ def test_hook_commands_resolve_to_real_files_under_bash(
     seen_exe = seen_script = False
     for cmd in _commands(settings):
         words = _words(bash, cmd)
-        assert words[0] in (exe, "python")
+        assert words[0] in (exe, "python") or words[0].endswith(".sh")
         if words[0] == exe:
             seen_exe = True
             assert Path(words[0]).exists()
