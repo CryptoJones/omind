@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.0.3] - 2026-09-29
+
+### Fixed
+- **`omind mesh daemon` output was block-buffered under systemd, so a failing sync was
+  invisible until the daemon restarted (#382).** The daemon logs through `print`, and under
+  the user unit `install_service` writes stdout is a pipe, which Python buffers in blocks:
+  nothing reached the journal until exit. pluto's vault carried a corrupt `.git/index` for
+  three days while the daemon logged `sync failed: fatal: .git/index: index file smaller than
+  expected` every cycle — all 182 lines surfaced with one timestamp, at restart. The daemon
+  now flushes every log line (the `sync()` log path included), the systemd unit sets
+  `Environment=PYTHONUNBUFFERED=1`, and the launchd plist sets the same in
+  `EnvironmentVariables`. Re-run `omind mesh install-service` to rewrite an existing unit.
+
 ## [10.0.2] - 2026-09-21
 
 ### Fixed
