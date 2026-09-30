@@ -16,6 +16,7 @@ must never interleave with a half-written note.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import re
@@ -900,6 +901,13 @@ def run_daemon(
     """
     from omind.paths import sync_signal_path
 
+    # Under systemd/launchd stdout is a pipe, so Python block-buffers it and
+    # nothing reaches the journal until the process exits: three days of
+    # `sync failed` lines once surfaced with a single timestamp, at restart.
+    # Flush every line so a failing sync is visible while it is failing.
+    if log is print:
+        log = functools.partial(print, flush=True)
+
     omi_dir = Path(omi_dir).expanduser()
     signal_file = sync_signal_path(omi_dir)
     stop = {"flag": False}
@@ -977,6 +985,9 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
             "[Service]\n"
             "Type=simple\n"
             f"ExecStart={daemon_cmd}\n"
+            # Belt and braces with run_daemon's line flush: the journal must
+            # see each line as it is written, not in one burst at exit.
+            "Environment=PYTHONUNBUFFERED=1\n"
             "Restart=on-failure\n"
             "RestartSec=30\n"
             "\n"
@@ -1009,6 +1020,11 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
             "    <array>\n"
             f"{args_xml}\n"
             "    </array>\n"
+            "    <key>EnvironmentVariables</key>\n"
+            "    <dict>\n"
+            "      <key>PYTHONUNBUFFERED</key>\n"
+            "      <string>1</string>\n"
+            "    </dict>\n"
             "    <key>KeepAlive</key>\n"
             "    <true/>\n"
             "    <key>RunAtLoad</key>\n"

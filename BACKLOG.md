@@ -120,6 +120,14 @@ the exact order of operations._
 
 ## Done
 
+### Shipped — 2026-09-29 (v10.0.3)
+
+- [x] **`mesh daemon` log lines were block-buffered under systemd; sync failures invisible until restart** ([#382](https://github.com/CryptoJones/omind/issues/382)) — **v10.0.3** — _bug (mesh, observability)_ —
+  the daemon logs through `print`, and under the systemd user unit stdout is a pipe, so
+  three days of `sync failed: fatal: .git/index: index file smaller than expected` on
+  pluto reached the journal as 182 lines with one timestamp, at restart. The daemon now
+  flushes every line; the systemd unit and launchd plist set `PYTHONUNBUFFERED=1`.
+
 ### Shipped — 2026-09-20 (v10.0.0)
 
 - [x] **`self-update` on Windows deleted the install it was running from** ([#375](https://github.com/CryptoJones/omind/issues/375)) — **v10.0.0** — _bug (installer, data-plane outage)_ —

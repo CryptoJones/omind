@@ -9,9 +9,11 @@ file with the sync engine.
 
 from __future__ import annotations
 
+import io
 import json
 import os
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -544,3 +546,85 @@ def test_install_service_requires_init(tmp_path: Path) -> None:
     omi.mkdir(parents=True)
     with pytest.raises(MeshError, match="mesh init"):
         mesh.install_service(tmp_path / "Vault", "OMI", log=quiet)
+
+
+class _FlushCounter(io.StringIO):
+    """A non-tty stdout stand-in that counts flush() calls."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.flushes = 0
+
+    def flush(self) -> None:
+        self.flushes += 1
+        super().flush()
+
+    def isatty(self) -> bool:
+        return False
+
+
+def test_daemon_default_logger_flushes_every_line(
+    pair: tuple[Path, str, Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Under systemd stdout is a pipe and block-buffered: three days of `sync
+    failed` lines once reached the journal in one burst at restart. The default
+    logger must flush per line."""
+    a, _, _b, _ = pair
+    cfg = mesh.load_node_config(a)
+    assert cfg is not None
+    out = _FlushCounter()
+    monkeypatch.setattr(sys, "stdout", out)
+    assert mesh.run_daemon(a, cfg, _max_tick_seconds=0.0) == 0
+    lines = [ln for ln in out.getvalue().splitlines() if ln.startswith("omind mesh daemon")]
+    assert len(lines) == 2  # start + stop banner
+    assert out.flushes >= len(out.getvalue().splitlines())
+
+
+def _fake_service_env(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, platform: str
+) -> list[list[str]]:
+    import omind.backup
+    import omind.provision
+
+    calls: list[list[str]] = []
+
+    def fake_run(argv: list[str], **_kw: object) -> None:
+        calls.append(list(argv))
+
+    monkeypatch.setattr(mesh, "run_command", fake_run)
+    monkeypatch.setattr(mesh.sys, "platform", platform)
+    monkeypatch.setattr(omind.backup, "systemd_user_dir", lambda: tmp_path / "systemd-user")
+    monkeypatch.setattr(omind.provision, "canonical_omind_exe", lambda: "/opt/bin/omind")
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
+    return calls
+
+
+def test_install_service_systemd_unit_is_unbuffered(
+    pair: tuple[Path, str, Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _, _b, _ = pair
+    calls = _fake_service_env(tmp_path, monkeypatch, "linux")
+    mesh.install_service(a.parent, a.name, log=quiet)
+    unit = (tmp_path / "systemd-user" / mesh.MESH_SERVICE_UNIT).read_text(encoding="utf-8")
+    service = unit.split("[Service]", 1)[1].split("[Install]", 1)[0]
+    assert "Environment=PYTHONUNBUFFERED=1\n" in service
+    assert "ExecStart=/opt/bin/omind mesh daemon" in service
+    assert [c[:3] for c in calls] == [
+        ["systemctl", "--user", "daemon-reload"],
+        ["systemctl", "--user", "enable"],
+    ]
+
+
+@pytest.mark.skipif(os.name == "nt", reason="launchd path calls os.getuid")
+def test_install_service_launchd_plist_is_unbuffered(
+    pair: tuple[Path, str, Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import plistlib
+
+    a, _, _b, _ = pair
+    _fake_service_env(tmp_path, monkeypatch, "darwin")
+    mesh.install_service(a.parent, a.name, log=quiet)
+    plist_path = tmp_path / "home" / "Library" / "LaunchAgents" / f"{mesh.MESH_LAUNCHD_LABEL}.plist"
+    plist = plistlib.loads(plist_path.read_bytes())
+    assert plist["EnvironmentVariables"] == {"PYTHONUNBUFFERED": "1"}
+    assert plist["ProgramArguments"][:3] == ["/opt/bin/omind", "mesh", "daemon"]
