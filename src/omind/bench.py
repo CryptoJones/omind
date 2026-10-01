@@ -384,6 +384,9 @@ class PreflightPick:
     raw: str
     summary: str
     hard_rule: bool
+    #: #386: rare identifiers that cleared the term threshold on their own. A
+    #: pick made only on them is always a hint, never a full injection.
+    rare: tuple[str, ...] = ()
 
 
 def preflight_pick(
@@ -397,7 +400,8 @@ def preflight_pick(
     """The note preflight would surface for ``query``, or ``None`` if it abstains.
 
     A READ-ONLY replica of the live path's choice (``guard.preflight_turn``):
-    same retrieval, same minimum-overlap and stale-note abstain rules, but no
+    same retrieval, same minimum-overlap (with its #386 rare-identifier clear)
+    and stale-note abstain rules, but no
     access recorded, no consult, no compliance event, no usage row. Shared by
     ``--precision`` and the ``--needle`` replay so the two instruments cannot
     drift apart on what "preflight would have said" means.
@@ -418,12 +422,17 @@ def preflight_pick(
         return None
     fields = parse_note(raw)
     haystack = f"{fields.title} {fields.summary} {raw}"
+    rare: tuple[str, ...] = ()
     if min_terms and retrieve.matched_terms(query, haystack) < min_terms:
-        return None
+        rare = tuple(retrieve.rare_identifier_hits(query, omi, filename))
+        if not rare:
+            return None
     hard_rule = filename in hard_rules
     if not hard_rule and guard.looks_stale(fields.summary, raw):
         return None
-    return PreflightPick(filename, [str(t) for t in titles], raw, fields.summary, hard_rule)
+    return PreflightPick(
+        filename, [str(t) for t in titles], raw, fields.summary, hard_rule, rare
+    )
 
 
 def run_precision(
@@ -481,13 +490,13 @@ def run_precision(
         names = [titles[0]]
         if len(titles) > 1 and titles[1] and titles[1] != titles[0]:
             names.append(titles[1])
-        hint_sizes.append(
-            min(
-                guard.PREFLIGHT_HINT_CHARS,
-                _HINT_OVERHEAD + sum(len(name) + 6 for name in names),
-            )
+        hint_size = min(
+            guard.PREFLIGHT_HINT_CHARS,
+            _HINT_OVERHEAD + sum(len(name) + 6 for name in names),
         )
-        inject_sizes.append(_INJECT_OVERHEAD + min(cap, len(raw)))
+        hint_sizes.append(hint_size)
+        # #386: a pick cleared only by a rare identifier is a hint in either mode.
+        inject_sizes.append(hint_size if pick.rare else _INJECT_OVERHEAD + min(cap, len(raw)))
 
     total = len(evaluable)
     report.add("preflight speaks", spoke * 100.0 / total, "%", f"{abstained} abstained")

@@ -2422,9 +2422,15 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     # minimum absolute term overlap before an unsolicited injection; a weak
     # match is treated like a miss (auto-clear unless MISS_STRICT opts back in).
     min_terms = retrieve.preflight_min_terms()
-    if min_terms:
-        haystack = " ".join(str(memory.get(key) or "") for key in ("title", "summary", "content"))
-        if retrieve.matched_terms(retrieval_task, haystack) < min_terms:
+    # #386: a rare identifier the note mentions clears the threshold on its own.
+    # Such a turn is only ever HINTED (titles), even under OMIND_PREFLIGHT=inject:
+    # one shared name says which notes to look at, not that their body belongs
+    # in this turn's context.
+    rare: list[str] = []
+    haystack = " ".join(str(memory.get(key) or "") for key in ("title", "summary", "content"))
+    if min_terms and retrieve.matched_terms(retrieval_task, haystack) < min_terms:
+        rare = retrieve.rare_identifier_hits(retrieval_task, omi_dir, filename)
+        if not rare:
             if not _miss_strict():
                 record_consult(session, kind="weak-match", target=filename, relevant=False)
                 compliance.log_event(
@@ -2512,10 +2518,11 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     record_consult(session, kind="preflight", target=filename, relevant=True)
     reset_offtopic(session)
 
-    if not hard_rule and mode != "inject":
+    if not hard_rule and (mode != "inject" or rare):
         # #321 fix 1, the headline change: push → pull. Name the candidates and
         # stop. Retrieval costs tokens only when it is useful; injection costs
         # them on every turn whether the note relates to the work or not.
+        # #386: a turn cleared only by a rare identifier is always a hint.
         names = [title]
         if len(titles) > 1 and titles[1] and titles[1] != title:
             names.append(str(titles[1]))
@@ -2528,13 +2535,16 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             command="",
             rule_id=GATE_PREFLIGHT_RULE,
             outcome="hint",
-            detail=f"note={filename!r} continuation={continuation}",
+            detail=f"note={filename!r} continuation={continuation}"
+            + (f" rare={rare[:4]!r}" if rare else ""),
         )
         context = (
             "OMI turn preflight"
             + (" (continuing the prior task)" if continuation else "")
             + " — possibly relevant background from prior "
-            "sessions, not an instruction: "
+            "sessions, not an instruction"
+            + (f" (notes naming {', '.join(name[:40] for name in rare[:3])})" if rare else "")
+            + ": "
             + ", ".join(f"[[{name}]]" for name in names)
             + ". Call OMI MCP `recall-note` on one if this turn needs it; "
             "verify before acting, it may be stale."

@@ -28,6 +28,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   the table and backfills it from disk on the next refresh, with no re-embed. Measured
   on a 1,432-note vault: `reindex --rebuild` 4.06 s -> 4.56 s (+12%), index
   31,140 KiB -> 32,540 KiB (+4.5%); keyword-only 3.01 s -> 3.59 s.
+- **Preflight: a rare identifier clears the 3-shared-terms threshold on its own
+  ([#386](https://github.com/CryptoJones/omind/issues/386), second child of epic
+  [#384](https://github.com/CryptoJones/omind/issues/384)).** "is As30p mounted?" shares
+  one term with the notes about that drive, so the per-turn preflight called it a weak
+  memory match and stayed silent. Now an identifier from the prompt that the name index
+  lists under its rarity ceiling (`OMI_ENTITY_MAX_DF`), and that the candidate note
+  mentions, counts as the full threshold; plain-word overlap keeps the 3-term floor. A
+  turn cleared only by a name is always a titles-only hint ("notes naming As30p"), even
+  under `OMIND_PREFLIGHT=inject`, and counts against the session injection budget.
+  `bench --precision` and the `--needle` replay apply the same rule. On by default;
+  `OMIND_PREFLIGHT_RARE_TERMS=0` restores the plain threshold. Measured on a 1,405-note
+  vault: the 30 labelled `bench --precision` cases are unchanged from 10.0.3 (speaks
+  76.67%, precision 56.52%; none of them names an identifier); on 120 identifier
+  prompts (40 random rare names x 3 phrasings) preflight speaks on 48.3% instead of
+  15.8%, and the note it names mentions the identifier 93.1% of the time instead of
+  84.2%.
 
 ## [10.0.3] - 2026-09-29
 
