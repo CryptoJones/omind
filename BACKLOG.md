@@ -73,6 +73,34 @@ the exact order of operations._
   longer leaks its fd on that path. The one piece of #362 that #368 did not carry over.
 - [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — _bug (hooks)_ — **shipped in this PR** (`_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands). —
 
+### ✅ Epic: memory reaches the agent when the named thing appears, not just when the prompt's words match ([#384](https://github.com/CryptoJones/omind/issues/384))
+
+_Done 2026-10-01: all six children merged (PRs #396–#401) and every definition-of-done line verified on main at `6228405`. Ships in the unreleased 10.1.0._
+
+_Filed 2026-09-30 after an agent saw a volume label only in `diskutil` output, never got the
+~10 notes explaining that the label had moved between three drives, and wrote a wrong claim
+into a new note. In dependency order; each child is flag-gated._
+
+- [x] **Name index: identifiers → notes** ([#385](https://github.com/CryptoJones/omind/issues/385)) — _enhancement_ — exact-token index of
+  labels, hosts, serials, repos and domains; foundation, injects nothing. — **shipped** in [#396](https://github.com/CryptoJones/omind/pull/396)
+  - [x] **Preflight: a rare identifier hit clears the 3-term threshold** ([#386](https://github.com/CryptoJones/omind/issues/386)) — _enhancement_ — **shipped** in [#397](https://github.com/CryptoJones/omind/pull/397)
+  - [x] **Budget: the agent's own reads don't spend the push-injection budget** ([#387](https://github.com/CryptoJones/omind/issues/387)) — _enhancement_ — **shipped** in [#398](https://github.com/CryptoJones/omind/pull/398)
+  - [x] **PostToolUse: name hints from tool output, once per name per session** ([#388](https://github.com/CryptoJones/omind/issues/388)) — _enhancement_ — **shipped** in [#399](https://github.com/CryptoJones/omind/pull/399)
+  - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
+  - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
+
+Follow-ups:
+
+- [ ] **entities: dotted Python names like `asyncio.run` are read as hostnames** ([#402](https://github.com/CryptoJones/omind/issues/402)) — _bug, follow-up of #384_
+- [ ] **Name hints: names shown at write time are not marked as already hinted** ([#403](https://github.com/CryptoJones/omind/issues/403)) — _enhancement, follow-up of #384_
+
+### Guard bugs found in the same session (2026-09-30)
+
+- [ ] **guard: any `-i` flag (e.g. `grep -iE`) next to sed/perl marks a command as repo work** ([#391](https://github.com/CryptoJones/omind/issues/391)) — _bug_
+- [ ] **guard: the "read it in full" git-rules demand is unsatisfiable (8000-char cap) and unverified** ([#392](https://github.com/CryptoJones/omind/issues/392)) — _bug_
+- [ ] **recall-note: gate-suggested titles containing `:` fail with "note not found"** ([#393](https://github.com/CryptoJones/omind/issues/393)) — _bug_
+- [ ] **rules: repo-scoped rules judge the hook's cwd repo, not the command's target repo** ([#394](https://github.com/CryptoJones/omind/issues/394)) — _bug_
+
 ## Not planned
 
 - [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
