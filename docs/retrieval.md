@@ -167,6 +167,19 @@ under `OMIND_PREFLIGHT=inject`), and it counts against the session's injection
 budget like any other hint. `OMIND_PREFLIGHT_RARE_TERMS=0` (or `OMI_ENTITY_INDEX=0`)
 restores the plain threshold.
 
+## Push and pull budgets
+
+The session injection budget (`guard.SESSION_INJECTION_BUDGET_CHARS`, 60,000 chars)
+limits **push**: context omind decides to send — SessionStart priming, the per-turn
+preflight, name hints. The agent's own `mcp__omi__*` reads are **pull**: the usage
+ledger marks them `"channel": "pull"`, and they no longer count against the budget
+([#387](https://github.com/CryptoJones/omind/issues/387)). Before this, a diligent
+session that read its way to 60K chars switched off even 500-char title hints.
+`omind audit` judges the two separately (`session.p99_tokens` for push,
+`session.pull_p99_tokens` for pull); pull has its own threshold but never suppresses
+a hint. Ledger events written before the split carry no channel and count as push.
+`OMIND_SPLIT_BUDGET=0` restores the combined budget.
+
 ## Measured on a 744-note vault
 
 | | before | after |

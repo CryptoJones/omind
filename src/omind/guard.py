@@ -2277,16 +2277,35 @@ def session_context_chars(omi_dir: Path | str, session: str) -> int:
     """omind context already pushed into ``session``, from omind's own ledger.
 
     The telemetry that measured #321 was being written and never read; this is
-    what reads it. Best-effort — budgeting must never break a hook.
+    what reads it. Since #387 only the PUSH channel counts — priming, preflight
+    and name hints — so the agent's own ``recall-note``/``search-vault`` reads no
+    longer switch hints off. ``OMIND_SPLIT_BUDGET=0`` restores the old sum.
+    Best-effort — budgeting must never break a hook.
     """
     if not session:
         return 0
     try:
         from omind import ai_usage
 
+        if ai_usage.split_budget_enabled():
+            return ai_usage.session_context_chars(omi_dir, session, channel=ai_usage.PUSH)
         return ai_usage.session_context_chars(omi_dir, session)
     except Exception:
         return 0
+
+
+#: Appended to the over-budget notice when the budget counts push only (#387),
+#: so the agent knows its own deliberate reads did not cause the taper.
+_PULL_NOT_COUNTED = "; your own OMI reads are not counted"
+
+
+def _split_budget() -> bool:
+    try:
+        from omind import ai_usage
+
+        return ai_usage.split_budget_enabled()
+    except Exception:
+        return False
 
 
 #: Turns that look like an action rather than a conversation (#241). Fixed by
@@ -2499,10 +2518,11 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             detail=f"chars={spent} budget={SESSION_INJECTION_BUDGET_CHARS}",
         )
         return (
-            f"OMI turn preflight has already pushed {spent:,} characters into "
-            "this session and is over budget — not adding more. Consult gate "
-            "cleared; call OMI MCP `search-vault`/`recall-note` when you need "
-            "memory."
+            f"OMI has already pushed {spent:,} unrequested characters into this "
+            f"session (push budget {SESSION_INJECTION_BUDGET_CHARS:,}"
+            f"{_PULL_NOT_COUNTED if _split_budget() else ''}) and is over budget "
+            "— not adding more. Consult gate cleared; call OMI MCP "
+            "`search-vault`/`recall-note` when you need memory."
         )
 
     mode = preflight_mode()

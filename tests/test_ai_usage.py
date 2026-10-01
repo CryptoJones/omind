@@ -301,3 +301,68 @@ def test_usage_summary_reports_injection_shape(
     out = capsys.readouterr().out
     assert "preflight per turn" in out
     assert "of omind context" in out
+
+
+def _mcp_read(omi: Path, chars: int, session: str) -> None:
+    """One OMI MCP result of roughly ``chars`` characters, as the hook records it."""
+    ai_usage.record_mcp_response(
+        omi,
+        {
+            "tool_name": "mcp__omi__recall-note",
+            "session_id": session,
+            "tool_response": "x" * max(0, chars - 2),
+        },
+    )
+
+
+def test_mcp_reads_are_logged_as_pull_and_injections_as_push(tmp_path: Path) -> None:
+    # #387: the agent's own reads are pull; everything omind chose to send is push.
+    omi = tmp_path / "OMI"
+    _mcp_read(omi, 1_000, "s-1")
+    ai_usage.record_context(omi, "recall", 500, session_id="s-1")
+    events = ai_usage.read_events(omi)
+    assert events[0]["channel"] == ai_usage.PULL
+    assert "channel" not in events[1]
+    assert [ai_usage.event_channel(e) for e in events] == [ai_usage.PULL, ai_usage.PUSH]
+    assert ai_usage.session_context_split(omi, "s-1") == {"push": 500, "pull": 1_000}
+    assert ai_usage.session_context_chars(omi, "s-1", channel=ai_usage.PUSH) == 500
+    assert ai_usage.session_context_chars(omi, "s-1", channel=ai_usage.PULL) == 1_000
+    assert ai_usage.session_context_chars(omi, "s-1") == 1_500
+    assert ai_usage.session_context_split(omi, "") == {"push": 0, "pull": 0}
+
+
+def test_pre_split_ledger_events_count_as_push(tmp_path: Path) -> None:
+    # #387 acceptance: backward compatible — an old "mcp" event has no channel and
+    # is counted as push, conservatively (it can only make the budget stricter).
+    omi = tmp_path / "OMI"
+    path = ai_usage.usage_path(omi)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(
+        json.dumps({"operation": "mcp", "characters": 4_000, "session_id": "old"}) + "\n",
+        encoding="utf-8",
+    )
+    assert ai_usage.session_context_split(omi, "old") == {"push": 4_000, "pull": 0}
+
+
+def test_split_budget_flag(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.delenv(ai_usage.SPLIT_BUDGET_ENV, raising=False)
+    assert ai_usage.split_budget_enabled()
+    for off in ("0", "off", "FALSE", " no "):
+        monkeypatch.setenv(ai_usage.SPLIT_BUDGET_ENV, off)
+        assert not ai_usage.split_budget_enabled()
+    monkeypatch.setenv(ai_usage.SPLIT_BUDGET_ENV, "1")
+    assert ai_usage.split_budget_enabled()
+
+
+def test_usage_top_sessions_split_push_and_pull(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    omi = tmp_path / "OMI"
+    ai_usage.record_context(omi, "recall", 300, session_id="s")
+    _mcp_read(omi, 2_000, "s")
+    top = ai_usage.usage_summary(omi, since="all")["injection"]["top_sessions"][0]
+    assert top["push_chars"] == 300
+    assert top["pull_chars"] == 2_000
+    assert top["chars"] == 2_300
+    assert main(["ai", "usage", "--since", "all", "--vault", str(tmp_path), "--folder", "OMI"]) == 0
+    assert "push 300, pull 2,000" in capsys.readouterr().out

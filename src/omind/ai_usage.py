@@ -138,6 +138,32 @@ def _rotate_if_oversized(path: Path) -> None:
         os.replace(path, path.with_suffix(path.suffix + ".1"))
 
 
+#: Context omind decided to send (SessionStart priming, the per-turn preflight,
+#: name hints). The session injection budget limits this channel only (#387).
+PUSH = "push"
+#: Context the agent asked for — the results of its own ``mcp__omi__*`` calls.
+#: Reported by ``omind audit`` against its own threshold; never suppresses hints.
+PULL = "pull"
+#: ``0``/``off`` restores the pre-#387 budget: pull counts against it too.
+SPLIT_BUDGET_ENV = "OMIND_SPLIT_BUDGET"
+_OFF_VALUES = frozenset({"0", "off", "false", "no"})
+
+
+def split_budget_enabled() -> bool:
+    """Whether the session injection budget counts push only (#387). On by default."""
+    return os.environ.get(SPLIT_BUDGET_ENV, "").strip().lower() not in _OFF_VALUES
+
+
+def event_channel(event: dict[str, Any]) -> str:
+    """:data:`PULL` or :data:`PUSH` for one ledger event.
+
+    Only an explicit ``"channel": "pull"`` is pull. Events written before #387
+    carry no channel and count as push — conservative: an old ledger can only
+    make the budget stricter, never looser.
+    """
+    return PULL if event.get("channel") == PULL else PUSH
+
+
 def log_event(
     omi_dir: Path | str,
     operation: str,
@@ -153,9 +179,15 @@ def log_event(
     avoided_tokens: int = 0,
     reason: str = "",
     session_id: str = "",
+    channel: str = "",
     now: datetime | None = None,
 ) -> None:
-    """Append a privacy-safe usage record. Never raises into an agent hook."""
+    """Append a privacy-safe usage record. Never raises into an agent hook.
+
+    ``channel`` is :data:`PULL` for context the agent asked for (its own OMI MCP
+    reads, #387). Anything else is written without the field and read as
+    :data:`PUSH`, which is also how every pre-#387 event is classified.
+    """
     record: dict[str, Any] = {
         "ts": (now or datetime.now()).isoformat(timespec="seconds"),
         "operation": operation,
@@ -175,6 +207,8 @@ def log_event(
         record["reason"] = reason[:160]
     if session_id:
         record["session_id"] = session_id[:160]
+    if channel == PULL:
+        record["channel"] = PULL
     try:
         path = usage_path(omi_dir)
         path.parent.mkdir(parents=True, exist_ok=True)
@@ -202,6 +236,7 @@ def record_context(
     characters: int,
     *,
     session_id: str = "",
+    channel: str = "",
 ) -> None:
     """Record context inserted into the parent agent without retaining content."""
     log_event(
@@ -211,6 +246,7 @@ def record_context(
         characters=characters,
         input_tokens=estimate_tokens(characters),
         session_id=session_id,
+        channel=channel,
     )
 
 
@@ -231,6 +267,9 @@ def record_mcp_response(omi_dir: Path | str, event: dict[str, Any]) -> None:
         "mcp",
         characters,
         session_id=str(event.get("session_id") or ""),
+        # The agent called the tool: this is a read it asked for, not an
+        # injection, so it never spends the push budget (#387).
+        channel=PULL,
     )
 
 
@@ -326,15 +365,33 @@ _SESSION_SCAN_BYTES = 512 * 1024
 
 
 def session_context_chars(
-    omi_dir: Path | str, session_id: str, *, operations: tuple[str, ...] = CONTEXT_OPERATIONS
+    omi_dir: Path | str,
+    session_id: str,
+    *,
+    operations: tuple[str, ...] = CONTEXT_OPERATIONS,
+    channel: str = "",
 ) -> int:
-    """Characters of omind-generated context already pushed into ``session_id``.
+    """Characters of omind-generated context already sent into ``session_id``.
 
     This ledger has recorded every injection since the beginning and nothing
-    ever consumed it (#321); the preflight budget does. Never raises.
+    ever consumed it (#321); the preflight budget does. ``channel`` limits the
+    sum to :data:`PUSH` or :data:`PULL` events (#387); empty counts both.
+    Never raises.
     """
+    split = session_context_split(omi_dir, session_id, operations=operations)
+    return split.get(channel, 0) if channel else sum(split.values())
+
+
+def session_context_split(
+    omi_dir: Path | str, session_id: str, *, operations: tuple[str, ...] = CONTEXT_OPERATIONS
+) -> dict[str, int]:
+    """``{"push": chars, "pull": chars}`` already sent into ``session_id`` (#387).
+
+    One bounded tail read of the ledger. Never raises.
+    """
+    totals = {PUSH: 0, PULL: 0}
     if not session_id:
-        return 0
+        return totals
     path = usage_path(omi_dir)
     try:
         with path.open("rb") as handle:
@@ -343,8 +400,7 @@ def session_context_chars(
             handle.seek(max(0, size - _SESSION_SCAN_BYTES))
             blob = handle.read()
     except OSError:
-        return 0
-    total = 0
+        return totals
     # A partial first line after the seek is simply unparseable and skipped.
     for line in blob.decode("utf-8", errors="replace").splitlines():
         if session_id not in line:
@@ -360,10 +416,10 @@ def session_context_chars(
         if event.get("operation") not in operations:
             continue
         try:
-            total += max(0, int(event.get("characters") or 0))
+            totals[event_channel(event)] += max(0, int(event.get("characters") or 0))
         except (ValueError, TypeError):
             continue
-    return total
+    return totals
 
 
 def parse_window(value: str) -> timedelta | None:
@@ -501,6 +557,7 @@ def _injection_stats(events: list[dict[str, Any]]) -> dict[str, Any]:
     """
     sizes: list[int] = []
     per_session: dict[str, int] = {}
+    per_session_pull: dict[str, int] = {}
     for event in events:
         if event.get("operation") not in CONTEXT_OPERATIONS:
             continue
@@ -513,6 +570,8 @@ def _injection_stats(events: list[dict[str, Any]]) -> dict[str, Any]:
         session = str(event.get("session_id") or "")
         if session:
             per_session[session] = per_session.get(session, 0) + chars
+            if event_channel(event) == PULL:
+                per_session_pull[session] = per_session_pull.get(session, 0) + chars
     sizes.sort()
     top = sorted(per_session.items(), key=lambda item: item[1], reverse=True)[:5]
     return {
@@ -525,7 +584,14 @@ def _injection_stats(events: list[dict[str, Any]]) -> dict[str, Any]:
             "max_chars": sizes[-1] if sizes else 0,
         },
         "top_sessions": [
-            {"session_id": session, "chars": chars, "tokens": estimate_tokens(chars)}
+            {
+                "session_id": session,
+                "chars": chars,
+                "tokens": estimate_tokens(chars),
+                # #387: the agent's own reads, and what omind chose to send.
+                "pull_chars": per_session_pull.get(session, 0),
+                "push_chars": chars - per_session_pull.get(session, 0),
+            }
             for session, chars in top
         ],
     }

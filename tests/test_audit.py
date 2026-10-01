@@ -162,3 +162,33 @@ def test_docs_table_matches_the_declared_thresholds() -> None:
         assert match, f"{t.key} is not documented in docs/audit.md"
         assert match.group(1) == ("<=" if t.direction == "max" else ">=")
         assert float(match.group(2).replace(",", "")) == t.limit
+
+
+def test_audit_reports_push_and_pull_as_separate_rows(tmp_path: Path) -> None:
+    # #387 acceptance: separate rows, separate verdicts. Twelve sessions each
+    # pulled ~200K chars (50K tokens, over the 30K pull limit) but were pushed
+    # only 2K chars — pull fails, push passes.
+    omi = _vault(tmp_path)
+    for i in range(12):
+        session = f"s{i}"
+        ai_usage.log_event(
+            omi, "mcp", characters=200_000, session_id=session, channel=ai_usage.PULL,
+            now=_NOW - timedelta(days=1),
+        )
+        _recall(omi, 2_000, n=1, session=session)
+    rows = _rows(audit.run_audit(omi, days=30, now=_NOW))
+    push, pull = rows["session.p99_tokens"], rows["session.pull_p99_tokens"]
+    assert push.status == audit.OK and push.value == 500
+    assert pull.status == audit.FAIL and pull.value == 50_000
+    assert push.label != pull.label
+
+
+def test_audit_counts_pre_split_mcp_events_as_push(tmp_path: Path) -> None:
+    omi = _vault(tmp_path)
+    for i in range(12):
+        ai_usage.log_event(
+            omi, "mcp", characters=200_000, session_id=f"s{i}", now=_NOW - timedelta(days=1)
+        )
+    rows = _rows(audit.run_audit(omi, days=30, now=_NOW))
+    assert rows["session.p99_tokens"].status == audit.FAIL
+    assert rows["session.pull_p99_tokens"].status == audit.UNMEASURED

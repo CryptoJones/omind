@@ -45,11 +45,12 @@ baseline. Change one only in a commit that says why.
 | `preflight.median_chars` | preflight recall: per-turn push, median | <= 1,200 chars | 20 | hint mode is capped at guard.PREFLIGHT_HINT_CHARS (500); 1,200 leaves room for hard-rule notes, which keep their full excerpt |
 | `preflight.p99_chars` | preflight recall: per-turn push, p99 | <= 6,000 chars | 20 | #321 was a tail problem (p99 6,809 / max 16,406 chars), invisible in totals |
 | `preflight.precision_pct` | preflight recall: injection precision | >= 70 % | 5 | the 70% target #321 set; measured by `omind bench --precision` |
-| `session.p99_tokens` | preflight recall: omind context per session, p99 | <= 15,000 tokens | 10 | guard.SESSION_INJECTION_BUDGET_CHARS is 60,000 chars = 15,000 tokens |
+| `session.p99_tokens` | preflight recall: omind push per session, p99 | <= 15,000 tokens | 10 | guard.SESSION_INJECTION_BUDGET_CHARS is 60,000 chars = 15,000 tokens; since #387 it limits push only (priming, preflight, name hints) |
 | `priming.median_tokens` | SessionStart priming: capsule size, median | <= 2,000 tokens | 10 | the default `balanced` capsule is budgeted at 8,000 chars = 2,000 tokens |
 | `priming.p99_tokens` | SessionStart priming: capsule size, p99 | <= 4,000 tokens | 10 | twice the `balanced` budget; the `full` profile is an explicit opt-in |
 | `mcp.median_chars` | MCP tool responses: response size, median | <= 6,000 chars | 20 | recall-note defaults to 4,000 chars; a median above 6,000 means the expensive tools are the habitual ones |
 | `mcp.p99_chars` | MCP tool responses: response size, p99 | <= 20,000 chars | 20 | read-note's default body cap is 20,000 chars (invariant 8) |
+| `session.pull_p99_tokens` | MCP tool responses: agent's own reads per session, p99 | <= 30,000 tokens | 10 | #387: twice the push budget; pull is deliberate, so only habitual whole-note reading should trip it |
 | `gate.offtopic_per_100` | consult gate: off-topic verdicts per 100 OMI reads | <= 25 per 100 | 20 | #326: 'if most forced consults are scored off-topic, the gate is spending attention for nothing'; 1 in 4 is already generous |
 | `gate.ceremony_pct` | consult gate: denies that were pure ceremony | <= 80 % | 20 | a guard whose denies are >80% satisfy-and-retry is mostly friction |
 | `gate.auto_clear_pct` | consult gate: turns cleared with nothing injected | <= 90 % | 20 | #296 measured 362 auto-cleared turns carrying 2,037 tool calls |
