@@ -249,6 +249,35 @@ class _Weights:
     conflicts: dict[str, str]
 
 
+@dataclass(frozen=True)
+class EntityNote:
+    """One note that mentions a name, as the name index reports it."""
+
+    filename: str
+    title: str
+    #: The note's date (``Created``, else its mtime) — what "newest first" sorts on.
+    last_seen: str
+
+
+@dataclass
+class EntityLookup:
+    """The answer to "which notes mention this name?" plus why, if none."""
+
+    token: str
+    #: Live (non-archived) notes that mention the token.
+    df: int
+    #: Live notes in the vault.
+    total: int
+    #: The most notes a token may appear in and still be an entity.
+    ceiling: int
+    #: Newest first. Empty when the token is too common (``df > ceiling``).
+    notes: list[EntityNote] = field(default_factory=list)
+
+    @property
+    def common(self) -> bool:
+        return self.df > self.ceiling
+
+
 @dataclass
 class _NoteRow:
     filename: str
@@ -318,6 +347,24 @@ CREATE TABLE IF NOT EXISTS links (
 );
 CREATE INDEX IF NOT EXISTS links_src ON links(src);
 CREATE INDEX IF NOT EXISTS links_target ON links(target);
+-- The name index (#385): identifier-shaped tokens -> the notes that mention
+-- them. Added without a SCHEMA_VERSION bump on purpose: CREATE IF NOT EXISTS
+-- adds it to an existing index, and the 'entities' meta key backfills it from
+-- the notes on disk, so upgrading never forces a full re-embed.
+-- Filenames are interned: they average ~100 bytes and a note has ~15 names,
+-- so storing them per row (twice, with the delete index) cost 6.6 MiB on a
+-- 1,400-note vault. INTEGER PRIMARY KEY so VACUUM can't renumber the ids.
+CREATE TABLE IF NOT EXISTS entity_notes (
+    id       INTEGER PRIMARY KEY,
+    filename TEXT NOT NULL UNIQUE
+);
+CREATE TABLE IF NOT EXISTS entities (
+    token     TEXT NOT NULL,     -- lookup key: NFC + casefold (entities.normalize)
+    note      INTEGER NOT NULL,  -- entity_notes.id
+    last_seen TEXT NOT NULL DEFAULT '',  -- the note's date: Created, else mtime
+    PRIMARY KEY (token, note)
+) WITHOUT ROWID;
+CREATE INDEX IF NOT EXISTS entities_note ON entities(note);
 CREATE TABLE IF NOT EXISTS meta (
     key   TEXT PRIMARY KEY,
     value TEXT NOT NULL
@@ -610,7 +657,17 @@ class SearchIndex:
         back to the pre-index substring scan (invariant 2 held), so the symptom
         was silently worse results rather than an error.
         """
-        for table in ("notes", "note_tags", "chunks", "chunks_fts", "vectors", "links", "meta"):
+        for table in (
+            "notes",
+            "note_tags",
+            "chunks",
+            "chunks_fts",
+            "vectors",
+            "links",
+            "entities",
+            "entity_notes",
+            "meta",
+        ):
             with contextlib.suppress(sqlite3.Error):
                 db.execute(f"DROP TABLE IF EXISTS {table}")
         db.executescript(_SCHEMA)
@@ -624,7 +681,19 @@ class SearchIndex:
             "INSERT OR REPLACE INTO meta(key, value) VALUES ('schema', ?), ('model', ?)",
             (str(SCHEMA_VERSION), embed.model_identity(self.model)),
         )
+        # Every note is about to be re-ingested, and ingest writes entities, so
+        # an empty index is already "built" for the current extractor.
+        self._set_entity_meta(db)
         self._bump(db)
+
+    @staticmethod
+    def _set_entity_meta(db: sqlite3.Connection) -> None:
+        from omind import entities
+
+        db.execute(
+            "INSERT OR REPLACE INTO meta(key, value) VALUES ('entities', ?)",
+            (entities.EXTRACTOR_VERSION if entities.enabled() else "",),
+        )
 
     @staticmethod
     def _bump(db: sqlite3.Connection) -> None:
@@ -722,6 +791,7 @@ class SearchIndex:
             for stale in [name for name in known if name not in seen]:
                 self._forget(db, stale)
                 stats.removed += 1
+            self._sync_entities(db)
             if vectors:
                 if pending_embed:
                     stats.embedded = self._embed_chunks(db, pending_embed)
@@ -816,6 +886,7 @@ class SearchIndex:
                 for raw in link_targets(text)
             ],
         )
+        self._index_entities(db, row, text, st.st_mtime_ns)
         tag_text = " ".join(row.tags)
         pending: list[tuple[int, str]] = []
         for chunk in chunk_note(text, path.stem):
@@ -849,7 +920,76 @@ class SearchIndex:
         db.execute("DELETE FROM chunks WHERE filename = ?", (filename,))
         db.execute("DELETE FROM note_tags WHERE filename = ?", (filename,))
         db.execute("DELETE FROM links WHERE src = ?", (filename,))
+        db.execute(
+            "DELETE FROM entities WHERE note IN (SELECT id FROM entity_notes WHERE filename = ?)",
+            (filename,),
+        )
+        db.execute("DELETE FROM entity_notes WHERE filename = ?", (filename,))
         db.execute("DELETE FROM notes WHERE filename = ?", (filename,))
+
+    # -- name index (#385) ----------------------------------------------------
+
+    @staticmethod
+    def _index_entities(
+        db: sqlite3.Connection, row: _NoteRow, text: str, mtime_ns: int
+    ) -> None:
+        """Write one note's identifier tokens (no-op when the flag is off)."""
+        from omind import entities
+
+        if not entities.enabled():
+            return
+        last_seen = row.created.strip() or time.strftime(
+            "%Y-%m-%d", time.localtime(mtime_ns / 1e9)
+        )
+        found = entities.extract(text, title=row.title, tags=row.tags)
+        if not found:
+            return
+        db.execute("INSERT OR IGNORE INTO entity_notes(filename) VALUES (?)", (row.filename,))
+        id_row = db.execute(
+            "SELECT id FROM entity_notes WHERE filename = ?", (row.filename,)
+        ).fetchone()
+        note_id = int(id_row["id"])
+        db.executemany(
+            "INSERT OR IGNORE INTO entities(token, note, last_seen) VALUES (?, ?, ?)",
+            [(key, note_id, last_seen) for key in found],
+        )
+
+    def _sync_entities(self, db: sqlite3.Connection) -> None:
+        """Keep the name index in step with the flag and the extractor version.
+
+        Turning ``OMI_ENTITY_INDEX`` off drops the rows; turning it back on, or
+        shipping a new extractor, re-extracts every note from disk. Neither
+        touches chunks or vectors, so it never costs a re-embed.
+        """
+        from omind import entities
+        from omind.store import _read_text
+
+        want = entities.EXTRACTOR_VERSION if entities.enabled() else ""
+        if self._meta(db, "entities") == want:
+            return
+        db.execute("DELETE FROM entities")
+        db.execute("DELETE FROM entity_notes")
+        if want:
+            rows = {
+                str(r["filename"]): r
+                for r in db.execute("SELECT filename, title, created, mtime_ns FROM notes")
+            }
+            tags: dict[str, list[str]] = {}
+            for tag_row in db.execute("SELECT filename, tag FROM note_tags"):
+                tags.setdefault(str(tag_row["filename"]), []).append(str(tag_row["tag"]))
+            for filename, r in rows.items():
+                try:
+                    text = _read_text(self.omi_dir / filename)
+                except OSError:
+                    continue
+                note = _NoteRow(
+                    filename=filename,
+                    title=str(r["title"]),
+                    created=str(r["created"]),
+                    tags=tags.get(filename, []),
+                )
+                self._index_entities(db, note, text, int(r["mtime_ns"]))
+        self._set_entity_meta(db)
 
     def _chunks_without_vectors(
         self, db: sqlite3.Connection, cap: int = 2000
@@ -1510,6 +1650,57 @@ class SearchIndex:
             return None
 
     @_locked
+    def entity_lookup(self, token: str, *, include_common: bool = False) -> EntityLookup | None:
+        """Every live note that mentions ``token`` exactly, newest first.
+
+        Exact-token match on the normalised key (NFC, case-folded) — no ranking,
+        no embeddings. A token in more than :func:`omind.entities.df_ceiling`
+        notes is too common to be informative: its ``notes`` come back empty
+        (``common`` is true) unless ``include_common`` asks for them anyway.
+        ``None`` when the index or the name index (``OMI_ENTITY_INDEX``) is off.
+        """
+        from omind import entities
+
+        if not entities.enabled():
+            return None
+        db = self._connect()
+        if db is None or self._refresh_if_needed() is None:
+            return None
+        key = entities.normalize(token)
+        try:
+            total_row = db.execute("SELECT count(*) AS n FROM notes WHERE disabled = 0").fetchone()
+            total = int(total_row["n"]) if total_row else 0
+            rows = db.execute(
+                "SELECT n.filename AS filename, n.title AS title, e.last_seen AS last_seen"
+                " FROM entities e"
+                " JOIN entity_notes en ON en.id = e.note"
+                " JOIN notes n ON n.filename = en.filename"
+                " WHERE e.token = ? AND n.disabled = 0"
+                " ORDER BY e.last_seen DESC, n.mtime_ns DESC, n.filename",
+                (key,),
+            ).fetchall()
+        except sqlite3.Error:
+            return None
+        lookup = EntityLookup(
+            token=key, df=len(rows), total=total, ceiling=entities.df_ceiling(total)
+        )
+        if not lookup.common or include_common:
+            lookup.notes = [
+                EntityNote(
+                    filename=str(r["filename"]),
+                    title=str(r["title"]),
+                    last_seen=str(r["last_seen"]),
+                )
+                for r in rows
+            ]
+        return lookup
+
+    def notes_for_entity(self, token: str) -> list[EntityNote] | None:
+        """The notes that mention ``token``, newest first (``[]`` if too common)."""
+        lookup = self.entity_lookup(token)
+        return None if lookup is None else lookup.notes
+
+    @_locked
     def notes(self) -> list[_NoteRow] | None:
         """Every indexed note's identity row (filename, title, created, tags)."""
         db = self._connect()
@@ -1680,6 +1871,10 @@ class SearchIndex:
                 "chunks": count("chunks"),
                 "vectors": count("vectors"),
                 "links": count("links"),
+                "entity_rows": count("entities"),
+                "entities": int(
+                    db.execute("SELECT count(DISTINCT token) AS n FROM entities").fetchone()["n"]
+                ),
                 "bytes": size,
                 "model": self.model,
             }

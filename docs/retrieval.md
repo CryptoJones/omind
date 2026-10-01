@@ -125,6 +125,33 @@ pre-index full-vault substring scan. The same fallback happens automatically if
 FTS5 is missing, the index file is corrupt, or another process holds the write
 lock — a broken index degrades search, it never breaks it.
 
+## The name index
+
+Ranked search dilutes a rare exact name (a drive label, a host, a serial) among every
+other word in the query. The name index answers the narrower question directly:
+*which notes mention this exact identifier?*
+
+```bash
+omind entity As30p              # every live note that mentions it, newest first
+omind entity As30p --json       # the same, machine-readable
+omind entity utf8 --all         # list it even if it is too common to be an entity
+```
+
+At index time each note's title, tags and body are scanned for identifier-shaped
+tokens only — mixed letters and digits (`As30p`, `WX81A255JFYD`), hostnames and
+domains under a known TLD, IPv4 addresses, `owner/repo` slugs, `/Volumes/<label>`
+and `[[wikilink]]` targets. Plain words never qualify; units (`16GB`), bare versions
+(`v10`), long hex hashes, filenames (`store.py`) and the `- Rev:` / `- Agent:` writer
+stamps are skipped. Matching is exact on the token, case-insensitive, with no
+embeddings, so it is cheap enough to run on every tool call.
+
+A token in more than 15% of the vault's notes (never fewer than 10) is reported as
+too common rather than as an entity. Tune with `OMI_ENTITY_MAX_DF=<fraction>`;
+turn the whole index off with `OMI_ENTITY_INDEX=0`. Nothing is injected into a
+session from it yet ([#384](https://github.com/CryptoJones/omind/issues/384) builds
+on it). On a 1,432-note vault it adds ~1.4 MiB (+4.5%) to the index and ~0.5 s
+(+12%) to a full rebuild; incremental refreshes are unchanged.
+
 ## Measured on a 744-note vault
 
 | | before | after |

@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.1.0] - 2026-10-01
+
+### Added
+- **Name index: which notes mention this exact identifier?
+  ([#385](https://github.com/CryptoJones/omind/issues/385), first child of epic
+  [#384](https://github.com/CryptoJones/omind/issues/384)).** At index time the search
+  index now extracts identifier-shaped tokens from each note's title, tags and body —
+  mixed letter/digit names (`As30p`, `WX81A255JFYD`, `dl380`), hostnames and domains
+  under a known TLD, IPv4 addresses, `owner/repo` slugs, `/Volumes/<label>` and
+  `[[wikilink]]` targets — into a new `entities(token, note, last_seen)` table.
+  `SearchIndex.notes_for_entity(token)` / `entity_lookup(token)` and the new
+  `omind entity <token>` command list every live note that mentions the token, newest
+  first. Matching is deterministic and exact on the token (NFC, case-folded); no
+  embeddings. Plain words never qualify, `- Rev:`/`- Agent:` writer stamps are ignored,
+  and a token in more than 15% of the vault (`OMI_ENTITY_MAX_DF`, floor 10 notes) is
+  reported as too common rather than as an entity. **Nothing is injected yet** — this is
+  the foundation the later #384 children read. On by default; `OMI_ENTITY_INDEX=0`
+  turns it off and drops its rows. No `SCHEMA_VERSION` bump: an existing index gains
+  the table and backfills it from disk on the next refresh, with no re-embed. Measured
+  on a 1,432-note vault: `reindex --rebuild` 4.06 s -> 4.56 s (+12%), index
+  31,140 KiB -> 32,540 KiB (+4.5%); keyword-only 3.01 s -> 3.59 s.
+
 ## [10.0.3] - 2026-09-29
 
 ### Fixed
