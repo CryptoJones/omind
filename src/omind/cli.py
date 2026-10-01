@@ -315,6 +315,23 @@ def build_parser() -> argparse.ArgumentParser:
     )
     _add_vault_args(reindex)
 
+    entity = sub.add_parser(
+        "entity",
+        help="list every note that mentions an exact identifier (a drive label, host, "
+        "serial, repo, domain) from the name index, newest first",
+    )
+    entity.add_argument("token", help="the identifier, e.g. As30p (case-insensitive)")
+    entity.add_argument(
+        "--limit", type=int, default=0, help="show at most this many notes (default: all)"
+    )
+    entity.add_argument(
+        "--all",
+        action="store_true",
+        help="list the notes even when the token is too common to count as an entity",
+    )
+    entity.add_argument("--json", action="store_true", help="machine-readable output")
+    _add_vault_args(entity)
+
     maintain = sub.add_parser(
         "maintain",
         help="sleep-time janitor: propose merges, refresh the index, and "
@@ -1253,8 +1270,65 @@ def _run_reindex(args: argparse.Namespace) -> int:
     print(
         f"search index: {result.notes} note(s), {result.reindexed} reindexed, "
         f"{result.removed} removed, {result.embedded} embedded in {result.seconds:.2f}s "
-        f"({stats.get('chunks', 0)} chunks, {(size if isinstance(size, int) else 0) // 1024} KiB)"
+        f"({stats.get('chunks', 0)} chunks, {stats.get('entities', 0)} names, "
+        f"{(size if isinstance(size, int) else 0) // 1024} KiB)"
     )
+    return 0
+
+
+def _run_entity(args: argparse.Namespace) -> int:
+    """``omind entity <token>``: the name index, for inspection (#385)."""
+    import json as _json
+
+    from omind import entities, searchindex
+
+    omi_dir = (args.vault / args.folder).expanduser()
+    if not entities.enabled():
+        print(f"name index disabled ({entities.ENABLE_ENV}=0)", file=sys.stderr)
+        return 2
+    if not searchindex.available():
+        print("search index unavailable (no FTS5 or disabled)", file=sys.stderr)
+        return 2
+    lookup = searchindex.SearchIndex(omi_dir).entity_lookup(args.token, include_common=args.all)
+    if lookup is None:
+        print("name index unavailable (locked, corrupt or disabled)", file=sys.stderr)
+        return 2
+    shown = lookup.notes[: args.limit] if args.limit > 0 else lookup.notes
+    if args.json:
+        print(
+            _json.dumps(
+                {
+                    "token": lookup.token,
+                    "df": lookup.df,
+                    "total": lookup.total,
+                    "ceiling": lookup.ceiling,
+                    "common": lookup.common,
+                    "notes": [
+                        {"filename": n.filename, "title": n.title, "last_seen": n.last_seen}
+                        for n in shown
+                    ],
+                },
+                indent=2,
+            )
+        )
+        return 0 if lookup.df else 1
+    if not lookup.df:
+        print(f"no note mentions {args.token!r}")
+        return 1
+    if lookup.common and not args.all:
+        print(
+            f"{args.token!r} is too common to be an entity: in {lookup.df} of "
+            f"{lookup.total} notes (ceiling {lookup.ceiling}). Use --all to list them."
+        )
+        return 0
+    print(
+        f"{lookup.df} note(s) mention {args.token!r} "
+        f"({lookup.total} notes, ceiling {lookup.ceiling}), newest first:"
+    )
+    for n in shown:
+        print(f"  {n.last_seen:<10}  {n.title}")
+    if len(shown) < len(lookup.notes):
+        print(f"  ... {len(lookup.notes) - len(shown)} more (raise --limit)")
     return 0
 
 
@@ -1863,6 +1937,8 @@ def main(argv: list[str] | None = None) -> int:
         return _run_ai(args)
     if args.command == "reindex":
         return _run_reindex(args)
+    if args.command == "entity":
+        return _run_entity(args)
     if args.command == "maintain":
         return _run_maintain(args)
     if args.command == "convert":
