@@ -31,7 +31,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.shared.message import SessionMessage
 
-from omind import graph, scope_guard, searchindex
+from omind import graph, scope_guard, searchindex, writecontext
 from omind.help_system import render_help
 from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
 from omind.store import (
@@ -356,6 +356,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         identity is one env var away in a single-operator fleet)."""
         return _clean_agent(explicit or "") or os.environ.get("OMIND_AGENT", "")
 
+    def _summary_of(name: str) -> str:
+        return store.read_fields(name).summary or ""
+
     @mcp.tool(
         name="create-note",
         description=(
@@ -366,7 +369,9 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "instead when this cleanly replaces the older fact). agent: your "
             "self-declared identity (advisory attribution only). scratch: mark a "
             "machine-local, auto-expiring note (never mesh-synced; archived after "
-            "7 idle days by `omind maintain`)."
+            "7 idle days by `omind maintain`). The response may list "
+            "related_by_entity: other notes that mention the same names — check "
+            "them for anything your note contradicts."
         ),
     )
     def create_note(
@@ -447,6 +452,20 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
                 "replaces an existing one, set supersedes; if they disagree, "
                 "set conflicts_with; if it is redundant, archive it."
             )
+        # Write-time context (#389): what other notes already say about the
+        # names in this write. Advisory, bounded, fail-open; pull, because it
+        # is the answer to the agent's own call.
+        result.update(
+            writecontext.response_fields(
+                store.omi_dir,
+                title=fields.title,
+                summary=fields.summary,
+                details=fields.details,
+                tags=fields.tags,
+                exclude=[filename],
+                summary_of=_summary_of,
+            )
+        )
         return result
 
     @mcp.tool(
@@ -457,7 +476,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             "of overwriting) when another writer changed the note in between — without "
             "it the response is flagged concurrency=unverified. When a note makes a "
             "memory obsolete, set supersedes (or the target's superseded_by) rather "
-            "than silently rewriting history."
+            "than silently rewriting history. The response may list "
+            "related_by_entity: other notes that mention the same names."
         ),
     )
     def edit_note(
@@ -477,7 +497,7 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         agent: str | None = None,
         scope: str | None = None,
         expected_version: str | None = None,
-    ) -> dict[str, str]:
+    ) -> dict[str, object]:
         fields = store.read_fields(name)
         if title is not None:
             fields.title = title
@@ -514,7 +534,10 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
         # guarded against the note's existing scope.
         scope_warning = scope_guard.check_write(fields.scope)
         filename = store.update_note(name, fields, expected_version=expected_version)
-        result: dict[str, str] = {"filename": filename, "version": store.note_version(name)}
+        result: dict[str, object] = {
+            "filename": filename,
+            "version": store.note_version(name),
+        }
         if scope_warning:
             result["scope_warning"] = scope_warning
         if expected_version is None:
@@ -522,6 +545,19 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             # (2026-08-27 review): without the token the write was not checked
             # against concurrent writers.
             result["concurrency"] = "unverified"
+        # Write-time context (#389) from what this edit wrote: the note's title
+        # (it names what the note is about) plus the fields the call passed.
+        result.update(
+            writecontext.response_fields(
+                store.omi_dir,
+                title=fields.title,
+                summary=summary or "",
+                details=details or "",
+                tags=tags or (),
+                exclude=[filename],
+                summary_of=_summary_of,
+            )
+        )
         return result
 
     @mcp.tool(

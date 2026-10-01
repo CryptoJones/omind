@@ -84,6 +84,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   is 56.5% on the same vault), added latency 0.49 ms median, 1.9 ms p95. Replaying the 2026-09-30 session, the first `diskutil` result yields
   `As30p` with the WD Blue drive-check note first. That is 28 minutes before the
   `edit-note` that wrongly "corrected" the 2026-09-25 adapter note.
+- **Write-time context: `create-note` and `edit-note` list what other notes already say
+  about the same names ([#389](https://github.com/CryptoJones/omind/issues/389), fifth
+  child of epic [#384](https://github.com/CryptoJones/omind/issues/384)).** `create-note`
+  warned only about near-duplicates and `edit-note` checked nothing, so an agent could
+  write that a note about `As30p` was mislabeled while other notes recorded the label
+  moving between three drives, and the response showed none of them. Both tools now
+  answer with `related_by_entity: [{name, title, summary, updated}]` (plus a one-line
+  advisory note): for up to 3 rare names in the write's title, summary, tags and details,
+  up to 3 other notes each, newest first: the notes titled after the name when there
+  are any, otherwise its newest mentions (`updated` is the note's date). Summaries
+  are cut to 200 chars and the list to 2,400 chars. The note being written and archived
+  notes are excluded. Names follow the #385/#388 rules (same extractor, same noise
+  filter, the rarity ceiling, at most 10 notes for a name no note is titled after), plus
+  two more: sequence tokens (`run4`, `round-3`, `ch13`) are skipped, and the write must
+  name the thing as a word, not only as a path component (`/Volumes/As30p/...`). A name
+  only in a long `details` must recur. One read-only index query, no model load; it
+  fails open and never blocks the write. It is pull: the PostToolUse ledger records it
+  with the rest of the `mcp__omi__*` result as `"channel": "pull"`, so it never spends
+  the push budget. New `omind bench --write-context --transcript PATH|DIR [--days N]`
+  replays real create/edit calls through the same picker. On by default;
+  `OMIND_WRITE_CONTEXT=0` turns it off. Measured on a 1,432-note vault over 347 sessions
+  from the last 7 days (239 writes: 113 create, 126 edit): a list on 54.0% of writes,
+  3.3 notes and 1,184 chars median when listed (p95 2,293), added latency 2.6 ms median,
+  8.5 ms p95. A hand-judged sample of 50 listed notes found 29 (58%) about the same
+  thing as the write (preflight `bench --precision` is 56.5%, tool-output name hints
+  58.6%). In the 2026-09-30 session, all six writes, including the three `edit-note`
+  calls on the adapter notes, list the WD Blue drive-check note, the As30p copy handoff
+  and the Seagate note first.
 
 ## [10.0.3] - 2026-09-29
 

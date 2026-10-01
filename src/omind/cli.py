@@ -484,16 +484,25 @@ def build_parser() -> argparse.ArgumentParser:
         "the PostToolUse name hints: how often they fire, precision, latency (#388)",
     )
     bench.add_argument(
+        "--write-context",
+        action="store_true",
+        help="replay the create-note/edit-note calls in --transcript (a .jsonl "
+        "session, or a directory of them) through write-time context: how often "
+        "related_by_entity is listed, its size, latency (#389)",
+    )
+    bench.add_argument(
         "--transcript",
         type=Path,
         help="--needle: the long transcript to replay (a Claude Code .jsonl session, "
-        "or any text file as a plain haystack); --tool-hints: a session or a directory",
+        "or any text file as a plain haystack); --tool-hints/--write-context: a session "
+        "or a directory",
     )
     bench.add_argument(
         "--days",
         type=float,
         default=0.0,
-        help="--tool-hints: only transcripts written in the last N days (default: all)",
+        help="--tool-hints/--write-context: only transcripts written in the last N days "
+        "(default: all)",
     )
     bench.add_argument(
         "--mode",
@@ -1452,6 +1461,15 @@ def _run_bench(args: argparse.Namespace) -> int:
             report = bench.run_tool_hints(omi_dir, args.transcript, days=args.days)
         except OSError as exc:
             print(f"omind bench --tool-hints: {exc}", file=sys.stderr)
+            return 2
+    elif args.write_context:
+        if args.transcript is None:
+            print("omind bench --write-context requires --transcript PATH", file=sys.stderr)
+            return 2
+        try:
+            report = bench.run_write_context(omi_dir, args.transcript, days=args.days)
+        except OSError as exc:
+            print(f"omind bench --write-context: {exc}", file=sys.stderr)
             return 2
     elif args.precision:
         report = bench.run_precision(omi_dir)
