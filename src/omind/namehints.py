@@ -350,8 +350,7 @@ def pick_hints(
         lookups = searchindex.entity_lookups_readonly(omi_dir, [key for key, _ in fresh])
         if not lookups:
             return []
-        picked: list[tuple[int, int, int, NameHint]] = []
-        read: Any = None
+        picked: list[tuple[int, int, int, NameHint, list[Any]]] = []
         for order, (key, spelling) in enumerate(fresh):
             lookup = lookups.get(key)
             if lookup is None or lookup.common or not lookup.notes:
@@ -369,16 +368,19 @@ def pick_hints(
             if not titles:
                 continue
             hint = NameHint(name=spelling, key=key, df=len(notes), titles=titles, titled=len(about))
-            if timeline.enabled():
-                # #390: a name whose facts changed shows its dated history,
-                # superseded notes marked rather than left out.
-                read = read or timeline._reader(omi_dir)
-                hint.timeline = timeline.build(omi_dir, spelling, notes, read=read)
-            picked.append((0 if about else 1, len(notes), order, hint))
+            picked.append((0 if about else 1, len(notes), order, hint, notes))
         # Names the vault has notes *about* first (the drive label, not the
         # partition next to it), then rarer first, then order of appearance.
         picked.sort(key=lambda item: item[:3])
-        return [item[3] for item in picked[: max(0, limit)]]
+        chosen = picked[: max(0, limit)]
+        if chosen and timeline.enabled():
+            # #390: a name whose facts changed shows its dated history,
+            # superseded notes marked rather than left out. Built only for the
+            # hints actually emitted, so the note-head reads stay bounded.
+            read = timeline._reader(omi_dir)
+            for *_, hint, notes in chosen:
+                hint.timeline = timeline.build(omi_dir, hint.name, notes, read=read)
+        return [item[3] for item in chosen]
     except Exception:
         return []
 

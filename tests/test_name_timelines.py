@@ -286,3 +286,34 @@ def test_bench_preflight_replica_applies_the_same_exemption(
     monkeypatch.setenv(timeline.ENABLE_ENV, "0")
     off = bench.preflight_pick(omi, "is As30p mounted?")
     assert off is None or not off.timelines
+
+
+def test_a_newer_notes_supersedes_marks_the_older_one(tmp_path: Path) -> None:
+    """``Supersedes:`` on the newer note marks the older one even when the older
+    note was never stamped ``Superseded by:``."""
+    d = tmp_path / "OMI"
+    d.mkdir()
+    _note(d, "Kq55z listens on port 8080", "Kq55z serves on 8080.", created="2026-09-01")
+    _note(
+        d,
+        "Kq55z moved to port 9090",
+        "Kq55z serves on 9090 now.",
+        created="2026-09-20",
+        meta="- Supersedes: [[Kq55z listens on port 8080]]\n",
+    )
+    _fillers(d)
+    _refresh(d)
+    (found,) = timeline.for_names(d, ["Kq55z"])
+    assert [(e.date, e.mark) for e in found.entries] == [
+        ("2026-09-01", timeline.SUPERSEDED),
+        ("2026-09-20", timeline.SUPERSEDES),
+    ]
+
+
+def test_write_context_exclusion_survives_a_generator(omi: Path) -> None:
+    fields = writecontext.response_fields(
+        omi, title="As30p check", exclude=(name for name in [f"{WD_BLUE}.md"])
+    )
+    (as30p,) = fields[writecontext.TIMELINE_FIELD]  # type: ignore[misc]
+    assert WD_BLUE not in [n["title"] for n in as30p["notes"]]
+    assert [r["title"] for r in fields[writecontext.FIELD]].count(WD_BLUE) == 0  # type: ignore[union-attr]

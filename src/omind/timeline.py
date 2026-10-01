@@ -47,7 +47,9 @@ from __future__ import annotations
 
 import contextlib
 import os
+import re
 from collections.abc import Iterable, Sequence
+from collections.abc import Set as AbstractSet
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
@@ -155,10 +157,37 @@ def _reader(omi_dir: Path | str) -> Any:
     return head
 
 
-def _mark(note: Any, head: str) -> str:
+_LINK_RE = re.compile(r"\[\[([^\]|#]+)")
+
+
+def _identity(text: str) -> str:
+    text = " ".join(str(text or "").split()).casefold()
+    return text[:-3] if text.endswith(".md") else text
+
+
+def _superseded_targets(notes: Sequence[Any]) -> set[str]:
+    """Identities (filename stems / titles, case-folded) that a note in
+    ``notes`` names in its ``Supersedes:`` field. A newer note that declares
+    the supersession marks the older one even when the older one was never
+    stamped ``Superseded by:``."""
+    targets: set[str] = set()
+    for note in notes:
+        raw = str(getattr(note, "supersedes", "") or "")
+        if not raw.strip():
+            continue
+        found = _LINK_RE.findall(raw) or raw.split(",")
+        targets.update(_identity(item) for item in found if item.strip())
+    return targets - {""}
+
+
+def _mark(note: Any, head: str, superseded: AbstractSet[str] = frozenset()) -> str:
     from omind import guard
 
     if str(getattr(note, "superseded_by", "") or "").strip():
+        return SUPERSEDED
+    if superseded and (
+        _identity(note.filename) in superseded or _identity(note.title) in superseded
+    ):
         return SUPERSEDED
     if head and guard.looks_stale(head):
         return CORRECTION
@@ -191,12 +220,13 @@ def build(
             return None
         recent = list(about or notes)[:MAX_ENTRIES]
         head = read or _reader(omi_dir)
+        superseded = _superseded_targets(notes)
         entries = [
             Entry(
                 filename=n.filename,
                 title=n.title or Path(n.filename).stem,
                 date=str(n.last_seen)[:10],
-                mark=_mark(n, head(n.filename)),
+                mark=_mark(n, head(n.filename), superseded),
             )
             for n in recent
         ]

@@ -297,6 +297,8 @@ def response_fields(
     """The fields a write tool adds to its response, or ``{}``. Never raises."""
     if not enabled():
         return {}
+    # Used twice (the list and the timelines): a generator would be spent.
+    exclude = tuple(exclude)
     related = pick(
         omi_dir,
         title=title,
