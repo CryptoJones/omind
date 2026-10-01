@@ -286,6 +286,61 @@ def preflight_min_terms() -> int:
     return _PREFLIGHT_MIN_TERMS_DEFAULT
 
 
+#: #386 (epic #384): a rare identifier shared by the prompt and the candidate
+#: note clears the preflight's term threshold on its own. ``As30p`` in "is As30p
+#: mounted?" is one shared term, so the 3-term floor used to call it a weak match
+#: and stay silent — penalising exactly the precise matches that matter most.
+#: Plain-word overlap keeps the 3-term floor; only a token from the name index
+#: (:mod:`omind.entities`) under its rarity ceiling (``OMI_ENTITY_MAX_DF``) counts
+#: as the full threshold. ``0``/``off`` restores the plain threshold.
+PREFLIGHT_RARE_TERMS_ENV = "OMIND_PREFLIGHT_RARE_TERMS"
+_OFF = frozenset({"0", "off", "false", "no"})
+#: The most identifiers a prompt contributes to one rare-term check, so a prompt
+#: that pastes a log full of names costs a bounded number of index lookups.
+_MAX_PROMPT_ENTITIES = 8
+
+
+def preflight_rare_terms() -> bool:
+    """Whether a rare identifier hit clears the preflight threshold (#386)."""
+    return os.environ.get(PREFLIGHT_RARE_TERMS_ENV, "").strip().lower() not in _OFF
+
+
+def rare_identifier_hits(task: str, omi_dir: Path | str, filename: str) -> list[str]:
+    """Rare identifiers in ``task`` that the note ``filename`` mentions (#386).
+
+    An identifier is rare when the name index lists it in at most
+    :func:`omind.entities.df_ceiling` live notes. Exact-token match on the index's
+    normalised key — no embeddings, no ranking. Fails open to ``[]``: the flag is
+    off, the name index is off or unavailable, or anything goes wrong — the
+    caller then applies the plain term threshold, exactly as before.
+    """
+    if not task or not filename or not preflight_rare_terms():
+        return []
+    try:
+        entities = importlib.import_module("omind.entities")
+        if not entities.enabled():
+            return []
+        found = entities.extract(task)
+        if not found:
+            return []
+        searchindex = importlib.import_module("omind.searchindex")
+        index = searchindex.shared(omi_dir)
+        if index is None:
+            return []
+        hits: list[str] = []
+        for spelling in list(found.values())[:_MAX_PROMPT_ENTITIES]:
+            lookup = index.entity_lookup(spelling)
+            if lookup is None:
+                return []
+            if lookup.common:
+                continue
+            if any(note.filename == filename for note in lookup.notes):
+                hits.append(str(spelling))
+        return hits
+    except Exception:
+        return []
+
+
 def normalize_intent(text: str) -> str:
     """Strip command scaffolding from a gate-blocked action before it is scored
     as the turn's *pending intent* (#97). Drops a leading ``cd <dir> &&|;`` and

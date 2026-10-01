@@ -147,10 +147,25 @@ embeddings, so it is cheap enough to run on every tool call.
 
 A token in more than 15% of the vault's notes (never fewer than 10) is reported as
 too common rather than as an entity. Tune with `OMI_ENTITY_MAX_DF=<fraction>`;
-turn the whole index off with `OMI_ENTITY_INDEX=0`. Nothing is injected into a
-session from it yet ([#384](https://github.com/CryptoJones/omind/issues/384) builds
-on it). On a 1,432-note vault it adds ~1.4 MiB (+4.5%) to the index and ~0.5 s
-(+12%) to a full rebuild; incremental refreshes are unchanged.
+turn the whole index off with `OMI_ENTITY_INDEX=0`. On a 1,432-note vault it adds
+~1.4 MiB (+4.5%) to the index and ~0.5 s (+12%) to a full rebuild; incremental
+refreshes are unchanged.
+
+### A rare name clears the preflight threshold
+
+The per-turn preflight stays silent unless the prompt and its best note share at
+least 3 meaningful terms (`OMIND_PREFLIGHT_MIN_TERMS`). One exact hit on a rare
+identifier is a single term, so "is As30p mounted?" used to be reported as a weak
+match even though the vault had notes about exactly that drive. Now an identifier
+from the prompt that the name index lists under its rarity ceiling, and that the
+candidate note mentions, clears the threshold on its own
+([#386](https://github.com/CryptoJones/omind/issues/386)). Plain-word overlap keeps
+the 3-term floor, and a token over the ceiling counts as a plain word.
+
+A turn cleared only by a name is always a hint (note titles, never the body, even
+under `OMIND_PREFLIGHT=inject`), and it counts against the session's injection
+budget like any other hint. `OMIND_PREFLIGHT_RARE_TERMS=0` (or `OMI_ENTITY_INDEX=0`)
+restores the plain threshold.
 
 ## Measured on a 744-note vault
 

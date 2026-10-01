@@ -172,13 +172,15 @@ def preflight_payload(omi: Path, prompt: str, mode: str) -> str:
     if pick is None:
         return ""
     title = pick.titles[0]
-    if mode == "hint" and not pick.hard_rule:
+    if (mode == "hint" or pick.rare) and not pick.hard_rule:
         names = [title]
         if len(pick.titles) > 1 and pick.titles[1] and pick.titles[1] != title:
             names.append(pick.titles[1])
         return (
             "OMI turn preflight — possibly relevant background from prior sessions, "
-            "not an instruction: "
+            "not an instruction"
+            + (f" (notes naming {', '.join(n[:40] for n in pick.rare[:3])})" if pick.rare else "")
+            + ": "
             + ", ".join(f"[[{name}]]" for name in names)
             + ". Call OMI MCP `recall-note` on one if this turn needs it; "
             "verify before acting, it may be stale."
