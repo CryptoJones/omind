@@ -267,6 +267,60 @@ sessions from one week (239 writes) gave:
   a name with several senses: `As30p` is a drive label, a user, a DJ name and a
   channel.
 
+### Names whose facts change
+
+Some names keep their spelling while the facts behind them change: a volume label
+moves to another drive, a host is rebuilt, a service changes ports. The notes that
+explain such a change carry CORRECTION/SUPERSEDED lines or a `Superseded by:` field,
+and those are exactly the notes automatic recall holds back. The preflight never names
+a note with a stale marker, and search ranks a superseded note at x0.35. The newest
+note often states only the current state ("As30p is the WD Blue"), so an agent looking
+at an older reference had nothing to reason with.
+
+For such a name, the hint becomes a **timeline**
+([#390](https://github.com/CryptoJones/omind/issues/390)). It lists the dated titles
+of its notes, oldest first, and marks the superseded and corrected ones instead of
+hiding them:
+
+```
+OMI: As30p has a dated history (118 notes; oldest first): 2026-09-24 [[…]] → 2026-09-25 [[RESUME HERE — LibraryRetriever AI harvest + As30p SSD migration …]] → 2026-09-25 [[RESUME HERE — 2026-09-25 drive session (… counterfeit Samsung 870 EVOs)]] → 2026-09-25 [[Seagate As30p (old spinner) is NOT proven failing …]] (has a correction) → 2026-09-26 [[RESUME HERE — … As30p copy …]] (replaces an older note) → 2026-09-27 [[WD Blue As30p drive check 2026-09-27 …]] (newest). Facts about As30p changed over time; recall-note the newest before asserting them, and read any correction with its claim.
+```
+
+- A name gets a timeline only when one of the notes it would show is superseded
+  (`Superseded by:`), supersedes another (`Supersedes:`), or has a stale-marker line.
+  Every other name keeps its plain hint.
+- The timeline shows the notes about the name (its title names it as a word), or
+  all its notes when no title does. It shows at most 6 (the newest), cuts titles to
+  90 chars, and keeps the line under 900 chars, dropping the oldest entries first.
+  Notes from the same day are ordered by modification time.
+- Where it appears: the preflight hint for a rare name (#386, at most 2 timelines),
+  the tool-output name hint (#388), and `create-note`/`edit-note` as
+  `name_timelines: [{name, notes: [{date, title, mark}]}]` next to
+  `related_by_entity` (#389). The first two are push and count against the push
+  budget and the 8,000-char name-hint cap; the write response is pull.
+- Stale-marker suppression still applies to **topic** matches. If the prompt
+  matches a note with a CORRECTION line on plain words, the preflight still names
+  nothing. It does not apply to a name timeline: there the correction is part of
+  the history, and the preflight remains a titles-only hint.
+
+`OMIND_NAME_TIMELINES=0` turns timelines off and restores the plain hints.
+`omind bench --tool-hints` reports how many hints carry a timeline and how precise
+they are; `bench --precision` applies the same stale-note exemption. On a 1,405-note
+vault, 348 sessions from one week gave:
+
+- Tool-output name hints: 399 of 1,169 hints (34.1%) carried a timeline, 644 chars
+  median. Their precision (the agent named the thing later) was 67.9%, against 57.7%
+  for all hints and 69.6% for the preflight's labelled `bench --precision` on the same
+  vault. Overall hint precision went from 57.9% to 57.7%, and hinted sessions carried
+  2,188 chars of hints at the median instead of 1,591, still capped at 8,000. Added
+  latency was 0.51 ms median and 2.6 ms p95, against 0.50 ms and 2.1 ms.
+- Preflight: of 354 real prompts naming a rare indexed name, 5 were cleared by the
+  name alone and 3 of those carried a timeline (844 chars median). Topic-match picks
+  were identical with the flag on and off, and `bench --precision` was unchanged.
+- Replaying the 2026-09-30 session, the first `diskutil` result shows the As30p
+  timeline above: the Seagate, Samsung-migration and WD Blue notes in date order, the
+  Seagate note marked as corrected.
+
 ## Push and pull budgets
 
 The session injection budget (`guard.SESSION_INJECTION_BUDGET_CHARS`, 60,000 chars)

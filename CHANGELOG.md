@@ -112,6 +112,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   58.6%). In the 2026-09-30 session, all six writes, including the three `edit-note`
   calls on the adapter notes, list the WD Blue drive-check note, the As30p copy handoff
   and the Seagate note first.
+- **Name timelines: a name whose facts changed shows its dated history instead of
+  having its CORRECTION/SUPERSEDED notes suppressed
+  ([#390](https://github.com/CryptoJones/omind/issues/390), sixth and last child of
+  epic [#384](https://github.com/CryptoJones/omind/issues/384)).** The notes that
+  explained the `As30p` label moving from the Seagate to a Samsung SSD to the WD Blue
+  carried correction lines, and the preflight never names such a note (#321). The
+  newest note gave only the current state. Now, when a name has history (one of its
+  notes is `Superseded by:`, `Supersedes:`, or has a stale-marker line), its hint is a
+  timeline: the dated titles of the notes about it, oldest first, superseded and
+  corrected ones marked instead of hidden, e.g. `OMI: As30p has a dated history (118
+  notes; oldest first): 2026-09-25 [[Seagate As30p …]] (has a correction) → … →
+  2026-09-27 [[WD Blue As30p drive check …]] (newest). …`. It replaces the plain hint
+  in the preflight's rare-name path (#386, at most 2 timelines; a timeline exempts that
+  turn from the stale-note abstain, and the turn stays a titles-only hint) and in
+  tool-output name hints (#388). `create-note`/`edit-note` add `name_timelines`
+  next to `related_by_entity` (#389). Stale-marker suppression is unchanged for topic
+  matches. Bounded: at most 6 entries (the newest), titles cut to 90 chars, 900 chars
+  per line with the oldest entries dropped first. Push paths count against the push
+  budget and the 8,000-char name-hint cap. The name index now carries each note's
+  `superseded_by`/`supersedes` (no schema bump). `bench --tool-hints` reports timeline
+  share and precision, and `bench --precision` applies the same exemption. On by
+  default; `OMIND_NAME_TIMELINES=0` turns it off. Measured on a 1,405-note vault over
+  348 sessions from the last 7 days: 34.1% of tool-output hints carried a timeline (644
+  chars median), and those were 67.9% precise against 57.7% for all hints. Overall
+  hint precision was 57.7% with timelines and 57.9% without. Hinted sessions carried
+  2,188 chars of hints at the median instead of 1,591. On 354 real prompts naming a
+  rare name, topic-match picks were identical with the flag on and off.
 
 ## [10.0.3] - 2026-09-29
 

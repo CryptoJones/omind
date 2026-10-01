@@ -31,6 +31,10 @@ mention it, with their summaries. It is advisory and never blocks the write.
   PostToolUse ledger records it with the rest of that result as
   ``"channel": "pull"`` (#387), and it never spends the push budget.
 
+A name in the list whose facts changed (a superseded note, a correction) also
+gets its dated history under ``name_timelines`` (:mod:`omind.timeline`, #390;
+``OMIND_NAME_TIMELINES=0`` turns that part off).
+
 ``OMIND_WRITE_CONTEXT=0`` turns it off.
 """
 
@@ -64,6 +68,8 @@ MAX_SCAN_CHARS = 16_000
 MAX_LOOKUPS = 200
 
 FIELD = "related_by_entity"
+#: The dated history of a name in the write whose facts changed (#390).
+TIMELINE_FIELD = "name_timelines"
 NOTE = (
     "Advisory only; the write succeeded. Other notes already mention these names. "
     "If one says something different from what you just wrote, recall-note it and "
@@ -291,6 +297,8 @@ def response_fields(
     """The fields a write tool adds to its response, or ``{}``. Never raises."""
     if not enabled():
         return {}
+    # Used twice (the list and the timelines): a generator would be spent.
+    exclude = tuple(exclude)
     related = pick(
         omi_dir,
         title=title,
@@ -302,7 +310,18 @@ def response_fields(
     )
     if not related:
         return {}
-    return {FIELD: [r.to_dict() for r in related], f"{FIELD}_note": NOTE}
+    out: dict[str, object] = {FIELD: [r.to_dict() for r in related], f"{FIELD}_note": NOTE}
+    # #390: a name whose facts changed also gets its dated history, oldest
+    # first, superseded and corrected notes marked rather than left out.
+    with contextlib.suppress(Exception):
+        from omind import timeline
+
+        timelines = timeline.for_names(
+            omi_dir, [r.name for r in related], exclude=exclude, limit=MAX_NAMES
+        )
+        if timelines:
+            out[TIMELINE_FIELD] = [t.to_dict() for t in timelines]
+    return out
 
 
 # -- replay (omind bench --write-context) ------------------------------------

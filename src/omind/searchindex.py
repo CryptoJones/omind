@@ -257,6 +257,11 @@ class EntityNote:
     title: str
     #: The note's date (``Created``, else its mtime) — what "newest first" sorts on.
     last_seen: str
+    #: The note this one is superseded by, if any (``Superseded by:``). Name
+    #: timelines (#390) mark such a note instead of hiding it.
+    superseded_by: str = ""
+    #: The note(s) this one supersedes, if any (``Supersedes:``).
+    supersedes: str = ""
 
 
 @dataclass
@@ -1886,7 +1891,8 @@ def _entity_lookups(
             rows.extend(
                 db.execute(
                     "SELECT e.token AS token, n.filename AS filename, n.title AS title,"
-                    " e.last_seen AS last_seen"
+                    " e.last_seen AS last_seen, n.superseded_by AS superseded_by,"
+                    " n.supersedes AS supersedes"
                     " FROM entities e"
                     " JOIN entity_notes en ON en.id = e.note"
                     " JOIN notes n ON n.filename = en.filename"
@@ -1911,6 +1917,8 @@ def _entity_lookups(
                     filename=str(r["filename"]),
                     title=str(r["title"]),
                     last_seen=str(r["last_seen"]),
+                    superseded_by=str(r["superseded_by"] or ""),
+                    supersedes=str(r["supersedes"] or ""),
                 )
                 for r in hits
             ]
