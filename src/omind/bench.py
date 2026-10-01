@@ -567,11 +567,13 @@ def run_tool_hints(
     sessions = [r.chars for r in replays if r.chars]
     report.add("transcripts", len(replays), "count", f"{len(paths) - len(replays)} unreadable")
     report.add("tool results replayed", results, "count", f"{pull:,} OMI reads skipped (pull)")
+    eligible = len(latencies)  # not pull, not a file tool: what the hook considers
     report.add(
         "tool results with a hint",
-        (hinted_calls * 100.0 / len(latencies)) if latencies else 0.0,
+        (hinted_calls * 100.0 / results) if results else 0.0,
         "%",
-        f"{len(hints):,} hints",
+        f"{len(hints):,} hints; "
+        + (f"{hinted_calls * 100.0 / eligible:.1f}% of {eligible:,} eligible" if eligible else ""),
     )
     if hints:
         used = sum(h.used_later for h in hints)

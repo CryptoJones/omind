@@ -78,10 +78,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `namehint.session_p99_chars` <= 8,000). New `omind bench --tool-hints --transcript
   PATH|DIR [--days N]` replays real sessions through the same picker. On by default;
   `OMIND_TOOL_NAME_HINTS=0` turns it off. Measured on a 1,432-note vault over 347
-  sessions from the last 7 days (13,424 tool results): a hint on 8.5% of tool results,
-  precision 58.6% (the agent named the hinted thing later in the session; the preflight's
-  labelled `bench --precision` is 56.5% on the same vault), added latency 0.49 ms median,
-  1.9 ms p95. Replaying the 2026-09-30 session, the first `diskutil` result yields
+  sessions from the last 7 days (13,424 tool results): a hint on 6.7% of all tool
+  results (8.5% of the ~10,700 the hook considers), precision 58.6% (the agent named
+  the hinted thing later in the session; the preflight's labelled `bench --precision`
+  is 56.5% on the same vault), added latency 0.49 ms median, 1.9 ms p95. Replaying the 2026-09-30 session, the first `diskutil` result yields
   `As30p` with the WD Blue drive-check note first. That is 28 minutes before the
   `edit-note` that wrongly "corrected" the 2026-09-25 adapter note.
 

@@ -213,7 +213,8 @@ how often hints fire, the added latency, and precision. Precision here means the
 of hints whose name the agent itself used later in the session. On a 1,432-note vault,
 347 sessions from one week gave these numbers:
 
-- hints on 8.5% of tool results;
+- hints on 6.7% of all tool results, which is 8.5% of the ~10,700 the hook
+  considers (not pull, not a file tool);
 - precision 58.6%, against 56.5% for the preflight's labelled `bench --precision` on
   the same vault;
 - added latency 0.49 ms median and 1.9 ms p95.

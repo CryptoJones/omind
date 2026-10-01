@@ -130,7 +130,7 @@ def test_hint_is_push_and_recorded_as_its_own_operation(omi: Path) -> None:
 def test_flag_off_disables_it(omi: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv(namehints.ENABLE_ENV, "0")
     assert namehints.tool_hints(_event("off", DISKUTIL), omi) == ""
-    monkeypatch.setenv(namehints.ENABLE_ENV, "0")
+    monkeypatch.delenv(namehints.ENABLE_ENV)
     monkeypatch.setenv(entities.ENABLE_ENV, "0")
     assert namehints.tool_hints(_event("off", DISKUTIL), omi) == ""
 
