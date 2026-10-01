@@ -51,7 +51,7 @@ import re
 import sqlite3
 import threading
 import time
-from collections.abc import Callable, Iterator, Sequence
+from collections.abc import Callable, Iterable, Iterator, Sequence
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Concatenate, ParamSpec, TypeVar, cast
@@ -1667,33 +1667,8 @@ class SearchIndex:
         if db is None or self._refresh_if_needed() is None:
             return None
         key = entities.normalize(token)
-        try:
-            total_row = db.execute("SELECT count(*) AS n FROM notes WHERE disabled = 0").fetchone()
-            total = int(total_row["n"]) if total_row else 0
-            rows = db.execute(
-                "SELECT n.filename AS filename, n.title AS title, e.last_seen AS last_seen"
-                " FROM entities e"
-                " JOIN entity_notes en ON en.id = e.note"
-                " JOIN notes n ON n.filename = en.filename"
-                " WHERE e.token = ? AND n.disabled = 0"
-                " ORDER BY e.last_seen DESC, n.mtime_ns DESC, n.filename",
-                (key,),
-            ).fetchall()
-        except sqlite3.Error:
-            return None
-        lookup = EntityLookup(
-            token=key, df=len(rows), total=total, ceiling=entities.df_ceiling(total)
-        )
-        if not lookup.common or include_common:
-            lookup.notes = [
-                EntityNote(
-                    filename=str(r["filename"]),
-                    title=str(r["title"]),
-                    last_seen=str(r["last_seen"]),
-                )
-                for r in rows
-            ]
-        return lookup
+        found = _entity_lookups(db, [key], include_common=include_common)
+        return None if found is None else found[key]
 
     def notes_for_entity(self, token: str) -> list[EntityNote] | None:
         """The notes that mention ``token``, newest first (``[]`` if too common)."""
@@ -1884,6 +1859,101 @@ class SearchIndex:
 
 _shared: dict[str, SearchIndex] = {}
 _shared_lock = threading.Lock()
+
+
+def _entity_lookups(
+    db: sqlite3.Connection, keys: list[str], *, include_common: bool = False
+) -> dict[str, EntityLookup] | None:
+    """One :class:`EntityLookup` per normalised key, from a single query.
+
+    Shared by :meth:`SearchIndex.entity_lookup` and :func:`entity_lookups_readonly`
+    so the two cannot drift on what "the notes that mention X" means.
+    ``None`` on any sqlite error (fail open).
+    """
+    from omind import entities
+
+    keys = list(dict.fromkeys(keys))
+    if not keys:
+        return {}
+    try:
+        total_row = db.execute("SELECT count(*) AS n FROM notes WHERE disabled = 0").fetchone()
+        total = int(total_row["n"]) if total_row else 0
+        rows: list[sqlite3.Row] = []
+        # Bounded IN lists: sqlite's default host-parameter limit is 999 on old builds.
+        for start in range(0, len(keys), 500):
+            chunk = keys[start : start + 500]
+            placeholders = ", ".join("?" * len(chunk))
+            rows.extend(
+                db.execute(
+                    "SELECT e.token AS token, n.filename AS filename, n.title AS title,"
+                    " e.last_seen AS last_seen"
+                    " FROM entities e"
+                    " JOIN entity_notes en ON en.id = e.note"
+                    " JOIN notes n ON n.filename = en.filename"
+                    f" WHERE e.token IN ({placeholders}) AND n.disabled = 0"
+                    " ORDER BY e.last_seen DESC, n.mtime_ns DESC, n.filename",
+                    chunk,
+                ).fetchall()
+            )
+    except sqlite3.Error:
+        return None
+    ceiling = entities.df_ceiling(total)
+    grouped: dict[str, list[sqlite3.Row]] = {key: [] for key in keys}
+    for row in rows:
+        grouped.setdefault(str(row["token"]), []).append(row)
+    out: dict[str, EntityLookup] = {}
+    for key in keys:
+        hits = grouped[key]
+        lookup = EntityLookup(token=key, df=len(hits), total=total, ceiling=ceiling)
+        if not lookup.common or include_common:
+            lookup.notes = [
+                EntityNote(
+                    filename=str(r["filename"]),
+                    title=str(r["title"]),
+                    last_seen=str(r["last_seen"]),
+                )
+                for r in hits
+            ]
+        out[key] = lookup
+    return out
+
+
+def entity_lookups_readonly(
+    omi_dir: Path | str, tokens: Iterable[str]
+) -> dict[str, EntityLookup] | None:
+    """Name-index lookups for a hot path that must not pay for the index (#388).
+
+    :meth:`SearchIndex.entity_lookup` connects through :meth:`SearchIndex._connect`,
+    which loads the embedding model to check the index's encoder identity, and
+    refreshes the index first — seconds, not milliseconds, in a fresh hook
+    process. This opens the existing index file read-only, never creates,
+    refreshes or repairs it, and answers every token in one query. Whatever the
+    last refresh (the MCP server, the preflight) recorded is what it sees.
+
+    Keys of the result are the tokens as :func:`omind.entities.normalize`
+    returns them. ``None`` when the name index is off, the index file is
+    missing, its schema or name index is not current, or anything goes wrong
+    (fail open).
+    """
+    from omind import entities
+
+    if not entities.enabled() or not available():
+        return None
+    path = index_path(omi_dir)
+    if not path.is_file():
+        return None
+    keys = [key for key in (entities.normalize(token) for token in tokens) if key]
+    try:
+        uri = path.resolve().as_uri() + "?mode=ro"
+        with contextlib.closing(sqlite3.connect(uri, uri=True, timeout=0.5)) as db:
+            db.row_factory = sqlite3.Row
+            if SearchIndex._meta(db, "schema") != str(SCHEMA_VERSION):
+                return None
+            if SearchIndex._meta(db, "entities") != entities.EXTRACTOR_VERSION:
+                return None
+            return _entity_lookups(db, keys)
+    except (sqlite3.Error, OSError, ValueError):
+        return None
 
 
 def shared(omi_dir: Path | str) -> SearchIndex | None:

@@ -167,6 +167,57 @@ under `OMIND_PREFLIGHT=inject`), and it counts against the session's injection
 budget like any other hint. `OMIND_PREFLIGHT_RARE_TERMS=0` (or `OMI_ENTITY_INDEX=0`)
 restores the plain threshold.
 
+### Names in tool output
+
+The preflight sees only the prompt. A name that turns up only in what a tool
+printed, such as a volume label in `diskutil list`, a host in `ssh` output or a
+serial in `ioreg`, used to reach no hook at all
+([#388](https://github.com/CryptoJones/omind/issues/388)). Claude Code's PostToolUse
+hook now extracts identifier-shaped tokens from the first 16,000 chars of each tool
+response, using the same extractor as the index. It looks them up in one read-only
+query: the hook opens the index file read-only, so it loads no embedding model and
+runs no refresh. Each new name with notes gets one titles-only line:
+
+```
+OMI: As30p → 118 notes; about it: [[WD Blue As30p drive check 2026-09-27 — clean, and the WD to pluto copy FAILED]]; [[…]]. recall-note before asserting facts about As30p.
+```
+
+"about it" lists notes whose title names the thing (not as a path component), newest
+first; a name no title carries shows the newest notes that mention it ("newest").
+
+What keeps it quiet:
+
+- A name is hinted once per session, and a name the preflight already hinted for a
+  prompt counts. At most 3 names are hinted per tool call, and name hints stop after
+  8,000 chars per session (`namehints.SESSION_BUDGET_CHARS`) or when the 60,000-char
+  push budget is spent.
+- Pull is never a trigger: the agent's own `mcp__omi__*` results, `omind` CLI output,
+  and files inside the vault.
+- File tools (Read, Grep, Glob, Write, Edit) are skipped. Their output is code the
+  agent chose to open, or its own write echoed back.
+- Names the agent typed into the call itself are skipped. The hint is for names that
+  arrive only in the output.
+- Some tokens look like identifiers but never name a thing: formats and platforms
+  (`utf-8`, `arm64`, `python3`), lower-case hex (commit hashes, colours), MIME types,
+  and wikilink titles already spelled out. These are skipped.
+- A name that no note's title carries must be in at most 10 notes.
+- Salience: in an output of 500+ chars, a name mentioned only once is skipped.
+
+Hints go to the usage ledger as operation `namehint` on the push channel. `omind audit`
+judges them as their own surface. `OMIND_TOOL_NAME_HINTS=0` turns them off.
+
+`omind bench --tool-hints --transcript PATH` replays a Claude Code `.jsonl` session, or
+a directory of them (`--days N` keeps recent ones), through the same picker. Each
+replayed hint only sees notes dated on or before its tool result. The replay reports
+how often hints fire, the added latency, and precision. Precision here means the share
+of hints whose name the agent itself used later in the session. On a 1,432-note vault,
+347 sessions from one week gave these numbers:
+
+- hints on 8.5% of tool results;
+- precision 58.6%, against 56.5% for the preflight's labelled `bench --precision` on
+  the same vault;
+- added latency 0.49 ms median and 1.9 ms p95.
+
 ## Push and pull budgets
 
 The session injection budget (`guard.SESSION_INJECTION_BUDGET_CHARS`, 60,000 chars)

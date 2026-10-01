@@ -102,6 +102,21 @@ THRESHOLDS: tuple[Threshold, ...] = (
         "since #387 it limits push only (priming, preflight, name hints)",
     ),
     Threshold(
+        "namehint.p99_chars", "tool-output name hints", "per-call push, p99",
+        1_200, "max", "chars", 20,
+        "tool calls are carrying several name hints at once: check them in "
+        "`omind bench --tool-hints`, or set OMIND_TOOL_NAME_HINTS=0",
+        "#388: at most 3 one-line, titles-only hints per tool call, titles cut "
+        "at 140 chars",
+    ),
+    Threshold(
+        "namehint.session_p99_chars", "tool-output name hints", "per-session push, p99",
+        8_000, "max", "chars", 10,
+        "the per-session cap is not holding — a bug, not a tuning problem; set "
+        "OMIND_TOOL_NAME_HINTS=0 and file it",
+        "namehints.SESSION_BUDGET_CHARS (8,000 chars, a thirtieth of the push budget)",
+    ),
+    Threshold(
         "priming.median_tokens", "SessionStart priming", "capsule size, median",
         2_000, "max", "tokens", 10,
         "`omind ai profile economy`, or trim the priming notes (Playbook, Rules)",
@@ -342,6 +357,17 @@ def _ledger_rows(usage: list[dict[str, Any]]) -> list[Row]:
         for split in per_session.values()
         if split[ai_usage.PULL]
     ]
+    namehint = _chars(usage, "namehint")
+    namehint_sessions: dict[str, int] = {}
+    for event in usage:
+        session = str(event.get("session_id") or "")
+        if session and event.get("operation") == "namehint":
+            try:
+                chars = max(0, int(event.get("characters") or 0))
+            except (TypeError, ValueError):
+                continue
+            namehint_sessions[session] = namehint_sessions.get(session, 0) + chars
+    per_session_hints = sorted(namehint_sessions.values())
     worst = max(session_tokens) if session_tokens else 0
     worst_pull = max(pull_tokens) if pull_tokens else 0
     return [
@@ -353,6 +379,13 @@ def _ledger_rows(usage: list[dict[str, Any]]) -> list[Row]:
         _judge(
             "session.p99_tokens", _percentile(session_tokens, 0.99), len(session_tokens),
             f"worst session {worst:,} tokens",
+        ),
+        _judge("namehint.p99_chars", _percentile(namehint, 0.99), len(namehint)),
+        _judge(
+            "namehint.session_p99_chars",
+            _percentile(per_session_hints, 0.99),
+            len(per_session_hints),
+            f"worst session {max(per_session_hints):,} chars" if per_session_hints else "",
         ),
         _judge("priming.median_tokens", _percentile(priming, 0.5), len(priming)),
         _judge("priming.p99_tokens", _percentile(priming, 0.99), len(priming)),
@@ -501,6 +534,7 @@ def run_audit(
         "preflight.median_chars", "preflight.p99_chars", "session.p99_tokens",
         "priming.median_tokens", "priming.p99_tokens", "mcp.median_chars",
         "mcp.p99_chars", "verifier.p99_chars", "session.pull_p99_tokens",
+        "namehint.p99_chars", "namehint.session_p99_chars",
     )
     guarded(ledger_keys, lambda: _ledger_rows(usage))
     guarded(("preflight.precision_pct",), lambda: [_precision_row(omi)])

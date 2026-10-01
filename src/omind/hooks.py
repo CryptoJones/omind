@@ -984,7 +984,7 @@ def run_hook(
                 lambda: _emit_unwritten(omi_dir, event.get("session_id")),
             )
         if event_name == "PostToolUse":
-            from omind import ai_usage, compliance, guard, loopguard, verify
+            from omind import ai_usage, compliance, guard, loopguard, namehints, verify
 
             # Four independent subsystems. Each is isolated (#204) so a failure
             # in one — accounting is the most fragile, and the least important —
@@ -1020,6 +1020,14 @@ def run_hook(
                     "PostToolUse/guard.midturn_context",
                     lambda: guard.midturn_context(event, Path(omi_dir)),
                 )
+                # #388: names that appear only in the tool's OUTPUT (a volume
+                # label in `diskutil list`) bring their notes' titles forward,
+                # once per name per session, on the push budget.
+                names = _best_effort(
+                    "PostToolUse/namehints.tool_hints",
+                    lambda: namehints.tool_hints(event, Path(omi_dir)),
+                )
+                context = "\n\n".join(part for part in (context, names) if part)
                 if context:
                     sink = stdout if stdout is not None else sys.stdout
                     sink.write(

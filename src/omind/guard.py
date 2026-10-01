@@ -1188,6 +1188,7 @@ def clear_all_gates() -> None:
         "git-fresh-*",
         "turn-*",
         "injected-*",
+        "namehints-*",
         "session-primed/*",
     ):
         try:
@@ -2570,6 +2571,12 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             "verify before acting, it may be stale."
         )[:PREFLIGHT_HINT_CHARS]
         ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
+        if rare:
+            # #388: a name hinted for the prompt is not hinted again when it
+            # turns up in a tool result later in the session.
+            from omind import namehints
+
+            namehints.mark_hinted(session, rare)
         return context
 
     version = str(memory.get("version") or "")
