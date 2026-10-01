@@ -219,6 +219,54 @@ of hints whose name the agent itself used later in the session. On a 1,432-note 
   the same vault;
 - added latency 0.49 ms median and 1.9 ms p95.
 
+### Names in a write
+
+`create-note` and `edit-note` answer with what other notes already say about the
+names in the write ([#389](https://github.com/CryptoJones/omind/issues/389)). The agent
+has just stated a claim and is still in the turn, so this is the cheapest place to
+catch a contradiction:
+
+```json
+"related_by_entity": [
+  {"name": "As30p",
+   "title": "WD Blue As30p drive check 2026-09-27 — clean, and the WD to pluto copy FAILED",
+   "summary": "…", "updated": "2026-09-27"}
+],
+"related_by_entity_note": "Advisory only; the write succeeded. …"
+```
+
+Names are taken from the title, summary, tags and details (`edit-note`: the note's
+title plus the fields the call passed) with the name-index extractor and looked up in
+one read-only query. Each name lists up to 3 other notes. Notes titled after the name
+come first and are the only ones listed when any exist; otherwise its newest mentions
+are listed. Rules:
+
+- At most 3 names, summaries cut to 200 chars, the whole list at most 2,400 chars
+  (`writecontext.MAX_CHARS`). A note listed for one name is not repeated for another.
+- The note being written and archived notes are never listed.
+- The same noise rules and rarity rules as tool-output name hints apply. Also skipped:
+  sequence tokens (`run4`, `round-3`, `ch13`), names the write mentions only as a path
+  component (`/Volumes/As30p/courses`), and a name that appears just once in a
+  `details` of 500+ chars.
+- It is advisory. It fails open and never blocks or changes the write.
+
+It is **pull**: it is part of the response to the agent's own `mcp__omi__*` call, so
+the ledger counts it with that result under `"channel": "pull"` and it never spends
+the push budget. `OMIND_WRITE_CONTEXT=0` turns it off.
+
+`omind bench --write-context --transcript PATH` replays the create-note and edit-note
+calls in a session, or a directory of them (`--days N`), through the same picker. Each
+replayed write only sees notes dated on or before its call. On a 1,432-note vault, 347
+sessions from one week (239 writes) gave:
+
+- a list on 54.0% of writes, 3.3 notes and 1,184 chars median when listed (p95 2,293);
+- 2.6 ms median added latency, 8.5 ms p95;
+- in a hand-judged sample of 50 listed notes, 29 (58%) were about the same thing as
+  the write. The bench's own proxy (the session read or linked the listed note) is
+  16.9%; it undercounts because the agents never saw the list. The misses are mostly
+  a name with several senses: `As30p` is a drive label, a user, a DJ name and a
+  channel.
+
 ## Push and pull budgets
 
 The session injection budget (`guard.SESSION_INJECTION_BUDGET_CHARS`, 60,000 chars)

@@ -602,6 +602,72 @@ def run_tool_hints(
     return report
 
 
+def run_write_context(
+    omi_dir: Path | str, source: Path | str, *, days: float = 0.0
+) -> Report:
+    """Replay real create-note/edit-note calls through write-time context (#389).
+
+    Every write in every transcript goes through the same picker the MCP tools
+    use (``writecontext.pick``), ``as_of`` the day of the call so notes written
+    later cannot help. Read-only.
+
+    There is no label set, so the proxy for precision is what the session did:
+    a listed note counts as **used** when the session read it through OMI (at
+    any point) or the written note links to it. It undercounts — the agent
+    never saw the list — so judge a sample by hand before trusting it.
+    """
+    from omind import writecontext
+
+    omi = Path(omi_dir).expanduser()
+    report = Report(vault=str(omi))
+    paths = transcripts_in(source, days=days)
+    writes = []
+    unreadable = 0
+    for path in paths:
+        try:
+            writes.extend(writecontext.replay_transcript(path, omi))
+        except (OSError, ValueError):
+            unreadable += 1
+    report.add("transcripts", len(paths) - unreadable, "count", f"{unreadable} unreadable")
+    creates = sum(1 for w in writes if w.tool == "create")
+    edits = len(writes) - creates
+    report.add("writes replayed", len(writes), "count", f"{creates:,} create, {edits:,} edit")
+    fired = [w for w in writes if w.related]
+    entries = sum(len(w.related) for w in fired)
+    report.add(
+        "writes with related_by_entity",
+        (len(fired) * 100.0 / len(writes)) if writes else 0.0,
+        "%",
+        f"{entries:,} notes listed",
+    )
+    if fired:
+        report.add("notes listed per write (when any)", entries / len(fired), "count")
+        sizes = sorted(w.chars for w in fired)
+        p95 = sizes[max(0, min(len(sizes) - 1, int(0.95 * len(sizes))))]
+        report.add(
+            "chars per write (when any)",
+            _median(sizes),
+            "chars",
+            f"median; p95 {p95:,}, max {sizes[-1]:,} (cap {writecontext.MAX_CHARS:,})",
+        )
+        used = sum(len(w.consulted | w.linked) for w in fired)
+        report.add("listed notes read or linked", used * 100.0 / entries, "%")
+    latencies = sorted(w.milliseconds for w in writes)
+    if latencies:
+        p95_ms = latencies[max(0, min(len(latencies) - 1, int(0.95 * len(latencies))))]
+        report.add("added latency, median", latencies[len(latencies) // 2], "ms")
+        report.add("added latency, p95", p95_ms, "ms", f"max {latencies[-1]:.1f} ms")
+    if len(paths) == 1:
+        for write in fired[:5]:
+            report.add(
+                f"{write.tool} @ line {write.line}",
+                len(write.related),
+                "count",
+                "; ".join(f"{r.name}: {r.title[:50]}" for r in write.related[:3]),
+            )
+    return report
+
+
 def _median(values: list[int]) -> int:
     if not values:
         return 0
