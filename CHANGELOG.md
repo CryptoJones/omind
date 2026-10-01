@@ -44,6 +44,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   prompts (40 random rare names x 3 phrasings) preflight speaks on 48.3% instead of
   15.8%, and the note it names mentions the identifier 93.1% of the time instead of
   84.2%.
+- **Budget: the agent's own OMI reads no longer spend the push-injection budget
+  ([#387](https://github.com/CryptoJones/omind/issues/387), third child of epic
+  [#384](https://github.com/CryptoJones/omind/issues/384)).** The 60,000-char session
+  budget summed priming, preflight **and** every `mcp__omi__*` result, so a session
+  that diligently ran `recall-note`/`search-vault` hit the budget on its own reads and
+  the preflight stopped sending even title hints ("over budget — not adding more").
+  The usage ledger now marks MCP results `"channel": "pull"`; the budget counts push
+  only (priming, preflight, name hints), and the over-budget notice says so. `omind
+  audit` reports push (`session.p99_tokens`, <= 15,000 tokens) and pull
+  (`session.pull_p99_tokens`, new, <= 30,000 tokens) as separate rows with separate
+  verdicts, and `omind ai usage` splits each top session into push and pull. Backward
+  compatible: ledger events without a channel count as push. On by default;
+  `OMIND_SPLIT_BUDGET=0` restores the combined budget.
 
 ## [10.0.3] - 2026-09-29
 

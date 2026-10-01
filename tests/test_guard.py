@@ -2443,3 +2443,76 @@ def test_failed_read_does_not_undo_an_earlier_successful_consult() -> None:
     guard.retract_consult(session, "Some Other Note")
     assert guard.consulted_this_turn(session)
     guard.clear_gate(session)
+
+
+def _pull(omi: Path, chars: int, session: str) -> None:
+    from omind import ai_usage
+
+    ai_usage.record_mcp_response(
+        omi,
+        {
+            "tool_name": "mcp__omi__search-vault",
+            "session_id": session,
+            "tool_response": "x" * chars,
+        },
+    )
+
+
+def test_agent_reads_do_not_spend_the_push_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #387 acceptance: 70K of pull and 5K of push — the preflight still injects.
+    from omind import ai_usage
+
+    monkeypatch.delenv(ai_usage.SPLIT_BUDGET_ENV, raising=False)
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
+    _pull(omi, 70_000, "diligent")
+    ai_usage.record_context(omi, "recall", 5_000, session_id="diligent")
+    assert guard.session_context_chars(omi, "diligent") == 5_000
+    context = guard.preflight_turn(
+        {"session_id": "diligent", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "over budget" not in context
+    assert "compact recall" in context
+
+
+def test_split_budget_off_restores_the_combined_budget(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import ai_usage
+
+    monkeypatch.setenv(ai_usage.SPLIT_BUDGET_ENV, "0")
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
+    _pull(omi, 70_000, "old-way")
+    ai_usage.record_context(omi, "recall", 5_000, session_id="old-way")
+    assert guard.session_context_chars(omi, "old-way") > guard.SESSION_INJECTION_BUDGET_CHARS
+    context = guard.preflight_turn(
+        {"session_id": "old-way", "prompt": "reduce OMI token usage"}, omi
+    )
+    assert "over budget" in context
+    assert "not counted" not in context
+
+
+def test_over_budget_notice_reports_push_only(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The notice must name the push figure, not push + the agent's own reads.
+    from omind import ai_usage
+
+    monkeypatch.delenv(ai_usage.SPLIT_BUDGET_ENV, raising=False)
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _token_note(omi)
+    _pull(omi, 30_000, "both")
+    ai_usage.record_context(omi, "recall", 61_000, session_id="both")
+    context = guard.preflight_turn({"session_id": "both", "prompt": "reduce OMI token usage"}, omi)
+    assert "over budget" in context
+    assert "61,000 unrequested characters" in context
+    assert "your own OMI reads are not counted" in context

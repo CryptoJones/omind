@@ -94,11 +94,12 @@ THRESHOLDS: tuple[Threshold, ...] = (
         "the 70% target #321 set; measured by `omind bench --precision`",
     ),
     Threshold(
-        "session.p99_tokens", "preflight recall", "omind context per session, p99",
+        "session.p99_tokens", "preflight recall", "omind push per session, p99",
         15_000, "max", "tokens", 10,
-        "long sessions are accumulating omind context; lower the session budget "
-        "or set OMIND_PREFLIGHT=off for long-running agents",
-        "guard.SESSION_INJECTION_BUDGET_CHARS is 60,000 chars = 15,000 tokens",
+        "long sessions are accumulating unrequested omind context; lower the "
+        "session budget or set OMIND_PREFLIGHT=off for long-running agents",
+        "guard.SESSION_INJECTION_BUDGET_CHARS is 60,000 chars = 15,000 tokens; "
+        "since #387 it limits push only (priming, preflight, name hints)",
     ),
     Threshold(
         "priming.median_tokens", "SessionStart priming", "capsule size, median",
@@ -125,6 +126,15 @@ THRESHOLDS: tuple[Threshold, ...] = (
         20_000, "max", "chars", 20,
         "a tool is returning near-unbounded payloads — see AGENTS.md invariant 8",
         "read-note's default body cap is 20,000 chars (invariant 8)",
+    ),
+    Threshold(
+        "session.pull_p99_tokens", "MCP tool responses", "agent's own reads per session, p99",
+        30_000, "max", "tokens", 10,
+        "sessions are re-reading whole notes: prefer recall-note over read-note "
+        "and narrower search-vault queries. Pull never suppresses hints, so this "
+        "costs context, not recall",
+        "#387: twice the push budget; pull is deliberate, so only habitual "
+        "whole-note reading should trip it",
     ),
     Threshold(
         "gate.offtopic_per_100", "consult gate", "off-topic verdicts per 100 OMI reads",
@@ -309,18 +319,31 @@ def _ledger_rows(usage: list[dict[str, Any]]) -> list[Row]:
     priming = [ai_usage.estimate_tokens(c) for c in _chars(usage, "priming")]
     mcp = _chars(usage, "mcp")
     verifier = _chars(usage, "verifier")
-    per_session: dict[str, int] = {}
+    # #387: push (what omind chose to send) and pull (the agent's own OMI MCP
+    # reads) are separate budgets with separate verdicts. Pre-#387 events carry
+    # no channel and are counted as push, conservatively.
+    per_session: dict[str, dict[str, int]] = {}
     for event in usage:
         session = str(event.get("session_id") or "")
         if session and event.get("operation") in ai_usage.CONTEXT_OPERATIONS:
             try:
-                per_session[session] = per_session.get(session, 0) + max(
-                    0, int(event.get("characters") or 0)
-                )
+                chars = max(0, int(event.get("characters") or 0))
             except (TypeError, ValueError):
                 continue
-    session_tokens = [ai_usage.estimate_tokens(c) for c in per_session.values()]
+            split = per_session.setdefault(session, {ai_usage.PUSH: 0, ai_usage.PULL: 0})
+            split[ai_usage.event_channel(event)] += chars
+    session_tokens = [
+        ai_usage.estimate_tokens(split[ai_usage.PUSH])
+        for split in per_session.values()
+        if split[ai_usage.PUSH]
+    ]
+    pull_tokens = [
+        ai_usage.estimate_tokens(split[ai_usage.PULL])
+        for split in per_session.values()
+        if split[ai_usage.PULL]
+    ]
     worst = max(session_tokens) if session_tokens else 0
+    worst_pull = max(pull_tokens) if pull_tokens else 0
     return [
         _judge("preflight.median_chars", _percentile(recall, 0.5), len(recall)),
         _judge(
@@ -337,6 +360,10 @@ def _ledger_rows(usage: list[dict[str, Any]]) -> list[Row]:
         _judge(
             "mcp.p99_chars", _percentile(mcp, 0.99), len(mcp),
             f"max {max(mcp):,} chars" if mcp else "",
+        ),
+        _judge(
+            "session.pull_p99_tokens", _percentile(pull_tokens, 0.99), len(pull_tokens),
+            f"worst session {worst_pull:,} tokens",
         ),
         _judge("verifier.p99_chars", _percentile(verifier, 0.99), len(verifier)),
     ]
@@ -473,7 +500,7 @@ def run_audit(
     ledger_keys = (
         "preflight.median_chars", "preflight.p99_chars", "session.p99_tokens",
         "priming.median_tokens", "priming.p99_tokens", "mcp.median_chars",
-        "mcp.p99_chars", "verifier.p99_chars",
+        "mcp.p99_chars", "verifier.p99_chars", "session.pull_p99_tokens",
     )
     guarded(ledger_keys, lambda: _ledger_rows(usage))
     guarded(("preflight.precision_pct",), lambda: [_precision_row(omi)])

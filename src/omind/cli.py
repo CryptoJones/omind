@@ -1672,7 +1672,9 @@ def _run_ai(args: argparse.Namespace) -> int:
     for row in injection["top_sessions"]:
         print(
             f"  session {row['session_id'][:12]}: {row['chars']:,} chars "
-            f"(~{row['tokens']:,} tokens) of omind context"
+            f"(~{row['tokens']:,} tokens) of omind context — "
+            f"push {row.get('push_chars', row['chars']):,}, "
+            f"pull {row.get('pull_chars', 0):,}"
         )
     return 0
 

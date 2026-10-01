@@ -308,8 +308,10 @@ broken hook can never wedge the agent.
   accumulating: a note that announces its own supersession or correction is
   named but never injected, unchecked `- [ ]` action items are stripped from any
   injection (they are somebody else's TODO, not this turn's assignment), and a
-  session that has already absorbed 60,000 characters of omind context stops
-  receiving more. Why the default flipped in 9.2.0: on the author's own ledger
+  session that has already been pushed 60,000 characters of unrequested omind
+  context stops receiving more. The agent's own `recall-note`/`search-vault`
+  reads are pull, not push, and do not count against it (#387;
+  `OMIND_SPLIT_BUDGET=0` restores the old combined budget). Why the default flipped in 9.2.0: on the author's own ledger
   the old push path had shipped ~3.4M tokens of unrequested recall across 5,816
   turns at ~25% precision, framed as binding instruction — a cost that never
   surfaced as an omind error, only as "the model has gotten worse in long
