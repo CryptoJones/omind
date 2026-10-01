@@ -2317,6 +2317,26 @@ _ACTION_TURN_RE = re.compile(
 )
 
 
+#: Name timelines shown with one preflight hint (#390). Each is at most
+#: ``timeline.MAX_CHARS``, so the hint stays under ~2,300 chars.
+_PREFLIGHT_TIMELINES = 2
+
+
+def _name_timelines(omi_dir: Path | str, names: list[str]) -> list[Any]:
+    """Dated histories for the rare names that cleared this turn (#390).
+
+    Empty when there are none, the flag is off, or anything fails.
+    """
+    if not names:
+        return []
+    try:
+        from omind import timeline
+
+        return timeline.for_names(omi_dir, names, limit=_PREFLIGHT_TIMELINES)
+    except Exception:
+        return []
+
+
 def _second_title_line(omi_dir: Path | str, titles: list[str], first: str) -> str:
     """Title + summary of the runner-up preflight match, never a full body
     (#241). Skipped on the economy profile, where the preflight budget is too
@@ -2482,10 +2502,16 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     # they are enforcement, and enforcement does not get to be probabilistic.
     hard_rule = filename in hard_rule_notes(omi_dir)
 
+    # #390: a turn cleared by a rare name whose facts changed gets that name's
+    # dated history — superseded and corrected notes marked, not hidden.
+    timelines = _name_timelines(omi_dir, rare)
+
     # #321 fix 3: never auto-inject a note that announces its own correction.
     # The pipeline used to ship facts, retractions and supersessions in
-    # arbitrary order, each stamped "the memory governs".
-    if not hard_rule and looks_stale(summary, excerpt):
+    # arbitrary order, each stamped "the memory governs". This governs TOPIC
+    # matches; a name timeline (#390) shows the correction as part of the
+    # history instead, and is only ever a titles-only hint.
+    if not hard_rule and not timelines and looks_stale(summary, excerpt):
         record_consult(session, kind="stale-note", target=filename, relevant=False)
         compliance.log_event(
             compliance.KIND_DECISION,
@@ -2557,7 +2583,8 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             rule_id=GATE_PREFLIGHT_RULE,
             outcome="hint",
             detail=f"note={filename!r} continuation={continuation}"
-            + (f" rare={rare[:4]!r}" if rare else ""),
+            + (f" rare={rare[:4]!r}" if rare else "")
+            + (f" timeline={[t.name for t in timelines]!r}" if timelines else ""),
         )
         context = (
             "OMI turn preflight"
@@ -2570,6 +2597,10 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             + ". Call OMI MCP `recall-note` on one if this turn needs it; "
             "verify before acting, it may be stale."
         )[:PREFLIGHT_HINT_CHARS]
+        if timelines:
+            from omind import timeline
+
+            context += "\n" + timeline.lines(timelines)
         ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
         if rare:
             # #388: a name hinted for the prompt is not hinted again when it

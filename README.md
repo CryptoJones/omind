@@ -316,7 +316,10 @@ broken hook can never wedge the agent.
   line naming its notes. Each name is hinted at most once per session, and these lines
   count as push (#388; `OMIND_TOOL_NAME_HINTS=0` turns them off). `create-note` and `edit-note` answer with the other notes that
   mention the same names, so a write that contradicts the vault shows it (#389, pull;
-  `OMIND_WRITE_CONTEXT=0` turns it off). Why the default flipped in 9.2.0: on the author's own ledger
+  `OMIND_WRITE_CONTEXT=0` turns it off). A name whose facts changed (a volume label that
+  moved between drives) gets its dated history instead of a plain hint, oldest first,
+  with superseded and corrected notes marked rather than hidden (#390;
+  `OMIND_NAME_TIMELINES=0` turns it off). Why the default flipped in 9.2.0: on the author's own ledger
   the old push path had shipped ~3.4M tokens of unrequested recall across 5,816
   turns at ~25% precision, framed as binding instruction — a cost that never
   surfaced as an omind error, only as "the model has gotten worse in long

@@ -387,6 +387,8 @@ class PreflightPick:
     #: #386: rare identifiers that cleared the term threshold on their own. A
     #: pick made only on them is always a hint, never a full injection.
     rare: tuple[str, ...] = ()
+    #: #390: the rendered dated history of those names, when their facts changed.
+    timelines: str = ""
 
 
 def preflight_pick(
@@ -428,10 +430,21 @@ def preflight_pick(
         if not rare:
             return None
     hard_rule = filename in hard_rules
-    if not hard_rule and guard.looks_stale(fields.summary, raw):
+    # #390: a name timeline is exempt from the stale-note abstain (topic matches
+    # are not), exactly as in the live path.
+    timelines = guard._name_timelines(omi, list(rare))
+    if not hard_rule and not timelines and guard.looks_stale(fields.summary, raw):
         return None
+    from omind import timeline
+
     return PreflightPick(
-        filename, [str(t) for t in titles], raw, fields.summary, hard_rule, rare
+        filename,
+        [str(t) for t in titles],
+        raw,
+        fields.summary,
+        hard_rule,
+        rare,
+        timeline.lines(timelines) if timelines else "",
     )
 
 
@@ -494,6 +507,8 @@ def run_precision(
             guard.PREFLIGHT_HINT_CHARS,
             _HINT_OVERHEAD + sum(len(name) + 6 for name in names),
         )
+        if pick.timelines:
+            hint_size += 1 + len(pick.timelines)
         hint_sizes.append(hint_size)
         # #386: a pick cleared only by a rare identifier is a hint in either mode.
         inject_sizes.append(hint_size if pick.rare else _INJECT_OVERHEAD + min(cap, len(raw)))
@@ -580,6 +595,21 @@ def run_tool_hints(
         consulted = sum(h.consulted_later for h in hints)
         report.add("hint precision (named later)", used * 100.0 / len(hints), "%")
         report.add("hint consulted later", consulted * 100.0 / len(hints), "%")
+    dated = [h for h in hints if h.hint.timeline is not None]
+    if dated:
+        # #390: hints for names whose facts changed carry the dated history.
+        report.add(
+            "hints with a name timeline",
+            len(dated) * 100.0 / len(hints),
+            "%",
+            f"{len(dated):,} of {len(hints):,}; "
+            f"{_median([len(h.hint.line()) for h in dated]):,} chars median",
+        )
+        report.add(
+            "timeline precision (named later)",
+            sum(h.used_later for h in dated) * 100.0 / len(dated),
+            "%",
+        )
     if latencies:
         p95 = latencies[max(0, min(len(latencies) - 1, int(0.95 * len(latencies))))]
         report.add("added latency, median", latencies[len(latencies) // 2], "ms")

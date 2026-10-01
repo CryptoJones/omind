@@ -23,6 +23,8 @@ This module closes that gap cheaply enough to run on every tool call:
 * a name is hinted **at most once per session** (names the preflight already
   hinted for a prompt count too), at most :data:`MAX_NAMES_PER_CALL` per call,
   only while it is under the index's rarity ceiling;
+* a name whose facts changed (a superseded note, a correction) gets its dated
+  history instead (:mod:`omind.timeline`, #390), still one line;
 * the hint is **titles only** — one line per name — and is charged to the
   **push** budget (``operation`` :data:`OPERATION`), so it stops when the
   session's push budget is spent;
@@ -176,8 +178,13 @@ class NameHint:
     titles: list[str] = field(default_factory=list)
     #: How many of the notes name it in their title.
     titled: int = 0
+    #: The name's dated history when its facts changed (#390); it replaces the
+    #: plain titles line. ``None`` for a name with no history.
+    timeline: Any = None
 
     def line(self) -> str:
+        if self.timeline is not None:
+            return str(self.timeline.line())
         shown = "; ".join(f"[[{_cut(title)}]]" for title in self.titles)
         what = "about it" if self.titled else "newest"
         return (
@@ -324,7 +331,7 @@ def pick_hints(
     if not text:
         return []
     try:
-        from omind import entities, searchindex
+        from omind import entities, searchindex, timeline
 
         if not entities.enabled():
             return []
@@ -344,6 +351,7 @@ def pick_hints(
         if not lookups:
             return []
         picked: list[tuple[int, int, int, NameHint]] = []
+        read: Any = None
         for order, (key, spelling) in enumerate(fresh):
             lookup = lookups.get(key)
             if lookup is None or lookup.common or not lookup.notes:
@@ -361,6 +369,11 @@ def pick_hints(
             if not titles:
                 continue
             hint = NameHint(name=spelling, key=key, df=len(notes), titles=titles, titled=len(about))
+            if timeline.enabled():
+                # #390: a name whose facts changed shows its dated history,
+                # superseded notes marked rather than left out.
+                read = read or timeline._reader(omi_dir)
+                hint.timeline = timeline.build(omi_dir, spelling, notes, read=read)
             picked.append((0 if about else 1, len(notes), order, hint))
         # Names the vault has notes *about* first (the drive label, not the
         # partition next to it), then rarer first, then order of appearance.
@@ -617,7 +630,8 @@ def replay_transcript(path: Path | str, omi_dir: Path | str) -> Replay:
             spent += size
             already.add(hint.key)
             needle = hint.key
-            titles = [title.casefold()[:60] for title in hint.titles]
+            shown = hint.timeline.titles if hint.timeline is not None else hint.titles
+            titles = [title.casefold()[:60] for title in shown]
             replay.hints.append(
                 ReplayHint(
                     line=number,
