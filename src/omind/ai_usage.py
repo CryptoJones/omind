@@ -356,7 +356,8 @@ def read_events(omi_dir: Path | str) -> list[dict[str, Any]]:
 
 
 #: Operations that put omind's own text into the parent agent's context window.
-CONTEXT_OPERATIONS = ("priming", "recall", "mcp")
+#: ``namehint`` is the PostToolUse name hint (#388), push like the preflight.
+CONTEXT_OPERATIONS = ("priming", "recall", "mcp", "namehint")
 #: Bytes of ledger tail scanned for a per-session total. The ledger is append
 #: ordered and a session's events are contiguous at the end while it is live,
 #: so a bounded tail read answers "how much have I pushed into THIS session"
@@ -484,7 +485,7 @@ def usage_summary(
         if session:
             session_latest[session] = event
 
-    operation_names = ("priming", "recall", "mcp", "verifier", "checkpoint")
+    operation_names = ("priming", "recall", "mcp", "namehint", "verifier", "checkpoint")
     operations = {
         operation: totals([e for e in attributable if e.get("operation") == operation])
         for operation in operation_names

@@ -46,6 +46,8 @@ baseline. Change one only in a commit that says why.
 | `preflight.p99_chars` | preflight recall: per-turn push, p99 | <= 6,000 chars | 20 | #321 was a tail problem (p99 6,809 / max 16,406 chars), invisible in totals |
 | `preflight.precision_pct` | preflight recall: injection precision | >= 70 % | 5 | the 70% target #321 set; measured by `omind bench --precision` |
 | `session.p99_tokens` | preflight recall: omind push per session, p99 | <= 15,000 tokens | 10 | guard.SESSION_INJECTION_BUDGET_CHARS is 60,000 chars = 15,000 tokens; since #387 it limits push only (priming, preflight, name hints) |
+| `namehint.p99_chars` | tool-output name hints: per-call push, p99 | <= 1,200 chars | 20 | #388: at most 3 one-line, titles-only hints per tool call, titles cut at 140 chars |
+| `namehint.session_p99_chars` | tool-output name hints: per-session push, p99 | <= 8,000 chars | 10 | namehints.SESSION_BUDGET_CHARS (8,000 chars, a thirtieth of the push budget) |
 | `priming.median_tokens` | SessionStart priming: capsule size, median | <= 2,000 tokens | 10 | the default `balanced` capsule is budgeted at 8,000 chars = 2,000 tokens |
 | `priming.p99_tokens` | SessionStart priming: capsule size, p99 | <= 4,000 tokens | 10 | twice the `balanced` budget; the `full` profile is an explicit opt-in |
 | `mcp.median_chars` | MCP tool responses: response size, median | <= 6,000 chars | 20 | recall-note defaults to 4,000 chars; a median above 6,000 means the expensive tools are the habitual ones |
@@ -78,7 +80,8 @@ gap is part of the report rather than an omission.
 Nothing new is collected. The audit reads:
 
 - the AI-usage ledger (`omind ai usage` reads the same file) — preflight, priming,
-  MCP-response and verifier sizes, and per-session accumulation;
+  tool-output name-hint, MCP-response and verifier sizes, and per-session
+  accumulation;
 - the compliance log — off-topic verdicts, denies, and gate continuity;
 - `omind bench --precision` — injection precision on the labelled query set;
 - the live MCP server definition — the fixed per-session schema cost;

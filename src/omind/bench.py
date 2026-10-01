@@ -519,6 +519,89 @@ def run_precision(
     return report
 
 
+def transcripts_in(source: Path | str, *, days: float = 0.0) -> list[Path]:
+    """The ``.jsonl`` transcripts under ``source`` (a file, or a directory
+    searched recursively), oldest first; ``days`` keeps only recently written
+    ones. Raises ``OSError`` when there are none."""
+    root = Path(source).expanduser()
+    found = [root] if root.is_file() else sorted(root.rglob("*.jsonl"))
+    if days > 0:
+        cutoff = time.time() - days * 86400
+        found = [path for path in found if path.stat().st_mtime >= cutoff]
+    if not found:
+        raise OSError(f"no .jsonl transcripts under {root}")
+    return sorted(found, key=lambda path: path.stat().st_mtime)
+
+
+def run_tool_hints(
+    omi_dir: Path | str, source: Path | str, *, days: float = 0.0
+) -> Report:
+    """Replay real sessions through the PostToolUse name hints (#388).
+
+    Every tool result in every transcript is fed, in order, to the same
+    read-only picker the live hook uses (``namehints.pick_hints``), with the
+    same once-per-name and per-session caps, and ``as_of`` the result's date so
+    notes written later cannot help. Read-only: no state, no ledger.
+
+    Precision has no label set here, so it is measured by what the session did
+    next: a hint is **on target** when the agent itself named it later in the
+    session (in its text or in a tool call), and **consulted** when it later
+    read OMI about it. Both undercount — the agent never saw these hints.
+    """
+    from omind import namehints
+
+    omi = Path(omi_dir).expanduser()
+    report = Report(vault=str(omi))
+    paths = transcripts_in(source, days=days)
+    replays = []
+    for path in paths:
+        try:
+            replays.append(namehints.replay_transcript(path, omi))
+        except (OSError, ValueError):
+            continue
+    results = sum(r.tool_results for r in replays)
+    pull = sum(r.pull_skipped for r in replays)
+    hints = [h for r in replays for h in r.hints]
+    latencies = sorted(ms for r in replays for ms in r.latencies_ms)
+    hinted_calls = sum(len({h.line for h in r.hints}) for r in replays)
+    sessions = [r.chars for r in replays if r.chars]
+    report.add("transcripts", len(replays), "count", f"{len(paths) - len(replays)} unreadable")
+    report.add("tool results replayed", results, "count", f"{pull:,} OMI reads skipped (pull)")
+    eligible = len(latencies)  # not pull, not a file tool: what the hook considers
+    report.add(
+        "tool results with a hint",
+        (hinted_calls * 100.0 / results) if results else 0.0,
+        "%",
+        f"{len(hints):,} hints; "
+        + (f"{hinted_calls * 100.0 / eligible:.1f}% of {eligible:,} eligible" if eligible else ""),
+    )
+    if hints:
+        used = sum(h.used_later for h in hints)
+        consulted = sum(h.consulted_later for h in hints)
+        report.add("hint precision (named later)", used * 100.0 / len(hints), "%")
+        report.add("hint consulted later", consulted * 100.0 / len(hints), "%")
+    if latencies:
+        p95 = latencies[max(0, min(len(latencies) - 1, int(0.95 * len(latencies))))]
+        report.add("added latency, median", latencies[len(latencies) // 2], "ms")
+        report.add("added latency, p95", p95, "ms", f"max {latencies[-1]:.1f} ms")
+    if sessions:
+        report.add(
+            "hint chars per hinted session",
+            _median(sessions),
+            "chars",
+            f"median; max {max(sessions):,} (cap {namehints.SESSION_BUDGET_CHARS:,})",
+        )
+    if len(replays) == 1:
+        for item in hints[:5]:
+            report.add(
+                f"hint @ line {item.line}",
+                item.hint.df,
+                "count",
+                f"{item.hint.name}: {'; '.join(t[:60] for t in item.hint.titles)}",
+            )
+    return report
+
+
 def _median(values: list[int]) -> int:
     if not values:
         return 0

@@ -478,10 +478,22 @@ def build_parser() -> argparse.ArgumentParser:
         "instruction at 20/50/80%% depth, preflight on vs off (#321)",
     )
     bench.add_argument(
+        "--tool-hints",
+        action="store_true",
+        help="replay --transcript (a .jsonl session, or a directory of them) through "
+        "the PostToolUse name hints: how often they fire, precision, latency (#388)",
+    )
+    bench.add_argument(
         "--transcript",
         type=Path,
         help="--needle: the long transcript to replay (a Claude Code .jsonl session, "
-        "or any text file as a plain haystack)",
+        "or any text file as a plain haystack); --tool-hints: a session or a directory",
+    )
+    bench.add_argument(
+        "--days",
+        type=float,
+        default=0.0,
+        help="--tool-hints: only transcripts written in the last N days (default: all)",
     )
     bench.add_argument(
         "--mode",
@@ -1431,6 +1443,15 @@ def _run_bench(args: argparse.Namespace) -> int:
             )
         except (OSError, ValueError) as exc:
             print(f"omind bench --needle: {exc}", file=sys.stderr)
+            return 2
+    elif args.tool_hints:
+        if args.transcript is None:
+            print("omind bench --tool-hints requires --transcript PATH", file=sys.stderr)
+            return 2
+        try:
+            report = bench.run_tool_hints(omi_dir, args.transcript, days=args.days)
+        except OSError as exc:
+            print(f"omind bench --tool-hints: {exc}", file=sys.stderr)
             return 2
     elif args.precision:
         report = bench.run_precision(omi_dir)
