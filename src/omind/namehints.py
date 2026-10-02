@@ -21,7 +21,9 @@ This module closes that gap cheaply enough to run on every tool call:
   commit hashes, MIME types, wikilink titles already spelled out) are skipped,
   and a name no note is titled after must be rare (:data:`UNTITLED_MAX_DF`);
 * a name is hinted **at most once per session** (names the preflight already
-  hinted for a prompt count too), at most :data:`MAX_NAMES_PER_CALL` per call,
+  hinted for a prompt count too, and so do names a ``create-note``/``edit-note``
+  response listed under ``related_by_entity`` or ``name_timelines``, #403), at
+  most :data:`MAX_NAMES_PER_CALL` per call,
   only while it is under the index's rarity ceiling;
 * a name whose facts changed (a superseded note, a correction) gets its dated
   history instead (:mod:`omind.timeline`, #390), still one line;
@@ -290,6 +292,53 @@ def is_pull(event: dict[str, Any], omi_dir: Path | str | None) -> bool:
     return False
 
 
+def written_names(event: dict[str, Any]) -> set[str]:
+    """Names an OMI write response (``create-note``/``edit-note``) already put
+    in front of the agent under ``related_by_entity`` or ``name_timelines``
+    (#389, #390), so the PostToolUse hint does not repeat them (#403).
+
+    The response may arrive as a dict, a JSON string, or MCP content blocks
+    wrapping one. Anything else yields ``set()``. Never raises.
+    """
+    tool = str(event.get("tool_name") or "")
+    if not tool.startswith(_OMI_TOOL_PREFIXES):
+        return set()
+    if tool.removeprefix("mcp__omi__").removeprefix("mcp_omi_").replace("_", "-") not in (
+        "create-note",
+        "edit-note",
+    ):
+        return set()
+    from omind import writecontext
+
+    names: set[str] = set()
+
+    def walk(value: Any, depth: int) -> None:
+        if depth > 6:
+            return
+        if isinstance(value, str):
+            if value.lstrip().startswith(("{", "[")):
+                with contextlib.suppress(ValueError, RecursionError):
+                    walk(json.loads(value), depth + 1)
+        elif isinstance(value, dict):
+            for key in (writecontext.FIELD, writecontext.TIMELINE_FIELD):
+                entries = value.get(key)
+                if isinstance(entries, list):
+                    names.update(
+                        str(e["name"])
+                        for e in entries
+                        if isinstance(e, dict) and isinstance(e.get("name"), str)
+                    )
+            for item in value.values():
+                walk(item, depth + 1)
+        elif isinstance(value, (list, tuple)):
+            for item in value:
+                walk(item, depth + 1)
+
+    with contextlib.suppress(Exception):
+        walk(event.get("tool_response"), 0)
+    return names
+
+
 def input_names(tool_input: Any) -> set[str]:
     """Names the agent typed into the call itself. It chose them, so they are
     not news; the hint is for names that arrive *only* in the output. Never
@@ -489,7 +538,12 @@ def tool_hints(event: dict[str, Any], omi_dir: Path | str | None) -> str:
         session = str(event.get("session_id") or event.get("session") or "")
         if not session or omi_dir is None or not enabled():
             return ""
-        if is_pull(event, omi_dir) or skipped_tool(str(event.get("tool_name") or "")):
+        if is_pull(event, omi_dir):
+            # #403: names a create-note/edit-note response already showed
+            # (related_by_entity, name_timelines) are not hinted again.
+            mark_hinted(session, written_names(event))
+            return ""
+        if skipped_tool(str(event.get("tool_name") or "")):
             return ""
         text = response_text(event.get("tool_response"))
         if not text:

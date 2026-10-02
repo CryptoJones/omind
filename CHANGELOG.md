@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.0] - 2026-10-02
+
+### Changed
+- **Names shown at write time now count as already hinted for the session
+  ([#403](https://github.com/CryptoJones/omind/issues/403)).** A `create-note` or
+  `edit-note` response that listed a name under `related_by_entity` (#389) or
+  `name_timelines` (#390) left the once-per-session name-hint ledger (#388) untouched, so
+  a later tool result printing the same name hinted it again. The PostToolUse hook now
+  reads those names out of an OMI write response (a dict, a JSON string, or MCP content
+  blocks) and marks them hinted. The write stays pull and is never a hint trigger itself;
+  a read whose result happens to carry the same field names marks nothing. Fails open:
+  an unparseable response marks nothing.
+
 ## [10.1.2] - 2026-10-02
 
 ### Fixed

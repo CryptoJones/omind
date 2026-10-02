@@ -218,6 +218,45 @@ def test_preflight_hint_counts_as_hinted(omi: Path) -> None:
     assert namehints.tool_hints(_event("pf", DISKUTIL), omi) == ""
 
 
+@pytest.mark.parametrize("tool", ["mcp__omi__create-note", "mcp__omi__edit-note"])
+@pytest.mark.parametrize("shape", ["blocks", "json", "dict"])
+def test_names_shown_at_write_time_count_as_hinted(omi: Path, tool: str, shape: str) -> None:
+    """#403: a name the write response already listed under ``related_by_entity``
+    or ``name_timelines`` is not hinted again by a later tool result."""
+    from omind import writecontext
+
+    fields = writecontext.response_fields(
+        omi, title="New As30p mount check", details="Mounted As30p again today."
+    )
+    assert any(r["name"] == "As30p" for r in fields[writecontext.FIELD])  # type: ignore[union-attr]
+    body = json.dumps({"filename": "New As30p mount check.md", **fields})
+    response: object = {
+        "blocks": [{"type": "text", "text": body}],
+        "json": body,
+        "dict": {"filename": "New As30p mount check.md", **fields},
+    }[shape]
+    session = f"w-{tool}-{shape}"
+    write = {"session_id": session, "tool_name": tool, "tool_input": {}, "tool_response": response}
+    assert namehints.tool_hints(write, omi) == ""  # the write itself is pull
+    assert "as30p" in namehints.hinted(session)
+    assert namehints.tool_hints(_event(session, DISKUTIL), omi) == ""
+    assert _ledger(omi) == []
+
+
+def test_only_write_tools_mark_names_hinted(omi: Path) -> None:
+    """A read whose result happens to carry the field name is still just pull."""
+    body = json.dumps({"related_by_entity": [{"name": "As30p"}]})
+    read = {
+        "session_id": "rd",
+        "tool_name": "mcp__omi__read-note",
+        "tool_input": {},
+        "tool_response": [{"type": "text", "text": body}],
+    }
+    assert namehints.tool_hints(read, omi) == ""
+    assert namehints.hinted("rd") == set()
+    assert "As30p" in namehints.tool_hints(_event("rd", DISKUTIL), omi)
+
+
 # -- what counts as a name worth a hint --------------------------------------
 
 
