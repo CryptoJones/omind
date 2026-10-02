@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.10] - 2026-10-02
+
+### Fixed
+- **Pushing `HEAD` from a public repo's main was not judged as a push to main
+  ([#423](https://github.com/CryptoJones/omind/issues/423)).** The refspec `HEAD` (or `@`)
+  was compared to the branch condition literally, so `git push origin HEAD`,
+  `git push -u origin HEAD` and `git push origin @` from a checked-out public main passed
+  the no-direct-push-public-main rule.
+  - A `HEAD` / `@` refspec now resolves to the checked-out branch of the repo the push
+    targets (its own `cd` / `-C`, not the cwd), so the same pushes from a feature branch
+    stay allowed. Lowercase `head` counts too: on a case-insensitive filesystem git
+    resolves it to the checked-out branch.
+  - `src:dst` is still judged by its destination (`HEAD:main`, `@:refs/heads/main`), and a
+    literal destination stays literal: `git push origin feature:HEAD` pushes a remote ref
+    named `HEAD`, not the local branch.
+  - A push with no refspec (`git push`, `git push origin`) is judged by where it lands,
+    `@{push}`: `feature/x` tracking `origin/main` under `push.default=upstream` is a push
+    to main. A configured `remote.<name>.push` refspec sourced from `HEAD` (which
+    `@{push}` does not resolve) is read too. If git cannot answer (detached HEAD, no
+    upstream, not a repo, git missing), the checked-out branch is judged, as before.
+
 ## [10.2.9] - 2026-10-02
 
 ### Fixed
