@@ -77,6 +77,43 @@ def test_hostnames_domains_and_ipv4_but_not_files() -> None:
     assert "999.1.1.1" not in keys
 
 
+def test_dotted_code_names_are_not_hostnames() -> None:
+    """#402: ``asyncio.run`` is a call, not a host under the ``.run`` ending."""
+    text = (
+        "Call asyncio.run(main()) then logging.info and self.path.name; "
+        "args.name, page.live, os.path, json.load(fp) and x.test()."
+    )
+    keys = _keys(text)
+    for not_a_host in (
+        "asyncio.run",
+        "logging.info",
+        "self.path.name",
+        "path.name",
+        "args.name",
+        "page.live",
+        "os.path",
+        "json.load",
+        "x.test",
+    ):
+        assert not_a_host not in keys
+
+
+def test_real_hostnames_under_code_colliding_endings_still_extract() -> None:
+    text = (
+        "Deployed to my-app.run, api.fly.run and https://hello.run/; docs on "
+        "wiki.example.info, see status-page.live and ci.build.test."
+    )
+    keys = _keys(text)
+    assert {
+        "my-app.run",
+        "api.fly.run",
+        "hello.run",
+        "wiki.example.info",
+        "status-page.live",
+        "ci.build.test",
+    } <= keys
+
+
 def test_repo_slugs_from_urls_and_bare() -> None:
     text = (
         "Clone https://github.com/CryptoJones/omind.git or git@gitlab.com:someone/tool, "

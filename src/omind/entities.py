@@ -57,7 +57,7 @@ DEFAULT_MAX_DF_FRACTION = 0.15
 MIN_DF_CEILING = 10
 #: Bump when extraction rules change: the next refresh re-extracts every note
 #: (cheap — no re-embedding, no schema wipe).
-EXTRACTOR_VERSION = "1"
+EXTRACTOR_VERSION = "2"
 #: Bounds on what one note can contribute, so a pasted log can't bloat the index.
 MAX_ENTITIES_PER_NOTE = 1000
 _MAX_TOKEN_LEN = 120
@@ -130,6 +130,13 @@ _TLDS = frozenset(
         "localhost",
     ]
 )
+#: Endings that are also everyday attribute names in code (``asyncio.run``,
+#: ``logging.info``, ``args.name``). A dotted token under one of these reads as
+#: a host only with hostname-only evidence: a hyphen (illegal in an identifier),
+#: a ``//`` before it (a URL), or three or more labels not rooted at ``self`` /
+#: ``cls`` (#402).
+_CODE_TLDS = frozenset(["run", "name", "info", "page", "live", "test", "int", "site", "home"])
+_CODE_ROOTS = frozenset(["self", "cls"])
 #: Extensions that mark a dotted or slashed token as a file, not a name.
 _FILE_EXTS = frozenset(
     [
@@ -345,10 +352,21 @@ def _mixed(text: str) -> Iterable[str]:
                     yield part
 
 
+def _host_ok(host: str, text: str, start: int, end: int) -> bool:
+    labels = host.lower().split(".")
+    if labels[-1] not in _TLDS or text.startswith("(", end):
+        return False  # ``foo.run(...)`` is a call, whatever the ending
+    if labels[-1] not in _CODE_TLDS:
+        return True
+    if "-" in host or text.endswith("//", 0, start):
+        return True
+    return len(labels) > 2 and labels[0] not in _CODE_ROOTS
+
+
 def _hosts(text: str) -> Iterable[str]:
     for match in _HOST_RE.finditer(text):
         host = match.group(1).rstrip(".")
-        if host.rsplit(".", 1)[-1].lower() in _TLDS:
+        if _host_ok(host, text, match.start(1), match.start(1) + len(host)):
             yield host
 
 
