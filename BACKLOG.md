@@ -149,6 +149,16 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.9)
+
+- [x] **guard: in-place edits still missed — gsed -i, second -exec after `\;`, case arms, poetry/pipx run, fs.rmSync/os.rename/shutil.move** ([#419](https://github.com/CryptoJones/omind/issues/419)) — **v10.2.9** — _bug_ —
+  `gsed` is an editor; an escaped `\;` no longer splits the stage, so a second
+  `find -exec` is read (and find's own `-iname` after it is not sed's `-i`); a case arm's
+  `)` ends a stage; `poetry`/`pipx`/`uv`/`pipenv`/`pdm`/`hatch`/`conda run` exec the next
+  word, past the tool's global options; `fs.rmSync(`, `.renameSync(`, `os.rename(`,
+  `shutil.move(` count as script writes, and `rm`/`rmdir`/`rename` only on a file-system
+  receiver (not pandas `df.rename`); a quoted `';'` ends a `find -exec`.
+
 ### Shipped — 2026-10-02 (v10.2.8)
 
 - [x] **guard: the hook's check action does not fail open on a classifier exception (AGENTS.md invariant 2)** ([#420](https://github.com/CryptoJones/omind/issues/420)) — **v10.2.8** — _bug_ —
