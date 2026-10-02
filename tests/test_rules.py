@@ -513,11 +513,13 @@ def test_walker_gaps_on_windows_tokenizing(
         assert not _denied(omi, command, cwd, monkeypatch), command
 
 
-def test_unknown_user_home_makes_the_directory_unknowable() -> None:
+def test_unknown_user_home_makes_the_directory_unknowable(tmp_path: Path) -> None:
     """#432: `Path.expanduser` raises on a `~user` with no such user; the walk
-    must not lose every site to it."""
+    must not lose every site to it. The later `cd` uses a real absolute path:
+    a bare `/x` is drive-relative on Windows, not absolute."""
+    target = (tmp_path / "x").as_posix()
     sites, _cwd, _local, _bodies = guard._shell_walk(
-        "cd ~nosuchuserzz432 && git status; cd /x && git push origin main"
+        f"cd ~nosuchuserzz432 && git status; cd {target} && git push origin main"
     )
     assert [s.program for s in sites] == ["cd", "git", "cd", "git"]
     assert sites[-1].cwd is not None and sites[-1].cwd.name == "x"
