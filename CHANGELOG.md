@@ -16,13 +16,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   run of options with no matching verb after cost about 3^N: `git` with 16 `-c a=b`
   took 6.5 s, and 18 took over 20 s. A PreToolUse hook that times out does not
   block, so those commands skipped the freshness, git-rules consult, capability and
-  omi-gate layers. guard.py now uses rules.py's one-shell-word pattern from #413,
-  `(?:[^\s"']|"[^"]*"|'[^']*')+`, which matches each character exactly one way.
+  omi-gate layers. guard.py and rules.py now share one shell-word pattern,
+  `(?:\\.|[^\s"'\\]|"[^"]*"|'[^']*')+`, which matches each character exactly one
+  way. The `\\.` branch takes a backslash-escaped quote (`O\'Brien`, `a=\"b`) as
+  one character: `policy.shell_code_text` leaves it as-is outside quotes, and
+  rules.py's #413 pattern read it as an unclosed quoted run, so
+  `git -c user.name=O\'Brien commit` was not a commit or repo work and a `push`
+  in that form escaped the side-effect check and the push rule.
   The fix covers `_GIT_FRESH_SUB_RE`, `_GIT_READONLY_SUB_RE`, `_GIT_COMMIT_RE`,
-  `_SHELL_SIDE_EFFECT_RE`, `_RISKY_SIDE_EFFECT_RE` and the inline regex in
-  `_is_repo_sensitive_action`. Each now rejects 40 options in well under a second.
-  Every form the old pattern accepted still matches. A scan of guard.py, policy.py
-  and rules.py found no other ambiguous pattern used on command text.
+  `_SHELL_SIDE_EFFECT_RE`, `_RISKY_SIDE_EFFECT_RE`, the inline regex in
+  `_is_repo_sensitive_action`, and rules.py's push matching. Each now rejects 40
+  options in well under a second. Option values with balanced quotes and with
+  escaped quotes match. A scan of guard.py, policy.py and rules.py found no other
+  ambiguous pattern used on command text.
 
 ## [10.2.11] - 2026-10-02
 

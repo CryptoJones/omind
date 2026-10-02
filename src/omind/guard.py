@@ -1328,7 +1328,11 @@ _REPO_TEST_RE = re.compile(
 # exactly one way to match, so a run of options with no matching verb after fails
 # in linear time. The old `\S+(?:"…")?\S*` split each value several ways and
 # backtracked ~3^N (6.5 s at 16 `-c a=b`), past the hook timeout (#431).
-_GIT_OPT_VALUE = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
+# shell_code_text leaves a backslash-escaped quote OUTSIDE quotes as-is, so `\\.`
+# takes `\'` / `\"` as one escaped character; read as an unclosed quoted run, it
+# hid `git -c user.name=O\'Brien commit` from every classifier (#431 review). Each
+# alternative starts with a different character, so the match stays linear.
+_GIT_OPT_VALUE = r"""(?:\\.|[^\s"'\\]|"[^"]*"|'[^']*')+"""
 _GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
 # One git subcommand that ESTABLISHES freshness (a fetch, or an ff-only/rebase
 # pull). ``[^|>&;\n]*`` keeps the whole subcommand free of pipes/redirects/chains

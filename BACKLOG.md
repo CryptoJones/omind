@@ -13,8 +13,6 @@ the exact order of operations._
 
 - [ ] **guard: hard seed rules miss `bash -c` / `eval` / piped-shell bodies and `env`/`nice`/`timeout`-wrapped `sudo`** ([#430](https://github.com/CryptoJones/omind/issues/430)) — _bug (security)_ —
   `bash -c 'sudo rm -rf /x'` and `timeout 5 sudo …` are not blocked. Found by the 2026-10-02 Fable audit.
-- [ ] **guard: `_GIT_OPT_VALUE` backtracks exponentially** ([#431](https://github.com/CryptoJones/omind/issues/431)) — _bug (DoS)_ —
-  16× `git -c` takes 6.5 s, so a PreToolUse hook timeout skips the soft gates. rules.py already has the fix; guard.py doesn't.
 - [ ] **rules: shell-site walker gaps from #413** ([#432](https://github.com/CryptoJones/omind/issues/432)) — _bug, includes a regression_ —
   a heredoc piped to `bash` is no longer judged. Also: an interpreter heredoc can exec a push, `cd ~user` raises, `env -C` is ignored, and `find -exec {} +` chains are quadratic.
 - [ ] **rules: push `--all` / `--mirror` and `push.default=matching` reach main from a feature branch** ([#433](https://github.com/CryptoJones/omind/issues/433)) — _bug_

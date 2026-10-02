@@ -461,8 +461,12 @@ def _default_push_branches(repo: Path, remote: str) -> list[str]:
 
 # Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
 # literals (#317 / #333 / #345) after -C or -c. One shell word: unquoted runs
-# and quoted runs in any order, so `user.name='A B'` is one value (#414).
-_GIT_OPT_VALUE = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
+# and quoted runs in any order, so `user.name='A B'` is one value (#414). A
+# backslash escapes the next character (`O\'Brien`, `a=\"b`): shell_code_text
+# leaves an escaped quote outside quotes as-is, and read as an unclosed quoted
+# run it hid the push from the rule (#431 review). Each alternative starts with a
+# different character, so the match stays linear.
+_GIT_OPT_VALUE = r"""(?:\\.|[^\s"'\\]|"[^"]*"|'[^']*')+"""
 # git's global options between `git` and the subcommand (#414): `-C <dir>`,
 # `-c k=v`, `--git-dir[=]<p>` and its siblings, and flag-only options such as
 # `--no-pager` / `-P`. A subcommand never starts with `-`, so the run of options

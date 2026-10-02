@@ -4,14 +4,17 @@
 
 from __future__ import annotations
 
+import contextlib
 import importlib.resources
 import io
 import json
 import re
 import shutil
+import signal
 import subprocess
 import sys
 import time
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -3163,23 +3166,93 @@ _GIT_OPTS_REGEXES = (
 )
 
 
+@contextlib.contextmanager
+def _hard_time_limit(seconds: float = 5.0) -> Iterator[None]:
+    """Fail the enclosed block after ``seconds`` instead of letting a
+    catastrophic regex hang the run until CI's own timeout (#431 review): an
+    exponential search never returns, so an elapsed-time assert after it never
+    runs. ``signal.setitimer`` is POSIX-only, so Windows skips."""
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("needs signal.setitimer (POSIX)")
+
+    def _expired(_signum: int, _frame: object) -> None:
+        raise TimeoutError(f"exceeded the {seconds} s hard bound")
+
+    previous = signal.signal(signal.SIGALRM, _expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)
+
+
+def _timed(fn: Callable[[], object]) -> tuple[object, float]:
+    """Run ``fn`` under :func:`_hard_time_limit`; return its result and elapsed time."""
+    with _hard_time_limit():
+        start = time.perf_counter()
+        result = fn()
+        return result, time.perf_counter() - start
+
+
 @pytest.mark.parametrize(
-    "opt", ["-c a=b ", '-C "  " ', "-c user.name='A B' ", "-C /abs/repo ", '-c k="  "x ']
+    "opt",
+    [
+        "-c a=b ",
+        '-C "  " ',
+        "-c user.name='A B' ",
+        "-C /abs/repo ",
+        '-c k="  "x ',
+        "-c user.name=O\\'Brien ",
+        '-c a=\\"b ',
+    ],
 )
 def test_git_global_options_do_not_backtrack_exponentially(opt: str) -> None:
     """#431: `\\S+(?:...)?\\S*` split each `-c k=v` value several ways, so a run of
     them with no matching verb after cost ~3^N (6.5 s at 16). A PreToolUse hook
-    that times out does not block, so the soft gates were skipped."""
+    that times out does not block, so the soft gates were skipped. Each search
+    runs under a hard bound, so a regression fails here rather than hanging."""
     command = "git " + opt * 40 + "bogus"
     for regex in _GIT_OPTS_REGEXES:
-        start = time.perf_counter()
-        assert not regex.search(command), regex.pattern
-        assert time.perf_counter() - start < 1.0, regex.pattern
+        found, elapsed = _timed(lambda regex=regex: regex.search(command))
+        assert not found, regex.pattern
+        assert elapsed < 1.0, regex.pattern
     action = {"tool": "Bash", "command": command}
-    start = time.perf_counter()
-    assert not guard._is_repo_sensitive_action(action)
-    assert not guard._is_commit_action(action)
-    assert time.perf_counter() - start < 1.0
+    for check in (guard._is_repo_sensitive_action, guard._is_commit_action):
+        found, elapsed = _timed(lambda check=check: check(action))
+        assert not found, check.__name__
+        assert elapsed < 1.0, check.__name__
+
+
+@pytest.mark.parametrize("count", [16, 24, 40])
+def test_decide_on_a_long_git_option_run_is_fast(count: int) -> None:
+    """#431's headline case end to end: `git` + N x `-c a=b` + `commit -m x`
+    through the whole ``decide()`` pipeline, under a second."""
+    session = f"s431-{count}"
+    guard.clear_gate(session)
+    command = "git " + "-c a=b " * count + "commit -m x"
+    action = {"tool": "Bash", "command": command, "session": session}
+    verdict, elapsed = _timed(lambda: guard.decide(action))
+    assert isinstance(verdict, guard.Verdict)
+    assert elapsed < 1.0
+
+
+@pytest.mark.parametrize("value", ["user.name=O\\'Brien", 'a=\\"b'])
+def test_escaped_quote_in_a_git_option_value_still_classifies(value: str) -> None:
+    """#431 review: ``shell_code_text`` leaves an escaped quote outside quotes
+    as-is, and the one-shell-word pattern read it as an unclosed quoted run, so
+    `git -c user.name=O\\'Brien commit` was neither a commit nor repo work and
+    skipped the freshness gate (fail-open). The ``\\\\.`` branch consumes it."""
+    commit = {"tool": "Bash", "command": f"git -c {value} commit -m fix"}
+    assert guard._is_commit_action(commit)
+    assert guard._is_repo_sensitive_action(commit)
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": f"git -c {value} merge x"})
+    assert guard._GIT_FRESH_SUB_RE.search(f"git -c {value} fetch origin --prune")
+    assert guard._GIT_READONLY_SUB_RE.search(f"git -c {value} status")
+    assert guard._SHELL_SIDE_EFFECT_RE.search(f"git -c {value} add .")
+    push = f"git -c {value} push origin main"
+    assert guard._RISKY_SIDE_EFFECT_RE.search(push)
+    assert guard._is_side_effect_action({"tool": "Bash", "command": push})
 
 
 def test_git_global_options_still_match_after_the_431_fix() -> None:
