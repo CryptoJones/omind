@@ -4,6 +4,7 @@
 
 from __future__ import annotations
 
+import json
 import re
 from pathlib import Path
 from typing import Any
@@ -92,11 +93,12 @@ def compact_recall(
         # caused by an overriding exception living below the fold (#239). Name
         # the note and the exact follow-up call instead.
         wanted = min(len(content) + 500, MAX_RECALL_CHARS)
-        title = fields.title or Path(filename).stem
+        # Name the stored filename, not the title: a retitled note's title
+        # resolves nowhere, and a title holding ``:`` is not the filename (#393).
         marker = (
             f"\n…[TRUNCATED at {limit} of {len(content)} chars. Before acting "
             "on this topic, call OMI MCP recall-note "
-            f'{{"name": "{title}", "max_chars": {wanted}}} '
+            f'{{"name": {json.dumps(filename, ensure_ascii=False)}, "max_chars": {wanted}}} '
             "or request a specific section.]"
         )
         content = content[: max(0, limit - len(marker))].rstrip() + marker

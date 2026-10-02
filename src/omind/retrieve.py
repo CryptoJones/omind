@@ -402,7 +402,7 @@ def _indexed_notes(
                 row.filename for row in rows if _looks_credential(row.title, " ".join(row.tags))
             }
         found = [
-            (title_by_file[hit.filename], _filename_stem(hit.filename))
+            (title_by_file[hit.filename], hit.filename)
             for hit in hits
             if hit.filename in title_by_file and hit.filename not in cred_files
         ]
@@ -412,9 +412,9 @@ def _indexed_notes(
 
 
 def _filename_stem(filename: str) -> str:
-    """A note's stored filename without ``.md`` -- the name that resolves by
-    construction (a title may hold characters stripped from the filename, or
-    the note may have been retitled since it was created; issue #393)."""
+    """A note's stored filename without ``.md`` -- the display fallback for an
+    untitled note. Never a ``recall-note`` name: a note titled ``X.md`` is
+    stored as ``X.md.md`` and its stem ``X.md`` names a different file."""
     return filename[:-3] if filename.endswith(".md") else filename
 
 
@@ -428,10 +428,13 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
 
 
 def _relevant_notes(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[tuple[str, str]]:
-    """``(title, filename stem)`` of the notes most relevant to ``task``.
+    """``(title, stored filename)`` of the notes most relevant to ``task``.
 
-    The title is for display; the stem is what a ``recall-note`` call should
-    carry, because only the stem is guaranteed to resolve. Fails open to ``[]``.
+    The title is for display; the full stored filename (with ``.md``) is what a
+    ``recall-note`` call should carry: ``safe_name`` takes a name ending in
+    ``.md`` as-is, so it opens exactly that file. A title may hold stripped
+    characters or be stale after a retitle, and a stem is ambiguous for a title
+    ending in ``.md`` (issue #393). Fails open to ``[]``.
     """
     task_terms = _tokens(task)
     if not task_terms:
@@ -458,9 +461,9 @@ def _relevant_notes(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[t
             task_is_cred=task_is_cred,
         )
         if score > 0:
-            scored.append((score, note.title or stem, stem))
+            scored.append((score, note.title or stem, note.filename))
     scored.sort(key=lambda s: (-s[0], s[1].lower()))
-    return [(title, stem) for _score, title, stem in scored[:limit]]
+    return [(title, filename) for _score, title, filename in scored[:limit]]
 
 
 def suggest_message(task: str, omi_dir: Path | str, *, limit: int = 3) -> str:
@@ -475,10 +478,10 @@ def suggest_message(task: str, omi_dir: Path | str, *, limit: int = 3) -> str:
     if not notes:
         return GATE_MESSAGE
     titles = [title for title, _name in notes]
-    # The call carries the stored filename stem, not the title: only the stem is
-    # guaranteed to resolve through recall-note (a title may hold stripped
-    # characters, or the note may have been retitled; issue #393). The title
-    # stays in the [[...]] display for the reader.
+    # The call carries the full stored filename, not the title or the stem: a
+    # title may hold stripped characters or be stale after a retitle, and the
+    # stem of ``X.md.md`` (a note titled ``X.md``) is ``X.md``, a different
+    # file (issue #393). The title stays in the [[...]] display for the reader.
     call = json.dumps({"name": notes[0][1]}, ensure_ascii=False, separators=(",", ":"))
     alternatives = ", ".join(f"[[{title}]]" for title in titles[1:])
     extra = f" Other candidates: {alternatives}." if alternatives else ""

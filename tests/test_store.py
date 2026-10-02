@@ -1049,7 +1049,7 @@ def test_relevant_titles_with_stripped_characters_resolve_via_read_note(
     """Issue #393, fixture-level: titles holding characters the sanitizer
     strips (``:``, ``?``, ``/``, ``"``, ``<>``) resolve through ``read_note``.
     Not a live-vault property: the gate's real contract (it emits the stored
-    stem, which also covers retitled notes) is
+    filename, which also covers retitled notes) is
     ``test_retrieve.py::test_suggest_message_recall_name_resolves_for_a_retitled_note``."""
     from omind import retrieve
 
@@ -1102,3 +1102,16 @@ def test_create_resolves_strictly_and_ignores_title_fallback(tmp_path: Path) -> 
     assert store.create_note(NoteFields(title="X", summary="second")) == "X.md"
     assert store.read_fields("X.md.md").summary == "first"
     assert store.read_fields("X.md").summary == "second"
+
+
+def test_create_beside_a_scratch_note_creates_the_durable_note(tmp_path: Path) -> None:
+    """Round 2 of #405 (the CHANGELOG's advertised behaviour change): creating
+    ``X`` beside an existing ``X.scratch.md`` creates ``X.md`` instead of
+    resolving onto the scratch note and refusing it as "already exists"."""
+    store = OmiStore(tmp_path)
+    assert store.create_note(NoteFields(title="X", summary="scratch"), scratch=True) == (
+        "X.scratch.md"
+    )
+    assert store.create_note(NoteFields(title="X", summary="durable")) == "X.md"
+    assert store.read_fields("X.scratch.md").summary == "scratch"
+    assert store.read_fields("X.md").summary == "durable"

@@ -17,9 +17,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   tried the title-to-filename fallback when strict validation *rejected* the name, and a
   `:` is legal to the validator — so the colon form validated, missed on disk, and failed
   with "note not found", leaving the gate's own remediation call unsatisfiable.
-  - The gate's `recall-note` call now carries the note's **stored filename stem**, which
-    resolves by construction — including for a note retitled after creation, whose title
-    resolves nowhere. The human title stays in the `[[…]]` display.
+  - The gate's `recall-note` call now carries the note's **full stored filename** (with
+    `.md`), which `safe_name` opens as-is — including for a note retitled after creation,
+    whose title resolves nowhere, and for a note titled `X.md` (stored as `X.md.md`), whose
+    stem `X.md` would name a different file. The human title stays in the `[[…]]`
+    display. The `recall-note` truncation marker's follow-up call names the stored
+    filename too.
   - `safe_name` also falls back when a name validates but names no existing note, but
     only if the name holds a character the sanitizer strips (`:`, `?`, `"`, …), and only
     onto a note whose parsed title matches it (casefold). A collision such as
