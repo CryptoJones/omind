@@ -1742,11 +1742,153 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
             return True
         if _REPO_TEST_RE.search(command):
             return True
-        if re.search(r"(?:^|[;&|\n(]\s*)(?:sed|perl|python|python3|node|ruby)\b", command) and (
-            " -i" in command or "write_text" in command or "Path(" in command
-        ):
+        stages = _program_stages(command)
+        if _runs_in_place_edit(stages):
+            return True
+        if _runs_script_write(stages, str(action.get("command") or "")):
             return True
     return bool(path)
+
+
+#: Words in command position that are not the program a stage runs: wrappers
+#: that exec the next word (``xargs``, ``sudo``, ``env``, ``timeout`` …) and
+#: shell keywords that introduce a command (``do``, ``then``, ``{`` …). The
+#: value is the wrapper's switches that take a SEPARATE argument, so
+#: ``sudo -u bob sed -i`` and ``xargs -I {} sed -i`` still reach the editor.
+_STAGE_WRAPPERS: dict[str, frozenset[str]] = {
+    **{name: frozenset() for name in policy._HEREDOC_OWNER_SKIP},
+    **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
+    "xargs": frozenset({"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
+    "env": frozenset({"-u", "-C", "-S"}),
+    "nice": frozenset({"-n"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "time": frozenset({"-f", "-o"}),
+}
+#: Wrappers that take one positional argument before the command (``timeout 5``).
+_WRAPPER_POSITIONAL = frozenset({"timeout"})
+#: ``find`` actions whose following words are a command of their own.
+_EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
+#: Per editor: (switches meaning in-place — BSD ``sed -I`` too; switches after
+#: which the rest of a cluster is that switch's ARGUMENT, as in
+#: ``perl -MList::Util`` / ``sed -fscript``; the subset that, as the LAST char
+#: of a cluster, consume the NEXT word — in ``sed -e -i f`` that ``-i`` is the
+#: script, not the flag).
+_EDITOR_SWITCHES: dict[str, tuple[frozenset[str], frozenset[str], frozenset[str]]] = {
+    "sed": (frozenset("iI"), frozenset("efl"), frozenset("efl")),
+    "perl": (frozenset("i"), frozenset("dDeEIMmx"), frozenset("eE")),
+    "ruby": (frozenset("i"), frozenset("CeEFIrx"), frozenset("CeEIr")),
+}
+_EDITOR_LONG_ARG = frozenset({"--expression", "--file", "--line-length"})
+_INTERPRETER_RE = re.compile(r"python[\d.]*|node|nodejs|ruby")
+_WRITE_MODE = r"""\\?['"](?:[bt]*[wax][bt+]*|r[bt]*\+[bt]*)\\?['"]"""
+#: A script writing or deleting files. Call syntax only, so the bare word in a
+#: printed string or a grep pattern does not count.
+_SCRIPT_WRITE_RE = re.compile(
+    r"\b(?:write_text|write_bytes|writeFile|writeFileSync|appendFile|appendFileSync)\s*\("
+    r"|\bFile\.write\s*\("
+    r"|\.unlink(?:Sync)?\s*\(|\bos\.(?:remove|replace)\s*\(|\bshutil\.rmtree\s*\("
+    # open(p, 'w'|'a'|'x'|'r+'…), open(p, mode="wb"), Path(p).open("w")
+    rf"|\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?{_WRITE_MODE}"
+    rf"|\.open\s*\(\s*(?:mode\s*=\s*)?{_WRITE_MODE}"
+)
+
+
+def _basename(word: str) -> str:
+    base = re.split(r"[/\\]", word)[-1]
+    return base[:-4] if base.lower().endswith(".exe") else base
+
+
+def _program_stages(code: str) -> list[tuple[str, list[str], int, int]]:
+    """Split shell ``code`` into simple commands: ``(program, args, start, end)``.
+
+    ``code`` is ``policy.shell_code_text`` output — the same length as the raw
+    command, so ``start:end`` slices the raw text too. Backslash-newline
+    continuations are joined; stages break at ``; & | ( `` ` `` and newlines,
+    and again at a ``find -exec``. Leading ``VAR=x`` assignments, wrappers and
+    keywords are skipped, so ``program`` is the basename (``.exe`` stripped) of
+    what actually runs. ``end`` extends over trailing blanked text: the heredoc
+    body that stage owns."""
+    code = code.replace("\\\n", "  ")
+    n = len(code)
+    stages: list[tuple[str, list[str], int, int]] = []
+    for seg in re.finditer(r"[^;&|\n(`]+", code):
+        end = seg.end()
+        while end < n and code[end].isspace():
+            end += 1
+        toks = [(m.group(), seg.start() + m.start()) for m in re.finditer(r"\S+", seg.group())]
+        while toks:
+            j = 0
+            while j < len(toks):
+                word = toks[j][0]
+                if re.match(r"[A-Za-z_]\w*=", word):
+                    j += 1
+                    continue
+                base = _basename(word)
+                if base not in _STAGE_WRAPPERS:
+                    break
+                j += 1
+                while j < len(toks) and toks[j][0].startswith("-"):
+                    j += 2 if toks[j][0] in _STAGE_WRAPPERS[base] else 1
+                if base in _WRAPPER_POSITIONAL and j < len(toks):
+                    j += 1
+            toks = toks[j:]
+            if not toks:
+                break
+            cut = next((k for k, (w, _) in enumerate(toks) if k and w in _EXEC_ACTIONS), len(toks))
+            stages.append((_basename(toks[0][0]), [w for w, _ in toks[1:cut]], toks[0][1], end))
+            toks = toks[cut + 1 :]
+    return stages
+
+
+def _runs_in_place_edit(stages: list[tuple[str, list[str], int, int]]) -> bool:
+    """True when a ``sed``/``perl``/``ruby`` invocation carries ITS OWN in-place
+    flag (``-i``, ``-i ''``, ``-i.bak``, ``-pi``, ``-Ei``, BSD ``sed -I``,
+    ``--in-place[=SUF]``).
+
+    ``stages`` come from :func:`_program_stages` over ``shell_code_text``
+    output, so quoted scripts are already blank. Each simple command is read on
+    its own: a ``-i`` belonging to another program in the same command
+    (``grep -iE``, ``ls -i``) used to satisfy a bare ``" -i" in command`` test
+    and turned read-only listings into repo work (#391)."""
+    for program, args, _start, _end in stages:
+        switches = _EDITOR_SWITCHES.get(program)
+        if switches is None:
+            continue
+        inplace, stops, takes_next = switches
+        skip = False
+        for tok in args:
+            if skip:
+                skip = False
+                continue
+            if tok == "--":
+                break
+            if tok == "--in-place" or tok.startswith("--in-place="):
+                return True
+            if tok in _EDITOR_LONG_ARG:
+                skip = True
+                continue
+            if not tok.startswith("-") or tok.startswith("--"):
+                continue
+            for pos, ch in enumerate(tok[1:], start=1):
+                if ch in inplace:
+                    return True
+                if ch in stops:
+                    skip = pos == len(tok) - 1 and ch in takes_next
+                    break
+    return False
+
+
+def _runs_script_write(stages: list[tuple[str, list[str], int, int]], raw: str) -> bool:
+    """True when a python/node/ruby stage's OWN text — its ``-c``/``-e``
+    payload or heredoc body, which ``shell_code_text`` blanked — calls a
+    file-writing or file-deleting API. Only the raw slice of the interpreter's
+    stage is searched, so ``grep "write_text" src | python3 -m json.tool`` is
+    not a script write (#391)."""
+    return any(
+        _INTERPRETER_RE.fullmatch(program) and _SCRIPT_WRITE_RE.search(raw[start:end])
+        for program, _args, start, end in stages
+    )
 
 
 def _is_global_config_mutation(action: dict[str, Any]) -> bool:
