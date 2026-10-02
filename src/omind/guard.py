@@ -39,6 +39,7 @@ cannot be skipped by a broken adapter or a missing policy file.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import re
@@ -1575,8 +1576,52 @@ _GIT_OPTS_WITH_ARG = frozenset(
     {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
 )
 #: Nesting limit for ``bash -c '… eval "…"'`` unwrapping; a deeper body is
-#: left as one opaque site (judged like any other text).
+#: left as one opaque site: its quoted text is judged as code (fails closed).
 _MAX_UNWRAP_DEPTH = 4
+#: Programs that run an ARGUMENT as shell code the guard does not unwrap
+#: (``su -c '…'``, ``fish -c``, ``watch '…'``, ``tmux new '…'``). Their quoted
+#: arguments are code, so a repo-scoped rule matching them fails closed
+#: (#413 review 3) instead of being read as data.
+_OPAQUE_EXECUTORS = frozenset(
+    {
+        "su",
+        "runuser",
+        "fish",
+        "csh",
+        "tcsh",
+        "nu",
+        "xonsh",
+        "elvish",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "script",
+        "watch",
+        "flock",
+        "parallel",
+        "tmux",
+        "screen",
+        "expect",
+        "nix-shell",
+        "chroot",
+        "unshare",
+        "nsenter",
+        "doas",
+        "pkexec",
+    }
+)
+#: ssh options whose value runs locally, before or around the connection.
+_SSH_LOCAL_EXEC_RE = re.compile(r"(?i)(?:Local|Proxy|KnownHosts)Command|\bexec\b")
+#: Script interpreters whose ``-c``/``-e`` body is code: they fail closed only
+#: when that body visibly spawns a process (:data:`_EXEC_CALL_RE`). A
+#: ``python3 -c "print('git push')"`` is data.
+_SCRIPT_INTERPRETER_RE = re.compile(
+    r"python[\d.]*|pypy[\d.]*|node|nodejs|deno|bun|ruby|perl|php|lua"
+)
+_EXEC_CALL_RE = re.compile(
+    r"subprocess|os\.(?:system|popen|exec|spawn)|pty\.spawn|child_process|Open3|%x|`"
+    r"|\b(?:system|exec|execSync|spawn|spawnSync|popen|qx|shell_exec|passthru|proc_open)\b"
+)
 
 
 @dataclass(frozen=True)
@@ -1587,11 +1632,15 @@ class _ShellSite:
     ``sudo``/``env``/``timeout 60`` skipped), with an ssh remote payload
     blanked. ``cwd`` is the directory it runs in, relative to the shell's
     starting directory unless absolute; ``None`` when a ``cd $VAR`` /
-    ``cd -`` made it unknowable (callers then fall back to the start)."""
+    ``cd -`` made it unknowable (callers then fall back to the start).
+    ``opaque`` marks a program that runs a quoted argument as code the guard
+    did not unwrap (``su -c``, a too-deep ``bash -c``, a python ``-c`` that
+    calls ``os.system``): its quoted text is code, not data."""
 
     program: str
     text: str
     cwd: Path | None
+    opaque: bool = False
 
 
 def _chdir(cwd: Path | None, step: str) -> Path | None:
@@ -1602,16 +1651,55 @@ def _chdir(cwd: Path | None, step: str) -> Path | None:
     return None if cwd is None else cwd / target
 
 
+#: A redirection operator alone (``>``, ``2>``, ``&>``, ``>&``): its target is
+#: the next word.
+_REDIRECT_OP_RE = re.compile(r"[0-9]*&?[<>]+[&|]?")
+#: A word that starts with a redirection (``>/dev/null``, ``2>&1``, ``<in``).
+_REDIRECT_RE = re.compile(r"[0-9]*&?[<>]")
+
+
+def _without_redirects(tokens: list[str]) -> list[str]:
+    """``tokens`` minus redirections and their targets: ``cd X >/dev/null``
+    and ``pushd X > /dev/null`` name the same directory as ``cd X``."""
+    words: list[str] = []
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif _REDIRECT_OP_RE.fullmatch(token):
+            skip = True
+        elif not _REDIRECT_RE.match(token):
+            words.append(token)
+    return words
+
+
 def _cd_operand(tokens: list[str] | None) -> str | None:
     """The literal directory a ``cd``/``pushd`` names, or ``None`` when it is
-    not statically knowable (``cd -``, ``cd $VAR``, options, unparseable)."""
+    not statically knowable (``cd -``, ``cd $VAR``, ``pushd +1``,
+    unparseable). Redirections are dropped and ``-P``/``-L``/``-e``/``-@``
+    and ``--`` skipped first (#413 review 3: ``pushd X >/dev/null``)."""
     if tokens is None:
         return None
-    if len(tokens) == 1:
-        return "~" if tokens[0] == "cd" else None  # bare `cd` goes home
-    if len(tokens) != 2 or tokens[1].startswith("-") or "$" in tokens[1] or "`" in tokens[1]:
+    words = _without_redirects(tokens)
+    if not words:
         return None
-    return tokens[1]
+    i = 1
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        if words[i] == "--":
+            i += 1
+            break
+        if not re.fullmatch(r"-[LPe@]+", words[i]):
+            return None
+        i += 1
+    operands = words[i:]
+    if not operands:
+        return "~" if words[0] == "cd" else None  # bare `cd` goes home
+    step = operands[0]
+    if len(operands) != 1 or step == "-" or "$" in step or "`" in step:
+        return None
+    if words[0] == "pushd" and step[:1] == "+":
+        return None  # pushd +N rotates the stack
+    return step
 
 
 def _git_site_cwd(tokens: list[str], cwd: Path | None) -> Path | None:
@@ -1641,6 +1729,12 @@ def _git_site_cwd(tokens: list[str], cwd: Path | None) -> Path | None:
 def _shell_body(tokens: list[str]) -> str | None:
     """The ``-c`` body of ``sh/bash/zsh … -c '<body>'`` (``-lc``, ``-ec`` and
     ``-o opt`` before it included), or ``None`` when there is no ``-c``."""
+    i = _shell_body_index(tokens)
+    return None if i is None else tokens[i]
+
+
+def _shell_body_index(tokens: list[str]) -> int | None:
+    """Where :func:`_shell_body` finds the body in ``tokens``."""
     has_c = False
     i = 1
     while i < len(tokens):
@@ -1655,7 +1749,7 @@ def _shell_body(tokens: list[str]) -> str | None:
             has_c = has_c or (word[0] == "-" and "c" in word[1:])
             i += 1
             continue
-        return word if has_c else None
+        return i if has_c else None
     return None
 
 
@@ -1683,6 +1777,11 @@ def _shell_sites(
     blanked. ``a || b`` is read like ``a && b``: a ``cd`` before ``||`` is
     assumed to have run, which is wrong only when that ``cd`` failed.
 
+    A ``cd``/``pushd`` operand is read past redirections and ``-P``/``-L``/
+    ``--`` (``pushd X >/dev/null``). A site whose quoted arguments are code
+    the walk did not follow (``su -c``, a too-deep or positional-arg ``bash
+    -c``, ssh ``LocalCommand``) is marked ``opaque`` so rules fail closed on it.
+
     Never raises on shell text: an unparseable word list keeps the site at the
     current directory; an unknowable ``cd`` makes the directory ``None``.
     """
@@ -1702,7 +1801,14 @@ def _shell_sites(
                 cwd, dirs = scopes.pop()
             continue
         program = item[0]
-        end = next((k for k in range(pos, len(code)) if code[k] in ";&|\n()`"), len(code))
+        end = next(
+            (
+                k
+                for k in range(pos, len(code))
+                if code[k] in ";&|\n()`" and not _is_redirect_char(code, k)
+            ),
+            len(code),
+        )
         text = raw[pos:end].rstrip()
         try:
             tokens: list[str] | None = _shell_tokens(text)
@@ -1718,7 +1824,7 @@ def _shell_sites(
             )
             if not in_subshell:
                 if program == "popd":
-                    if tokens is None or len(tokens) != 1:
+                    if tokens is None or len(_without_redirects(tokens)) != 1:
                         cwd = None
                     elif dirs:
                         cwd, dirs = dirs[0], dirs[1:]
@@ -1743,15 +1849,26 @@ def _shell_sites(
                 local[cut:end] = [" "] * (end - cut)
                 text = raw[pos:cut]
                 break
-            sites.append(_ShellSite(program, text, cwd))
+            # `-o LocalCommand=…` / `ProxyCommand` / `KnownHostsCommand` /
+            # `Match exec` run on THIS machine: their quoted values are code.
+            sites.append(_ShellSite(program, text, cwd, bool(_SSH_LOCAL_EXEC_RE.search(text))))
             continue
         body: str | None = None
+        positional = False
         if tokens and depth < _MAX_UNWRAP_DEPTH:
             if program in _LOCAL_SHELLS:
-                body = _shell_body(tokens)
+                at_body = _shell_body_index(tokens)
+                if at_body is not None:
+                    body = tokens[at_body]
+                    positional = at_body + 1 < len(tokens)
             elif program == "eval" and len(tokens) > 1:
                 body = " ".join(tokens[1:])
         if body is not None:
+            if positional:
+                # Words after the body become $0, $1 ..., which the body can
+                # run (`bash -c '"$@"' _ <cmd>`): code the walk does not
+                # follow, so the whole command fails closed.
+                sites.append(_ShellSite(program, text, cwd, True))
             inner, inner_cwd, inner_dirs, inner_local = _shell_sites(body, cwd, dirs, depth + 1)
             sites.extend(inner)
             if program == "eval":
@@ -1761,8 +1878,26 @@ def _shell_sites(
                 local[at : at + len(body)] = list(inner_local)
             continue
         site_cwd = _git_site_cwd(tokens, cwd) if program == "git" and tokens else cwd
-        sites.append(_ShellSite(program, text, site_cwd))
+        opaque = (
+            program in _OPAQUE_EXECUTORS
+            or program in _LOCAL_SHELLS  # a shell body not unwrapped (too deep, unparseable)
+            or program == "eval"
+            or raw[pos] in "'\""  # the program word itself is quoted: `'git push' x`
+            or (
+                bool(_SCRIPT_INTERPRETER_RE.fullmatch(program)) and bool(_EXEC_CALL_RE.search(text))
+            )
+        )
+        sites.append(_ShellSite(program, text, site_cwd, opaque))
     return sites, cwd, dirs, "".join(local)
+
+
+def _is_redirect_char(code: str, k: int) -> bool:
+    """Whether the ``&``/``|`` at ``code[k]`` belongs to a redirection
+    (``2>&1``, ``&>f``, ``>|f``), not a separator ending the simple command."""
+    ch = code[k]
+    if ch == "&":
+        return (k > 0 and code[k - 1] in "<>") or (k + 1 < len(code) and code[k + 1] == ">")
+    return ch == "|" and k > 0 and code[k - 1] == ">"
 
 
 def _git_dash_c_path(command: str) -> Path | None:
@@ -1778,13 +1913,22 @@ def _git_dash_c_path(command: str) -> Path | None:
     per command). Note rules judge every git separately, through
     :func:`_rules_command_view`."""
     try:
-        sites, cwd, _dirs, _local = _shell_sites(command)
+        sites, cwd, _local = _shell_walk(command)
     except Exception:
         return None
     for site in sites:
         if site.program == "git":
             return site.cwd
     return cwd
+
+
+@functools.lru_cache(maxsize=8)
+def _shell_walk(command: str) -> tuple[tuple[_ShellSite, ...], Path | None, str]:
+    """:func:`_shell_sites` from the start directory, memoised: the repo
+    resolver and the note-rule view walk the same command in one check (#413
+    review 3). Pure in ``command``: sites hold paths relative to the start."""
+    sites, cwd, _dirs, local = _shell_sites(command)
+    return tuple(sites), cwd, local
 
 
 def _shell_tokens(part: str) -> list[str]:
@@ -1830,6 +1974,11 @@ def _enclosing_repo(candidates: list[Path]) -> Path | None:
     for candidate in candidates:
         try:
             cur = candidate.resolve()
+        except ValueError:
+            # An embedded NUL (`cd /tm\0p`) names no directory; it raised
+            # past every rule (#413 review 3). Fall back to the next candidate,
+            # which ends at the cwd.
+            continue
         except OSError:
             cur = candidate.absolute()
         for parent in (cur, *cur.parents):
@@ -1877,14 +2026,16 @@ def _rules_command_view(action: dict[str, Any]) -> rules_mod.CommandView | None:
         from omind import rules as rules_mod
 
         base = _action_base_dir(action)
-        sites, _cwd, _dirs, local_text = _shell_sites(command)
+        sites, _cwd, local_text = _shell_walk(command)
+        repos: dict[Path | None, Path | None] = {}  # 1,600 chained pushes share one cwd
+        for site in sites:
+            if site.cwd not in repos:
+                cands = [base] if site.cwd is None else [base / site.cwd, base]
+                repos[site.cwd] = _enclosing_repo(cands)
         return rules_mod.CommandView(
             local_text=local_text,
             sites=tuple(
-                rules_mod.CommandSite(
-                    text=site.text,
-                    repo=_enclosing_repo([base] if site.cwd is None else [base / site.cwd, base]),
-                )
+                rules_mod.CommandSite(text=site.text, repo=repos[site.cwd], opaque=site.opaque)
                 for site in sites
             ),
         )

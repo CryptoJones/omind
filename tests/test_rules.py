@@ -4,6 +4,8 @@ and the guard wiring (#240)."""
 
 from __future__ import annotations
 
+import functools
+import shlex
 import subprocess
 import time
 from pathlib import Path
@@ -222,8 +224,7 @@ _PRE_394_DENIED: tuple[tuple[str, str], ...] = (
     ("cd {public} && git push origin main", "public"),
     ("ssh h uptime; git push origin main", "public"),
     ("git commit -m 'git push later' && git push", "public"),
-    # Quoted text no parsed command accounts for is judged as before #394:
-    ("echo 'git push'", "public"),
+    # The body of an executor the guard does not unwrap fails closed:
     ("su -c 'git push'", "public"),
     ("git push origin main # ssh host 'x'", "public"),
 )
@@ -260,6 +261,10 @@ _NEWLY_DENIED: tuple[tuple[str, str], ...] = (
 
 #: Denied before #394 and allowed now, each for a stated reason.
 _NOW_ALLOWED: tuple[tuple[str, str], ...] = (
+    # Quoted data handed to a program that does not execute it (#413 review 3).
+    ("echo 'git push'", "public"),
+    ('echo "run git push origin main after review"', "public"),
+    ("git commit -m 'docs: explain git push'", "public"),
     # The push runs on another host: the local repo says nothing about it.
     ("ssh localhost 'cd {private} && git commit -m x && git push origin main'", "public"),
     ("ssh -p 22 host 'git push origin main'", "public"),
@@ -313,6 +318,137 @@ def test_remote_or_private_target_is_not_judged_against_the_cwd(
     omi, public, private = two_repos
     cmd = command.format(public=public, private=private)
     assert not _denied(omi, cmd, public if where == "public" else private, monkeypatch), cmd
+
+
+#: #413 review round 3, item 2: quoted arguments of programs that do not run
+#: them are data. Each was allowed on main before #394 or by its quoting, and
+#: must stay allowed on a PUBLIC main: grepping a repo that documents its git
+#: workflow is common.
+_QUOTED_DATA: tuple[str, ...] = (
+    "grep 'git push' README.md",
+    "rg 'git push' src",
+    'grep -rn "git push origin main" docs/',
+    'git commit -m "docs: explain git push origin main"',
+    "sed -i '' 's/git push origin main/git push origin feat/' doc.md",
+    "printf '%s\\n' 'git push' >> CHANGELOG.md",
+    "gh issue comment 1 --body 'never git push to main'",
+    "echo 'git push origin main'",
+    "python3 -c \"print('git push origin main')\"",
+    "git log --oneline --grep='git push'",
+    'gh pr create --title x --body "Then git push origin main once merged"',
+    "gh pr create --body \"$(cat <<'EOF'\nSteps: git push origin main\nEOF\n)\"",
+    "cat > notes.md <<'EOF'\nUse git push origin main\nEOF",
+)
+
+
+@pytest.mark.parametrize("command", _QUOTED_DATA)
+def test_quoted_data_is_not_a_push(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#413 review 3: a repo-scoped rule judges only a command the shell runs.
+    `git push` inside a grep pattern, a commit message or a `--body` is data;
+    it used to fall back to the HEAD branch (main) and deny."""
+    omi, public, _private = two_repos
+    assert not _denied(omi, command, public, monkeypatch), command
+
+
+#: Executors whose argument IS code the guard does not unwrap: they fail closed.
+_OPAQUE_EXECUTORS: tuple[str, ...] = (
+    "su -c 'git push origin main'",
+    "su - root -c 'git push origin main'",
+    "fish -c 'git push origin main'",
+    "python3 -c \"import os; os.system('git push origin main')\"",
+    "python3 -c \"import subprocess; subprocess.run('git push origin main', shell=True)\"",
+    "perl -e 'system(\"git push origin main\")'",
+    "ssh -o PermitLocalCommand=yes -o LocalCommand='git push origin main' host true",
+    "ssh -o ProxyCommand=\"sh -c 'git push origin main'\" host",
+    "bash -c '\"$@\"' _ git push origin main",  # positional args the body runs
+    "bash -c bash -c 'git push origin main'",
+    "eval " * 6 + "git push origin main",  # deeper than the unwrap limit
+    functools.reduce(
+        lambda body, _: "bash -c " + shlex.quote(body), range(6), "git push origin main"
+    ),
+)
+
+
+@pytest.mark.parametrize("command", _OPAQUE_EXECUTORS)
+def test_bodies_of_unwrapped_executors_fail_closed(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#413 review 3: quoted text is data only for a program that does not
+    execute it. `su -c`, a python `-c` that calls os.system/subprocess, and a
+    shell nested past the unwrap limit run their body: judged as before."""
+    omi, public, _private = two_repos
+    assert _denied(omi, command, public, monkeypatch), command
+
+
+#: #413 review 3, item 3: a cd/pushd with a redirect or an option still moves.
+_CD_FORMS: tuple[str, ...] = (
+    "pushd {public} >/dev/null && git push origin main",
+    "pushd {public} > /dev/null; git push origin main",
+    "cd {public} >/dev/null && git push origin main",
+    "cd {public} 2>/dev/null && git push origin main",
+    "cd {public} &>/dev/null && git push origin main",
+    "cd {public} 2>&1 && git push origin main",
+    "bash -c 'cd {public} >/dev/null && git push origin main'",
+    "cd -P {public} && git push origin main",
+    "cd -L {public} && git push origin main",
+    "cd -- {public} && git push origin main",
+    "cd -P -- {public} 2>/dev/null && git push origin main",
+)
+
+
+@pytest.mark.parametrize("command", _CD_FORMS)
+def test_cd_with_redirect_or_option_still_moves(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """`pushd X >/dev/null` is how pushd is normally written. The operand was
+    read only from a two-token `cd X`, so these left the cwd unknown and the
+    push was judged at the PRIVATE start directory."""
+    omi, public, private = two_repos
+    cmd = command.format(public=public)
+    assert _denied(omi, cmd, private, monkeypatch), cmd
+
+
+def test_popd_and_cd_with_redirects_move_both_ways(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi, public, private = two_repos
+    cmd = f"pushd {private} >/dev/null && popd >/dev/null && git push origin main"
+    assert _denied(omi, cmd, public, monkeypatch), cmd
+    cmd = f"cd {public} >/dev/null && cd -P -- {private} && git push origin main"
+    assert not _denied(omi, cmd, public, monkeypatch), cmd
+
+
+def test_nul_byte_in_cd_falls_back_to_the_cwd(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#413 review 3, item 4: `resolve()` raises ValueError on an embedded NUL,
+    which escaped every rule. An unresolvable directory falls back to the cwd."""
+    omi, public, _private = two_repos
+    assert _denied(omi, "cd /tm\x00p && git push origin main", public, monkeypatch)
+    action = {"tool": "Bash", "command": "cd /tm\x00p && ls"}
+    assert guard._repo_root_for_action(action) == public
+
+
+def test_git_global_options_do_not_backtrack_exponentially(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#413 review 3, item 1: `--git-dir=X` matched both the named-option and the
+    generic `--long[=v]` branch, so a run of them with no push after took 8.6 s
+    at n=24, doubling per option."""
+    omi, public, _private = two_repos
+    for command in (
+        "git " + "--git-dir=a " * 40 + "log # git push",
+        "git " + "--work-tree a " * 40 + "pus",
+        "git " + "--namespace=a --no-pager " * 40 + "log # git push",
+    ):
+        start = time.perf_counter()
+        rules._PUSH_ARGS_RE.search(command)
+        rules._canonical_git(command)
+        _denied(omi, command, public, monkeypatch)
+        assert time.perf_counter() - start < 1.0, command
+    assert rules._pushed_branches("git --git-dir=a --work-tree b push origin main") == ["main"]
 
 
 def test_private_targets_stay_allowed(
