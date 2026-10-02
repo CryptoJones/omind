@@ -2273,14 +2273,52 @@ def _enclosing_repo(candidates: list[Path]) -> Path | None:
         except OSError:
             cur = candidate.absolute()
         for parent in (cur, *cur.parents):
-            marker = parent / ".git"
-            # A real worktree has either a .git pointer file or a directory
-            # containing HEAD. Merely finding an empty directory named .git
-            # (for example a sandbox mount marker) must not turn every child
-            # path into a repository and demand an impossible freshness fetch.
-            if marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file()):
+            if _is_worktree_root(parent):
                 return parent
     return None
+
+
+def _is_worktree_root(path: Path) -> bool:
+    """Whether ``path`` is the top of a git worktree. A real worktree has
+    either a .git pointer file or a directory containing HEAD. Merely finding
+    an empty directory named .git (for example a sandbox mount marker) must
+    not turn every child path into a repository and demand an impossible
+    freshness fetch."""
+    marker = path / ".git"
+    return marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file())
+
+
+#: The most directories a write target's repo lookup checks, the target
+#: itself included (#448). Real paths are far shallower; a pathological one
+#: past the bound is simply not judged (fails open).
+_REPO_WALK_LIMIT = 64
+
+
+def _dir_repo(path: Path, cache: dict[Path, Path | None]) -> Path | None:
+    """The worktree enclosing the resolved ``path``, checking at most
+    :data:`_REPO_WALK_LIMIT` directories (#448). ``cache`` is shared by every
+    target of one command: each directory is checked once, so a thousand
+    targets in one tree cost one walk. A walk cut off by the bound caches
+    nothing, since a shallower start could still reach the repo."""
+    visited: list[Path] = []
+    found: Path | None = None
+    complete = False
+    for depth, parent in enumerate((path, *path.parents)):
+        if depth >= _REPO_WALK_LIMIT:
+            break
+        if parent in cache:
+            found, complete = cache[parent], True
+            break
+        visited.append(parent)
+        if _is_worktree_root(parent):
+            found, complete = parent, True
+            break
+    else:
+        complete = True  # reached the filesystem root
+    if complete:
+        for directory in visited:
+            cache[directory] = found
+    return found
 
 
 def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
@@ -2786,24 +2824,24 @@ def _rsync_remote(word: str) -> bool:
     return colon > 0 and "/" not in word[:colon]
 
 
-def _path_in_repo(word: str, cwd: Path | None, repo: Path) -> bool:
-    """Whether the literal path ``word``, used from ``cwd`` (``None``: not
-    knowable, so only an absolute path is judged), names something inside
-    ``repo``. A word with a parameter or command substitution is not a literal
-    and never counts, nor does a null device (``/dev/null``, Windows ``NUL``)."""
+def _write_target(word: str, cwd: Path | None) -> Path | None:
+    """The resolved path the literal word ``word`` names, used from ``cwd``
+    (``None``: not knowable, so only an absolute path is judged). A word with
+    a parameter or command substitution is not a literal and names nothing,
+    nor does a null device (``/dev/null``, Windows ``NUL``)."""
     if not word or "$" in word or "`" in word:
-        return False
+        return None
     if word.startswith("/dev/") or word.lower() in ("nul", "nul:"):
-        return False
+        return None
     try:
         target = Path(word).expanduser()
         if not target.is_absolute():
             if cwd is None:
-                return False
+                return None
             target = cwd / target
-        return target.resolve().is_relative_to(repo.resolve())
+        return target.resolve()
     except (OSError, RuntimeError, ValueError):
-        return False
+        return None
 
 
 #: A ``[[ … ]]`` test or a ``(( … ))`` / ``$(( … ))`` arithmetic expression on
@@ -2820,31 +2858,46 @@ def _without_comparisons(command: str) -> str:
 
 
 def _writes_into_repo(action: dict[str, Any], repo: Path | None = None) -> bool:
-    """Whether a Bash command writes a file inside its target repo through an
-    output redirection, ``tee``, ``cp``, ``mv``, ``install``, ``dd of=``,
+    """Whether a Bash command writes a file inside a repo through an output
+    redirection, ``tee``, ``cp``, ``mv``, ``install``, ``dd of=``,
     ``truncate``, ``touch``, ``ln`` or a local ``rsync`` destination, or
-    removes one with ``rm`` or ``mv`` (#434, #450). Every simple command the
-    local shell runs, ``-c``/``eval`` bodies included, is judged from the
-    directory it runs in. A target outside the repo (``>/dev/null``, ``2>&1``,
-    ``> /tmp/log``) is not repo work.
-    ``repo`` is the already-resolved target repo, if the caller has it.
-    ``False`` on any failure: classification fails open."""
+    removes one with ``rm`` or ``mv`` (#434, #450). See
+    :func:`_bash_write_repo`. ``False`` on any failure: classification fails
+    open."""
+    return _bash_write_repo(action, repo) is not None
+
+
+def _bash_write_repo(action: dict[str, Any], repo: Path | None = None) -> Path | None:
+    """The repo a Bash command writes into (#434, #450, #448), or ``None``.
+    Every simple command the local shell runs, ``-c``/``eval`` bodies
+    included, is judged from the directory it runs in, and each write target
+    resolves its OWN enclosing repo, as the Write tool's path does: the repo
+    the command's ``cd``/``git -C`` lead to says nothing about where a
+    redirect earlier in the line landed (#448). A target in no repo
+    (``>/dev/null``, ``2>&1``, ``> /tmp/log``) is not repo work. ``repo``, the
+    caller's already-resolved repo, also counts as one, and wins when a target
+    lies in it. ``None`` on any failure: classification fails open."""
     try:
-        if repo is None:
-            repo = _repo_root_for_action(action)
-        if repo is None:
-            return False
+        own = None if repo is None else repo.resolve()
         base = _action_base_dir(action)
+        cache: dict[Path, Path | None] = {}
         for site in _shell_walk(_without_comparisons(_action_command(action)))[0]:
             cwd = None if site.cwd is None else base / site.cwd
             targets = _redirect_targets(site.text)
             if site.program in _FILE_OPS:
                 targets += _file_op_targets(site.program, site.text)
-            if any(_path_in_repo(word, cwd, repo) for word in targets):
-                return True
+            for word in targets:
+                target = _write_target(word, cwd)
+                if target is None:
+                    continue
+                if own is not None and target.is_relative_to(own):
+                    return own
+                found = _dir_repo(target, cache)
+                if found is not None:
+                    return found
     except Exception:
-        return False
-    return False
+        return None
+    return None
 
 
 #: Wrappers and keywords a stage skips to reach its program, with their
@@ -3806,6 +3859,13 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
             rule_id="global-config-explicit-auth",
         )
 
+    # A Bash command run from outside any repo can still write into one
+    # (`cat > ~/src/x/y.py <<EOF` from /tmp). The Write tool takes its repo
+    # from its path; such a write takes it from its target (#448). Only when
+    # the command resolves no repo of its own: a commit's freshness stays
+    # keyed to the repo its `cd`/`git -C` lead to.
+    if repo is None and str(action.get("tool") or "") == "Bash":
+        repo = _bash_write_repo(action)
     if repo is not None and _is_repo_sensitive_action(action, repo):
         if not git_rules_missing and not _has_consulted_git_rules(session):
             record_pending(session, command or _action_path(action))

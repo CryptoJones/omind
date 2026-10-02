@@ -4220,3 +4220,117 @@ def test_redirect_with_no_target_repo_is_not_repo_work(tmp_path: Path) -> None:
     """No target repo, nothing to protect: the redirect check fails open."""
     action = {"tool": "Bash", "command": "echo x > x.py", "cwd": tmp_path.as_posix()}
     assert not guard._writes_into_repo(action)
+
+
+def _two_probe_repos(tmp_path: Path) -> tuple[Path, Path, Path]:
+    """Repo A, repo B and a directory in neither (#448)."""
+    a, outside = _write_probe_repo(tmp_path)
+    b = tmp_path / "b"
+    (b / ".git").mkdir(parents=True)
+    (b / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    return a, b, outside
+
+
+def test_write_into_the_cwd_repo_counts_after_cd_into_another_repo(tmp_path: Path) -> None:
+    """#448: the command-level repo follows the `cd` into B, but the redirect
+    ran in A, and A is a repo: the write is repo work for A."""
+    a, b, _outside = _two_probe_repos(tmp_path)
+    action = {
+        "tool": "Bash",
+        "command": f"echo x > README.md && cd {b.as_posix()}",
+        "cwd": a.as_posix(),
+    }
+    assert guard._repo_root_for_action(action) == b
+    assert guard._writes_into_repo(action)
+    assert guard._writes_into_repo(action, b)
+    assert guard._bash_write_repo(action) == a.resolve()
+    assert guard._is_repo_sensitive_action(action, b)
+
+
+def test_heredoc_write_into_a_repo_from_outside_any_repo_is_gated(tmp_path: Path) -> None:
+    """#448: from a cwd in no repo, `cat > <repo>/src/x.py <<EOF` writes the
+    repo exactly as the Write tool on that path does, so it hits the same
+    git-rules gate."""
+    repo, _b, outside = _two_probe_repos(tmp_path)
+    command = f"cat > {repo.as_posix()}/src/x.py <<'EOF'\nprint(1)\nEOF"
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
+    assert guard._repo_root_for_action(action) is None
+    assert guard._writes_into_repo(action)
+    assert guard._bash_write_repo(action) == repo.resolve()
+    session = "448-heredoc-from-outside"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    verdict = guard.decide({**action, "session": session})
+    assert not verdict.allow
+    assert verdict.rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo x > {outside}/y",
+        "echo x > y",
+        "cp a {outside}/b",
+        "rm -rf {outside}/scratch",
+        "echo x > /dev/null",
+        "echo x > $OUT",
+    ],
+)
+def test_writes_outside_every_repo_do_not_count(tmp_path: Path, command: str) -> None:
+    """#448: a target in no repo is not repo work, whatever the cwd."""
+    _a, _b, outside = _two_probe_repos(tmp_path)
+    action = {
+        "tool": "Bash",
+        "command": command.format(outside=outside.as_posix()),
+        "cwd": outside.as_posix(),
+    }
+    assert not guard._writes_into_repo(action)
+    assert guard._bash_write_repo(action) is None
+    session = "448-outside"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    assert guard.decide({**action, "session": session}).allow
+    guard.clear_gate(session)
+
+
+def test_bash_write_repo_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """#448 (AGENTS.md invariant 2): a crash in the walk or the repo lookup
+    degrades to "no repo written", never an exception."""
+    repo, _b, outside = _two_probe_repos(tmp_path)
+    action = {
+        "tool": "Bash",
+        "command": f"echo x > {repo.as_posix()}/src/x.py",
+        "cwd": outside.as_posix(),
+    }
+    monkeypatch.setattr(guard, "_is_worktree_root", _raise)
+    assert guard._bash_write_repo(action) is None
+    assert guard._writes_into_repo(action) is False
+    monkeypatch.undo()
+    monkeypatch.setattr(guard, "_shell_walk", _raise)
+    assert guard._bash_write_repo(action) is None
+    assert guard._writes_into_repo(action) is False
+
+
+def test_target_repo_walk_is_bounded_and_cached(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#448: each target's repo lookup walks a bounded number of parents and
+    shares one cache per command, so many targets in one directory cost one
+    walk; a repo past the bound is not found (fails open)."""
+    repo, _b, outside = _two_probe_repos(tmp_path)
+    deep = repo / "src" / "a" / "b" / "c"
+    calls: list[Path] = []
+    real = guard._is_worktree_root
+
+    def counting(path: Path) -> bool:
+        calls.append(path)
+        return real(path)
+
+    monkeypatch.setattr(guard, "_is_worktree_root", counting)
+    targets = " ".join(f"{deep.as_posix()}/f{i}" for i in range(50))
+    action = {"tool": "Bash", "command": f"touch {targets}", "cwd": outside.as_posix()}
+    assert guard._bash_write_repo(action) == repo.resolve()
+    assert len(calls) == len(set(calls))  # every directory is checked once
+    monkeypatch.setattr(guard, "_REPO_WALK_LIMIT", 2)
+    assert guard._bash_write_repo(action) is None

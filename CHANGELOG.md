@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.21] - 2026-10-02
+
+### Fixed
+- **Bash writes into a repo other than the resolved one now hit the consult
+  gate ([#448](https://github.com/CryptoJones/omind/issues/448)).** The
+  repo-work write check (#434, #450) judged every write target against the one
+  repo resolved for the command, so `echo x > README.md && cd /other/repo`
+  (the write lands in the cwd repo, the `cd` moves the resolved repo away) and
+  `cat > ~/src/repo/x.py <<EOF` from `/tmp` (no repo resolved at all) were
+  not repo work, though the Write tool on the same path is gated.
+  - Each write target now resolves its own enclosing worktree, the way the
+    Write tool's path does. Any target inside a repo counts; a target in no
+    repo (`/tmp/y`, `/dev/null`, `$OUT`) still does not.
+  - When the command resolves no repo of its own, the written repo stands in
+    for the consult and freshness gates. A command that does resolve one
+    keeps it, so a commit's freshness stays keyed to the repo its `cd` or
+    `-C` lead to.
+  - The lookup is cheap: one cache per command (each directory is checked
+    once) and at most 64 directories per target. Any failure, or a path past
+    the bound, means "no repo written" (fails open).
+
 ## [10.2.20] - 2026-10-02
 
 ### Fixed
