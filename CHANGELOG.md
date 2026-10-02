@@ -24,8 +24,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `read-note` at its 65536 hard cap, for a note larger than any read can return. Once a
     full read lands, a later partial read the same turn does not re-arm the gate; that
     record is per turn (`omi-gate-reset.sh` now clears it as `begin_turn` does).
+  - Truncation is read from the parsed result (a `truncated` field at any depth, including
+    JSON inside MCP text content), so compact `{"truncated":true}` no longer slips past.
+  - Only an actual read of the note counts: `read-note`, `recall-note`, or a native file
+    read. A `search-vault` query, `backlinks` or `graph-neighbors` naming the note no
+    longer clears the gate, and a native `Read` with `offset`/`limit` is partial.
+  - Every read of the git-rules note is classified, not only one made after a block, so a
+    truncated recall before the first block no longer satisfies the gate in advance.
+  - The full/partial record is written under its sibling `.lock` (check and write in one
+    critical section).
   - `recall-note`'s truncation marker no longer re-suggests recall at the cap for a note
-    longer than the cap; it names the `read-note` call instead.
+    longer than the cap; it names the `read-note` call instead (and no longer offers a
+    section read, which the gate refuses).
   - The read-note bounds move to `recall.READ_NOTE_DEFAULT_CHARS` /
     `recall.READ_NOTE_HARD_CAP` so the guard and verifier share them with the server.
 

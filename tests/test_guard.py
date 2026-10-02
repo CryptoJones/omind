@@ -1437,6 +1437,8 @@ def test_bash_adapters_treat_vault_writes_as_ordinary_actions() -> None:
         assert writes in sh, f"{name} must not treat vault writes as consults"
     reset = files.joinpath("omi-gate-reset.sh").read_text(encoding="utf-8")
     assert "demanded-$sid.txt" in reset
+    # #392: the full/incomplete read record is per turn too.
+    assert "incomplete-$sid.txt" in reset
 
 
 @pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")

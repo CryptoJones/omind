@@ -1013,3 +1013,177 @@ def test_read_note_at_the_hard_cap_is_the_best_possible_ask(tmp_path: Path) -> N
         out=io.StringIO(),
     )
     assert guard._has_consulted_git_rules(session)
+
+
+# -- #392 EM review: the verifier checks exactly what "in full" claims ---------
+
+
+def test_compact_serialized_truncated_recall_does_not_clear(tmp_path: Path) -> None:
+    """MCP text content produced with ``separators=(",", ":")`` carries
+    ``{"truncated":true}``; a substring search for ``"truncated": true`` missed
+    it and the truncated read cleared the gate."""
+    omi = _omi(tmp_path)
+    session = "v392-compact"
+    _armed(session)
+    text = json.dumps(
+        {"title": guard.GIT_RULES_NOTE, "content": "part", "truncated": True},
+        separators=(",", ":"),
+    )
+    event = {
+        "session_id": session,
+        "tool_name": "mcp__omi__recall-note",
+        "tool_input": {"name": guard.GIT_RULES_NOTE},
+        "tool_response": {"content": [{"type": "text", "text": text}]},
+    }
+    verify.verify_consult(event, omi, require=True, out=io.StringIO())
+    assert not guard._has_consulted_git_rules(session)
+    # The same payload as a bare string tool_response is parsed too.
+    event["tool_response"] = text
+    verify.verify_consult(event, omi, require=True, out=io.StringIO())
+    assert not guard._has_consulted_git_rules(session)
+
+
+def test_response_truncated_parses_structure_not_text() -> None:
+    assert verify._response_truncated({"truncated": True})
+    assert verify._response_truncated([{"type": "text", "text": '{"a":{"truncated":true}}'}])
+    assert not verify._response_truncated({"truncated": False, "content": "x"})
+    # A note body merely QUOTING the field is not a truncated result.
+    assert not verify._response_truncated({"content": 'quoted "truncated": true here'})
+
+
+def _native_rules_read(session: str, omi: Path, **extra: object) -> dict:
+    note = omi / f"{guard.GIT_RULES_NOTE}.md"
+    note.write_text("# rules\n\nall of them\n", encoding="utf-8")
+    return {
+        "session_id": session,
+        "tool_name": "Read",
+        "tool_input": {"file_path": str(note), **extra},
+        "tool_response": {"type": "text", "file": {"content": "# rules"}},
+    }
+
+
+def test_native_read_with_offset_or_limit_is_partial(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    for i, extra in enumerate(({"limit": 20}, {"offset": 5}, {"offset": 1, "limit": 2000})):
+        session = f"v392-native-{i}"
+        _armed(session)
+        out = io.StringIO()
+        verify.verify_consult(_native_rules_read(session, omi, **extra), omi, out=out)
+        assert not guard._has_consulted_git_rules(session), extra
+        assert "partial Read" in out.getvalue()
+        # A plain full Read then clears it on the first try.
+        verify.verify_consult(_native_rules_read(session, omi), omi, out=io.StringIO())
+        assert guard._has_consulted_git_rules(session)
+
+
+@pytest.mark.parametrize(
+    ("tool", "kind", "field"),
+    [
+        ("mcp__omi__search-vault", "search", "query"),
+        ("mcp__omi__backlinks", "search", "name"),
+        ("mcp__omi__graph-neighbors", "search", "name"),
+    ],
+)
+def test_non_read_consults_of_the_rules_note_do_not_clear(
+    tmp_path: Path, tool: str, kind: str, field: str
+) -> None:
+    """A search/backlinks/graph call NAMING the note reads none of its rules."""
+    omi = _omi(tmp_path)
+    session = f"v392-nonread-{tool}"
+    _armed(session)
+    # PreToolUse, as the adapters report it...
+    guard.decide(
+        {
+            "tool": tool,
+            "session": session,
+            "is_omi_consult": True,
+            "consult_target": guard.GIT_RULES_NOTE,
+            "consult_kind": kind,
+        }
+    )
+    # ...and PostToolUse, where consult_target calls backlinks a "read".
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": tool,
+            "tool_input": {field: guard.GIT_RULES_NOTE},
+            "tool_response": {"content": [{"type": "text", "text": '{"results":[]}'}]},
+        },
+        omi,
+        out=io.StringIO(),
+    )
+    assert not guard._has_consulted_git_rules(session)
+    # The read the block message names clears it on the first try.
+    guard.decide(
+        {
+            "tool": "mcp__omi__read-note",
+            "session": session,
+            "is_omi_consult": True,
+            "consult_target": guard.GIT_RULES_NOTE,
+            "consult_kind": "read",
+        }
+    )
+    assert guard._has_consulted_git_rules(session)
+
+
+def test_early_truncated_read_before_any_demand_is_not_credited(tmp_path: Path) -> None:
+    """A default 4,000-char recall BEFORE the first block used to be recorded as
+    a consult with no completeness check, so the gate never fired."""
+    omi = _omi(tmp_path)
+    session = "v392-early"
+    guard.begin_turn(session, "commit and push the repo work")
+    assert guard.demanded_note(session) == ""
+    out = io.StringIO()
+    verify.verify_consult(_demanded_read_event(session, truncated=True), omi, out=out)
+    assert not guard._has_consulted_git_rules(session)
+    assert '"max_chars":65536' in out.getvalue()
+    # A full read clears it on the first try, demanded or not.
+    verify.verify_consult(
+        _demanded_event(session, "read-note", {"representation": "raw"}, {"raw": "all"}),
+        omi,
+        out=io.StringIO(),
+    )
+    assert guard._has_consulted_git_rules(session)
+
+
+def test_early_full_read_before_any_demand_is_credited(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    session = "v392-early-full"
+    guard.begin_turn(session, "commit and push the repo work")
+    verify.verify_consult(_demanded_read_event(session, truncated=False), omi, out=io.StringIO())
+    assert guard._has_consulted_git_rules(session)
+
+
+def test_read_completeness_record_is_written_under_its_sibling_lock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """AGENTS.md locking invariant: the check-then-write (full mark vs partial)
+    holds ``filelock.exclusive`` on the SIBLING ``.lock`` path, and a partial
+    read cannot overwrite a full one."""
+    import contextlib
+    from collections.abc import Iterator
+
+    from omind import filelock
+
+    locked: list[Path] = []
+    real = filelock.exclusive
+
+    @contextlib.contextmanager
+    def spy(path: Path, *, mode: int = 0o600) -> Iterator[int]:
+        locked.append(path)
+        with real(path, mode=mode) as fd:
+            yield fd
+
+    monkeypatch.setattr(guard.filelock, "exclusive", spy)
+    session = "v392-lock"
+    guard.begin_turn(session, "x")
+    data = guard._incomplete_path(session)
+    locked.clear()
+    guard.record_full_consult(session, guard.GIT_RULES_NOTE)
+    assert not guard.record_partial_consult(session, guard.GIT_RULES_NOTE)
+    assert guard.has_full_consult(session, guard.GIT_RULES_NOTE)
+    assert len(locked) == 2
+    assert all(p == data.with_name(data.name + ".lock") for p in locked)
+    guard.clear_incomplete_consult(session)
+    assert guard.record_partial_consult(session, guard.GIT_RULES_NOTE)
+    assert guard.incomplete_consult(session) == guard.GIT_RULES_NOTE.lower()

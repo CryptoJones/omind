@@ -137,67 +137,110 @@ def _read_failed(event: dict[str, Any]) -> bool:
     return False
 
 
-def _update_demanded_completeness(
-    event: dict[str, Any], session: str, target: str, out: Any = None
-) -> None:
-    """Keep the gate armed when the *demanded* note came back truncated (#239).
+#: How deep :func:`_response_truncated` walks a tool result. MCP nests the
+#: payload a few levels (content blocks -> text -> JSON); anything deeper is not
+#: a recall/read-note result.
+_TRUNCATION_WALK_DEPTH = 8
+
+
+def _response_truncated(value: object, depth: int = 0) -> bool:
+    """True when a read's tool result says it was cut off (#392).
+
+    Parses the STRUCTURE instead of searching serialized text: a ``truncated``
+    field set to ``true`` at any depth, including inside MCP text content
+    blocks whose text is itself JSON (compact ``{"truncated":true}`` included —
+    a substring search for ``"truncated": true`` missed it), or read-note's
+    ``[truncated: showing …]`` body marker in any string."""
+    if depth > _TRUNCATION_WALK_DEPTH:
+        return False
+    if isinstance(value, dict):
+        if value.get("truncated") is True:
+            return True
+        return any(_response_truncated(v, depth + 1) for v in value.values())
+    if isinstance(value, list):
+        return any(_response_truncated(v, depth + 1) for v in value)
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                parsed = json.loads(stripped)
+            except ValueError:
+                parsed = None
+            if isinstance(parsed, (dict, list)):
+                return _response_truncated(parsed, depth + 1)
+        return _READ_NOTE_TRUNCATED_RE.search(value) is not None
+    return False
+
+
+def _is_git_rules_read(event: dict[str, Any], target: str) -> bool:
+    """A read (read-note, recall-note, or a native Read of the file) of the
+    git-rules note — the only reads whose completeness the gate consumes."""
+    return guard.GIT_RULES_NOTE.lower() in target.lower() and guard.is_note_read(
+        str(event.get("tool_name") or ""), target
+    )
+
+
+def _update_git_rules_completeness(event: dict[str, Any], session: str, out: Any = None) -> None:
+    """Record whether a read of the git-rules note was complete (#239, #392).
 
     The recurrence log on the git-rules note records three real violations
     caused by the overriding exception living below the recall fold: the read
-    "satisfied" the gate while the rule that mattered was cut off. A truncated
-    read of the demanded note now records as incomplete, which
-    ``_has_consulted_git_rules`` refuses to credit.
+    "satisfied" the gate while the rule that mattered was cut off. A partial
+    read of the note records as incomplete, which ``_has_consulted_git_rules``
+    refuses to credit.
 
-    #392: this now checks exactly what ``guard.GIT_RULES_MESSAGE`` claims —
-    "in full". A read counts only when it is not truncated (recall-note's
-    ``truncated: true`` OR read-note's ``[truncated: showing …]`` body marker,
-    which used to slip through) and is not a ``section`` drill-down. recall-note
-    at its 8000-char cap no longer counts when still truncated: read-note can
-    return the whole note, so that read is not the best possible ask. The one
-    un-wedge left is read-note at its hard cap, for a note larger than any
-    read can return. Once a full read lands, a later partial read this turn
-    does not re-arm the gate. Only the git-rules demand is checked (the only
-    gate that consumes this state). Best-effort: any parsing surprise counts
-    the read as complete (fail open).
+    #392: this checks exactly what ``guard.GIT_RULES_MESSAGE`` claims — "in
+    full". A read counts only when it is not truncated (a ``truncated: true``
+    field anywhere in the parsed result, or read-note's ``[truncated: showing
+    …]`` body marker), is not a ``section`` drill-down, and is not a native
+    ``Read`` with ``offset``/``limit``. recall-note at its 8000-char cap does
+    not count when still truncated: read-note can return the whole note. The
+    one un-wedge left is read-note at its hard cap, for a note larger than any
+    read can return. The classification applies to EVERY read of the note,
+    demanded yet or not: a truncated recall before the first block used to be
+    credited, so the gate never fired. Once a full read lands, a later partial
+    read this turn does not re-arm the gate. Best-effort: any parsing surprise
+    counts the read as complete (fail open).
     """
     try:
         from omind import recall
 
-        demanded = guard.demanded_note(session)
-        if guard.GIT_RULES_NOTE.lower() not in demanded.lower():
-            return
-        blob = json.dumps(event.get("tool_response"), default=str)
-        truncated = (
-            '"truncated": true' in blob
-            or '\\"truncated\\": true' in blob
-            or _READ_NOTE_TRUNCATED_RE.search(blob) is not None
-        )
+        note = guard.GIT_RULES_NOTE
+        tool = str(event.get("tool_name") or "")
         ti = event.get("tool_input")
         ti = ti if isinstance(ti, dict) else {}
         section = str(ti.get("section") or "").strip()
-        is_read_note = str(event.get("tool_name") or "").endswith("read-note")
+        is_read_note = tool.lower().replace("_", "-").endswith("read-note")
+        native_partial = tool == "Read" and (
+            ti.get("offset") is not None or ti.get("limit") is not None
+        )
         default = recall.READ_NOTE_DEFAULT_CHARS if is_read_note else recall.DEFAULT_RECALL_CHARS
         try:
             asked = int(ti.get("max_chars") or default)
         except (TypeError, ValueError):
             asked = default
         best_possible = is_read_note and asked >= recall.READ_NOTE_HARD_CAP
-        if (truncated or section) and not best_possible:
-            if guard.has_full_consult(session, demanded):
+        partial = bool(section) or native_partial or _response_truncated(event.get("tool_response"))
+        if partial and not best_possible:
+            if not guard.record_partial_consult(session, note):
                 return  # already read in full this turn; a drill-down adds to it
-            guard.record_incomplete_consult(session, demanded)
-            why = f"was section-only ({section!r})" if section else "came back TRUNCATED"
+            if section:
+                why = f"was section-only ({section!r})"
+            elif native_partial:
+                why = "was a partial Read (offset/limit)"
+            else:
+                why = "came back TRUNCATED"
             call = json.dumps(
-                recall.full_read_args(demanded), ensure_ascii=False, separators=(",", ":")
+                recall.full_read_args(note), ensure_ascii=False, separators=(",", ":")
             )
             print(
-                f"The demanded note {why}; the consult gate stays armed. Next call "
+                f"The git-rules note {why}; it does not satisfy the consult gate. Next call "
                 f"OMI MCP read-note with {call} (it returns the whole note; "
-                f"recall-note stops at {recall.MAX_RECALL_CHARS} chars) before retrying.",
+                f"recall-note stops at {recall.MAX_RECALL_CHARS} chars) before repo work.",
                 file=out if out is not None else sys.stderr,
             )
         else:
-            guard.record_full_consult(session, demanded)
+            guard.record_full_consult(session, note)
     except Exception:
         guard.clear_incomplete_consult(session)
 
@@ -567,6 +610,7 @@ def verify_consult(
         return None
     kind, target = target_info
     session = str(event.get("session_id") or "")
+    tool = str(event.get("tool_name") or "")
     if kind == "read" and _read_failed(event):
         # #358: PreToolUse credited this read before it ran. It returned nothing,
         # so retract the credit — a not-found read of the demanded note must not
@@ -578,17 +622,17 @@ def verify_consult(
         # relevance judging entirely — no overlap compute, no model tiebreak,
         # no re-close. Record the consult (relevant) so the turn history is intact
         # and the off-topic streak doesn't accrue against a paused window.
-        guard.record_consult(session, kind=kind, target=target, relevant=True)
+        guard.record_consult(session, kind=kind, target=target, relevant=True, tool=tool)
         guard.reset_offtopic(session)
         return "relevant"
-    if kind == "read" and _guard_demanded(session, target):
-        _update_demanded_completeness(event, session, target, out=out)
+    if kind == "read" and _is_git_rules_read(event, target):
+        _update_git_rules_completeness(event, session, out=out)
     if (
         _always_relevant(target)
         or _guard_demanded(session, target)
         or _hard_rule_note(target, omi_dir)
     ):
-        guard.record_consult(session, kind=kind, target=target, relevant=True)
+        guard.record_consult(session, kind=kind, target=target, relevant=True, tool=tool)
         guard.reset_offtopic(session)
         return "relevant"
 
@@ -599,7 +643,7 @@ def verify_consult(
     judged, score = _judge_scored(
         task, activity, _consult_text(kind, target, omi_dir), pending, omi_dir
     )
-    guard.record_consult(session, kind=kind, target=target, relevant=judged)
+    guard.record_consult(session, kind=kind, target=target, relevant=judged, tool=tool)
     if judged:
         guard.reset_offtopic(session)  # #98: honest work breaks the off-topic streak
         return "relevant"

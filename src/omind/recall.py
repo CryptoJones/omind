@@ -111,16 +111,20 @@ def compact_recall(
         if len(content) > MAX_RECALL_CHARS:
             # No recall can return this note whole; re-suggesting recall at the
             # cap was a dead end that returned the same cut-off text (#392).
+            # No "or request a specific section" either: the git-rules gate
+            # refuses to credit a section read, so that advice bounced the agent.
             follow_up = "read-note " + json.dumps(full_read_args(filename), ensure_ascii=False)
+            alternative = ""
         else:
             wanted = min(len(content) + 500, MAX_RECALL_CHARS)
             follow_up = (
                 f'recall-note {{"name": {json.dumps(filename, ensure_ascii=False)}, '
                 f'"max_chars": {wanted}}}'
             )
+            alternative = " or request a specific section"
         marker = (
             f"\n…[TRUNCATED at {limit} of {len(content)} chars. Before acting "
-            f"on this topic, call OMI MCP {follow_up} or request a specific section.]"
+            f"on this topic, call OMI MCP {follow_up}{alternative}.]"
         )
         content = content[: max(0, limit - len(marker))].rstrip() + marker
     payload: dict[str, Any] = {
