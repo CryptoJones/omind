@@ -7,6 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.1.1] - 2026-10-01
+
+### Fixed
+- **`recall-note`/`read-note` could not open a note the consult gate had just named when
+  its title held a `:` ([#393](https://github.com/CryptoJones/omind/issues/393)).** The
+  gate names notes by title, and `filename_for_title` strips `:` on write, so
+  `… (2026-09-25 17:55 CDT)` is stored as `… 17 55 CDT).md`. `OmiStore.safe_name` only
+  tried the title-to-filename fallback when strict validation *rejected* the name, and a
+  `:` is legal to the validator — so the colon form validated, missed on disk, and failed
+  with "note not found", leaving the gate's own remediation call unsatisfiable. The
+  fallback now also runs when a validated name names no existing note; a name with no
+  matching note still resolves to its literal path, so creates are unaffected.
+
 ## [10.1.0] - 2026-10-01
 
 ### Added

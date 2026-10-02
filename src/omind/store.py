@@ -1048,7 +1048,9 @@ class OmiStore:
         "NEVER offer to end/pause the session …", and the recall was rejected
         for the ``/`` in "end/pause" — an instruction impossible to satisfy.
 
-        So when the raw name is rejected, fall back to the sanitized title, and
+        So when the raw name is rejected — or validates but names no existing
+        note (a ``:`` passes validation yet is stripped on write, issue #393) —
+        fall back to the sanitized title, and
         accept it only if that note actually exists. Traversal stays impossible:
         the sanitizer strips separators outright, and the fallback re-runs the
         full validation below on its result. Creates are unaffected — a
@@ -1060,6 +1062,14 @@ class OmiStore:
                 scratch_candidate = validated.with_name(validated.stem + SCRATCH_SUFFIX)
                 if scratch_candidate.exists():
                     return scratch_candidate
+                # A title can pass strict validation yet still not be the
+                # stored filename (``:`` is legal here but stripped on write,
+                # issue #393). Fall back to the sanitized title when it names
+                # an existing note; otherwise keep the literal path so creates
+                # are unaffected.
+                fallback = self._name_from_title(name)
+                if fallback is not None:
+                    return fallback
             return validated
         except NoteError:
             fallback = self._name_from_title(name)

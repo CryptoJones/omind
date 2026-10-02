@@ -106,7 +106,6 @@ Follow-ups:
 
 - [ ] **guard: any `-i` flag (e.g. `grep -iE`) next to sed/perl marks a command as repo work** ([#391](https://github.com/CryptoJones/omind/issues/391)) — _bug_
 - [ ] **guard: the "read it in full" git-rules demand is unsatisfiable (8000-char cap) and unverified** ([#392](https://github.com/CryptoJones/omind/issues/392)) — _bug_
-- [ ] **recall-note: gate-suggested titles containing `:` fail with "note not found"** ([#393](https://github.com/CryptoJones/omind/issues/393)) — _bug_
 - [ ] **rules: repo-scoped rules judge the hook's cwd repo, not the command's target repo** ([#394](https://github.com/CryptoJones/omind/issues/394)) — _bug_
 
 ## Not planned
@@ -157,6 +156,12 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-01 (v10.1.1)
+
+- [x] **recall-note: gate-suggested titles containing `:` fail with "note not found"** ([#393](https://github.com/CryptoJones/omind/issues/393)) — **v10.1.1** — _bug_ —
+  `safe_name` now falls back to the sanitized title whenever the literal name validates
+  but names no existing note, so every title the gate emits resolves.
 
 ### Shipped — 2026-09-29 (v10.0.3)
 

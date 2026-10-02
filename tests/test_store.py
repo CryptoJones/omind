@@ -1019,3 +1019,45 @@ def test_safe_name_still_rejects_a_title_with_no_matching_note(tmp_path: Path) -
     store = OmiStore(tmp_path)
     with pytest.raises(NoteError):
         store.safe_name("no/such/note")
+
+
+def test_safe_name_resolves_a_title_with_a_colon(tmp_path: Path) -> None:
+    """Issue #393: a `:` is legal to the strict validator, so the colon form of a
+    title used to pass validation, miss on disk, and skip the title fallback —
+    the guard's suggested recall then failed with "note not found"."""
+    store = OmiStore(tmp_path)
+    title = "RESUME HERE — harvest + SSD migration (2026-09-25 17:55 CDT)"
+    store.create_note(NoteFields(title=title, summary="s"))
+    assert (tmp_path / "RESUME HERE — harvest + SSD migration (2026-09-25 17 55 CDT).md").is_file()
+    resolved = store.safe_name(title)
+    assert resolved.name == "RESUME HERE — harvest + SSD migration (2026-09-25 17 55 CDT).md"
+    assert store.read_note(title)
+
+
+def test_safe_name_keeps_the_literal_path_when_no_title_note_exists(
+    tmp_path: Path,
+) -> None:
+    """A missing literal name still resolves to itself (creates are unaffected)
+    when no sanitized-title note exists either."""
+    store = OmiStore(tmp_path)
+    assert store.safe_name("brand new: note").name == "brand new: note.md"
+
+
+def test_every_gate_suggested_title_resolves_through_recall(tmp_path: Path) -> None:
+    """Issue #393: every title the consult gate names must resolve via
+    recall-note, including titles holding characters stripped from filenames."""
+    from omind import retrieve
+
+    store = OmiStore(tmp_path)
+    titles = [
+        "Deploy runbook: staging (17:55 CDT)",
+        "Deploy checklist? prod/staging",
+        'Deploy "quoted" notes <draft>',
+        "Deploy plain notes",
+    ]
+    for title in titles:
+        store.create_note(NoteFields(title=title, summary="deploy staging runbook"))
+    suggested = retrieve.relevant_titles("deploy staging runbook", tmp_path, limit=10)
+    assert suggested
+    for title in suggested:
+        assert store.read_note(title)
