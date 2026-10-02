@@ -36,7 +36,7 @@ import tomlkit.exceptions
 import yaml
 
 from omind import filelock, paths, seeds
-from omind.hooks import HOOK_MARKER, command_is_omind_hook
+from omind.hooks import command_is_omind_hook
 from omind.provision import (
     LEGACY_SERVER_NAME,
     CheckResult,
@@ -49,6 +49,9 @@ from omind.provision import (
     canonical_omind_argv,
     canonical_omind_cmd,
     diagnose,
+    double_quote,
+    hook_arg_quote,
+    hook_quote,
 )
 
 
@@ -452,6 +455,11 @@ class AgentProvisioner(Provisioner):
 
     AGENT_LABEL: ClassVar[str] = ""
     INSTALL_HINT: ClassVar[str] = ""
+    #: The shell this harness runs hook command strings in on Windows, as a
+    #: :func:`provision.hook_quote` key. Every hook the harness runs is rendered
+    #: through :meth:`_omind_cmd`, so one harness uses one quoting convention.
+    #: POSIX is unaffected (always ``shlex.quote``).
+    WINDOWS_HOOK_SHELL: ClassVar[str] = "bash"
 
     REQUIRED_TOOLS: ClassVar[dict[str, str]] = {
         "git": "the mesh replicates the memory folder over git",
@@ -501,6 +509,15 @@ class AgentProvisioner(Provisioner):
                 "replaced by `omind node`)"
             )
 
+    def _omind_cmd(self) -> str:
+        """The pinned omind prefix, quoted for this harness's Windows hook shell."""
+        return canonical_omind_cmd(hook_quote(self.WINDOWS_HOOK_SHELL))
+
+    def _arg(self, value: object, posix: Callable[[str], str] = double_quote) -> str:
+        """*value* quoted as a hook argument for this harness's Windows hook
+        shell; *posix* is the call site's POSIX quoting, kept byte-for-byte."""
+        return hook_arg_quote(self.WINDOWS_HOOK_SHELL, str(value), posix)
+
     def _omind_hook_command(self, event: str) -> str:
         """The ``omind hook <event>`` invocation an agent runs for OMI priming.
 
@@ -510,10 +527,10 @@ class AgentProvisioner(Provisioner):
         Both folder values are quoted so a path like ``My Vault`` cannot
         word-split into a stray positional.
         """
-        omind = canonical_omind_cmd()
+        omind = self._omind_cmd()
         return (
-            f'{omind} hook {event} --vault "{self.config.vault}" '
-            f'--folder "{self.config.folder}"'
+            f"{omind} hook {event} --vault {self._arg(self.config.vault)} "
+            f"--folder {self._arg(self.config.folder)}"
         )
 
     def integrate(self) -> None:
@@ -551,6 +568,10 @@ class HermesProvisioner(AgentProvisioner):
     AGENT_LABEL = "Hermes Agent"
     INSTALL_HINT = "Install Hermes Agent (it creates ~/.hermes on first run), then re-run."
     DONE_MESSAGE = "Done. Restart Hermes Agent to load the OMI memory tools."
+    # No shell: agent/shell_hooks.py `_spawn` runs split_command_line(command)
+    # with shell=False, which on Windows is shlex.split(posix=False) and strips
+    # one layer of matching quotes, so a double-quoted path is one argv token.
+    WINDOWS_HOOK_SHELL = "argv"
 
     def agent_root(self) -> Path:
         return hermes_root()
@@ -658,7 +679,7 @@ class HermesProvisioner(AgentProvisioner):
         else:
             self.log(f"  OMI priming hook already installed in {path}")
 
-        self._allowlist_hook("pre_llm_call", command, HOOK_MARKER)
+        self._allowlist_hook("pre_llm_call", command, command_is_omind_hook)
 
     def integrate(self) -> None:
         super().integrate()
@@ -725,14 +746,16 @@ class HermesProvisioner(AgentProvisioner):
                 )
         else:
             self.log(f"  OMI guard hook already installed in {path}")
-        self._allowlist_hook("pre_tool_call", command, marker)
+        self._allowlist_hook("pre_tool_call", command, lambda c: marker in c)
 
-    def _allowlist_hook(self, event: str, command: str, marker: str) -> None:
+    def _allowlist_hook(self, event: str, command: str, owned: Callable[[str], bool]) -> None:
         """Pre-approve a hook command in Hermes' consent allowlist so it loads
         without a TTY prompt. Matching is by (event, command); replaces any prior
-        omind-owned approval for that event (identified by ``marker`` in the
-        command) so a drifted command can't leave a stale grant. Never overwrites
-        a file it can't parse."""
+        omind-owned approval for that event (``owned(command)`` is true) so a
+        drifted command can't leave a stale grant. The priming hook passes
+        :func:`command_is_omind_hook`, the matcher doctor and the hook list use:
+        a quoted pin (``'/home/jane doe/bin/omind' hook``) does not contain the
+        bare ``omind hook`` marker. Never overwrites a file it can't parse."""
         path = hermes_allowlist_path()
         try:
             raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
@@ -758,9 +781,7 @@ class HermesProvisioner(AgentProvisioner):
             e
             for e in approvals
             if not (
-                isinstance(e, dict)
-                and e.get("event") == event
-                and marker in str(e.get("command", ""))
+                isinstance(e, dict) and e.get("event") == event and owned(str(e.get("command", "")))
             )
         ]
         kept.append({"event": event, "command": command})
@@ -782,6 +803,9 @@ class OpenClawProvisioner(AgentProvisioner):
     AGENT_LABEL = "OpenClaw"
     INSTALL_HINT = "Install OpenClaw (it creates ~/.openclaw on first run), then re-run."
     DONE_MESSAGE = "Done. Restart OpenClaw to load the OMI memory tools."
+    # Undetermined: current OpenClaw has no shell-command hook path to read a
+    # Windows shell from (its hooks are in-process JS). Kept on the default
+    # double quotes until that is settled (#425).
 
     def agent_root(self) -> Path:
         return openclaw_root()
@@ -903,7 +927,7 @@ class OpenClawProvisioner(AgentProvisioner):
         """
         path = openclaw_config_path()
         data = self._read_settings(path)
-        command = f"{canonical_omind_cmd()} guard adapter --harness openclaw"
+        command = f"{self._omind_cmd()} guard adapter --harness openclaw"
         desired = {"event": "pre_tool", "command": command, "enabled": True}
         hooks = data.get("hooks")
         if not isinstance(hooks, dict):
@@ -958,6 +982,11 @@ class GeminiProvisioner(AgentProvisioner):
 
     AGENT_LABEL = "Gemini CLI"
     INSTALL_HINT = "Install the Gemini CLI (`npm i -g @google/gemini-cli`), then re-run."
+    # gemini-cli 0.46.0 HookRunner.executeCommandHook spawns
+    # getShellConfiguration(): on Windows `pwsh -NoProfile -Command <cmd>` (or
+    # `powershell.exe -NoProfile -NonInteractive -Command`). PowerShell rejects
+    # `"<path>" -m omind ...`; it needs the call operator.
+    WINDOWS_HOOK_SHELL = "powershell"
     DONE_MESSAGE = (
         "Done. Restart the Gemini CLI to load the OMI guard "
         "(needs a Gemini CLI with BeforeTool hook support)."
@@ -973,7 +1002,7 @@ class GeminiProvisioner(AgentProvisioner):
     def _guard_hook_group(self) -> dict[str, Any]:
         """One ``BeforeTool`` matcher group running the omind gemini adapter on
         every tool. Gemini pipes the event JSON on stdin; the adapter reads it."""
-        omind = canonical_omind_cmd()
+        omind = self._omind_cmd()
         return {
             "matcher": ".*",
             "hooks": [
@@ -1071,6 +1100,9 @@ class PoolsideProvisioner(AgentProvisioner):
 
     AGENT_LABEL = "Poolside (pool CLI)"
     INSTALL_HINT = "Install the pool CLI and run `pool login`, then re-run."
+    # docs.poolside.ai/hooks: `command` "Runs through /bin/sh -c on Unix or
+    # cmd /c on Windows".
+    WINDOWS_HOOK_SHELL = "cmd"
     DONE_MESSAGE = (
         "Done. Start a new `pool` session to pick up the omi MCP server and the "
         "OMI guard + memory hooks (`pool mcp list` should show the server)."
@@ -1106,13 +1138,12 @@ class PoolsideProvisioner(AgentProvisioner):
     def _hook_command(self, event: str) -> str:
         """The shell command pool runs for one hook event; absolute ``omind``
         path, quoted folder values (see :meth:`_omind_hook_command`)."""
-        omind = canonical_omind_cmd()
+        omind = self._omind_cmd()
         if event == "PreToolUse":
             return f"{omind} guard adapter {POOLSIDE_HARNESS_FLAG}"
         if event == "UserPromptSubmit":
-            return (
-                f'{omind} guard preflight {POOLSIDE_HARNESS_FLAG} --omi-dir "{self.config.omi_dir}"'
-            )
+            omi_dir = self._arg(self.config.omi_dir)
+            return f"{omind} guard preflight {POOLSIDE_HARNESS_FLAG} --omi-dir {omi_dir}"
         return f"{self._omind_hook_command(event)} {POOLSIDE_HARNESS_FLAG}"
 
     def desired_hook_entries(self) -> dict[str, dict[str, Any]]:
@@ -1631,6 +1662,12 @@ class CodexProvisioner(AgentProvisioner):
 
     AGENT_LABEL = "Codex CLI"
     INSTALL_HINT = "Install Codex CLI (`npm i -g @openai/codex`, or the snap), then re-run."
+    # Codex (0.154.0) runs hooks in the session shell: build_hooks_config
+    # (codex-rs/core/src/session/mod.rs) uses shell.derive_exec_args, and
+    # shell_detect.rs makes PowerShell (pwsh, else powershell.exe) the Windows
+    # default -> `<pwsh> -NoProfile -Command <cmd>`. One convention for the
+    # guard, SessionStart and PostToolUse hooks alike.
+    WINDOWS_HOOK_SHELL = "powershell"
     DONE_MESSAGE = (
         "Done. Restart Codex to load the OMI memory tools, /omind skill, trusted "
         "omind hooks, and the global AGENTS.md bootstrap."
@@ -1651,14 +1688,14 @@ class CodexProvisioner(AgentProvisioner):
     def _guard_hook_group(self) -> dict[str, Any]:
         """One Claude-schema matcher group running the omind codex adapter on all
         tools. Codex pipes the event JSON on stdin; the adapter reads it directly."""
-        omind = canonical_omind_cmd(shlex.quote)
+        omind = self._omind_cmd()
         return {
             "hooks": [
                 {
                     "type": "command",
                     "command": (
                         f"{omind} guard adapter --harness codex "
-                        f"--omi-dir {shlex.quote(str(self.config.omi_dir))}"
+                        f"--omi-dir {self._arg(self.config.omi_dir, shlex.quote)}"
                     ),
                     "timeout": 30,
                 }
@@ -2302,6 +2339,10 @@ class AgyProvisioner(AgentProvisioner):
 
     AGENT_LABEL = "Antigravity CLI (agy)"
     INSTALL_HINT = "Install the Antigravity CLI (`agy`), then re-run."
+    # agy 1.2.14 (Go) jsonhook.executeCommandModeHook runs
+    # exec.CommandContext(ctx, "cmd", "/c", command) on Windows (`sh -c` on
+    # POSIX), per the disassembled official windows-x64 build.
+    WINDOWS_HOOK_SHELL = "cmd"
     DONE_MESSAGE = (
         "Done. Restart the Antigravity CLI to load the OMI memory tools, hooks, and skill."
     )
@@ -2390,8 +2431,8 @@ class AgyProvisioner(AgentProvisioner):
                 paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def desired_hook_block(self) -> dict[str, Any]:
-        omind = canonical_omind_cmd(shlex.quote)
-        omi_dir = shlex.quote(str(self.config.omi_dir))
+        omind = self._omind_cmd()
+        omi_dir = self._arg(self.config.omi_dir, shlex.quote)
         return {
             "PreToolUse": [
                 {

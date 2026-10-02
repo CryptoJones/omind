@@ -357,6 +357,24 @@ def test_hermes_priming_is_idempotent(tmp_path: Path, hermes_home: Path) -> None
     assert sorted(a["event"] for a in allow["approvals"]) == ["pre_llm_call", "pre_tool_call"]
 
 
+def test_hermes_allowlist_drops_a_stale_quoted_pin(tmp_path: Path, hermes_home: Path) -> None:
+    """A spaced POSIX pin is shell-quoted (``'/home/jane doe/.../omind' hook``),
+    which does not contain the bare ``omind hook`` marker. Cleanup uses the same
+    matcher as doctor, so the stale approval is still removed (#418 review)."""
+    stale = "'/home/jane doe/.local/bin/omind' hook pre_llm_call --vault \"/v\" --folder \"OMI\""
+    user = {"event": "pre_llm_call", "command": "/usr/bin/my-own-hook"}
+    (hermes_home / "shell-hooks-allowlist.json").write_text(
+        json.dumps({"approvals": [{"event": "pre_llm_call", "command": stale}, user]}),
+        encoding="utf-8",
+    )
+    run_setup_for(_config(tmp_path, "hermes"), log=_quiet)
+    allow = json.loads((hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8"))
+    commands = [a["command"] for a in allow["approvals"] if a["event"] == "pre_llm_call"]
+    assert stale not in commands
+    assert user["command"] in commands
+    assert sum(c.startswith("/usr/bin/omind hook pre_llm_call") for c in commands) == 1
+
+
 def test_hermes_priming_tolerates_corrupt_allowlist(
     tmp_path: Path, hermes_home: Path
 ) -> None:
@@ -566,13 +584,120 @@ def test_openclaw_gemini_poolside_quote_a_spaced_pin(tmp_path: Path, spaced_pin:
     commands = [h["command"] for h in data["hooks"]["agent"]]
     assert f"{prefix} guard adapter --harness openclaw" in commands
 
+    # Gemini runs hooks in PowerShell on Windows: the call operator form.
+    gemini_prefix = (
+        " ".join([f"& '{spaced_pin[0]}'", *spaced_pin[1:]]) if len(spaced_pin) > 1 else prefix
+    )
     gemini = agents.GeminiProvisioner(_config(tmp_path, "gemini"), log=_quiet)
-    assert gemini._guard_hook_group()["hooks"][0]["command"].startswith(f"{prefix} guard adapter ")
+    command = gemini._guard_hook_group()["hooks"][0]["command"]
+    assert command.startswith(f"{gemini_prefix} guard adapter ")
 
     pool = agents.PoolsideProvisioner(_config(tmp_path, "poolside"), log=_quiet)
     for event in ("PreToolUse", "UserPromptSubmit", "SessionStart"):
         assert pool._hook_command(event).startswith(f"{prefix} "), event
     assert provision._hook_omind_argv(pool._hook_command("SessionStart")) == spaced_pin
+
+
+# -- #418 review round 3: each harness's Windows hook shell ---------------------
+
+_WIN_PLAIN = r"C:\Users\u\AppData\Roaming\uv\tools\omind\Scripts\python.exe"
+_WIN_SPACED = r"C:\Users\Jane Doe\AppData\Roaming\uv\tools\omind\Scripts\python.exe"
+
+
+def _hook_commands_by_harness(vault: Path) -> dict[str, list[str]]:
+    """Every hook command string each harness writes, rendered on this "platform"."""
+    cfg = SetupConfig(vault=vault, folder="OMI", agent="codex")  # type: ignore[arg-type]
+    codex = agents.CodexProvisioner(cfg, log=_quiet)
+    agy_block = agents.AgyProvisioner(cfg, log=_quiet).desired_hook_block()
+    pool = agents.PoolsideProvisioner(cfg, log=_quiet)
+    claude = provision.Provisioner(cfg, log=_quiet)
+    gemini = agents.GeminiProvisioner(cfg, log=_quiet)
+    openclaw = OpenClawProvisioner(cfg, log=_quiet)
+    return {
+        "gemini": [gemini._guard_hook_group()["hooks"][0]["command"]],
+        "codex": [
+            codex._guard_hook_group()["hooks"][0]["command"],
+            codex._omind_hook_command("SessionStart"),
+            codex._omind_hook_command("PostToolUse"),
+        ],
+        "agy": [
+            h["command"]
+            for groups in agy_block.values()
+            for g in groups
+            for h in g.get("hooks", [g])
+        ],
+        "poolside": [pool._hook_command(e) for e in pool.HOOK_EVENTS],
+        "hermes": [HermesProvisioner(cfg, log=_quiet)._omind_hook_command("pre_llm_call")],
+        "openclaw": [f"{openclaw._omind_cmd()} guard adapter --harness openclaw"],
+        "claude": [claude._hook_command(e) for e in provision.HANDLED_EVENTS],
+    }
+
+
+@pytest.mark.parametrize("exe", [_WIN_PLAIN, _WIN_SPACED], ids=["plain", "spaced"])
+def test_windows_hooks_use_each_harness_shell_syntax(
+    monkeypatch: pytest.MonkeyPatch, exe: str
+) -> None:
+    """Each harness's hooks are rendered for the shell it runs them in on Windows,
+    one convention per harness (#418 review):
+
+    - Gemini, Codex: PowerShell (``pwsh -NoProfile -Command``). A quoted path
+      followed by arguments is a ParserError there, so the call operator.
+    - agy, Poolside: ``cmd /c``. Quoted only when needed, so a plain path keeps
+      the line from starting with a quote (cmd's quote-stripping rule).
+    - Hermes: no shell, a Windows-mode argv split: double quotes.
+    - Claude Code: bash, its Windows default: double quotes. OpenClaw:
+      undetermined, unchanged double quotes.
+    """
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [exe, "-m", "omind"])
+    vault = Path(r"C:\Users\Jane Doe\Obsidian Vault")
+    omi_dir = str(vault / "OMI")
+    cmd_head = f"{exe} -m omind " if " " not in exe else f'"{exe}" -m omind '
+    expected_head = {
+        "gemini": f"& '{exe}' -m omind ",
+        "codex": f"& '{exe}' -m omind ",
+        "agy": cmd_head,
+        "poolside": cmd_head,
+        "hermes": f'"{exe}" -m omind ',
+        "openclaw": f'"{exe}" -m omind ',
+        "claude": f'"{exe}" -m omind ',
+    }
+    commands = _hook_commands_by_harness(vault)
+    for harness, head in expected_head.items():
+        for command in commands[harness]:
+            assert command.startswith(head), (harness, command)
+            # A single-quoted path only where PowerShell reads it: cmd and the
+            # argv split both keep `'` literally.
+            if harness not in ("gemini", "codex"):
+                assert f"'{exe}'" not in command, (harness, command)
+            if " -m omind hook " in command:  # doctor reads `hook <Event>` pins back
+                assert provision._hook_omind_argv(command) == [exe, "-m", "omind"], command
+    # Arguments follow the same shell: a PowerShell literal, or cmd double quotes.
+    assert f"--omi-dir '{omi_dir}'" in commands["codex"][0]
+    assert f"--vault '{vault}' --folder 'OMI'" in commands["codex"][1]
+    assert all(f'--omi-dir "{omi_dir}"' in c for c in commands["agy"])
+    assert f'--vault "{vault}" --folder OMI' in commands["poolside"][-1]
+
+
+def test_windows_quoting_helpers() -> None:
+    assert provision.powershell_quote(r"C:\a$b\o'k\py.exe") == r"& 'C:\a$b\o''k\py.exe'"
+    assert provision.cmd_quote(r"C:\u\python.exe") == r"C:\u\python.exe"
+    assert provision.cmd_quote(r"C:\J D\python.exe") == r'"C:\J D\python.exe"'
+
+
+def test_posix_hooks_ignore_the_windows_shells(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The per-harness Windows shell never leaks into POSIX output."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: ["/usr/bin/omind"])
+    commands = _hook_commands_by_harness(Path("/home/u/My Vault"))
+    for harness, cmds in commands.items():
+        for command in cmds:
+            # Claude Code's hooks have always double-quoted the pin, everywhere.
+            head = '"/usr/bin/omind" ' if harness == "claude" else "/usr/bin/omind "
+            assert command.startswith(head), (harness, command)
+            assert "& " not in command, (harness, command)
+    assert "--omi-dir '/home/u/My Vault/OMI'" in commands["codex"][0]
+    assert '--vault "/home/u/My Vault" --folder "OMI"' in commands["codex"][1]
 
 
 # -- MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q -----------------

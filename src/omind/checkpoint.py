@@ -325,7 +325,9 @@ def install_timer(
         "\n"
         "[Service]\n"
         "Type=oneshot\n"
-        f'ExecStart={omind} checkpoint run --since {every} '
+        # Quoted like the mesh and backup units: an unquoted path word-splits
+        # on a space (``/home/jane doe/...``), and systemd takes double quotes.
+        f'ExecStart="{omind}" checkpoint run --since {every} '
         f'--vault "{vault}" --folder "{folder}"\n'
     )
     timer = (

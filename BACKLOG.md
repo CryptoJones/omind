@@ -94,6 +94,12 @@ into a new note. In dependency order; each child is flag-gated._
   - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
   - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
 
+### Windows
+
+- [ ] **Windows hook shells: OpenClaw undetermined; verify `cmd /c` spaced paths (agy, pool) and Claude Code without Git Bash** ([#425](https://github.com/CryptoJones/omind/issues/425)) — _bug (Windows), follow-up of #418_ —
+  #418 renders each harness's hooks for its Windows shell; these three cases still need a
+  real Windows run, and OpenClaw's hook schema needs confirming.
+
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -150,7 +156,7 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   exits 0) in every hook, MCP entry, guard script and service line, falling back to the #377
   launcher resolution. `doctor` reads, probes and compares the module form, and flags hooks
   still on `omind.exe`. macOS/Linux are unchanged.
-- [x] **doctor/setup: `_HOOK_EXE_RE` truncates a quoted omind path containing a space (Windows %USERPROFILE% with spaces)** ([#417](https://github.com/CryptoJones/omind/issues/417)) — **v10.2.5** — _bug (Windows)_ —
+- [x] **doctor/setup: `_HOOK_EXE_RE` truncates a quoted omind path containing a space (Windows %USERPROFILE% with spaces)** ([#417](https://github.com/CryptoJones/omind/issues/417)) — **v10.2.6** — _bug (Windows)_ —
   the hook parser takes a quoted path whole, so a pin under `C:\Users\Jane Doe\` round-trips
   setup → doctor as healthy instead of a false non-canonical / dead-pin fail.
 

@@ -36,6 +36,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     the username, so `C:\Users\Jane Doe\...` used to word-split.
     `canonical_omind_cmd()` quotes by default (double quotes on Windows, `shlex.quote` on
     POSIX).
+  - On Windows each harness's hooks are rendered for the shell that harness actually runs
+    them in, one convention per harness. Gemini CLI and Codex run hooks through PowerShell
+    (`pwsh -NoProfile -Command`), which rejects `"<path>" -m omind ...` as a parse error, so
+    they get the call operator: `& '<path>' -m omind ...`, with PowerShell-literal arguments.
+    agy and pool run `cmd /c`, so the path is quoted only when it needs it. Hermes splits the
+    string itself (no shell), and Claude Code runs Git Bash by default; both keep double
+    quotes. Codex's guard hook no longer single-quotes a Windows path.
+  - Under Smart App Control the old `omind.exe` pin probes as dead, not stale. doctor's
+    dead-pin messages, for the hooks and the MCP entry, now name `"<python.exe>" -m omind
+    setup` too, instead of the blocked `omind setup`.
+  - The Hermes allowlist cleanup uses the same omind-hook matcher as doctor, so a stale
+    approval for a quoted pin (`'/home/jane doe/.../omind' hook ...`) is removed. The
+    checkpoint timer's `ExecStart` quotes the omind path like the mesh and backup units.
   - macOS and Linux are otherwise unchanged.
 - **The OpenCode and DSH guard plugins were invalid JavaScript on Windows.** Placeholders
   were pasted raw into `"..."` literals, and every uv tool path holds `\uv`, a malformed

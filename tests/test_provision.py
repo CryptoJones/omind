@@ -1686,6 +1686,67 @@ def test_doctor_fails_a_module_mcp_pin_that_does_not_run(
     assert f"{_WIN_PY} -m omind" in results["mcp_registration"].message
 
 
+_SAC_LAUNCHER = r"C:\Users\u\.local\bin\omind.exe"
+
+
+@pytest.fixture
+def sac_blocks_launcher(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Smart App Control enforcing: spawning ``omind.exe`` raises, while the
+    interpreter still runs ``-m omind`` (#380). Probes go through the real
+    :func:`provision._launcher_runs`, so the block reads as a dead pin."""
+
+    def blocked(argv: list[str], **_kw: object) -> subprocess.CompletedProcess[bytes]:
+        if argv[0] == _SAC_LAUNCHER:
+            raise PermissionError(1, "An Application Control policy has blocked this file")
+        raise OSError(f"unexpected probe {argv}")
+
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "_module_runs", lambda _py: True)
+    monkeypatch.setattr(provision.subprocess, "run", blocked)
+    provision._launcher_runs.cache_clear()
+    yield
+    provision._launcher_runs.cache_clear()
+
+
+def test_doctor_dead_hook_pin_under_sac_names_the_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, sac_blocks_launcher: None
+) -> None:
+    """Under SAC the old ``omind.exe`` pin is DEAD, not merely stale, and the
+    dead branch runs first. Its advice must not be `omind setup`, which SAC
+    blocks too (#418 review)."""
+    vault = tmp_path / "v"
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_SAC_LAUNCHER])
+    settings = _wired_settings(tmp_path, vault)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    _ready_enforce_hook()
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+    assert result.level == "fail"
+    assert "pinned omind does not run" in result.message and _SAC_LAUNCHER in result.message
+    assert f'`"{_WIN_PY}" -m omind setup`' in result.message
+    assert "`omind setup`" not in result.message
+
+
+def test_doctor_dead_mcp_pin_under_sac_names_the_interpreter(
+    tmp_path: Path,
+    fake_tools: None,
+    isolate_claude: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    sac_blocks_launcher: None,
+) -> None:
+    """The MCP dead-pin message gives the same SAC-safe advice (#418 review)."""
+    config = _config(tmp_path)
+    _provision_files(config)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_SAC_LAUNCHER])
+    _write_server_config(isolate_claude, config)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    results = {r.key: r for r in provision.diagnose(config)}
+    message = results["mcp_registration"].message
+    assert results["mcp_registration"].level == "fail"
+    assert "pinned omind does not run" in message and _SAC_LAUNCHER in message
+    assert f'`"{_WIN_PY}" -m omind setup`' in message
+    assert "`omind setup`" not in message
+
+
 def test_immutable_hint_explains_how_to_unlock(monkeypatch: pytest.MonkeyPatch) -> None:
     """A lock that blocks the fix must at least say how to lift it.
 

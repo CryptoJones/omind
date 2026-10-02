@@ -118,6 +118,81 @@ def shell_quote(exe: str) -> str:
     return double_quote(exe) if _windows() else shlex.quote(exe)
 
 
+def powershell_literal(value: str) -> str:
+    """*value* as a PowerShell single-quoted literal: no ``$`` or backtick
+    expansion; an embedded ``'`` is doubled."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def powershell_quote(exe: str) -> str:
+    """*exe* as a PowerShell command head: ``& '<exe>'``.
+
+    PowerShell parses a quoted string at the start of a statement as an
+    expression, so ``"<exe>" -m omind ...`` is a ParserError ("Unexpected token
+    '-m'"); the call operator ``&`` makes it a command.
+    """
+    return f"& {powershell_literal(exe)}"
+
+
+#: Characters that make cmd.exe need quotes around a path.
+_CMD_SPECIAL = frozenset(" \t&()[]{}^=;!'+,`~%")
+
+
+def cmd_quote(exe: str) -> str:
+    """*exe* for a ``cmd /c`` command line: double quotes only when needed.
+
+    ``cmd /c`` strips the first and last quote of a line that starts with a
+    quote and holds more than two, so a needlessly quoted head breaks a hook
+    whose arguments are quoted too. A plain path stays bare, the same bytes the
+    launcher pin wrote before #380.
+    """
+    return f'"{exe}"' if any(c in _CMD_SPECIAL for c in exe) else exe
+
+
+#: How each Windows hook shell wants the pinned path quoted (#418 review).
+_WINDOWS_HOOK_QUOTE: dict[str, Callable[[str], str]] = {
+    # `pwsh`/`powershell.exe -Command`: needs the call operator.
+    "powershell": powershell_quote,
+    # `cmd /c`: bare unless the path needs quotes.
+    "cmd": cmd_quote,
+    # Bash (the Windows bash shipped with Git for Windows), and harnesses that
+    # split the string themselves in Windows mode: plain double quotes.
+    "bash": double_quote,
+    "argv": double_quote,
+}
+
+
+#: How each Windows hook shell wants an ARGUMENT (a vault or OMI path) quoted.
+_WINDOWS_ARG_QUOTE: dict[str, Callable[[str], str]] = {
+    "powershell": powershell_literal,
+    "cmd": cmd_quote,
+    "bash": double_quote,
+    "argv": double_quote,
+}
+
+
+def hook_quote(windows_shell: str) -> Callable[[str], str]:
+    """The quoting for the pinned path of a harness whose hooks run under
+    *windows_shell* on Windows.
+
+    One harness, one convention: every hook a harness runs goes through the
+    same function. POSIX always uses :func:`shlex.quote`, unchanged.
+    """
+    windows = _WINDOWS_HOOK_QUOTE[windows_shell]
+
+    def quote(exe: str) -> str:
+        return windows(exe) if _windows() else shlex.quote(exe)
+
+    return quote
+
+
+def hook_arg_quote(windows_shell: str, value: str, posix: Callable[[str], str]) -> str:
+    """*value* quoted as a hook argument: the *windows_shell* form on Windows,
+    *posix* (the call site's existing quoting, so POSIX bytes do not churn)
+    elsewhere."""
+    return _WINDOWS_ARG_QUOTE[windows_shell](value) if _windows() else posix(value)
+
+
 def canonical_omind_cmd(quote: Callable[[str], str] = shell_quote) -> str:
     """:func:`canonical_omind_argv` as a shell command prefix.
 
@@ -1868,7 +1943,8 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
             CheckResult(
                 "mcp_registration",
                 "fail",
-                f"MCP server '{name}': pinned omind does not run ({dead}) — run `omind setup`",
+                f"MCP server '{name}': pinned omind does not run ({dead}) — run "
+                f"{_setup_invocation(canonical_omind_argv())}",
             )
         )
     elif not prov._matches_desired(server):
@@ -1942,7 +2018,9 @@ def _setup_invocation(canonical: list[str]) -> str:
 
     Plain ``omind setup`` everywhere but the Windows module form (#380): where
     Smart App Control blocks ``omind.exe``, launching setup through that same
-    launcher is blocked too, so the advice names the interpreter instead.
+    launcher is blocked too, so the advice names the interpreter instead. Used
+    by the dead-pin messages as well: under SAC the blocked launcher probes as
+    dead, which is exactly when ``omind setup`` cannot run.
     """
     if len(canonical) > 1 and tuple(canonical[1:]) == MODULE_ARGS:
         return f"`{double_quote(canonical[0])} -m omind setup`"
@@ -2036,7 +2114,7 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             "hooks",
             "fail",
             "auto-memory hooks: pinned omind does not run "
-            f"({', '.join(sorted(dead_exes))}) — run `omind setup`.{lock_note}",
+            f"({', '.join(sorted(dead_exes))}) — run {_setup_invocation(canonical)}.{lock_note}",
         )
     if stale_exes:
         return CheckResult(
