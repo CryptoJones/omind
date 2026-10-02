@@ -503,6 +503,7 @@ def test_hook_commands_quote_the_windows_exe_path(
 ) -> None:
     """Git Bash strips the backslashes of an unquoted path (C:\\Users\\x -> C:Usersx)."""
     exe = "C:\\Users\\ci\\.local\\bin\\omind.EXE"
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [exe])
 
     for event in provision.HANDLED_EVENTS:
@@ -1530,6 +1531,7 @@ def test_windows_hook_command_uses_the_module_form(
 ) -> None:
     """The hook line is ``"<python>" -m omind hook ...``: still found as ours, and
     doctor reads the interpreter plus module tail back out of it (#380)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
     for event in provision.HANDLED_EVENTS:
         cmd = Provisioner(_config(tmp_path), log=_quiet)._hook_command(event)
@@ -1635,6 +1637,7 @@ def test_dead_pin_probes_the_module_not_bare_python(monkeypatch: pytest.MonkeyPa
     def no_launcher(exe: str) -> bool:
         raise AssertionError(f"launcher-probed {exe}")
 
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(provision, "_module_runs", module_runs)
     monkeypatch.setattr(provision, "_launcher_runs", no_launcher)
     dead = provision._dead_pin(_WIN_PY, ["-m", "omind", "node"])
@@ -1678,6 +1681,7 @@ def test_doctor_fails_a_module_mcp_pin_that_does_not_run(
 ) -> None:
     config = _config(tmp_path)
     _provision_files(config)
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
     monkeypatch.setattr(provision, "_module_runs", lambda _py: False)
     _write_server_config(isolate_claude, config)
@@ -2173,8 +2177,9 @@ def test_windows_diagnose_accepts_direct_commands_and_flags_missing_sh(
     assert len(sh_results) == 1 and sh_results[0].level == "ok"
 
 
-def test_posix_diagnose_has_no_sh_check() -> None:
-    assert provision._diagnose_windows_sh() == [] or os.name == "nt"
+def test_posix_diagnose_has_no_sh_check(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    assert provision._diagnose_windows_sh() == []
 
 
 # -- #356: Windows Store stub detection for python -----------------------------

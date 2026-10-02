@@ -45,6 +45,12 @@ def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     # ...and skip the `python -m omind` form (#380), which would otherwise win
     # on windows-latest with the test interpreter.
     monkeypatch.setattr(provision, "_windows_module_argv", lambda: None)
+    # The fake pin above is a POSIX path, and the harness tests below assert
+    # POSIX-shaped hook lines (shlex quoting, bare launcher head). On a real
+    # Windows runner `_windows()` is True and every harness renders its Windows
+    # shell form instead, so pin the platform to match the fake. Tests that
+    # assert the Windows form pin `_windows` to True themselves.
+    monkeypatch.setattr(provision, "_windows", lambda: False)
 
 
 @pytest.fixture(autouse=True)
@@ -411,8 +417,10 @@ _WIN_PY = r"C:\Users\u\AppData\Roaming\uv\tools\omind\Scripts\python.exe"
 
 @pytest.fixture
 def module_form(monkeypatch: pytest.MonkeyPatch) -> list[str]:
-    """Resolve omind to the Windows ``python.exe -m omind`` form (#380)."""
+    """Resolve omind to the Windows ``python.exe -m omind`` form (#380), on a
+    Windows platform so the rendering matches the pin."""
     argv = [_WIN_PY, "-m", "omind"]
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(argv))
     monkeypatch.setattr(agents, "canonical_omind_argv", lambda: list(argv))
     return argv
@@ -501,6 +509,7 @@ def test_js_guard_templates_escape_windows_paths(
     """A raw `C:\\...\\uv\\...` path in a JS string literal is a SyntaxError, so
     the OpenCode/DSH guard never loaded. Every placeholder is JSON-escaped and
     decodes back to the exact value."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(agents, "canonical_omind_argv", lambda: [_NASTY_WIN, "-m", "omind"])
     vault = Path(r"C:\Users\Jane Doe\new\tools\uv\vault")
     config = SetupConfig(vault=vault, folder=r"O\tM I", agent="dsh")  # type: ignore[arg-type]
@@ -689,15 +698,18 @@ def test_posix_hooks_ignore_the_windows_shells(monkeypatch: pytest.MonkeyPatch) 
     """The per-harness Windows shell never leaks into POSIX output."""
     monkeypatch.setattr(provision, "_windows", lambda: False)
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: ["/usr/bin/omind"])
-    commands = _hook_commands_by_harness(Path("/home/u/My Vault"))
+    vault = Path("/home/u/My Vault")
+    commands = _hook_commands_by_harness(vault)
     for harness, cmds in commands.items():
         for command in cmds:
             # Claude Code's hooks have always double-quoted the pin, everywhere.
             head = '"/usr/bin/omind" ' if harness == "claude" else "/usr/bin/omind "
             assert command.startswith(head), (harness, command)
             assert "& " not in command, (harness, command)
-    assert "--omi-dir '/home/u/My Vault/OMI'" in commands["codex"][0]
-    assert '--vault "/home/u/My Vault" --folder "OMI"' in commands["codex"][1]
+    # str() of the Path, not a literal: on a Windows runner `Path` renders the
+    # same vault with backslashes even with `_windows` pinned False.
+    assert f"--omi-dir '{vault / 'OMI'}'" in commands["codex"][0]
+    assert f'--vault "{vault}" --folder "OMI"' in commands["codex"][1]
 
 
 # -- MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q -----------------
@@ -808,7 +820,9 @@ def test_opencode_setup_registers_mcp_and_guard_plugin(tmp_path: Path) -> None:
     # The guard plugin is written into OpenCode's auto-loaded plugin/ dir.
     body = agents.opencode_guard_plugin_path().read_text(encoding="utf-8")
     assert "__OMIND_BIN__" not in body and "__OMI_DIR__" not in body
-    assert str(config.omi_dir) in body
+    # Placeholders are JSON-escaped into JS string literals (#418 review), so a
+    # Windows path's backslashes appear doubled in the file.
+    assert json.dumps(str(config.omi_dir)) in body
     assert "tool.execute.before" in body and "--harness opencode" in body
 
 
