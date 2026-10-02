@@ -848,4 +848,179 @@ def test_pushed_branches_quoted_and_spaced_dash_c() -> None:
         'git -C "/path" -c user.name="Aaron Clark" push origin feat:main'
     ) == ["main"]
     assert rules._pushed_branches("git push origin --tags") == ["(tags)"]
-    assert rules._pushed_branches('git -C "/repo with spaces" push') is None  # bare push -> None
+    # A push with no refspec is resolved by where it lands (#423).
+    assert rules._pushed_branches('git -C "/repo with spaces" push') == ["(default-push):"]
+    assert rules._pushed_branches("git push -u origin") == ["(default-push):origin"]
+    assert rules._pushed_branches("git status") is None
+
+
+def _real_repo(path: Path, branch: str) -> Path:
+    """A real git repo with one commit, checked out on ``branch`` (#423): the
+    HEAD tests below resolve the branch through git itself, not a stub."""
+    git = ["git", "-C", str(path), "-c", "user.name=t", "-c", "user.email=t@t"]
+    subprocess.run(["git", "init", "-q", "-b", "main", str(path)], check=True)
+    subprocess.run([*git, "commit", "-q", "--allow-empty", "-m", "init"], check=True)
+    if branch != "main":
+        subprocess.run([*git, "checkout", "-q", "-b", branch], check=True)
+    return path.resolve()
+
+
+@pytest.fixture
+def head_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    """(omi, on_main, on_feature): the seed-shaped `*git push*` rule's vault, and
+    two REAL public repos, the first on main and the second on a feature branch."""
+    omi = tmp_path / "OMI"
+    _note_with_rule(omi)
+    on_main = _real_repo(tmp_path / "on-main", "main")
+    on_feature = _real_repo(tmp_path / "on-feature", "feature/x")
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_name", lambda r: r.name)
+    return omi, on_main, on_feature
+
+
+#: #423: `HEAD` / `@` as the refspec name the checked-out branch.
+_HEAD_PUSHES: tuple[str, ...] = (
+    "git push origin HEAD",
+    "git push -u origin HEAD",
+    "git push --set-upstream origin HEAD",
+    "git push origin @",
+    "git push -u origin @",
+    "git push origin +HEAD",
+    # Lowercase: on case-insensitive APFS / NTFS git resolves `head` to
+    # .git/HEAD (checked with git 2.54 on macOS), so it is matched everywhere.
+    "git push origin head",
+    "git push origin +head",
+    "git push",  # bare push, no upstream: the checked-out branch, as before
+    "git push origin",
+    "git push -u origin",
+)
+
+
+@pytest.mark.parametrize("command", _HEAD_PUSHES)
+def test_head_push_from_public_main_is_denied(
+    head_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    omi, on_main, _on_feature = head_repos
+    assert _denied(omi, command, on_main, monkeypatch), command
+
+
+@pytest.mark.parametrize("command", _HEAD_PUSHES)
+def test_head_push_from_feature_branch_is_allowed(
+    head_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    omi, _on_main, on_feature = head_repos
+    assert not _denied(omi, command, on_feature, monkeypatch), command
+
+
+def test_head_resolves_against_the_target_repo(
+    head_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#423: HEAD is the branch of the repo the push runs in, not of the cwd."""
+    omi, on_main, on_feature = head_repos
+    to_main = f"git -C {on_main.as_posix()} push -u origin HEAD"
+    to_feature = f"git -C {on_feature.as_posix()} push -u origin HEAD"
+    assert _denied(omi, to_main, on_feature, monkeypatch)
+    assert not _denied(omi, to_feature, on_main, monkeypatch)
+    assert _denied(omi, f"cd {on_main.as_posix()} && git push origin @", on_feature, monkeypatch)
+
+
+def test_head_source_refspec_judges_its_destination(
+    head_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#423: `src:dst` is judged by dst, whatever HEAD is."""
+    omi, on_main, on_feature = head_repos
+    assert _denied(omi, "git push origin HEAD:main", on_feature, monkeypatch)
+    assert _denied(omi, "git push origin @:refs/heads/main", on_feature, monkeypatch)
+    assert not _denied(omi, "git push origin HEAD:feature/y", on_main, monkeypatch)
+    assert rules._pushed_branches("git push -u origin HEAD") == ["(current)"]
+    assert rules._pushed_branches("git push origin @:main") == ["main"]
+
+
+def test_head_as_destination_stays_literal(
+    head_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#423 review: `src:HEAD` pushes a remote ref literally named HEAD, so it is
+    not judged as the local checkout (a false positive on a public main)."""
+    omi, on_main, on_feature = head_repos
+    for where in (on_main, on_feature):
+        assert not _denied(omi, "git push origin feature:HEAD", where, monkeypatch)
+        assert not _denied(omi, "git push origin main:HEAD", where, monkeypatch)
+        assert not _denied(omi, "git push origin main:@", where, monkeypatch)
+    assert rules._pushed_branches("git push origin main:HEAD") == ["HEAD"]
+
+
+def _git(repo: Path, *args: str) -> None:
+    subprocess.run(["git", "-C", str(repo), *args], check=True, capture_output=True)
+
+
+@pytest.fixture
+def tracking_main(head_repos: tuple[Path, Path, Path], tmp_path: Path) -> tuple[Path, Path]:
+    """(omi, repo): the public `feature/x` repo with a REAL bare remote
+    `origin`, tracking that remote's `main` (#423 review)."""
+    omi, _on_main, on_feature = head_repos
+    remote = tmp_path / "remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", str(remote)], check=True)
+    _git(on_feature, "remote", "add", "origin", remote.as_posix())
+    _git(on_feature, "push", "-q", "origin", "feature/x:main")
+    _git(on_feature, "branch", "-q", "--set-upstream-to", "origin/main")
+    return omi, on_feature
+
+
+@pytest.mark.parametrize("command", ["git push", "git push origin", "git push -u origin"])
+def test_bare_push_to_upstream_main_is_denied(
+    tracking_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#423 review: on `feature/x` tracking `origin/main` with
+    `push.default=upstream`, a bare push lands on main: judged by `@{push}`."""
+    omi, repo = tracking_main
+    _git(repo, "config", "push.default", "upstream")
+    assert _denied(omi, command, repo, monkeypatch), command
+    # The same repo pushing to its own name lands on feature/x: allowed.
+    _git(repo, "config", "push.default", "current")
+    assert not _denied(omi, command, repo, monkeypatch), command
+
+
+def test_bare_push_with_head_push_refspec_is_denied(
+    tracking_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#423 review: `remote.origin.push HEAD:refs/heads/main` sends a bare push
+    to main. git's `@{push}` cannot resolve a HEAD-sourced refspec, so the
+    configured refspec is read too."""
+    omi, repo = tracking_main
+    _git(repo, "config", "remote.origin.push", "HEAD:refs/heads/main")
+    assert _denied(omi, "git push", repo, monkeypatch)
+    assert _denied(omi, "git push origin", repo, monkeypatch)
+
+
+def test_head_push_from_detached_head_stays_quiet(
+    head_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md invariant 2: a detached HEAD names no branch, so the branch
+    condition cannot hold and the rule stays quiet on purpose."""
+    omi, on_main, _on_feature = head_repos
+    _git(on_main, "checkout", "-q", "--detach")
+    assert rules._repo_branch(on_main) == "HEAD"
+    for command in ("git push origin HEAD", "git push", "git push origin"):
+        assert not _denied(omi, command, on_main, monkeypatch), command
+
+
+def test_branch_lookup_failure_stays_quiet(
+    head_repos: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md invariant 2: when git cannot name the branch (not a repo, or
+    git missing) the lookup fails open and the rule stays quiet on purpose."""
+    omi, on_main, _on_feature = head_repos
+    not_a_repo = tmp_path / "plain"
+    not_a_repo.mkdir()
+    for command in ("git push origin HEAD", "git push", "git push origin"):
+        assert rules.evaluate(_action(command), omi, not_a_repo) is None, command
+    assert rules._default_push_branches(not_a_repo, "") == [""]
+
+    def no_git(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(rules.subprocess, "run", no_git)
+    assert rules._repo_branch(on_main) == ""
+    assert rules._default_push_branches(on_main, "origin") == [""]
+    for command in ("git push origin HEAD", "git push", "git push origin"):
+        assert rules.evaluate(_action(command), omi, on_main) is None, command

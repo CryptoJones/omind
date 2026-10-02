@@ -50,6 +50,7 @@ wrong.
 from __future__ import annotations
 
 import fnmatch
+import functools
 import json
 import re
 import subprocess
@@ -405,6 +406,59 @@ def _repo_branch(repo: Path) -> str:
         return ""
 
 
+def _git_out(repo: Path, *args: str) -> str | None:
+    """``git -C repo <args>`` stdout, or None on any failure (fails open)."""
+    try:
+        proc = subprocess.run(
+            ["git", "-C", str(repo), *args],
+            capture_output=True,
+            text=True,
+            timeout=5,
+        )
+    except (OSError, subprocess.SubprocessError):
+        return None
+    return proc.stdout if proc.returncode == 0 else None
+
+
+def _default_push_branches(repo: Path, remote: str) -> list[str]:
+    """Branches a refspec-less ``git push [<remote>]`` in ``repo`` lands on
+    (#423): what ``@{push}`` resolves to, so ``feature/x`` tracking
+    ``origin/main`` under ``push.default=upstream`` is judged as ``main``. A
+    configured ``remote.<name>.push`` refspec sourced from ``HEAD`` adds its
+    destination too, because ``@{push}`` does not resolve one (git 2.54 says
+    "push refspecs for 'origin' do not include 'feature'").
+
+    Fails open: anything git cannot answer (detached HEAD, no upstream, not a
+    repo, git missing) leaves the checked-out branch, judged as before.
+    """
+    current = _repo_branch(repo)
+    dests: list[str] = []
+    try:
+        push = _git_out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}")
+        remotes = (_git_out(repo, "remote") or "").split()
+        push = (push or "").strip()
+        owner = max((r for r in remotes if push.startswith(r + "/")), key=len, default="")
+        if owner and (not remote or remote == owner):
+            dests.append(push.removeprefix(owner + "/"))
+        if not remote and current and current != "HEAD":
+            remote = (
+                _git_out(repo, "config", f"branch.{current}.pushRemote")
+                or _git_out(repo, "config", "remote.pushDefault")
+                or _git_out(repo, "config", f"branch.{current}.remote")
+                or "origin"
+            ).strip()
+        if remote in remotes:
+            specs = _git_out(repo, "config", "--get-all", f"remote.{remote}.push") or ""
+            for spec in specs.split():
+                src, _, dst = spec.lstrip("+").partition(":")
+                if src.upper() in _CURRENT_BRANCH_REFS:
+                    dests.append(dst.removeprefix("refs/heads/") or current)
+    except Exception as exc:  # noqa: BLE001 - enforcement fails open
+        _breadcrumb(f"rules_push_dest({repo})", exc)
+        dests = []
+    return dests or [current]
+
+
 # Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
 # literals (#317 / #333 / #345) after -C or -c. One shell word: unquoted runs
 # and quoted runs in any order, so `user.name='A B'` is one value (#414).
@@ -458,14 +512,32 @@ def _code_text(text: str) -> str:
     return _BLANKED_QUOTE_RE.sub(unquote, policy.shell_code_text(text))
 
 
+#: Refspecs that name the checked-out branch, resolved per target repo (#423).
+#: Compared upper-cased: on a case-insensitive filesystem (macOS APFS, Windows
+#: NTFS) git resolves `head` to `.git/HEAD`, so `git push origin head` pushes
+#: the checked-out branch; matching it everywhere only makes the rule stricter.
+_CURRENT_BRANCH_REFS = frozenset({"HEAD", "@"})
+#: Marker :func:`_pushed_branches` returns for a `HEAD` / `@` refspec with no
+#: explicit destination: the checked-out branch of the target repo.
+_CURRENT_REF = "(current)"
+#: Marker prefix for a push with no refspec (`git push`, `git push origin`),
+#: judged by where it really lands, ``@{push}`` (#423). The remote follows.
+_DEFAULT_PUSH = "(default-push):"
+
+
 def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
-    """Branch names a ``git push`` explicitly targets, or ``None`` for a bare
-    push (no refspec — the checked-out branch is what gets pushed).
+    """Branch names a ``git push`` targets, or ``None`` when the text holds no
+    push. A push with no refspec gives one ``(default-push):<remote>`` marker
+    (empty remote for a bare ``git push``), which :func:`_judge` resolves.
 
     A tag push (``git push origin v8.6.1`` / ``--tags``) from a checked-out
     main matched the branch condition via HEAD and got denied (#240 v1 false
     positive): when the command names refspecs, judge those instead of HEAD.
-    Refspecs like ``HEAD:main`` count as their destination.
+    Refspecs like ``HEAD:main`` count as their destination, and a literal
+    destination stays literal (``feature:HEAD`` pushes a remote ref named
+    ``HEAD``). A ``HEAD`` / ``@`` refspec with no destination gives the
+    ``(current)`` marker, which :func:`_judge` resolves to the target repo's
+    checked-out branch (#423).
 
     The push is located in :func:`policy.shell_code_text` (#394), so a push
     inside an ssh payload or quoted string is never the one judged; its
@@ -500,6 +572,9 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
         positional.append(token)
     # First positional token is the remote; the rest are refspecs.
     for token in positional[1:]:
+        if ":" not in token and token.lstrip("+").upper() in _CURRENT_BRANCH_REFS:
+            refs.append(_CURRENT_REF)
+            continue
         dest = token.rsplit(":", 1)[-1]
         # Force-push refspecs prefix the destination with '+' (`git push
         # origin +main`); without stripping it, "+main" never matched the
@@ -511,7 +586,9 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
             refs.append("(tags)")
         else:
             refs.append(dest)
-    return refs or None
+    if not refs:
+        return [_DEFAULT_PUSH + (positional[0] if positional else "")]
+    return refs
 
 
 @dataclass(frozen=True)
@@ -564,7 +641,20 @@ def _judge(
     if rule.except_repos and fact("name", _repo_name) in rule.except_repos:
         return None
     if rule.when_branch:
-        branches = pushed if pushed is not None else [fact("branch", _repo_branch)]
+        # `HEAD` / `@` name the checked-out branch (#423): `git push -u
+        # origin HEAD` from main pushes main, so it is judged as main. A push
+        # with no refspec is judged by where it lands (`@{push}`).
+        branches: list[str] = []
+        for branch in pushed if pushed is not None else [_CURRENT_REF]:
+            if branch == _CURRENT_REF:
+                branches.append(fact("branch", _repo_branch))
+            elif branch.startswith(_DEFAULT_PUSH):
+                remote = branch.removeprefix(_DEFAULT_PUSH)
+                branches += fact(
+                    f"push:{remote}", functools.partial(_default_push_branches, remote=remote)
+                )
+            else:
+                branches.append(branch)
         if not any(branch in rule.when_branch for branch in branches):
             return None
     if rule.conditioned_on_has_commits():

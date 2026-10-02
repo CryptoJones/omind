@@ -149,6 +149,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.10)
+
+- [x] **rules: pushing HEAD from a public repo's main is not judged as a push to main** ([#423](https://github.com/CryptoJones/omind/issues/423)) — **v10.2.10** — _bug_ —
+  a `HEAD` / `@` refspec resolves to the target repo's checked-out branch, so
+  `git push -u origin HEAD` from a public main is denied and from a feature branch is not;
+  `src:dst` is judged by its destination (a literal `HEAD` destination stays literal), and
+  a push with no refspec by `@{push}`.
+
 ### Shipped — 2026-10-02 (v10.2.9)
 
 - [x] **guard: in-place edits still missed — gsed -i, second -exec after `\;`, case arms, poetry/pipx run, fs.rmSync/os.rename/shutil.move** ([#419](https://github.com/CryptoJones/omind/issues/419)) — **v10.2.9** — _bug_ —
