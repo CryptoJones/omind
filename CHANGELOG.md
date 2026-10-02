@@ -7,6 +7,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.12] - 2026-10-02
+
+### Fixed
+- **Guard: git global-option values no longer backtrack exponentially
+  ([#431](https://github.com/CryptoJones/omind/issues/431)).** guard.py's
+  `_GIT_OPT_VALUE` (`\S+(?:"…")?\S*`) could split each `-c k=v` several ways, so a
+  run of options with no matching verb after cost about 3^N: `git` with 16 `-c a=b`
+  took 6.5 s, and 18 took over 20 s. A PreToolUse hook that times out does not
+  block, so those commands skipped the freshness, git-rules consult, capability and
+  omi-gate layers. guard.py now uses rules.py's one-shell-word pattern from #413,
+  `(?:[^\s"']|"[^"]*"|'[^']*')+`, which matches each character exactly one way.
+  The fix covers `_GIT_FRESH_SUB_RE`, `_GIT_READONLY_SUB_RE`, `_GIT_COMMIT_RE`,
+  `_SHELL_SIDE_EFFECT_RE`, `_RISKY_SIDE_EFFECT_RE` and the inline regex in
+  `_is_repo_sensitive_action`. Each now rejects 40 options in well under a second.
+  Every form the old pattern accepted still matches. A scan of guard.py, policy.py
+  and rules.py found no other ambiguous pattern used on command text.
+
 ## [10.2.11] - 2026-10-02
 
 ### Fixed

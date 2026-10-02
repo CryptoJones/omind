@@ -87,6 +87,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.12)
+
+- [x] **guard: `_GIT_OPT_VALUE` backtracks exponentially (16x `git -c` => 6.5 s; hook timeout skips soft gates)** ([#431](https://github.com/CryptoJones/omind/issues/431)) — **v10.2.12** — _bug (enforcement)_ —
+  guard.py now uses rules.py's non-backtracking one-shell-word value pattern
+  (#413). Every regex built on `_GIT_GLOBAL_OPTS` rejects 40 options in under a
+  second, so the soft gates no longer time out.
+
 ### Shipped — 2026-10-02 (v10.2.11)
 
 - [x] **Windows hook shells: OpenClaw undetermined; verify `cmd /c` spaced paths (agy, pool) and Claude Code without Git Bash** ([#425](https://github.com/CryptoJones/omind/issues/425)) — **v10.2.11** — _bug (Windows)_ —

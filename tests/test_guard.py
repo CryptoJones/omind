@@ -11,6 +11,7 @@ import re
 import shutil
 import subprocess
 import sys
+import time
 from pathlib import Path
 
 import pytest
@@ -3149,3 +3150,45 @@ def test_run_guard_check_survives_a_failing_blocked_stderr_write(
     monkeypatch.setattr(sys, "stderr", _BrokenErr())
     payload = {"tool": "Bash", "command": "sudo ls", "session": "s420se"}
     assert guard.run_guard("check", io.StringIO(json.dumps(payload))) == 2
+
+
+#: Every module-level regex built on guard's ``_GIT_GLOBAL_OPTS`` (#431). The
+#: inline one in ``_is_repo_sensitive_action`` is exercised through the function.
+_GIT_OPTS_REGEXES = (
+    guard._GIT_FRESH_SUB_RE,
+    guard._GIT_READONLY_SUB_RE,
+    guard._GIT_COMMIT_RE,
+    guard._SHELL_SIDE_EFFECT_RE,
+    guard._RISKY_SIDE_EFFECT_RE,
+)
+
+
+@pytest.mark.parametrize(
+    "opt", ["-c a=b ", '-C "  " ', "-c user.name='A B' ", "-C /abs/repo ", '-c k="  "x ']
+)
+def test_git_global_options_do_not_backtrack_exponentially(opt: str) -> None:
+    """#431: `\\S+(?:...)?\\S*` split each `-c k=v` value several ways, so a run of
+    them with no matching verb after cost ~3^N (6.5 s at 16). A PreToolUse hook
+    that times out does not block, so the soft gates were skipped."""
+    command = "git " + opt * 40 + "bogus"
+    for regex in _GIT_OPTS_REGEXES:
+        start = time.perf_counter()
+        assert not regex.search(command), regex.pattern
+        assert time.perf_counter() - start < 1.0, regex.pattern
+    action = {"tool": "Bash", "command": command}
+    start = time.perf_counter()
+    assert not guard._is_repo_sensitive_action(action)
+    assert not guard._is_commit_action(action)
+    assert time.perf_counter() - start < 1.0
+
+
+def test_git_global_options_still_match_after_the_431_fix() -> None:
+    """#431: the non-backtracking value pattern keeps every form the old one took."""
+    opts = '-C "  " -c user.name="  " -c core.x=1 -c k="  "x -C /abs/repo '
+    assert guard._GIT_FRESH_SUB_RE.search(f"git {opts}fetch origin --prune")
+    assert guard._GIT_READONLY_SUB_RE.search(f"git {opts}status")
+    assert guard._GIT_COMMIT_RE.search(f"git {opts}commit -m x")
+    assert guard._SHELL_SIDE_EFFECT_RE.search(f"git {opts}add .")
+    assert guard._RISKY_SIDE_EFFECT_RE.search(f"git {opts}push")
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": f"git {opts}merge x"})
+    assert not guard._GIT_FRESH_SUB_RE.search(f"git {opts}fetch | tee x")
