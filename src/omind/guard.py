@@ -3339,6 +3339,47 @@ class _HardSubjects:
     quoted: tuple[str, ...] = ()
 
 
+def _process_substitution_code(
+    masked: str, text: str, stop: int, program: str, tokens: list[str]
+) -> str | None:
+    """The producer of a process substitution that the local shell or
+    ``source``/``.`` stage ``tokens`` (ending at offset ``stop`` of ``text``)
+    reads as code (#444): ``bash <(echo sudo id)`` and ``source <(…)`` run it
+    as their script, ``bash < <(…)`` as their stdin. ``None`` when the stage
+    does not end in one, or reads its code from elsewhere (``bash x.sh
+    <(…)``, ``bash -c '…' <(…)``, ``diff <(…)`` is not a shell at all).
+
+    ``masked`` is :func:`policy.shell_code_text` of ``text``, so a paren in a
+    quoted string never closes the substitution; an unclosed one runs to the
+    end of the text."""
+    if stop >= len(masked) or masked[stop] != "(" or tokens[-1:] != ["<"]:
+        return None
+    before = tokens[:-1]
+    as_stdin = before[-1:] == ["<"]
+    if as_stdin:
+        before = before[:-1]
+    if program not in _LOCAL_SHELLS:
+        words = _without_redirects(before)
+        if not (_sources_stdin(before) if as_stdin else len(words) == 1):
+            return None
+    elif _shell_body_index(before) is not None or _shell_code_source(before)[0] != "stdin":
+        return None
+    elif not as_stdin and any(
+        word in _STDIN_OPERANDS or (len(word) > 1 and word[0] == "-" and "s" in word[1:])
+        for word in before[1:]
+    ):
+        return None  # `bash -s <(…)`, `bash - <(…)`: the substitution is a positional word
+    depth = 0
+    for k in range(stop, len(masked)):
+        if masked[k] == "(":
+            depth += 1
+        elif masked[k] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[stop + 1 : k]
+    return text[stop + 1 :]
+
+
 def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
     """Add to ``code``/``words`` what each local shell in ``text`` runs that
     the walk does not unwrap (#430 review): a ``bash -c`` body's positional
@@ -3360,13 +3401,21 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
             tokens = _shell_tokens(text[pos:stop])
         except ValueError:
             tokens = [program]
+        producer = _process_substitution_code(masked, text, stop, program, tokens)
+        if producer is not None:
+            # `bash <(echo sudo id)`, `source <(…)`, `bash < <(…)`: what the
+            # substitution prints is the code the shell runs (#444).
+            if producer.strip():
+                words.append(_words_in_command_position(producer))
+            continue
         if program not in _LOCAL_SHELLS and not _sources_stdin(tokens):
             continue
         head = _pipeline_head(masked, pos, floor)
         floor = stop
         own = pos  # where a heredoc the shell reads may open (its own: masked)
         if program not in _LOCAL_SHELLS:
-            here: list[str] = []  # `… | source /dev/stdin`, `. /dev/stdin <<EOF`
+            # `… | source /dev/stdin`, `. /dev/stdin <<EOF`, `. /dev/stdin <<< '…'`
+            here: list[str] = _here_strings(tokens[1:])
             own = stop
         else:
             at_body = _shell_body_index(tokens)

@@ -11,6 +11,9 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
+- [ ] **guard hard rules: `find -exec sudo`, `$(…)`/`${…}` program names and `eval "$(…)"` are not judged** ([#455](https://github.com/CryptoJones/omind/issues/455)) — _bug_ —
+  deferred from #444: each needs either `find -exec` unwrapping or the output of a command
+  substitution, which the guard does not evaluate.
 - [ ] **guard hard rules: bundled wrapper option clusters (`env -iC dir sudo …`) are not read getopt-style** ([#451](https://github.com/CryptoJones/omind/issues/451)) — _bug_ —
   found while fixing #432: the `policy.py` wrapper regex treats a bundled cluster as one opaque switch, so
   `env -iC /x sudo id` may not reach the program behind it. Read clusters the way `_program_stages` does.
@@ -88,6 +91,16 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.19)
+
+- [x] **guard: shells reading a bare `-` stdin operand (and process substitution) are not judged by hard rules** ([#444](https://github.com/CryptoJones/omind/issues/444)) — **v10.2.19** — _bug_ —
+  `bash <(echo sudo id)`, `source <(…)`, `bash < <(…)`, `echo sudo id > >(bash)`
+  and `. /dev/stdin <<< '…'` have their code judged. `setsid` is a stage wrapper
+  and `stdbuf`'s long value switches are read. The bare `-` forms were already
+  caught by #446 and now have tests. `find -exec sudo`, `$(printf sudo) id`,
+  `${X:-sudo} id` and `eval "$(…)"` are deferred to
+  [#455](https://github.com/CryptoJones/omind/issues/455).
 
 ### Shipped — 2026-10-02 (v10.2.18)
 

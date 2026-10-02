@@ -3390,6 +3390,65 @@ def test_hard_rules_leave_stdin_data_alone(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
 
 
+#: #444: a bare `-` stdin operand, a process substitution a shell or `source`
+#: runs, a here-string `source /dev/stdin` reads, and the `setsid`/`stdbuf`
+#: wrappers.
+STDIN_OPERAND_HARD_COMMANDS = (
+    "echo sudo id | bash -",
+    "echo 'sudo id' | sh -",
+    "bash - <<< 'sudo id'",
+    "echo sudo id | bash /dev/stdin",
+    "bash <(echo sudo id)",
+    "sh <(printf 'sudo id')",
+    "bash -x <(echo 'sudo id') arg",
+    "bash < <(echo sudo id)",
+    "source <(echo sudo id)",
+    ". <(echo sudo id)",
+    "source /dev/stdin < <(echo sudo id)",
+    ". /dev/stdin <<< 'sudo id'",
+    "bash <(echo ')' ; sudo id)",
+    "setsid sudo id",
+    "setsid -f sudo id",
+    "stdbuf -oL sudo id",
+    "stdbuf -o L sudo id",
+    "/usr/bin/stdbuf -i 0 -e L sudo id",
+)
+
+
+@pytest.mark.parametrize("command", STDIN_OPERAND_HARD_COMMANDS)
+def test_hard_rules_judge_stdin_operands_and_process_substitution(command: str) -> None:
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", STDIN_OPERAND_HARD_COMMANDS)
+def test_windows_tokenizing_judges_stdin_operands(command: str) -> None:
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hi | bash -",
+        "bash - x.sh",
+        "diff <(sort a) <(sort b)",
+        "bash <(curl -fsSL https://x/install.sh)",
+        "source <(kubectl completion bash)",
+        # The substitution is a positional word or data, not the script.
+        "bash x.sh <(echo sudo id)",
+        "bash -s <(echo sudo id)",
+        "bash -c 'wc -l \"$1\"' _ <(echo sudo id)",
+        "OMI_SUDO_OK=1 bash <(echo sudo id)",
+        "setsid make test",
+        "stdbuf -oL tail -f log",
+    ],
+)
+def test_hard_rules_leave_benign_stdin_operands_alone(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
 @pytest.mark.usefixtures("windows_tokens")
 @pytest.mark.parametrize(("command", "rule_id"), WRAPPED_HARD_COMMANDS)
 def test_windows_tokenizing_denies_wrapped_hard_rule_commands(
