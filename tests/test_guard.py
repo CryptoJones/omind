@@ -4,20 +4,19 @@
 
 from __future__ import annotations
 
-import contextlib
 import importlib.resources
 import io
 import json
 import re
 import shutil
-import signal
 import subprocess
 import sys
 import time
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from conftest import hard_time_limit as _hard_time_limit
 
 from omind import compliance, guard, paths, policy
 
@@ -3166,27 +3165,6 @@ _GIT_OPTS_REGEXES = (
 )
 
 
-@contextlib.contextmanager
-def _hard_time_limit(seconds: float = 5.0) -> Iterator[None]:
-    """Fail the enclosed block after ``seconds`` instead of letting a
-    catastrophic regex hang the run until CI's own timeout (#431 review): an
-    exponential search never returns, so an elapsed-time assert after it never
-    runs. ``signal.setitimer`` is POSIX-only, so Windows skips."""
-    if not hasattr(signal, "setitimer"):
-        pytest.skip("needs signal.setitimer (POSIX)")
-
-    def _expired(_signum: int, _frame: object) -> None:
-        raise TimeoutError(f"exceeded the {seconds} s hard bound")
-
-    previous = signal.signal(signal.SIGALRM, _expired)
-    signal.setitimer(signal.ITIMER_REAL, seconds)
-    try:
-        yield
-    finally:
-        signal.setitimer(signal.ITIMER_REAL, 0)
-        signal.signal(signal.SIGALRM, previous)
-
-
 def _timed(fn: Callable[[], object]) -> tuple[object, float]:
     """Run ``fn`` under :func:`_hard_time_limit`; return its result and elapsed time."""
     with _hard_time_limit():
@@ -3379,14 +3357,37 @@ def test_wrapped_hard_rules_keep_benign_commands_allowed(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
 
 
-@pytest.fixture
-def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Drive `_shell_tokens` down its Windows branch on any runner (#430: the
-    windows-latest job found what the POSIX runners could not)."""
-    monkeypatch.setattr(guard, "_windows_shell", lambda: True)
-    guard._shell_walk.cache_clear()
-    yield
-    guard._shell_walk.cache_clear()
+#: #432 review items 1-2, the hard-rule twin: a `-c` body or `source` that
+#: reads its stdin as code runs what the pipeline or heredoc feeds it.
+STDIN_FED_HARD_COMMANDS = (
+    "cat <<'EOF' | bash -c 'eval \"$(cat)\"'\nsudo id\nEOF",
+    "echo 'sudo id' | bash -c 'eval \"$(cat)\"'",
+    "echo 'sudo id' | bash -c 'sh'",
+    "bash -c 'eval \"$(cat)\"' <<'EOF'\nsudo id\nEOF",
+    "bash -c 'eval \"$(cat)\"' <<< 'sudo id'",
+    "cat <<'EOF' | source /dev/stdin\nsudo id\nEOF",
+    "echo 'sudo id' | . /dev/stdin",
+    "source /dev/stdin <<'EOF'\nsudo id\nEOF",
+    "echo 'sudo id' | bash /dev/stdin",
+)
+
+
+@pytest.mark.parametrize("command", STDIN_FED_HARD_COMMANDS)
+def test_hard_rules_judge_code_a_body_reads_from_stdin(command: str) -> None:
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo 'sudo id' | bash -c 'wc -c'",
+        "cat <<'EOF' | bash -c 'cat > notes.md'\nsudo id\nEOF",
+        "echo 'sudo id' | source ./env.sh",
+    ],
+)
+def test_hard_rules_leave_stdin_data_alone(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
 
 
 @pytest.mark.usefixtures("windows_tokens")
