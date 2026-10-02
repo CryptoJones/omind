@@ -17,9 +17,6 @@ the exact order of operations._
 - [ ] **guard hard rules: bundled wrapper option clusters (`env -iC dir sudo …`) are not read getopt-style** ([#451](https://github.com/CryptoJones/omind/issues/451)) — _bug_ —
   found while fixing #432: the `policy.py` wrapper regex treats a bundled cluster as one opaque switch, so
   `env -iC /x sudo id` may not reach the program behind it. Read clusters the way `_program_stages` does.
-- [ ] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — _bug_ —
-  `bash -c '"$@"' _ git commit -m x` is opaque to the hard rules, but the consult and freshness
-  classifiers never see the positional command.
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
@@ -87,6 +84,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.23)
+
+- [x] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — **v10.2.23** — _bug_ —
+  the consult and freshness classifiers reuse the hard rules' subjects, so the words a positional
+  body runs (`bash -c '"$@"' _ git commit -m x`) and code piped into a shell on stdin
+  (`printf 'git commit -m x' | sh`, `cat <<'EOF' | bash`) are repo work, and a commit reached either
+  way hits the freshness gate.
 
 ### Shipped — 2026-10-02 (v10.2.22)
 
