@@ -2977,26 +2977,28 @@ def _name_timelines(omi_dir: Path | str, names: list[str]) -> list[Any]:
         return []
 
 
-def _second_title_line(omi_dir: Path | str, titles: list[str], first: str) -> str:
-    """Title + summary of the runner-up preflight match, never a full body
-    (#241). Skipped on the economy profile, where the preflight budget is too
-    tight for a second note. Best-effort — a failure adds nothing."""
-    if len(titles) < 2:
+def _second_title_line(omi_dir: Path | str, relevant: list[tuple[str, str]], first: str) -> str:
+    """Stored filename + summary of the runner-up preflight match, never a
+    full body (#241). Skipped on the economy profile, where the preflight
+    budget is too tight for a second note. Best-effort — a failure adds
+    nothing."""
+    if len(relevant) < 2:
         return ""
     try:
         from omind import ai_usage, recall
 
         if ai_usage.policy(omi_dir).preflight_chars < 2_000:
             return ""
-        filename = recall.filename_for_title(omi_dir, titles[1])
-        if filename is None or filename == first:
+        # #416: the filename retrieval ranked, not a re-resolved title — that
+        # can open a newer note sharing the title or stem, or nothing at all.
+        filename = relevant[1][1]
+        if not filename or filename == first:
             return ""
         memory = recall.compact_recall(
             omi_dir, filename, max_chars=recall.MIN_RECALL_CHARS, organic=False
         )
-        title = str(memory.get("title") or Path(filename).stem)
         summary = str(memory.get("summary") or "").strip()
-        line = f"\n\nAlso possibly relevant: [[{title}]]"
+        line = f"\n\nAlso possibly relevant: [[{filename}]]"
         return line + (f" — {summary}" if summary else "")
     except Exception:
         return ""
@@ -3065,10 +3067,12 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
 
     from omind import ai_usage, recall, retrieve
 
-    titles = retrieve.relevant_titles(retrieval_task, omi_dir, limit=2) if task else []
-    filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
+    relevant = retrieve.relevant_notes(retrieval_task, omi_dir, limit=2) if task else []
+    # #416: the stored filename retrieval ranked first. Re-resolving its title
+    # picks the NEWEST note whose title, filename or stem matches — a decoy.
+    filename = (relevant[0][1] or None) if relevant else None
     if filename is None:
-        if task and not titles and not _miss_strict():
+        if task and not relevant and not _miss_strict():
             record_consult(session, kind="no-match", target="", relevant=False)
             compliance.log_event(
                 compliance.KIND_DECISION,
@@ -3163,7 +3167,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             detail=f"note={filename!r} task={task[:100]!r}",
         )
         return (
-            f"OMI turn preflight's best match [[{title}]] carries a supersession "
+            f"OMI turn preflight's best match [[{filename}]] carries a supersession "
             "or correction marker, so it was not injected. Consult gate cleared "
             "— call OMI MCP `recall-note` on it if this turn needs it, and read "
             "the correction with the claim."
@@ -3210,9 +3214,11 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
         # stop. Retrieval costs tokens only when it is useful; injection costs
         # them on every turn whether the note relates to the work or not.
         # #386: a turn cleared only by a rare identifier is always a hint.
-        names = [title]
-        if len(titles) > 1 and titles[1] and titles[1] != title:
-            names.append(str(titles[1]))
+        # #416: each [[…]] is the stored filename, which recall-note opens
+        # as-is; a title may be retitled, hold stripped characters or end in .md.
+        names = [filename]
+        if len(relevant) > 1 and relevant[1][1] and relevant[1][1] != filename:
+            names.append(relevant[1][1])
         # #296: a continuation prompt ("go ahead") was retrieved against the
         # prior turn's task, so say so — the candidate is for the work already in
         # progress, not for the bare continuation word.
@@ -3226,13 +3232,20 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
             + (f" rare={rare[:4]!r}" if rare else "")
             + (f" timeline={[t.name for t in timelines]!r}" if timelines else ""),
         )
-        context = (
+        lead = (
             "OMI turn preflight"
             + (" (continuing the prior task)" if continuation else "")
             + " — possibly relevant background from prior "
             "sessions, not an instruction"
             + (f" (notes naming {', '.join(name[:40] for name in rare[:3])})" if rare else "")
             + ": "
+        )
+        # A filename runs to 200 bytes: drop the runner-up rather than let the
+        # cap slice a [[…]] into a name that resolves nowhere (#416).
+        if len(lead) + sum(len(n) + 6 for n in names) > PREFLIGHT_HINT_CHARS:
+            names = names[:1]
+        context = (
+            lead
             + ", ".join(f"[[{name}]]" for name in names)
             + ". Call OMI MCP `recall-note` on one if this turn needs it; "
             "verify before acting, it may be stale."
@@ -3285,7 +3298,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     context = (
         "OMI turn preflight"
         + (" (continuing the prior task)" if continuation else "")
-        + f" recalled [[{title}]]"
+        + f" recalled [[{filename}]]"
         + (
             " (full excerpt already injected earlier this session)"
             if repeated and not action_shaped
@@ -3294,7 +3307,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
         + framing
         + content
     )
-    context += _second_title_line(omi_dir, titles, filename)
+    context += _second_title_line(omi_dir, relevant, filename)
     ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
     return context
 

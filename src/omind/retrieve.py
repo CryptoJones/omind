@@ -427,6 +427,13 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
     return [title for title, _name in _relevant_notes(task, omi_dir, limit=limit)]
 
 
+def relevant_notes(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[tuple[str, str]]:
+    """``(title, stored filename)`` of the notes most relevant to ``task``,
+    best first, or ``[]``. The filename is what a ``recall-note`` call should
+    carry (#393, #416). Fails open to ``[]``."""
+    return _relevant_notes(task, omi_dir, limit=limit)
+
+
 def _relevant_notes(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[tuple[str, str]]:
     """``(title, stored filename)`` of the notes most relevant to ``task``.
 

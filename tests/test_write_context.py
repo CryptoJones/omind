@@ -97,7 +97,7 @@ def test_create_note_naming_as30p_returns_the_as30p_notes(server: MCPServer) -> 
     assert _titles(got) == [HISTORY, COPY, SEAGATE]
     assert all(entry["name"] == "As30p" for entry in related)
     assert related[0]["updated"] == "2026-09-27"
-    assert set(related[0]) == {"name", "title", "summary", "updated"}
+    assert set(related[0]) == {"name", "note", "title", "summary", "updated"}
     assert "Advisory only" in got[f"{writecontext.FIELD}_note"]
 
 

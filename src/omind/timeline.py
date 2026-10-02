@@ -17,8 +17,8 @@ notes about it, oldest to newest, and marks which are superseded or carry a
 correction instead of removing them:
 
     OMI: As30p has a dated history (118 notes; oldest first): 2026-09-25
-    [[Seagate As30p …]] (has a correction) → … → 2026-09-27 [[WD Blue As30p …]]
-    (newest). …
+    [[Seagate As30p ….md]] (has a correction) → … → 2026-09-27
+    [[WD Blue As30p ….md]] (newest). …
 
 * It is built only for a name with history: at least one of the notes it would
   show is superseded (``Superseded by:``), supersedes another (``Supersedes:``),
@@ -32,9 +32,11 @@ correction instead of removing them:
   correction as part of the history.
 * Bounded: the notes *about* the name (its title names it as a word) when there
   are any, otherwise all its notes; at most :data:`MAX_ENTRIES` (the newest),
-  titles cut to :data:`TITLE_CHARS`, the line at most :data:`MAX_CHARS` (oldest
-  entries dropped first). Push paths charge it to the push budget like the hint
-  it replaces.
+  the line at most :data:`MAX_CHARS` (oldest entries dropped first). Each
+  entry names its note by the full stored filename, which ``recall-note``
+  opens as-is; a cut title would resolve nowhere (#406). The ``title`` in the
+  JSON form is cut to :data:`TITLE_CHARS` and is for display only. Push paths
+  charge it to the push budget like the hint it replaces.
 * Deterministic and read-only: one read-only index query
   (:func:`omind.searchindex.entity_lookups_readonly`) and at most
   :data:`MAX_ENTRIES` note heads read from disk. Fails open to ``None``.
@@ -59,7 +61,7 @@ from typing import Any
 ENABLE_ENV = "OMIND_NAME_TIMELINES"
 #: Entries shown per name: the newest this many of its notes, oldest first.
 MAX_ENTRIES = 6
-#: Each title is cut here (``…``). recall-note resolves a title prefix.
+#: A displayed title is cut here (``…``). Display only.
 TITLE_CHARS = 90
 #: Ceiling on one rendered timeline line. Oldest entries are dropped to fit.
 MAX_CHARS = 900
@@ -91,10 +93,17 @@ class Entry:
     def render(self, *, newest: bool = False) -> str:
         marks = [m for m in (self.mark, "newest" if newest else "") if m]
         tail = f" ({', '.join(marks)})" if marks else ""
-        return f"{self.date} [[{_cut(self.title)}]]{tail}"
+        # The stored filename, not the title: recall-note opens it exactly,
+        # while a cut or retitled title resolves nowhere (#406, as #393).
+        return f"{self.date} [[{self.filename}]]{tail}"
 
     def to_dict(self) -> dict[str, str]:
-        return {"date": self.date, "title": _cut(self.title), "mark": self.mark}
+        return {
+            "date": self.date,
+            "title": _cut(self.title),
+            "note": self.filename,
+            "mark": self.mark,
+        }
 
 
 @dataclass
@@ -113,13 +122,24 @@ class Timeline:
         return [entry.title for entry in reversed(self.entries)]
 
     def line(self) -> str:
-        """The rendered one-line timeline, at most :data:`MAX_CHARS`."""
+        """The rendered one-line timeline, at most :data:`MAX_CHARS`.
+
+        Oldest entries are dropped to fit. The line is never sliced: a cut
+        could land inside a ``[[…]]`` and emit a half-name that resolves
+        nowhere (#406). When not even the newest entry fits, the line is
+        empty; :func:`build` drops such a timeline before anyone renders it.
+        """
         entries = list(self.entries)
-        while True:
+        while entries:
             text = self._render(entries)
-            if len(text) <= MAX_CHARS or len(entries) <= 1:
-                return text[:MAX_CHARS]
+            if len(text) <= MAX_CHARS:
+                return text
             entries.pop(0)
+        return ""
+
+    def fits(self) -> bool:
+        """Whether at least the newest entry renders within :data:`MAX_CHARS`."""
+        return bool(self.entries) and len(self._render(self.entries[-1:])) <= MAX_CHARS
 
     def _render(self, entries: Sequence[Entry]) -> str:
         last = len(entries) - 1
@@ -233,12 +253,15 @@ def build(
         if not any(entry.mark for entry in entries):
             return None
         entries.reverse()
-        return Timeline(
+        found = Timeline(
             name=spelling,
             key=entities.normalize(spelling),
             df=len(notes) if df is None else df,
             entries=entries,
         )
+        # A history whose newest entry alone overflows the cap is dropped
+        # rather than cut mid-link; the caller falls back to a plain hint.
+        return found if found.fits() else None
     except Exception:
         return None
 

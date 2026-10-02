@@ -94,10 +94,6 @@ into a new note. In dependency order; each child is flag-gated._
   - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
   - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
 
-Follow-ups:
-
-- [ ] **namehints/timeline: `…`-truncated titles are documented as resolvable by recall-note, but nothing resolves a prefix** ([#406](https://github.com/CryptoJones/omind/issues/406)) — _bug, follow-up of #384 (raised in the #405 review)_
-
 ### Windows
 
 - [ ] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — _bug (Windows)_ —
@@ -151,6 +147,17 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.6)
+
+- [x] **namehints/timeline: `…`-truncated titles are documented as resolvable by recall-note, but nothing resolves a prefix** ([#406](https://github.com/CryptoJones/omind/issues/406)) — **v10.2.6** — _bug, follow-up of #384 (raised in the #405 review)_ —
+  name hints and timelines now name each note by its full stored filename, which
+  `recall-note` opens as-is; `name_timelines` entries carry it as `note`. A test passes
+  every emitted name through `recall.compact_recall`. A timeline line is never sliced
+  mid-link; one whose newest entry cannot fit is dropped.
+- [x] **related_by_entity entries and the preflight topic hint still name notes by title, not a resolvable filename** ([#416](https://github.com/CryptoJones/omind/issues/416)) — **v10.2.6** — _bug, follow-up of #406_ —
+  `related_by_entity` entries carry the stored filename as `note`; the preflight hint
+  and its stale-note message name candidates by stored filename.
 
 ### Shipped — 2026-10-02 (v10.2.5)
 

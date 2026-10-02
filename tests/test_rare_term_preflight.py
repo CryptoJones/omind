@@ -67,7 +67,7 @@ def omi(tmp_path: Path) -> Path:
 def test_rare_identifier_alone_names_the_note(omi: Path) -> None:
     context = guard.preflight_turn({"session_id": "rare-1", "prompt": "is As30p mounted?"}, omi)
     assert "weak memory match" not in context
-    assert f"[[{AS30P_TITLE}]]" in context
+    assert f"[[{AS30P_TITLE}.md]]" in context
     assert "notes naming As30p" in context
     assert guard.consulted_this_turn("rare-1")
     events = compliance.read_events()
@@ -109,7 +109,7 @@ def test_rare_clear_is_a_hint_even_in_inject_mode(
 ) -> None:
     monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
     context = guard.preflight_turn({"session_id": "rare-inj", "prompt": "is As30p mounted?"}, omi)
-    assert f"[[{AS30P_TITLE}]]" in context
+    assert f"[[{AS30P_TITLE}.md]]" in context
     assert "Seagate" not in context  # titles only: the body is not pushed
 
 

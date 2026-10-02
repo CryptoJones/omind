@@ -70,8 +70,6 @@ MAX_TITLES = 2
 #: (~2,000 tokens, a thirtieth of the push budget). Bounds the tail: on the
 #: replay behind #388 the worst session would otherwise have taken ~21,000.
 SESSION_BUDGET_CHARS = 8_000
-#: Each title is cut here (``…``). recall-note resolves a title prefix.
-TITLE_CHARS = 140
 
 #: A name no note is titled after is hinted only while this rare. Past it the
 #: token is vocabulary the vault uses in passing (``python3``, ``127.0.0.1``),
@@ -180,6 +178,9 @@ class NameHint:
     titles: list[str] = field(default_factory=list)
     #: How many of the notes name it in their title.
     titled: int = 0
+    #: Stored filenames (with ``.md``) parallel to :attr:`titles`: what the
+    #: hint renders, because ``recall-note`` opens exactly that file (#406).
+    filenames: list[str] = field(default_factory=list)
     #: The name's dated history when its facts changed (#390); it replaces the
     #: plain titles line. ``None`` for a name with no history.
     timeline: Any = None
@@ -187,17 +188,21 @@ class NameHint:
     def line(self) -> str:
         if self.timeline is not None:
             return str(self.timeline.line())
-        shown = "; ".join(f"[[{_cut(title)}]]" for title in self.titles)
+        shown = "; ".join(f"[[{name}]]" for name in self.recall_names())
         what = "about it" if self.titled else "newest"
         return (
             f"OMI: {self.name} → {self.df} note{'s' if self.df != 1 else ''}; "
             f"{what}: {shown}. recall-note before asserting facts about {self.name}."
         )
 
+    def recall_names(self) -> list[str]:
+        """The names the hint offers for ``recall-note``, best first.
 
-def _cut(title: str) -> str:
-    title = " ".join(title.split())
-    return title if len(title) <= TITLE_CHARS else title[: TITLE_CHARS - 1].rstrip() + "…"
+        The full stored filename, never the title: a cut title (``…``), a
+        retitled note's title and the stem of ``X.md.md`` all resolve nowhere
+        or to another note (#406, the #393 rule).
+        """
+        return list(self.filenames)
 
 
 def _noise(key: str, spelling: str) -> bool:
@@ -415,10 +420,17 @@ def pick_hints(
             if not about and len(notes) > UNTITLED_MAX_DF:
                 continue
             rest = [n for n in notes if n not in about]
-            titles = [n.title for n in (about + rest)[:MAX_TITLES] if n.title]
-            if not titles:
+            shown = [n for n in (about + rest)[:MAX_TITLES] if n.title]
+            if not shown:
                 continue
-            hint = NameHint(name=spelling, key=key, df=len(notes), titles=titles, titled=len(about))
+            hint = NameHint(
+                name=spelling,
+                key=key,
+                df=len(notes),
+                titles=[n.title for n in shown],
+                titled=len(about),
+                filenames=[n.filename for n in shown],
+            )
             picked.append((0 if about else 1, len(notes), order, hint, notes))
         # Names the vault has notes *about* first (the drive label, not the
         # partition next to it), then rarer first, then order of appearance.
@@ -696,6 +708,12 @@ def replay_transcript(path: Path | str, omi_dir: Path | str) -> Replay:
             needle = hint.key
             shown = hint.timeline.titles if hint.timeline is not None else hint.titles
             titles = [title.casefold()[:60] for title in shown]
+            # Hints name notes by stored filename (#406), so a recall of
+            # exactly that name is a consult too.
+            if hint.timeline is not None:
+                titles += [e.filename.casefold() for e in hint.timeline.entries]
+            else:
+                titles += [filename.casefold() for filename in hint.filenames]
             replay.hints.append(
                 ReplayHint(
                     line=number,
