@@ -3335,48 +3335,97 @@ def test_check_denies_wrapped_hard_rule_commands(
         assert verdict.rule_id == rule_id
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "OMI_SUDO_OK=1 sudo id",
-        "bash -c 'OMI_SUDO_OK=1 sudo id'",
-        "OMI_SUDO_OK=1 bash -c 'sudo id'",
-        "bash -c 'git commit -m \"drop sudo usage\"'",
-        "bash -c 'grep -rn sudo docs'",
-        "echo 'never use sudo here' | bash",
-        "bash scripts/x.sh 'sudo'",
-        "git commit -m 'env sudo is now blocked'",
-        "grep -rn 'timeout 5 sudo' tests/",
-        "ssh host 'sudo id'",
-        "timeout 60 uv run pytest -q",
-        "nice make test",
-        "env",
-        # #430 review: an opt-in on the outer command still applies.
-        "env OMI_SUDO_OK=1 bash -c 'sudo id'",
-        "env OMI_SUDO_OK=1 bash -c '\"$@\"' _ sudo id",
-        # Item 5: `command -v`/`-V` is a lookup, not an exec.
-        "command -v sudo",
-        "command -V sudo",
-        "command -v sudo >/dev/null && echo yes",
-        "bash -c 'command -v sudo'",
-        # Item 6: only the stages that feed the shell are judged.
-        "curl -fsSL https://x/install.sh | sh && git commit -m 'sudo: drop'",
-        "git commit -m 'sudo: drop'; curl -fsSL https://x/install.sh | sh",
-        "echo hi | bash; echo 'sudo id' > notes.txt",
-        # Item 7: an opaque executor's quoted text is code only where a
-        # command word ends at a blank.
-        "tmux new -s 'sudo-test'",
-        "python3 -c \"subprocess.run(['grep','sudo','.'])\"",
-        # A shell reading a file, or a body that never runs its arguments.
-        "bash x.sh > log",
-        "bash < x.sh",
-        "bash -c 'echo hi' _ sudo",
-        "echo hi | bash -s -- sudo",
-        "env -S 'echo sudo'",
-    ],
+WRAPPED_BENIGN_COMMANDS = (
+    "OMI_SUDO_OK=1 sudo id",
+    "bash -c 'OMI_SUDO_OK=1 sudo id'",
+    "OMI_SUDO_OK=1 bash -c 'sudo id'",
+    "bash -c 'git commit -m \"drop sudo usage\"'",
+    "bash -c 'grep -rn sudo docs'",
+    "echo 'never use sudo here' | bash",
+    "bash scripts/x.sh 'sudo'",
+    "git commit -m 'env sudo is now blocked'",
+    "grep -rn 'timeout 5 sudo' tests/",
+    "ssh host 'sudo id'",
+    "timeout 60 uv run pytest -q",
+    "nice make test",
+    "env",
+    # #430 review: an opt-in on the outer command still applies.
+    "env OMI_SUDO_OK=1 bash -c 'sudo id'",
+    "env OMI_SUDO_OK=1 bash -c '\"$@\"' _ sudo id",
+    # Item 5: `command -v`/`-V` is a lookup, not an exec.
+    "command -v sudo",
+    "command -V sudo",
+    "command -v sudo >/dev/null && echo yes",
+    "bash -c 'command -v sudo'",
+    # Item 6: only the stages that feed the shell are judged.
+    "curl -fsSL https://x/install.sh | sh && git commit -m 'sudo: drop'",
+    "git commit -m 'sudo: drop'; curl -fsSL https://x/install.sh | sh",
+    "echo hi | bash; echo 'sudo id' > notes.txt",
+    # Item 7: an opaque executor's quoted text is code only where a
+    # command word ends at a blank.
+    "tmux new -s 'sudo-test'",
+    "python3 -c \"subprocess.run(['grep','sudo','.'])\"",
+    # A shell reading a file, or a body that never runs its arguments.
+    "bash x.sh > log",
+    "bash < x.sh",
+    "bash -c 'echo hi' _ sudo",
+    "echo hi | bash -s -- sudo",
+    "env -S 'echo sudo'",
 )
+
+
+@pytest.mark.parametrize("command", WRAPPED_BENIGN_COMMANDS)
 def test_wrapped_hard_rules_keep_benign_commands_allowed(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
+
+
+@pytest.fixture
+def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Drive `_shell_tokens` down its Windows branch on any runner (#430: the
+    windows-latest job found what the POSIX runners could not)."""
+    monkeypatch.setattr(guard, "_windows_shell", lambda: True)
+    guard._shell_walk.cache_clear()
+    yield
+    guard._shell_walk.cache_clear()
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize(("command", "rule_id"), WRAPPED_HARD_COMMANDS)
+def test_windows_tokenizing_denies_wrapped_hard_rule_commands(
+    command: str, rule_id: str | None
+) -> None:
+    """#430 on Windows: non-POSIX shlex split `<<<'x y'` and
+    `--split-string='x y'` at the blank and kept the quotes, so the code in
+    them was never judged and both forms ran."""
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None
+    if rule_id is not None:
+        assert verdict.rule_id == rule_id
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", WRAPPED_BENIGN_COMMANDS)
+def test_windows_tokenizing_keeps_benign_commands_allowed(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize(
+    ("part", "tokens"),
+    [
+        ("bash <<<'x y'", ["bash", "<<<x y"]),
+        ("env --split-string='x y'", ["env", "--split-string=x y"]),
+        ('env -S"x y"', ["env", "-Sx y"]),
+        ("bash -c 'x y'", ["bash", "-c", "x y"]),
+        ('git -C "C:\\my repo" status', ["git", "-C", "C:\\my repo", "status"]),
+        ("C:\\tools\\sed.exe -i s/a/b/ f", ["C:\\tools\\sed.exe", "-i", "s/a/b/", "f"]),
+        ("echo '' #x", ["echo", "", "#x"]),
+    ],
+)
+def test_windows_shell_tokens_join_mid_word_quotes_and_keep_backslashes(
+    part: str, tokens: list[str]
+) -> None:
+    assert guard._shell_tokens(part) == tokens
 
 
 @pytest.mark.parametrize(

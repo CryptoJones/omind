@@ -1950,23 +1950,29 @@ def _shell_walk(
     return tuple(sites), cwd, local, tuple(bodies)
 
 
+def _windows_shell() -> bool:
+    """Whether hooks run on Windows. A function so tests can drive
+    :func:`_shell_tokens` down its Windows branch on any platform."""
+    return os.name == "nt"
+
+
 def _shell_tokens(part: str) -> list[str]:
     """shlex tokens for one simple command. POSIX shlex treats every backslash
     as an escape and turns an unquoted Windows path such as ``C:\\repo`` into
     ``C:repo``. PowerShell/cmd do not use backslashes that way, so retain them
-    for a Windows shell or an explicit drive path. Non-POSIX shlex keeps
-    surrounding quotes; remove only a matching outer pair. Raises
-    ``ValueError`` on an unbalanced quote."""
-    windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", part)
-    tokens = shlex.split(part, posix=not windows_style)
-    if windows_style:
-        tokens = [
-            token[1:-1]
-            if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
-            else token
-            for token in tokens
-        ]
-    return tokens
+    for a Windows shell or an explicit drive path. Quotes still follow POSIX
+    rules there: Windows agents run hooks under Git Bash, where a quote opens
+    mid-word, so ``<<<'x y'`` and ``--split-string='x y'`` are one unquoted
+    word each. (Non-POSIX shlex split them at the blank and kept the quotes,
+    so the code in them was never judged; #430.) Raises ``ValueError`` on an
+    unbalanced quote."""
+    if not (_windows_shell() or re.search(r"(?<!\w)[A-Za-z]:\\", part)):
+        return shlex.split(part)
+    lexer = shlex.shlex(part, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""  # keep backslashes: `C:\repo` stays `C:\repo`
+    return list(lexer)
 
 
 def _action_command(action: dict[str, Any]) -> str:

@@ -52,6 +52,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     on wrapped forms.
   - The seed rules still apply when the state dir cannot resolve (#421). If the
     walk raises, the command alone is judged, as before.
+  - On Windows, `bash <<<'sudo id'` and `env --split-string='sudo id'` ran. The
+    tokenizer used non-POSIX shlex there, which ignores a quote that opens
+    mid-word: it split each form at the blank and kept the quotes, so the code
+    in them was never judged. Windows tokenizing (and any part with a drive
+    path) now follows POSIX quote rules with backslashes kept, as Git Bash
+    reads them. Every bypass and benign test case also runs with the Windows
+    tokenizer forced (`guard._windows_shell`).
   - The audit's hard-rule probe table, the roundtable's bypass list and its
     false-positive list are parametrized tests in `tests/test_guard.py`, and the
     bypass list runs through every adapter in `tests/test_adapters.py`.
