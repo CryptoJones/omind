@@ -48,6 +48,7 @@ from omind.provision import (
     _diagnose_tools,
     canonical_omind_argv,
     canonical_omind_cmd,
+    cmd_needs_quotes,
     diagnose,
     double_quote,
     go_cmd_breaks,
@@ -595,7 +596,7 @@ class HermesProvisioner(AgentProvisioner):
             return {}
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             raise ProvisionError(
                 f"{path} is not valid YAML ({exc}); refusing to overwrite. "
                 "Fix or remove it and re-run."
@@ -768,7 +769,7 @@ class HermesProvisioner(AgentProvisioner):
         path = hermes_allowlist_path()
         try:
             raw = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else {}
-        except (OSError, json.JSONDecodeError):
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError):
             self.log(
                 f"  NOTE: {path} is unreadable/invalid; skipping allowlist "
                 "pre-approval (approve the hook at Hermes' TTY prompt, or run "
@@ -1281,7 +1282,7 @@ class PoolsideProvisioner(AgentProvisioner):
             return {}
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             raise ProvisionError(
                 f"{path} is not valid YAML ({exc}); refusing to overwrite. "
                 "Fix or remove it and re-run."
@@ -1519,7 +1520,7 @@ class DeepseekProvisioner(AgentProvisioner):
             return []
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError) as exc:
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             raise ProvisionError(
                 f"{path} is not valid YAML ({exc}); refusing to overwrite."
             ) from exc
@@ -1552,7 +1553,7 @@ class DeepseekProvisioner(AgentProvisioner):
         if path.is_file():
             try:
                 doc = yaml.safe_load(path.read_text(encoding="utf-8")) or []
-            except (OSError, yaml.YAMLError):
+            except (OSError, UnicodeDecodeError, yaml.YAMLError):
                 doc = []
         if not isinstance(doc, list):
             doc = []
@@ -2094,7 +2095,7 @@ class CodexProvisioner(AgentProvisioner):
         path = codex_agents_path()
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return False
         return CODEX_BOOTSTRAP_START in text and CODEX_BOOTSTRAP_END in text
 
@@ -2105,7 +2106,7 @@ class CodexProvisioner(AgentProvisioner):
         desired = self.bootstrap_content().rstrip() + "\n"
         try:
             current = path.read_text(encoding="utf-8") if path.is_file() else ""
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise ProvisionError(f"could not read {path}: {exc}") from exc
 
         start = current.find(CODEX_BOOTSTRAP_START)
@@ -2136,7 +2137,7 @@ class CodexProvisioner(AgentProvisioner):
             return tomlkit.document()
         try:
             return tomlkit.parse(path.read_text(encoding="utf-8"))
-        except tomlkit.exceptions.ParseError as exc:
+        except (OSError, UnicodeDecodeError, tomlkit.exceptions.ParseError) as exc:
             raise ProvisionError(
                 f"{path} is not valid TOML ({exc}); refusing to overwrite. "
                 "Fix or remove it and re-run."
@@ -2236,7 +2237,7 @@ class GooseProvisioner(AgentProvisioner):
             return {}
         try:
             data = yaml.safe_load(path.read_text(encoding="utf-8"))
-        except yaml.YAMLError as exc:
+        except (OSError, UnicodeDecodeError, yaml.YAMLError) as exc:
             raise ProvisionError(
                 f"{path} is not valid YAML ({exc}); refusing to overwrite. "
                 "Fix or remove it and re-run."
@@ -2317,7 +2318,7 @@ class GooseProvisioner(AgentProvisioner):
     def bootstrap_installed(self) -> bool:
         try:
             text = goose_hints_path().read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return False
         return GOOSE_HINTS_START in text and GOOSE_HINTS_END in text
 
@@ -2328,7 +2329,7 @@ class GooseProvisioner(AgentProvisioner):
         block = self.bootstrap_content().rstrip()
         try:
             current = path.read_text(encoding="utf-8") if path.is_file() else ""
-        except OSError as exc:
+        except (OSError, UnicodeDecodeError) as exc:
             raise ProvisionError(f"could not read {path}: {exc}") from exc
 
         start = current.find(GOOSE_HINTS_START)
@@ -2569,7 +2570,7 @@ class AgyProvisioner(AgentProvisioner):
         path = self.agents_path()
         try:
             text = path.read_text(encoding="utf-8")
-        except OSError:
+        except (OSError, UnicodeDecodeError):
             return False
         return AGY_BOOTSTRAP_START in text and AGY_BOOTSTRAP_END in text
 
@@ -2580,7 +2581,7 @@ class AgyProvisioner(AgentProvisioner):
         with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
             try:
                 current = path.read_text(encoding="utf-8") if path.is_file() else ""
-            except OSError as exc:
+            except (OSError, UnicodeDecodeError) as exc:
                 raise ProvisionError(f"could not read {path}: {exc}") from exc
 
             start = current.find(AGY_BOOTSTRAP_START)
@@ -2778,8 +2779,30 @@ class AmazonQProvisioner(McpOnlyProvisioner):
 # -- diagnose -------------------------------------------------------------------
 
 
-def _diagnose_agent(provisioner: AgentProvisioner) -> list[CheckResult]:
-    """The agent-specific doctor checks shared by Hermes and OpenClaw."""
+def _unreadable_config(read: Callable[[], object]) -> str | None:
+    """Why *read* cannot read its config (the ``ProvisionError`` text, which names
+    the file), or None when it reads fine.
+
+    The ``*_wired`` / ``registered_server`` probes swallow that error and answer
+    "not installed", so doctor said "run `omind setup`" for a file setup then
+    refuses (#435). Doctor checks this first and reports the file instead.
+    """
+    try:
+        read()
+    except ProvisionError as exc:
+        return str(exc)
+    return None
+
+
+def _diagnose_agent(
+    provisioner: AgentProvisioner, read_config: Callable[[], object] | None = None
+) -> list[CheckResult]:
+    """The agent-specific doctor checks shared by Hermes and OpenClaw.
+
+    *read_config* reads the config holding the MCP entry; when given, an
+    unreadable file is a ``fail`` that names it rather than "not registered"
+    (#435).
+    """
     config = provisioner.config
     label = provisioner.AGENT_LABEL
     key = label.split()[0].lower()
@@ -2797,7 +2820,10 @@ def _diagnose_agent(provisioner: AgentProvisioner) -> list[CheckResult]:
 
     name = config.server_name
     server = provisioner.registered_server()
-    if server is None:
+    bad = _unreadable_config(read_config) if read_config is not None else None
+    if bad is not None:
+        results.append(CheckResult(f"{key}_mcp_registration", "fail", bad))
+    elif server is None:
         results.append(
             CheckResult(
                 f"{key}_mcp_registration",
@@ -2840,7 +2866,7 @@ def diagnose_hermes(config: SetupConfig) -> list[CheckResult]:
 
 def diagnose_openclaw(config: SetupConfig) -> list[CheckResult]:
     prov = OpenClawProvisioner(config=config, log=lambda _msg: None)
-    results = _diagnose_agent(prov)
+    results = _diagnose_agent(prov, lambda: prov._read_settings(openclaw_config_path()))
     if prov._retired_guard_present():
         results.append(
             CheckResult(
@@ -3015,7 +3041,10 @@ def diagnose_gemini(config: SetupConfig) -> list[CheckResult]:
             CheckResult("gemini_root", "fail", f"Gemini CLI not found: {root} does not exist")
         )
     results.extend(_diagnose_omi_folder(prov.config))
-    if prov._guard_wired():
+    bad = _unreadable_config(lambda: prov._read_settings(gemini_settings_path()))
+    if bad is not None:
+        results.append(CheckResult("gemini_guard", "fail", bad))
+    elif prov._guard_wired():
         results.append(
             CheckResult("gemini_guard", "ok", f"OMI guard wired into {gemini_settings_path()}")
         )
@@ -3111,7 +3140,12 @@ def diagnose_deepseek(config: SetupConfig) -> list[CheckResult]:
 
     # MCP server + guard plugin in the home-level patch.
     path = dsh_home_patch_path()
-    entries = prov._patch_entries(path)
+    try:
+        entries = prov._patch_entries(path)
+    except ProvisionError as exc:
+        # Doctor never raises on a garbage config (#435): report it instead.
+        results.append(CheckResult("deepseek_patch", "fail", str(exc)))
+        return results
     mcp_ok = any(isinstance(e, dict) and e.get("id") == "mcp-omi" for e in entries)
     guard_ok = any(isinstance(e, dict) and e.get("id") == "omind-guard" for e in entries)
     plugin_path = dsh_guard_plugin_path()
@@ -3227,17 +3261,56 @@ def _hook_commands_in(node: object) -> list[str]:
     return []
 
 
-def _go_cmd_quote_check(key: str, agent: str, commands: list[str]) -> CheckResult | None:
+def _only_folder_quoted(commands: list[str], folder: str) -> bool:
+    """Whether every ``"…"`` in *commands* is there only for the OMI *folder*.
+
+    A quoted run is the folder's when it is the folder name itself (Poolside's
+    ``--folder "My Memory"``) or a path that ends in it under a parent needing
+    no quotes (agy's ``--omi-dir "C:\\vault\\My Memory"``).
+    """
+    for command in commands:
+        for run in command.split('"')[1::2]:
+            if run == folder:
+                continue
+            parent = run[: -len(folder)] if run.endswith(folder) else None
+            if parent and parent[-1] in "/\\" and not cmd_needs_quotes(parent):
+                continue
+            return False
+    return True
+
+
+def _go_cmd_quote_check(
+    key: str, agent: str, commands: list[str], folder: str
+) -> CheckResult | None:
     """A warning when an installed agy/pool hook carries a double quote (#425).
 
     Both run hooks through Go's ``exec.Command("cmd", "/c", command)``, which
     escapes every inner ``"`` as ``\\"``; cmd.exe cannot read that, so the hook
     fails on every call. Setup only writes one when a path needing quotes has
-    no 8.3 short name, so the fix is on the filesystem, not in omind.
+    no 8.3 short name, so the fix is on the filesystem, not in omind. The OMI
+    folder is the exception (#435): Poolside passes it as a bare name, which
+    ``GetShortPathNameW`` resolves against the process's working directory, not
+    the vault, so setup cannot count on a short name for it. A folder that
+    needs quotes is named outright, and leads the message when it is the only
+    quoted part: the fix is a plainer folder name.
     """
     broken = [c for c in commands if go_cmd_breaks(c)]
     if not broken:
         return None
+    rerun = f"re-run `omind setup --agent {agent}`"
+    folder_note = ""
+    if cmd_needs_quotes(folder):
+        folder_fix = "pick an OMI folder name without spaces or special characters (`--folder`)"
+        if _only_folder_quoted(broken, folder):
+            return CheckResult(
+                key,
+                "warn",
+                f"{len(broken)} {agent} hook command(s) carry the OMI folder name "
+                f"{folder!r} in double quotes, which Go's `cmd /c` escaping breaks, "
+                "so those hooks fail, and no 8.3 short name stands in for it: "
+                f"{folder_fix}, and {rerun}.",
+            )
+        folder_note = f" The OMI folder name {folder!r} needs quotes too: {folder_fix}."
     return CheckResult(
         key,
         "warn",
@@ -3246,7 +3319,7 @@ def _go_cmd_quote_check(key: str, agent: str, commands: list[str]) -> CheckResul
         "other special character has no 8.3 short name. Install omind (and the "
         "vault) under a path without spaces, or enable 8.3 names on that volume "
         "(`fsutil 8dot3name set <drive>: 0`, then recreate the directory), and "
-        f"re-run `omind setup --agent {agent}`",
+        f"{rerun}.{folder_note}",
     )
 
 
@@ -3263,7 +3336,10 @@ def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
             CheckResult("poolside_root", "fail", f"pool CLI not found: {root} does not exist")
         )
     results.extend(_diagnose_omi_folder(prov.config))
-    if prov.registered_server() == prov.desired_server_entry():
+    bad = _unreadable_config(prov._read_config)
+    if bad is not None:
+        results.append(CheckResult("poolside_mcp", "fail", bad))
+    elif prov.registered_server() == prov.desired_server_entry():
         results.append(
             CheckResult(
                 "poolside_mcp",
@@ -3280,7 +3356,10 @@ def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
                 "(run `omind setup --agent poolside`)",
             )
         )
-    if prov._hooks_wired():
+    if bad is not None:
+        # The same unreadable settings.yaml holds the hooks too (#435).
+        results.append(CheckResult("poolside_guard", "fail", bad))
+    elif prov._hooks_wired():
         results.append(
             CheckResult(
                 "poolside_guard",
@@ -3303,7 +3382,9 @@ def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
         hooks = None
     groups = hooks.values() if isinstance(hooks, dict) else []
     owned = [e for g in groups if isinstance(g, list) for e in g if prov._owned_hook(e)]
-    quoted = _go_cmd_quote_check("poolside_cmd_quotes", "poolside", _hook_commands_in(owned))
+    quoted = _go_cmd_quote_check(
+        "poolside_cmd_quotes", "poolside", _hook_commands_in(owned), config.folder
+    )
     if quoted is not None:
         results.append(quoted)
     return results
@@ -3349,7 +3430,10 @@ def diagnose_agy(config: SetupConfig) -> list[CheckResult]:
         results.append(
             CheckResult("agy_mcp_registration", "ok", f"MCP server '{name}' -> {config.omi_dir}")
         )
-    if prov._hooks_wired():
+    bad = _unreadable_config(prov._read_hooks)
+    if bad is not None:
+        results.append(CheckResult("agy_hooks", "fail", bad))
+    elif prov._hooks_wired():
         results.append(CheckResult("agy_hooks", "ok", f"OMI hooks wired into {prov.hooks_path()}"))
     else:
         results.append(
@@ -3363,7 +3447,9 @@ def diagnose_agy(config: SetupConfig) -> list[CheckResult]:
         agy_block = prov._read_hooks().get(AGY_HOOK_NAME)
     except ProvisionError:
         agy_block = None
-    quoted = _go_cmd_quote_check("agy_cmd_quotes", "agy", _hook_commands_in(agy_block))
+    quoted = _go_cmd_quote_check(
+        "agy_cmd_quotes", "agy", _hook_commands_in(agy_block), config.folder
+    )
     if quoted is not None:
         results.append(quoted)
     skill_file = prov.skill_dir() / paths.AGENT_SKILL_FILENAME

@@ -7,6 +7,50 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.15] - 2026-10-02
+
+### Fixed
+- **Provision and doctor robustness
+  ([#435](https://github.com/CryptoJones/omind/issues/435)).** Four older gaps found
+  by the 2026-10-02 audit.
+  - **A non-UTF-8 config file no longer raises.** Setup and doctor caught only
+    `JSONDecodeError` (or `YAMLError` / TOML `ParseError`), so a Latin-1 or UTF-16
+    settings file escaped as a raw `UnicodeDecodeError`. This covered Claude
+    `settings.json`, Codex `hooks.json` and `config.toml`, Gemini `settings.json`,
+    `openclaw.json`, agy hooks, the Poolside, Hermes and goose YAML, the DSH patch
+    and the Hermes allowlist. Setup now refuses such a file with a `ProvisionError`
+    and leaves it untouched. Doctor never raises, and reports a `fail` that names
+    the unreadable file rather than "not installed, run `omind setup`" (which
+    setup would then refuse). The DeepSeek doctor also caught no error at all
+    from its patch file and now reports it.
+  - **UNC paths in the Git Bash hook form.** Bash collapses `\\` to `\` inside
+    double quotes, so `"\\srv\share\..."` reached omind as `\srv\share\...`, in
+    both the interpreter token and `--vault`. The new `provision.bash_quote` keeps
+    plain double quotes when bash leaves the value alone, so existing hooks keep
+    their bytes. Single quotes are not enough for a UNC path: Claude Code spawns
+    Git Bash from a native process as `bash.exe -c "<command>"`, and the MSYS2
+    runtime halves every `\\` inside that quoted argument before bash parses it.
+    So a UNC path is written as `//srv/share/...`, which Windows reads as the
+    same share and MSYS2's argument conversion leaves alone. Any other value
+    bash would rewrite goes in single quotes: a `$`, a backtick, a `"`, or a
+    trailing backslash. A value that also holds a `'` stays double-quoted with
+    `\`, `"`, `$` and backtick escaped, and a drive path in that form is
+    forward-slashed too, so it carries no `\\` for MSYS2 to halve. Doctor's hook
+    parser removes those escapes and maps `//srv/...` back to `\\srv\...`, so a
+    UNC interpreter such as `\\srv\O'Brien\py\python.exe` is probed and compared
+    as bash runs it, not flagged as a dead or stale pin that setup can never
+    clear. PowerShell and cmd forms were not affected.
+  - **A folder name with a space in the cmd form.** Setup cannot count on an 8.3
+    short name for the OMI folder (`GetShortPathNameW` resolves a bare name
+    against the working directory, not the vault), so `--folder "My Memory"`
+    can still carry the `"` that Go's `cmd /c` breaks. Doctor's agy/Poolside
+    warning only named "omind (and the vault)". It now names the folder, says to
+    pick one without spaces, and leads with the folder when it is the only
+    quoted part.
+  - **`_scripts_dirs` caught only `KeyError`** from `sysconfig.get_path`. A
+    `ValueError` could reach `canonical_omind_exe()` on Windows. Both are now
+    skipped.
+
 ## [10.2.14] - 2026-10-02
 
 ### Security
