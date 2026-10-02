@@ -131,12 +131,18 @@ _TLDS = frozenset(
     ]
 )
 #: Endings that are also everyday attribute names in code (``asyncio.run``,
-#: ``logging.info``, ``args.name``). A dotted token under one of these reads as
-#: a host only with hostname-only evidence: a hyphen (illegal in an identifier),
-#: a ``//`` before it (a URL), or three or more labels not rooted at ``self`` /
-#: ``cls`` (#402).
-_CODE_TLDS = frozenset(["run", "name", "info", "page", "live", "test", "int", "site", "home"])
-_CODE_ROOTS = frozenset(["self", "cls"])
+#: ``page.live``). A dotted token under one of these reads as a host only with
+#: hostname-only evidence: a hyphen (illegal in an identifier), a ``//`` before
+#: it (a URL), or three or more labels none of which is a receiver name such as
+#: ``self`` (#402). A bare two-label ``hello.run`` is therefore not a host.
+_CODE_TLDS = frozenset(["run", "live", "page", "site", "home"])
+#: Endings so common as attributes (``request.user.name``, ``logging.root.info``)
+#: that even three labels prove nothing: only a hyphen or a ``//`` counts (#402).
+_ATTR_TLDS = frozenset(["name", "info", "test", "int"])
+#: Receiver names: a chain with one of these as any label is attribute access.
+_CODE_ROOTS = frozenset(["self", "cls", "this", "super"])
+#: A token followed by ``(`` (optionally after whitespace) is being called.
+_CALL_RE = re.compile(r"\s*\(")
 #: Extensions that mark a dotted or slashed token as a file, not a name.
 _FILE_EXTS = frozenset(
     [
@@ -352,21 +358,26 @@ def _mixed(text: str) -> Iterable[str]:
                     yield part
 
 
-def _host_ok(host: str, text: str, start: int, end: int) -> bool:
+def _host_ok(host: str, text: str, start: int, called: bool) -> bool:
     labels = host.lower().split(".")
-    if labels[-1] not in _TLDS or text.startswith("(", end):
-        return False  # ``foo.run(...)`` is a call, whatever the ending
-    if labels[-1] not in _CODE_TLDS:
+    if labels[-1] not in _TLDS:
+        return False
+    if labels[-1] not in _CODE_TLDS and labels[-1] not in _ATTR_TLDS:
         return True
     if "-" in host or text.endswith("//", 0, start):
-        return True
-    return len(labels) > 2 and labels[0] not in _CODE_ROOTS
+        return True  # neither can be an identifier, so neither can be a call
+    if labels[-1] in _ATTR_TLDS:
+        return False
+    if called and start + len(host) == len(text):
+        return False  # ``app.server.run()``: the whole token is called, not a host
+    return len(labels) > 2 and not _CODE_ROOTS.intersection(labels)
 
 
-def _hosts(text: str) -> Iterable[str]:
+def _hosts(text: str, called: bool = False) -> Iterable[str]:
+    """Hostnames in one token; ``called`` when the token is followed by ``(``."""
     for match in _HOST_RE.finditer(text):
         host = match.group(1).rstrip(".")
-        if _host_ok(host, text, match.start(1), match.start(1) + len(host)):
+        if _host_ok(host, text, match.start(1), called):
             yield host
 
 
@@ -450,12 +461,18 @@ def extract(text: str, *, title: str = "", tags: Iterable[str] = ()) -> dict[str
 def _candidates(source: str) -> Iterable[str]:
     yield from _wikilinks(source)
     yield from _volumes(source)
-    for word in dict.fromkeys(_TOKEN_RE.findall(source)):
+    # A token counts as called if *any* of its occurrences is followed by ``(``;
+    # the token split drops the ``(``, so look at the original text (#402).
+    words: dict[str, bool] = {}
+    for match in _TOKEN_RE.finditer(source):
+        called = _CALL_RE.match(source, match.end()) is not None
+        words[match.group()] = words.get(match.group(), False) or called
+    for word, called in words.items():
         has_digit = _DIGIT_RE.search(word) is not None
         if "/" in word:
             yield from _slugs(word)
         if "." in word:
-            yield from _hosts(word)
+            yield from _hosts(word, called)
             if has_digit:
                 yield from _ipv4(word)
         if has_digit:
