@@ -30,7 +30,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     separate value in `policy.STAGE_WRAPPERS`.
   - Each stage's text now stops at the next stage's start. Before, every stage
     of a `find … -exec … {} +` chain was scanned and tokenized to the end of the
-    command: 2000 clauses took about 17 s, and now take about 0.04 s.
+    command: 2000 clauses took about 17 s.
+  - **Review fixes (PR #446).** A `-c` body that reads its stdin as code (`…
+    | bash -c 'eval "$(cat)"'`, `. /dev/stdin`, a nested `sh`, `-s`) now has
+    the pipeline and heredoc that feed it judged and walked, for note rules and
+    hard rules alike. `source`/`.` of `/dev/stdin`, `/dev/fd/0` or `-` is read
+    like a shell with no `-c` body, and so is `bash /dev/stdin`. An interpreter
+    that reads its program from a pipe (`cat <<EOF | python3 -`) takes that
+    pipeline and heredoc as its text. Wrapper switches read like getopt, so
+    `env -iC <dir>`, `env -iC<dir>` and `env -u X -C <dir>` move the directory,
+    and `env` counts only as a wrapper in its own position (`sudo -u env -C …`
+    is sudo's `-C`). A heredoc piped into a shell and walked is no longer also
+    opaque text, so a `cd <private>` inside it counts.
+  - Stage ends come from one backward pass, and a stage the splitter cut at a
+    redirect's `&`/`|` (the `1` of `2>&1`) no longer bounds the stage before
+    it. The hard rules' shell scan is bounded the same way. 2000 clauses of
+    `find -exec sed … {} +`, with or without `2>&1`, `-exec sh x {} +`, or
+    4000 `2>&1` redirects now walk in under 0.1 s and take under 0.15 s
+    through the hard rules (the `2>&1` shape took 19.5 s, the `sh` shape
+    11.4 s).
 
 ## [10.2.15] - 2026-10-02
 

@@ -11,6 +11,8 @@ live when local pytest runs left hook-failure breadcrumbs in the real
 
 from __future__ import annotations
 
+import contextlib
+import signal
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -177,3 +179,31 @@ def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     guard._shell_walk.cache_clear()
     yield
     guard._shell_walk.cache_clear()
+
+
+class HardTimeLimitExceeded(BaseException):
+    """Raised by :func:`hard_time_limit`. A ``BaseException``, so the guard's
+    fail-open ``except Exception`` handlers cannot swallow it and turn a
+    blown bound into a pass (#432 review)."""
+
+
+@contextlib.contextmanager
+def hard_time_limit(seconds: float = 5.0) -> Iterator[None]:
+    """Fail the enclosed block after ``seconds`` instead of letting a
+    catastrophic regex hang the run until CI's own timeout (#431 review): an
+    exponential search never returns, so an elapsed-time assert after it never
+    runs. ``signal.setitimer`` is POSIX-only, so Windows skips. Shared by the
+    guard and rules suites (#432 review)."""
+    if not hasattr(signal, "setitimer"):
+        pytest.skip("needs signal.setitimer (POSIX)")
+
+    def _expired(_signum: int, _frame: object) -> None:
+        raise HardTimeLimitExceeded(f"exceeded the {seconds} s hard bound")
+
+    previous = signal.signal(signal.SIGALRM, _expired)
+    signal.setitimer(signal.ITIMER_REAL, seconds)
+    try:
+        yield
+    finally:
+        signal.setitimer(signal.ITIMER_REAL, 0)
+        signal.signal(signal.SIGALRM, previous)

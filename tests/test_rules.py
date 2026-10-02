@@ -11,6 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
+from conftest import hard_time_limit
 
 from omind import guard, rules
 
@@ -532,6 +533,112 @@ def test_find_exec_chain_walk_is_linear() -> None:
     assert time.perf_counter() - start < 1.0
     assert [s.program for s in sites].count("sed") == 2000
     assert sites[1].text.startswith("sed s/a/b/ {} +") and len(sites[1].text) < 30
+
+
+#: #432 review (EM, PR #446): code a local shell or interpreter reads from
+#: its stdin, and `env` switch shapes the first fix missed. Each must be denied.
+_REVIEW_BYPASSES_432: tuple[tuple[str, str], ...] = (
+    # 1. A `-c` body that reads its stdin as code.
+    ("cat <<'EOF' | bash -c 'eval \"$(cat)\"'\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | bash -c '. /dev/stdin'\ngit push origin main\nEOF", "public"),
+    ("echo 'git push origin main' | bash -c 'sh'", "public"),
+    ("bash -c 'eval \"$(cat)\"' <<'EOF'\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | bash -c 'eval \"$(cat)\"'\ncd {public}\ngit push origin main\nEOF", "private"),
+    # 2. `source`/`.` of stdin.
+    ("cat <<'EOF' | source /dev/stdin\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | . /dev/stdin\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | source /dev/fd/0\ngit push origin main\nEOF", "public"),
+    ("source /dev/stdin <<'EOF'\ngit push origin main\nEOF", "public"),
+    # 3. An interpreter that reads its program from a pipe.
+    ("cat <<'EOF' | python3 -\nimport os; os.system('git push origin main')\nEOF", "public"),
+    ("cat <<'EOF' | python3\nimport os; os.system('git push origin main')\nEOF", "public"),
+    ("echo \"import os; os.system('git push origin main')\" | python3", "public"),
+    # 4. `env` short clusters, `--`, and an unknowable directory.
+    ("env -iC {public} git push origin main", "private"),
+    ("env -iC{public} git push origin main", "private"),
+    ("env -u HOME -C {public} git push origin main", "private"),
+    ("env -C {public} -- git push origin main", "private"),
+    ("cd {private} && env -C ../public git push origin main", "private"),
+    ('env -C "$DIR" git push origin main', "public"),
+    # Two heredocs: only the one fed to the shell is its code (`keep_from`).
+    ("cat <<'A' >f\necho ok\nA\ncat <<'B' | bash\ngit push origin main\nB", "public"),
+    ("cat <<'A' >f; cat <<'B' | bash\necho ok\nA\ngit push origin main\nB", "public"),
+)
+
+#: #432 review: these stay allowed.
+_REVIEW_ALLOWED_432: tuple[tuple[str, str], ...] = (
+    # 8. A walked heredoc's `cd` counts; its body is not opaque text.
+    ("cat <<'EOF' | bash\ncd {private}\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | source /dev/stdin\ncd {private}\ngit push origin main\nEOF", "public"),
+    # 9. `env` as sudo's `-u` value is no `env` program: `-C` is sudo's.
+    ("cd {private} && sudo -u env -C {public} git push origin main", "public"),
+    ("cd {public} && env -C ../private git push origin main", "public"),
+    ('env -C "$DIR" git push origin main', "private"),
+    # A body or script that does not read its stdin as code: data.
+    ("cat <<'EOF' | bash -c 'cat > notes.md'\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | python3 report.py\nos.system('git push origin main')\nEOF", "public"),
+    # Two heredocs: the one written to a file is data.
+    ("cat <<'A' >f\ngit push origin main\nA\ncat <<'B' | bash\necho ok\nB", "public"),
+    ("cat <<'A' >f; cat <<'B' | bash\ngit push origin main\nA\necho ok\nB", "public"),
+)
+
+
+def test_review_bypasses_are_denied(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#432 review items 1-4: each push reaches public main and is denied."""
+    omi, public, private = two_repos
+    for command, cwd in _repo_cases(_REVIEW_BYPASSES_432, public, private):
+        assert _denied(omi, command, cwd, monkeypatch), command
+
+
+def test_review_false_positives_stay_allowed(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#432 review items 8-9, `env -C` edges and the two-heredoc split."""
+    omi, public, private = two_repos
+    for command, cwd in _repo_cases(_REVIEW_ALLOWED_432, public, private):
+        assert not _denied(omi, command, cwd, monkeypatch), command
+
+
+@pytest.mark.usefixtures("windows_tokens")
+def test_review_cases_on_windows_tokenizing(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi, public, private = two_repos
+    for command, cwd in _repo_cases(_REVIEW_BYPASSES_432, public, private):
+        assert _denied(omi, command, cwd, monkeypatch), command
+    for command, cwd in _repo_cases(_REVIEW_ALLOWED_432, public, private):
+        assert not _denied(omi, command, cwd, monkeypatch), command
+
+
+#: #432 review items 5-7: chain shapes that were quadratic. Each clause has no
+#: separator, so every stage used to scan (and tokenize) to the end.
+_CHAIN_SHAPES_432 = (
+    "find . " + "-exec sed s/a/b/ {} + " * 2000,
+    "find . " + "-exec sed s/a/b/ {} + 2>&1 " * 2000,  # 19.5 s in the walk
+    "find . " + "-exec sh x {} + " * 2000,  # 11.4 s in the hard rules
+    "find . " + "-exec sh x {} + 2>&1 " * 2000,
+    "echo x" + " 2>&1" * 4000,
+)
+
+
+@pytest.mark.parametrize(
+    "chain", _CHAIN_SHAPES_432, ids=["exec", "exec-redir", "sh", "sh-redir", "redirs"]
+)
+def test_chain_shapes_stay_linear_through_both_judges(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, chain: str
+) -> None:
+    """Through `_hard_rule_subjects` and `_note_rules_verdict`, each with a cold
+    walk cache, under the #438 SIGALRM bound rather than a wall-clock assert."""
+    omi, public, _private = two_repos
+    command = chain + "; git push origin main"
+    guard._shell_walk.cache_clear()
+    with hard_time_limit(3.0):
+        guard._hard_rule_subjects(command)
+    guard._shell_walk.cache_clear()
+    with hard_time_limit(3.0):
+        assert _denied(omi, command, public, monkeypatch)
 
 
 def test_git_global_options_do_not_backtrack_exponentially(

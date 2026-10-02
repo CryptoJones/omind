@@ -86,8 +86,9 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   A heredoc piped into a shell (`cat <<EOF | bash`, `echo … | sh`) is judged again,
   and a heredoc fed that way is walked. An interpreter heredoc that execs a push is
   opaque, like its `-c` twin. `cd ~nouser` no longer discards the walk. `env -C` /
-  `--chdir` move the directory. A 2000-clause `find -exec {} +` chain walks in
-  about 0.04 s instead of 17 s.
+  `--chdir` move the directory (getopt clusters too). A `-c` body, `source`,
+  or interpreter that reads its stdin as code has its pipeline judged. Long
+  `find -exec {} +` chains, with or without `2>&1`, stay under 0.15 s.
 
 ### Shipped — 2026-10-02 (v10.2.15)
 

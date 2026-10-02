@@ -1649,8 +1649,9 @@ class _ShellSite:
     text: str
     cwd: Path | None
     opaque: bool = False
-    #: A shell with no ``-c`` body: ``text`` is the whole pipeline feeding
-    #: it, producers and their heredoc included (``cat <<EOF | bash``, #432).
+    #: A shell, ``source`` or ``-c`` body reading code from stdin: ``text`` is
+    #: the pipeline feeding it (``cat <<EOF | bash``, #432). A heredoc fed to
+    #: a body-less shell is walked instead of kept in ``text``.
     piped: bool = False
 
 
@@ -1746,7 +1747,12 @@ def _env_chdir(prefix: str, cwd: Path | None) -> Path | None:
     """``cwd`` moved by every ``env -C <dir>`` / ``--chdir[=]<dir>`` among the
     wrapper words ``prefix`` that precede a stage's program (#432): ``env
     -C <public> git push`` pushes from ``<public>``. A ``$VAR`` or unparseable
-    value makes the directory unknowable (``None``)."""
+    value makes the directory unknowable (``None``).
+
+    The prefix is read the way :func:`_program_stages` skips wrappers, so
+    ``env`` counts only in its own position as a wrapper, never as another
+    wrapper's value (``sudo -u env -C 3 git``), and a short cluster reads like
+    getopt (``env -iC <dir>``, ``env -iC<dir>``, ``env -u X -C <dir>``)."""
     try:
         words = _shell_tokens(prefix)
     except ValueError:
@@ -1755,29 +1761,55 @@ def _env_chdir(prefix: str, cwd: Path | None) -> Path | None:
         if words[k] in _EXEC_ACTIONS:  # only this stage's own wrappers
             words = words[k + 1 :]
             break
-    takes_arg = _STAGE_WRAPPERS["env"]
     i = 0
     while i < len(words):
-        if _basename(words[i]) != "env":
+        if re.match(r"[A-Za-z_]\w*=", words[i]):
             i += 1
             continue
+        base = _basename(words[i])
+        if base not in _STAGE_WRAPPERS:
+            break  # not a wrapper chain this reads: the directory stays put
+        takes_arg = _STAGE_WRAPPERS[base]
+        positional = base in _WRAPPER_POSITIONAL
         i += 1
-        while i < len(words) and words[i].startswith("-") and words[i] != "--":
-            word, value = words[i], None
-            if word in ("-C", "--chdir"):
-                value = words[i + 1] if i + 1 < len(words) else ""
+        while i < len(words):
+            word = words[i]
+            if word == "--":
                 i += 1
-            elif word.startswith("--chdir="):
-                value = word.partition("=")[2]
-            elif word.startswith("-C"):
-                value = word[2:]
-            elif word in takes_arg:
+                break
+            if not word.startswith("-") or len(word) < 2:
+                if not positional:
+                    break
+                positional = False  # `timeout 5`: the duration, then more switches
                 i += 1
-            if value is not None:
-                literal = value and "$" not in value and "`" not in value
-                cwd = _chdir(cwd, value) if literal else None
-            i += 1
+                continue
+            if base == "env":
+                value = _env_chdir_value(word, words[i + 1] if i + 1 < len(words) else "")
+                if value is not None:
+                    literal = value and "$" not in value and "`" not in value
+                    cwd = _chdir(cwd, value) if literal else None
+            i += _switch_width(word, takes_arg)
     return cwd
+
+
+def _env_chdir_value(word: str, after: str) -> str | None:
+    """The directory the ``env`` switch ``word`` changes to (``after`` is the
+    next word), or ``None`` when it changes none. ``-C`` may end or sit inside
+    a short cluster (``-iC <dir>``, ``-iC<dir>``). A letter before it that
+    takes a value (``-uC`` unsets ``C``), or ``-S`` (its rest is a command),
+    ends the cluster first."""
+    if word in ("-C", "--chdir"):
+        return after
+    if word.startswith("--chdir="):
+        return word.partition("=")[2]
+    if word.startswith("--"):
+        return None
+    for k in range(1, len(word)):
+        if word[k] == "C":
+            return word[k + 1 :] or after
+        if word[k] == "S" or "-" + word[k] in _STAGE_WRAPPERS["env"]:
+            return None
+    return None
 
 
 def _shell_body(tokens: list[str]) -> str | None:
@@ -1855,6 +1887,7 @@ def _shell_sites(
     # -exec … {} +` chain (no separator) is not rescanned to the end for
     # every stage: that was quadratic (#432).
     starts = sorted(stage[2] for stage in stages) + [len(code)]
+    ends = _stage_ends(code, starts[:-1])
     nth = floor = 0
     sites: list[_ShellSite] = []
     scopes: list[tuple[Path | None, tuple[Path | None, ...]]] = []
@@ -1869,17 +1902,7 @@ def _shell_sites(
         program = item[0]
         while starts[nth] <= pos:
             nth += 1
-        bound = starts[nth]
-        if _SEPARATOR_CHAR_RE.search(code, pos, bound):
-            bound = len(code)  # `cd X &>/dev/null`: a redirect is no separator
-        end = next(
-            (
-                k
-                for k in range(pos, bound)
-                if code[k] in ";&|\n()`" and not _is_redirect_char(code, k)
-            ),
-            bound,
-        )
+        end = ends[pos]
         text = raw[pos:end].rstrip()
         try:
             tokens: list[str] | None = _shell_tokens(text)
@@ -1907,13 +1930,6 @@ def _shell_sites(
                     cwd = moved
             sites.append(_ShellSite(program, text, cwd))
             continue
-        here = cwd
-        # This stage's wrapper words: back to the previous stage's start or
-        # separator, whichever is nearer (bounded, so a chain stays linear).
-        lo = starts[nth - 2] if nth >= 2 else 0
-        lo = max([lo - 1] + [code.rfind(ch, lo, pos) for ch in ";&|\n()`"]) + 1
-        if re.search(r"(?:^|[\s/])env\s", raw[lo:pos]):
-            here = _env_chdir(raw[lo:pos], cwd)  # `env -C <dir> git push`
         if program in _REMOTE_LAUNCHERS:
             takes_arg = _REMOTE_LAUNCHERS[program]
             words = list(re.finditer(r"\S+", code[pos:end]))
@@ -1929,19 +1945,40 @@ def _shell_sites(
                 break
             # `-o LocalCommand=…` / `ProxyCommand` / `KnownHostsCommand` /
             # `Match exec` run on THIS machine: their quoted values are code.
-            sites.append(_ShellSite(program, text, here, bool(_SSH_LOCAL_EXEC_RE.search(text))))
+            sites.append(_ShellSite(program, text, cwd, bool(_SSH_LOCAL_EXEC_RE.search(text))))
             continue
+        here = cwd
+        # This stage's wrapper words: back to the previous stage's start or
+        # separator, whichever is nearer (bounded, so a chain stays linear).
+        lo = starts[nth - 2] if nth >= 2 else 0
+        lo = max([lo - 1] + [code.rfind(ch, lo, pos) for ch in ";&|\n()`"]) + 1
+        if re.search(r"(?:^|[\s/])env\s", raw[lo:pos]):
+            here = _env_chdir(raw[lo:pos], cwd)  # `env -C <dir> git push`
         body: str | None = None
-        positional = False
+        positional = stdin_body = False
         if tokens and depth < _MAX_UNWRAP_DEPTH:
             if program in _LOCAL_SHELLS:
                 at_body = _shell_body_index(tokens)
                 if at_body is not None:
                     body = tokens[at_body]
                     positional = at_body + 1 < len(tokens)
+                    stdin_body = _body_reads_stdin(tokens, at_body)
             elif program == "eval" and len(tokens) > 1:
                 body = " ".join(tokens[1:])
         if body is not None:
+            if stdin_body:
+                # The body reads its stdin as code (`eval "$(cat)"`, `.
+                # /dev/stdin`, a nested `sh`): the pipeline and any heredoc
+                # feeding it are code too (#432 review). The fed heredoc is
+                # walked as shell code, and the site keeps it in its opaque
+                # text, since the body may hand it to something else.
+                head = _pipeline_head(code, pos, floor)
+                floor = end
+                fed = _owned_heredocs(raw, code, head, end)
+                if fed:
+                    sites.extend(_shell_sites(fed, here, dirs, depth + 1, bodies)[0])
+                piped_text = f"{raw[head:end].rstrip()}\n{fed}".rstrip()
+                sites.append(_ShellSite(program, piped_text, here, True, True))
             if positional:
                 # Words after the body become $0, $1 ..., which the body can
                 # run (`bash -c '"$@"' _ <cmd>`): code the walk does not
@@ -1961,25 +1998,42 @@ def _shell_sites(
             continue
         site_cwd = _git_site_cwd(tokens, here) if program == "git" and tokens else here
         piped = False
-        if program in _LOCAL_SHELLS and tokens is not None and depth < _MAX_UNWRAP_DEPTH:
+        sources_stdin = program in ("source", ".") and _sources_stdin(tokens)
+        if (
+            (program in _LOCAL_SHELLS or sources_stdin)
+            and tokens is not None
+            and depth < _MAX_UNWRAP_DEPTH
+        ):
             # No `-c` body: it runs a script or reads code from stdin (`cat
-            # <<EOF | bash`, `echo … | sh`). The code is in the pipeline that
-            # feeds it, which is judged as this site's text (#432: the text
-            # was just `bash`, so a piped heredoc push passed). A heredoc that
-            # pipeline feeds it is shell code, walked in a child shell.
+            # <<EOF | bash`, `echo … | sh`, `… | source /dev/stdin`). The code
+            # is in the pipeline that feeds it, which is judged as this site's
+            # text (#432: the text was just `bash`, so a piped heredoc push
+            # passed). A heredoc that pipeline feeds it is shell code, walked
+            # in a child shell; once walked, it is left out of this site's
+            # opaque text, so a `cd` inside it counts (#432 review). A bare
+            # shell's own heredoc (`bash <<EOF`) is code the walk already
+            # reads in place; `source /dev/stdin <<EOF`'s is masked, so fed.
             head = _pipeline_head(code, pos, floor)
             floor = end
-            fed = _owned_heredocs(raw, code, head, pos)
-            text, piped = f"{raw[head:end].rstrip()}\n{fed}".rstrip(), True
+            fed = _owned_heredocs(raw, code, head, end if sources_stdin else pos)
+            text, piped = raw[head:end].rstrip(), True
             if fed:
                 sites.extend(_shell_sites(fed, site_cwd, dirs, depth + 1, bodies)[0])
         elif _SCRIPT_INTERPRETER_RE.fullmatch(program):
             # The heredoc it owns (`python3 - <<EOF`) is its code, judged like
             # its `-c` twin (#432); `end` stopped at the line break before it.
-            fed = _owned_heredocs(raw, code, pos, end)
-            text = f"{text}\n{fed}".rstrip()
+            # When it reads its program from stdin, the pipeline feeding it
+            # and that pipeline's heredoc are its code too (`cat <<EOF |
+            # python3 -`, #432 review).
+            head = pos
+            if tokens is not None and _interpreter_reads_stdin(tokens):
+                head = _pipeline_head(code, pos, floor)
+                floor = end
+            fed = _owned_heredocs(raw, code, head, end)
+            text = f"{raw[head:end].rstrip()}\n{fed}".rstrip()
         opaque = (
             program in _OPAQUE_EXECUTORS
+            or sources_stdin
             or program in _LOCAL_SHELLS  # a shell body not unwrapped (too deep, unparseable)
             or program == "eval"
             or raw[pos] in "'\""  # the program word itself is quoted: `'git push' x`
@@ -1991,7 +2045,101 @@ def _shell_sites(
     return sites, cwd, dirs, "".join(local)
 
 
-_SEPARATOR_CHAR_RE = re.compile(r"[;&|\n()`]")
+def _stage_ends(code: str, starts: list[int]) -> dict[int, int]:
+    """Where each stage starting at an offset in ``starts`` (sorted) ends: at
+    the first separator after it that is not part of a redirection, or at the
+    next stage's start, whichever comes first (#432). One backward pass finds
+    every next separator, so a long chain with no separator (a `find -exec …
+    {} +` run, with or without `2>&1` in each clause) stays linear.
+
+    A stage that starts right after a redirection's ``&``/``|`` (the ``1`` of
+    ``2>&1 …``, the target of ``&>f``) is the stage splitter cutting at a
+    redirect, not a new command: it does not bound the stage before it."""
+    n = len(code)
+    next_sep = [n] * (n + 1)
+    for k in range(n - 1, -1, -1):
+        sep = code[k] in ";&|\n()`" and not _is_redirect_char(code, k)
+        next_sep[k] = k if sep else next_sep[k + 1]
+    real = [s for s in starts if not _after_redirect(code, s)] + [n]
+    ends: dict[int, int] = {}
+    r = 0
+    for idx, pos in enumerate(starts):
+        while real[r] <= pos:
+            r += 1
+        # A split-off redirect target ends at the next stage of any kind.
+        bound = real[r] if not _after_redirect(code, pos) else (starts + [n])[idx + 1]
+        ends[pos] = min(next_sep[pos], bound)
+    return ends
+
+
+def _after_redirect(code: str, pos: int) -> bool:
+    """Whether the stage at ``pos`` follows a redirection's ``&``/``|``
+    (blanks between), so the stage splitter cut a redirection there."""
+    k = pos - 1
+    while k >= 0 and code[k] in " \t":
+        k -= 1
+    return k >= 0 and code[k] in "&|" and _is_redirect_char(code, k)
+
+
+#: A ``-c`` body that reads its stdin as code (#432 review): a ``$(cat)`` /
+#: backtick ``cat``, ``/dev/stdin``, ``/dev/fd/0``, ``source -``, or a shell,
+#: interpreter, ``read`` or ``xargs`` in command position, any of which can
+#: run what the pipeline feeding the outer shell writes.
+_BODY_READS_STDIN_RE = re.compile(
+    r"/dev/stdin|/dev/fd/0|\$\(\s*cat\b|`\s*cat\b"
+    r"|(?:^|[\s;&|(`{])(?:source|\.)\s+-(?=\s|$)"
+    r"|(?:^|[\s;&|(`{])(?:(?:ba|z|da|k|mk|a)?sh|python[\d.]*|pypy[\d.]*|node|nodejs"
+    r"|deno|bun|ruby|perl|php|lua|read|xargs)(?=[\s;&|)`}]|$)"
+)
+
+#: Operands that make ``source``/``.`` (or a shell) read code from stdin.
+_STDIN_OPERANDS = frozenset({"/dev/stdin", "/dev/fd/0", "-"})
+
+
+def _body_reads_stdin(tokens: list[str], at_body: int) -> bool:
+    """Whether the local shell ``tokens`` (whose ``-c`` body is
+    ``tokens[at_body]``) runs code from its stdin: an ``-s`` among its
+    switches, or a body :data:`_BODY_READS_STDIN_RE` matches."""
+    switches = tokens[1:at_body]
+    if any(len(w) > 1 and w[0] == "-" and w[1] != "-" and "s" in w[1:] for w in switches):
+        return True
+    return bool(_BODY_READS_STDIN_RE.search(tokens[at_body]))
+
+
+def _sources_stdin(tokens: list[str] | None) -> bool:
+    """Whether ``source``/``.`` ``tokens`` reads its stdin as code: its file
+    operand is ``/dev/stdin``, ``/dev/fd/0`` or ``-`` (#432 review)."""
+    words = _without_redirects(tokens or [])
+    return len(words) > 1 and words[1] in _STDIN_OPERANDS
+
+
+#: Interpreter switches whose value is the program itself (``python3 -c``,
+#: ``node -e``, ``perl -E``, ``php -r``) or a module (``python3 -m``).
+_INTERPRETER_CODE_SWITCHES = frozenset({"-c", "-m", "-e", "-E", "-p", "-r", "--eval", "--print"})
+#: Interpreter switches that take a separate, non-code value.
+_INTERPRETER_VALUE_SWITCHES = frozenset({"-W", "-X", "--require"})
+
+
+def _interpreter_reads_stdin(tokens: list[str]) -> bool:
+    """Whether interpreter ``tokens`` reads its program from stdin: a ``-``
+    or ``/dev/stdin`` operand, or no script and no ``-c``/``-e`` program at
+    all (``… | python3``). A script operand reads a file (#432 review)."""
+    words = _without_redirects(tokens)
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if word in _STDIN_OPERANDS:
+            return True
+        if word == "--":
+            return i + 1 >= len(words) or words[i + 1] in _STDIN_OPERANDS
+        if not word.startswith("-"):
+            return False  # a script file
+        if word in _INTERPRETER_CODE_SWITCHES or (
+            not word.startswith("--") and word[-1] in "cmeEpr"
+        ):
+            return False  # `-c '…'`, `-uc '…'`: the program is an argument
+        i += 2 if word in _INTERPRETER_VALUE_SWITCHES else 1
+    return True
 
 
 def _owned_heredocs(raw: str, code: str, start: int, stop: int) -> str:
@@ -2415,6 +2563,22 @@ _PATHLIB_RE = re.compile(r"\bpathlib\b|\bPath\s*\(")
 _PATHLIB_OP_RE = re.compile(r"\.(?:rename|rmdir)\s*\(")
 
 
+def _switch_width(word: str, takes_arg: frozenset[str]) -> int:
+    """How many words the wrapper switch ``word`` spans (1 or 2), given the
+    switches in ``takes_arg`` that take a value. A short cluster reads like
+    getopt (#432 review): the first value-taking letter takes the rest of the
+    word, or the next word when it ends the cluster (``env -iC <dir>``,
+    ``sudo -iu bob``), so that next word is never read as the program."""
+    if word in takes_arg:
+        return 2
+    if word.startswith("--") or len(word) < 3:
+        return 1
+    for k in range(1, len(word)):
+        if "-" + word[k] in takes_arg:
+            return 2 if k == len(word) - 1 else 1
+    return 1
+
+
 def _basename(word: str) -> str:
     base = re.split(r"[/\\]", word)[-1]
     return base[:-4] if base.lower().endswith(".exe") else base
@@ -2472,13 +2636,13 @@ def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int,
                     break
                 j += 1
                 while j < ntok and toks[j][0].startswith("-"):
-                    j += 2 if toks[j][0] in _STAGE_WRAPPERS[base] else 1
+                    j += _switch_width(toks[j][0], _STAGE_WRAPPERS[base])
                 if base in _WRAPPER_POSITIONAL and j < ntok:
                     # Switches and `--` may follow the duration too
                     # (`timeout 5s -k 2s cmd`, `timeout 5 -- cmd`; #430 review).
                     j += 1
                     while j < ntok and toks[j][0].startswith("-"):
-                        j += 2 if toks[j][0] in _STAGE_WRAPPERS[base] else 1
+                        j += _switch_width(toks[j][0], _STAGE_WRAPPERS[base])
             if j >= ntok:
                 break
             cut = j + 1
@@ -2787,8 +2951,10 @@ def _shell_code_source(words: list[str]) -> tuple[str, list[str]]:
             continue
         elif reads_stdin:
             pass  # with `-s`, operands are positional words, not a script
+        elif word in _STDIN_OPERANDS:
+            reads_stdin = True  # `bash /dev/stdin`, `bash -` (#432 review)
         elif word == "--":
-            if i + 1 < len(words):
+            if i + 1 < len(words) and words[i + 1] not in _STDIN_OPERANDS:
                 return "file", []  # `bash -- x.sh`
         elif len(word) > 1 and word[0] in "-+":
             reads_stdin = word[0] == "-" and "s" in word[1:]
@@ -2796,6 +2962,22 @@ def _shell_code_source(words: list[str]) -> tuple[str, list[str]]:
             return "file", []
         i += 1
     return "stdin", here
+
+
+def _here_strings(words: list[str]) -> list[str]:
+    """The here-strings among ``words`` (``<<< '…'``, ``<<<'…'``): what a
+    shell whose ``-c`` body reads its stdin is given as code (#432 review)."""
+    here: list[str] = []
+    i = 0
+    while i < len(words):
+        attached = _HERE_STRING_RE.fullmatch(words[i])
+        if attached and attached.group(1):
+            here.append(attached.group(1))
+        elif words[i].endswith("<<<") and _REDIRECT_OP_RE.fullmatch(words[i]):
+            here.extend(words[i + 1 : i + 2])
+            i += 1
+        i += 1
+    return here
 
 
 def _pipeline_head(code: str, at: int, floor: int = 0) -> int:
@@ -2892,42 +3074,51 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
     ``curl … | sh && git commit -m 'sudo: drop'`` judges the curl alone. Also
     every ``env -S`` value, which env splits and runs as a command."""
     masked = policy.shell_code_text(text)
+    stages = _program_stages(masked, text)
+    # Each stage stops at the next stage's start too, so a `find -exec sh x
+    # {} +` chain is not rescanned to the end per shell (#432 review).
+    ends = _stage_ends(masked, sorted(stage[2] for stage in stages))
     floor = 0
-    for program, _args, pos, _end in _program_stages(masked, text):
-        if program not in _LOCAL_SHELLS:
+    for program, _args, pos, _end in stages:
+        if program not in _LOCAL_SHELLS and program not in ("source", "."):
             continue
-        head = _pipeline_head(masked, pos, floor)
-        stop = next(
-            (
-                k
-                for k in range(pos, len(masked))
-                if masked[k] in ";&|\n()`" and not _is_redirect_char(masked, k)
-            ),
-            len(masked),
-        )
-        floor = stop
+        stop = ends[pos]
         try:
             tokens = _shell_tokens(text[pos:stop])
         except ValueError:
             tokens = [program]
-        at_body = _shell_body_index(tokens)
-        if at_body is not None:
-            if at_body + 1 < len(tokens) and _POSITIONAL_REF_RE.search(tokens[at_body]):
-                # `bash -c '"$@"' _ sudo id`: $0 is `_`, so judge from both.
-                words.append(" ".join(tokens[at_body + 1 :]))
-                words.append(" ".join(tokens[at_body + 2 :]))
+        if program not in _LOCAL_SHELLS and not _sources_stdin(tokens):
             continue
-        source, here = _shell_code_source(tokens)
-        if source != "stdin":
-            continue
+        head = _pipeline_head(masked, pos, floor)
+        floor = stop
+        own = pos  # where a heredoc the shell reads may open (its own: masked)
+        if program not in _LOCAL_SHELLS:
+            here: list[str] = []  # `… | source /dev/stdin`, `. /dev/stdin <<EOF`
+            own = stop
+        else:
+            at_body = _shell_body_index(tokens)
+            if at_body is not None:
+                if at_body + 1 < len(tokens) and _POSITIONAL_REF_RE.search(tokens[at_body]):
+                    # `bash -c '"$@"' _ sudo id`: $0 is `_`, so judge from both.
+                    words.append(" ".join(tokens[at_body + 1 :]))
+                    words.append(" ".join(tokens[at_body + 2 :]))
+                if not _body_reads_stdin(tokens, at_body):
+                    continue
+                # `… | bash -c 'eval "$(cat)"'`: the body runs its stdin.
+                here = _here_strings(tokens[at_body + 1 :])
+                own = stop
+            else:
+                source, here = _shell_code_source(tokens)
+                if source != "stdin":
+                    continue
         code.extend(here)
         if text[head:pos].strip():
             words.append(_words_in_command_position(text[head:pos]))
         # A producer's heredoc body starts on the next line (`cat <<EOF |
         # bash`), past this stage: it is the code the shell reads.
-        heredocs = list(policy._HEREDOC_RE.finditer(masked, head, pos))
+        heredocs = list(policy._HEREDOC_RE.finditer(masked, head, own))
         if heredocs:
-            code.append(_heredoc_bodies(text, text.find("\n", pos), heredocs))
+            code.append(_heredoc_bodies(text, text.find("\n", own), heredocs))
     for segment in re.finditer(r"(?:\\.|[^;&|\n(`)\\])+", masked):
         if not re.search(r"(?:^|[\s/])env\s", segment.group() + " "):
             continue
