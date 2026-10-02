@@ -103,10 +103,6 @@ Follow-ups:
 - [ ] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — _bug (Windows)_ —
   with SAC enforcing, all hooks and the `omi` MCP server stop working, while `python -m omind` still runs.
 
-### Guard bugs found in the same session (2026-09-30)
-
-- [ ] **rules: repo-scoped rules judge the hook's cwd repo, not the command's target repo** ([#394](https://github.com/CryptoJones/omind/issues/394)) — _bug_
-
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -155,6 +151,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.5)
+
+- [x] **rules: repo-scoped rules judge the hook's cwd repo, not the command's target repo** ([#394](https://github.com/CryptoJones/omind/issues/394)) — **v10.2.5** — _bug_ —
+  repo-scoped rules match against shell code text (an ssh payload or quoted string is
+  skipped, not judged against the local repo); the target repo follows `cd <dir> &&` and
+  `(cd <dir>; …)` as well as `git -C`; the hook adapter passes the event `cwd`.
 
 ### Shipped — 2026-10-02 (v10.2.4)
 

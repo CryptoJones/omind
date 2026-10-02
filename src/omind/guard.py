@@ -1560,46 +1560,79 @@ def _action_path(action: dict[str, Any]) -> str:
 
 
 def _git_dash_c_path(command: str) -> Path | None:
-    """The cumulative ``-C <dir>`` target of the command's first simple command,
-    when that command is ``git`` — the repo a ``git -C <dir> …`` actually acts
-    on. Scoped to a literal leading ``git`` token so ``make -C``/``tar -C`` are
-    never misread. Repeated ``-C`` chains relative to the previous one (git's
-    own semantics); a relative result resolves against cwd in the caller. Any
-    parse trouble returns ``None`` (fall back to cwd) — never raises."""
+    """The directory the command's first ``git`` invocation acts on, from the
+    ``cd <dir> &&`` / ``(cd <dir>; …)`` prefixes before it (#394) plus its own
+    cumulative ``-C <dir>`` options (#147). Only a literal ``git`` token honors
+    ``-C``, so ``make -C``/``tar -C`` are never misread. Repeated ``-C`` and
+    ``cd`` steps chain relative to the previous one (the shell's and git's own
+    semantics); a relative result resolves against the cwd in the caller.
+
+    Separators are found in :func:`policy.shell_code_text`, so a ``cd … &&``
+    inside an ssh payload or quoted string never moves the local target. A
+    ``cd`` with no git after it still names the target directory. Any parse
+    trouble — an unbalanced quote, ``cd -``, ``cd $VAR`` — returns ``None``
+    (fall back to cwd); never raises."""
     try:
-        parts = _split_simple_commands(command)
-        if not parts:
-            return None
-        # POSIX shlex treats every backslash as an escape and turns an unquoted
-        # Windows path such as ``C:\\repo`` into ``C:repo``.  PowerShell/cmd do
-        # not use backslashes that way, so retain them for a Windows shell or
-        # an explicit drive path. Non-POSIX shlex keeps surrounding quotes;
-        # remove only a matching outer pair.
-        windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", parts[0])
-        tokens = shlex.split(parts[0], posix=not windows_style)
-        if windows_style:
-            tokens = [
-                token[1:-1]
-                if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
-                else token
-                for token in tokens
-            ]
-    except ValueError:
+        code = policy.shell_code_text(command)
+        cuts = [0]
+        for sep in re.finditer(r"&&|\|\||;|\n", code):
+            cuts += [sep.start(), sep.end()]
+        cuts.append(len(code))
+        parts = [command[cuts[i] : cuts[i + 1]] for i in range(0, len(cuts), 2)]
+        target: Path | None = None
+        subshells: list[Path | None] = []
+        for part in parts:
+            text = part.strip()
+            while text.startswith("("):
+                subshells.append(target)
+                text = text[1:].lstrip()
+            closes = 0
+            while text.endswith(")") and closes < len(subshells):
+                text = text[:-1].rstrip()
+                closes += 1
+            text = text.removeprefix("{").strip().removesuffix("}").strip()
+            tokens = _shell_tokens(text) if text else []
+            if tokens and tokens[0] in ("cd", "pushd"):
+                if len(tokens) != 2 or tokens[1].startswith("-") or "$" in tokens[1]:
+                    return None
+                step = Path(tokens[1]).expanduser()
+                target = step if target is None or step.is_absolute() else target / step
+            elif tokens and tokens[0] == "git":
+                i = 1
+                while i < len(tokens) - 1:
+                    if tokens[i] == "-C":
+                        step = Path(tokens[i + 1]).expanduser()
+                        target = step if target is None or step.is_absolute() else target / step
+                        i += 2
+                    elif tokens[i] == "-c":
+                        i += 2
+                    else:
+                        break
+                return target
+            for _ in range(closes):
+                target = subshells.pop()
+        return target
+    except (ValueError, IndexError):
         return None
-    if not tokens or tokens[0] != "git":
-        return None
-    target: Path | None = None
-    i = 1
-    while i < len(tokens) - 1:
-        if tokens[i] == "-C":
-            step = Path(tokens[i + 1]).expanduser()
-            target = step if target is None or step.is_absolute() else target / step
-            i += 2
-        elif tokens[i] == "-c":
-            i += 2
-        else:
-            break
-    return target
+
+
+def _shell_tokens(part: str) -> list[str]:
+    """shlex tokens for one simple command. POSIX shlex treats every backslash
+    as an escape and turns an unquoted Windows path such as ``C:\\repo`` into
+    ``C:repo``. PowerShell/cmd do not use backslashes that way, so retain them
+    for a Windows shell or an explicit drive path. Non-POSIX shlex keeps
+    surrounding quotes; remove only a matching outer pair. Raises
+    ``ValueError`` on an unbalanced quote."""
+    windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", part)
+    tokens = shlex.split(part, posix=not windows_style)
+    if windows_style:
+        tokens = [
+            token[1:-1]
+            if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
+            else token
+            for token in tokens
+        ]
+    return tokens
 
 
 def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
@@ -1609,6 +1642,14 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
         p = Path(raw_path).expanduser()
         candidates.append(p if p.is_dir() else p.parent)
     else:
+        # The adapter passes the hook event's cwd — the agent's shell cwd — which
+        # can differ from this process's (#394: a worktree commit judged against
+        # the main checkout). Fall back to the process cwd when absent or bogus.
+        base = Path.cwd()
+        with contextlib.suppress(Exception):
+            event_cwd = action.get("cwd")
+            if isinstance(event_cwd, str) and event_cwd and Path(event_cwd).is_dir():
+                base = Path(event_cwd)
         # A Bash action carries no file path, so the repo was previously always
         # the shell's cwd — which misattributed `git -C <other-repo> fetch` (and
         # `git -C <other-repo> commit`) to the cwd repo (#147). Honor `-C` for
@@ -1623,8 +1664,8 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
                 )
             dash_c = _git_dash_c_path(cmd)
             if dash_c is not None:
-                candidates.append(dash_c)
-        candidates.append(Path.cwd())
+                candidates.append(dash_c if dash_c.is_absolute() else base / dash_c)
+        candidates.append(base)
     for candidate in candidates:
         try:
             cur = candidate.resolve()

@@ -169,6 +169,55 @@ def test_guard_check_action_denies_via_note_rule(tmp_path: Path, repo: Path, mon
     assert "branch + PR required" in verdict.reason
 
 
+def test_repo_scoped_rule_judges_the_target_repo_not_the_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#394 repro: with the cwd in a PUBLIC repo, a push inside an ssh payload
+    to another host's private repo was denied as a direct push to public main.
+    Repo-scoped rules now judge the repo the command actually targets."""
+    omi = tmp_path / "OMI"
+    # `*git*push*` so the `git -C <dir> push` form matches too (the seed's
+    # `*git push*` pattern does not — a separate matter from #394).
+    _note_with_rule(omi, match='"*git*push*"')
+    public, private = tmp_path / "public", tmp_path / "private"
+    for r in (public, private):
+        (r / ".git").mkdir(parents=True)
+        (r / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    public, private = public.resolve(), private.resolve()
+    monkeypatch.setattr(
+        rules, "_repo_visibility", lambda r, **k: "public" if r == public else "private"
+    )
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    monkeypatch.setattr(rules, "_repo_name", lambda r: r.name)
+
+    def verdict(command: str, cwd: Path) -> guard.Verdict | None:
+        monkeypatch.chdir(cwd)
+        return guard._note_rules_verdict({"tool": "Bash", "command": command}, omi)
+
+    def denied(command: str, cwd: Path) -> bool:
+        v = verdict(command, cwd)
+        return v is not None and not v.allow
+
+    repro = (
+        "ssh localhost 'cd /Volumes/X/repos/linear-algebra && git commit -m x"
+        " && git push origin main'"
+    )
+    assert not denied(repro, public)  # remote payload: not judged against the cwd repo
+    assert not denied(repro, private)
+    # Still denied when the LOCAL target is the public repo, however it is named.
+    assert denied(f"cd {public} && git push origin main", private)
+    assert denied(f"(cd {public}; git push origin main)", private)
+    assert denied(f"git -C {public} push origin main", private)
+    assert denied("git push origin main", public)  # plain: cwd as before
+    # ...and not when the target is the private repo, whatever the cwd.
+    assert not denied(f"cd {private} && git push origin main", public)
+    assert not denied(f"git -C {private} push origin main", public)
+    # A local push after a remote one is still judged locally.
+    assert denied("ssh h 'git push origin feature' && git push origin main", public)
+    # A quoted refspec is read from the raw command, not lost to the masking.
+    assert denied('git push origin "main"', public)
+
+
 def test_pushed_refspec_wins_over_checked_out_branch(
     tmp_path: Path, repo: Path, monkeypatch
 ) -> None:

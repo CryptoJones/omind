@@ -1360,6 +1360,56 @@ def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
     assert str(fetch_side) == str(commit_side) == str(repo_b)
 
 
+def test_repo_resolution_follows_cd_and_event_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#394: the repo a command acts on comes from `cd <dir> &&` / `(cd x; …)`
+    and the hook event's cwd — never from a `cd` inside an ssh payload, and
+    plain commands keep the cwd behaviour."""
+    repo_a = _mk_repo(tmp_path, "a")
+    repo_b = _mk_repo(tmp_path, "b")
+    monkeypatch.chdir(repo_a)
+    for command, expected in [
+        (f"cd {repo_b} && git commit -m x", repo_b),
+        ("cd ../b && git push origin main", repo_b),  # relative to cwd
+        (f"cd {tmp_path} && cd b && git push", repo_b),  # chained cd
+        (f"cd {tmp_path} && git -C b push", repo_b),  # cd then -C
+        (f"(cd {repo_b}; git commit -m x)", repo_b),  # subshell
+        (f"(cd {repo_b} && make) && git commit -m x", repo_a),  # subshell cd ends
+        (f'cd "{repo_b}" && git status', repo_b),  # quoted dir
+        (f"ssh host 'cd {repo_b} && git push origin main'", repo_a),  # remote payload
+        (f"echo 'cd {repo_b} && git push'", repo_a),  # quoted data
+        ("cd $HOME && git push", repo_a),  # unparseable -> cwd
+        ("cd - && git push", repo_a),
+        ("git push origin main", repo_a),  # plain command -> cwd
+    ]:
+        got = guard._repo_root_for_action({"tool": "Bash", "command": command})
+        assert got == expected, command
+    # The adapter-supplied event cwd wins over this process's cwd...
+    got = guard._repo_root_for_action(
+        {"tool": "Bash", "command": "git commit -m x", "cwd": str(repo_b)}
+    )
+    assert got == repo_b
+    got = guard._repo_root_for_action(
+        {"tool": "Bash", "command": "git -C ../a fetch", "cwd": str(repo_b)}
+    )
+    assert got == repo_a  # relative -C resolves against the event cwd
+    # ...and a missing / bogus one falls back to it (fail open).
+    for bogus in ("", str(tmp_path / "nope"), 42):
+        got = guard._repo_root_for_action({"tool": "Bash", "command": "git push", "cwd": bogus})
+        assert got == repo_a, bogus
+
+
+def test_normalize_action_carries_event_cwd() -> None:
+    """#394: the adapter passes the hook event's cwd through to the core."""
+    from omind import adapters
+
+    action = adapters.normalize_action(
+        {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": "/w/t"}
+    )
+    assert action["cwd"] == "/w/t"
+
+
 def test_dash_c_git_writes_are_classified_and_checked_against_the_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

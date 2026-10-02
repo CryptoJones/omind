@@ -58,7 +58,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from omind import filelock, paths
+from omind import filelock, paths, policy
 
 ACTION_DENY = "deny"
 ACTION_WARN = "warn"
@@ -407,7 +407,7 @@ def _repo_branch(repo: Path) -> str:
 # literals (#317 / #333 / #345) after -C or -c.
 _GIT_OPT_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+(?:"[^"]*"|'[^']*')?\S*)"""
 _GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
-_PUSH_ARGS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}push\b(?P<rest>[^;|&`\n]*)")
+_PUSH_ARGS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}push\b(?P<rest>[^;|&`)\n]*)")
 
 
 def _pushed_branches(command: str) -> list[str] | None:
@@ -418,12 +418,17 @@ def _pushed_branches(command: str) -> list[str] | None:
     main matched the branch condition via HEAD and got denied (#240 v1 false
     positive): when the command names refspecs, judge those instead of HEAD.
     Refspecs like ``HEAD:main`` count as their destination.
+
+    The push is located in :func:`policy.shell_code_text` (#394), so a push
+    inside an ssh payload or quoted string is never the one judged; its
+    arguments are then read from the same span of the raw command.
     """
-    match = _PUSH_ARGS_RE.search(command)
+    match = _PUSH_ARGS_RE.search(policy.shell_code_text(command))
     if not match:
         return None
     refs: list[str] = []
-    tokens = [t for t in match.group("rest").split() if t]
+    rest = command[match.start("rest") : match.end("rest")]
+    tokens = [t.strip("'\"") for t in rest.split() if t.strip("'\"")]
     positional: list[str] = []
     for token in tokens:
         if token == "--tags":
@@ -486,6 +491,13 @@ def evaluate(
         )
         if repo_scoped:
             if repo is None:
+                continue
+            # #394: a repo-scoped condition judges the LOCAL repo the guard
+            # resolved. When the match only exists inside data — an
+            # `ssh host 'cd r && git push'` payload or a quoted string — the
+            # command acts on some other repo (often another host), so judging
+            # it against the local cwd repo is meaningless: skip, fail open.
+            if command and not fnmatch.fnmatch(policy.shell_code_text(command), rule.match):
                 continue
             if rule.except_repos and _repo_name(repo) in rule.except_repos:
                 continue

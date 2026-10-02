@@ -127,8 +127,11 @@ if [ "$tool" = "Bash" ]; then
     printf 'omi-guard: omind not found at %s — BLOCKING this Bash command (fail-closed).\n' "$OMIND" >&2
     exit 2
   fi
-  jq -nc --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" --arg tp "$transcript" \
-    '{tool:"Bash", command:$c, session:$s, prompt:$prompt, transcript_path:$tp, is_omi_consult:false}' 2>/dev/null \
+  # The event's cwd is the agent's shell cwd (#394): the core resolves the
+  # target repo from it, not from wherever this hook process happened to start.
+  cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+  jq -nc --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" --arg tp "$transcript" --arg cwd "$cwd" \
+    '{tool:"Bash", command:$c, session:$s, prompt:$prompt, transcript_path:$tp, cwd:$cwd, is_omi_consult:false}' 2>/dev/null \
     | "$OMIND" guard check --omi-dir "$OMI_DIR"
   rc=$?
   # Only a clean allow(0) / block(2) from the core is authoritative. ANY other

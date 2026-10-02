@@ -7,6 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.5] - 2026-10-02
+
+### Fixed
+- **Repo-scoped note rules judged the hook's cwd repo, not the repo the command targets
+  ([#394](https://github.com/CryptoJones/omind/issues/394)).** With the shell in a public
+  repo, `ssh host 'cd /other/repo && git push origin main'` was denied as a direct push
+  to a public main, although the push ran on another host against a private repo.
+  - Repo-scoped rules (visibility / branch / except_repos / has-commits) now match against
+    `policy.shell_code_text(command)`, so a match that exists only inside an ssh payload
+    or a quoted string is skipped (fail open) rather than judged against the local repo.
+    The pushed refspec is located the same way. Rules without repo conditions still see
+    the raw command.
+  - The target repo now follows `cd <dir> && …`, `(cd <dir>; …)` and chained `cd` steps
+    before a command's first `git`, on top of the existing `git -C` handling. Anything
+    unparseable (`cd -`, `cd $VAR`, an unbalanced quote) falls back to the cwd.
+  - The Claude hook adapter now passes the event's `cwd` (the agent's shell cwd) to
+    `omind guard check`, and `normalize_action` carries it, so a worktree commit is no
+    longer resolved against the main checkout the hook process started in.
+
 ## [10.2.4] - 2026-10-02
 
 ### Fixed
