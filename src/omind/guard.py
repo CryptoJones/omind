@@ -48,7 +48,7 @@ import shlex
 import sys
 import tempfile
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
@@ -2465,15 +2465,33 @@ def _rules_command_view(action: dict[str, Any]) -> rules_mod.CommandView | None:
             if site.cwd not in repos:
                 cands = [base] if site.cwd is None else [base / site.cwd, base]
                 repos[site.cwd] = _enclosing_repo(cands)
+        memo: dict[Path, Path | None] = {}
         return rules_mod.CommandView(
             local_text=local_text,
             sites=tuple(
-                rules_mod.CommandSite(text=site.text, repo=repos[site.cwd], opaque=site.opaque)
+                rules_mod.CommandSite(
+                    text=site.text,
+                    repo=repos[site.cwd],
+                    opaque=site.opaque,
+                    write_repos=_rules_write_repos(site, base, memo),
+                )
                 for site in sites
             ),
         )
     except Exception:
         return None
+
+
+def _rules_write_repos(
+    site: _ShellSite, base: Path, memo: dict[Path, Path | None]
+) -> tuple[Path, ...]:
+    """The repos one site writes into, for the note rules (#458), without
+    duplicates. ``()`` on any failure: the site is still judged where it runs,
+    only its written repos are dropped (fail open)."""
+    try:
+        return tuple(dict.fromkeys(_site_write_repos(site, base, memo)))
+    except Exception:
+        return ()
 
 
 def _repo_has_remote(repo: Path) -> bool:
@@ -3009,20 +3027,33 @@ def _bash_write_repo(action: dict[str, Any]) -> Path | None:
         base = _action_base_dir(action)
         memo: dict[Path, Path | None] = {}
         for site in _shell_walk(_without_comparisons(_action_command(action)))[0]:
-            cwd = None if site.cwd is None else base / site.cwd
-            targets = _redirect_targets(site.text)
-            if site.program in _FILE_OPS:
-                targets += _file_op_targets(site.program, site.text)
-            elif site.program in _EDITOR_SWITCHES:
-                targets += _in_place_edit_targets(site.program, site.text)
-            for word in targets:
-                target = _write_target(word, cwd)
-                found = None if target is None else _dir_repo(target, memo)
-                if found is not None:
-                    return found
+            for found in _site_write_repos(site, base, memo):
+                return found
     except Exception:
         return None
     return None
+
+
+def _site_write_repos(
+    site: _ShellSite, base: Path, memo: dict[Path, Path | None]
+) -> Iterator[Path]:
+    """The repo each file one simple command writes or removes lands in, in
+    order, as the Write tool's path picks its repo (#448, #458). ``base`` is
+    the shell's starting directory; ``memo`` is shared by every site of one
+    command (see :func:`_dir_repo`). A target in no repo yields nothing. Raises
+    on a malformed site: callers fail open."""
+    cwd = None if site.cwd is None else base / site.cwd
+    text = _without_comparisons(site.text)
+    targets = _redirect_targets(text)
+    if site.program in _FILE_OPS:
+        targets += _file_op_targets(site.program, text)
+    elif site.program in _EDITOR_SWITCHES:
+        targets += _in_place_edit_targets(site.program, text)
+    for word in targets:
+        target = _write_target(word, cwd)
+        found = None if target is None else _dir_repo(target, memo)
+        if found is not None:
+            yield found
 
 
 def _in_place_edit_targets(program: str, text: str) -> list[str]:

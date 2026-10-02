@@ -1534,3 +1534,89 @@ def test_code_text_fast_path_answers_as_the_slow_path() -> None:
     for _ in range(20_000):
         text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 12)))
         assert rules._code_text(text) == _slow_code_text(text), repr(text)
+
+
+@pytest.fixture
+def write_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path, Path]:
+    """(omi, x, y, outside) for #458: a deny on every Bash command in public
+    repo X; Y is private and ``outside`` is in no repo."""
+    omi = tmp_path / "OMI"
+    _note_with_rule(
+        omi,
+        id="no-bash-in-x",
+        match='"*"',
+        when="\n  repo_visibility: public",
+        except_repos="[]",
+    )
+    x, y, outside = tmp_path / "x", tmp_path / "y", tmp_path / "outside"
+    for r in (x, y):
+        (r / ".git").mkdir(parents=True)
+        (r / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    outside.mkdir()
+    x, y, outside = x.resolve(), y.resolve(), outside.resolve()
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public" if r == x else "private")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    monkeypatch.setattr(rules, "_repo_name", lambda r: r.name)
+    return omi, x, y, outside
+
+
+def test_repo_rule_judges_the_repo_a_bash_write_targets(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458: a repo-scoped rule on X fires for a Bash write into X from
+    outside it, as the Write tool on that path would be judged against X."""
+    omi, x, y, outside = write_repos
+    for command, where in (
+        (f"cat > {x}/file.py <<EOF\nprint(1)\nEOF\n", outside),
+        (f"sed -i s/a/b/ {x}/f.txt", outside),
+        (f"echo x > {x}/f && cd {y}", y),
+        (f"cd {outside} && echo x > {x}/f", y),
+        (f"bash -c 'echo x > {x}/f'", outside),
+    ):
+        assert _denied(omi, command, where, monkeypatch), command
+
+
+def test_repo_rule_ignores_writes_outside_the_repo(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458: a write that lands outside X is not judged against X."""
+    omi, _x, y, outside = write_repos
+    for command, where in (
+        (f"cat > {outside}/file.py <<EOF\nprint(1)\nEOF\n", outside),
+        (f"echo x > {y}/f", outside),
+        (f"sed -i s/a/b/ {y}/f.txt", outside),
+        ("echo x > /dev/null 2>&1", y),
+        ("echo x > f.txt", outside),
+    ):
+        assert not _denied(omi, command, where, monkeypatch), command
+
+
+def test_write_repo_judged_with_the_sites_own_refspec(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#458: the written repo is judged for the site that writes it, with that
+    site's refspec: a feature-branch push logging into a public repo on main
+    is not a push to main."""
+    omi, public, _private = two_repos
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    assert not _denied(omi, f"git push origin feature > {public}/log", outside, monkeypatch)
+    assert _denied(omi, f"git push origin main > {public}/log", outside, monkeypatch)
+    # A write into the public repo next to a push elsewhere judges the push
+    # only where it runs: the echo is not a push.
+    assert not _denied(omi, f"echo x > {public}/f; git push origin main", outside, monkeypatch)
+
+
+def test_write_repo_lookup_failure_fails_open(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458 (invariant 2): a crash resolving write targets drops only the
+    written repos; the guard neither raises nor loses the cwd judgement."""
+    omi, x, _y, outside = write_repos
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(guard, "_dir_repo", boom)
+    assert not _denied(omi, f"echo x > {x}/f", outside, monkeypatch)
+    assert _denied(omi, "echo x > f", x, monkeypatch)
