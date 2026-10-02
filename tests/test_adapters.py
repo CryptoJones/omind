@@ -418,7 +418,7 @@ def test_run_adapter_agy_fails_open_when_translation_raises(
     captured = capsys.readouterr()
     assert code == 0
     assert json.loads(captured.out) == {"decision": "allow"}
-    assert "internal error in guard check" in captured.err
+    assert "internal error in guard adapter translate" in captured.err
     events = _adapter_error_events("agy-420")
     assert len(events) == 1
     assert events[0]["outcome"] == "fail-open"
@@ -478,3 +478,156 @@ def test_run_adapter_fails_open_when_render_raises(
     payload = {"tool": "shell", "command": "ls", "session": "r420"}
     assert adapters.run_adapter(io.StringIO(json.dumps(payload))) == 0
     assert len(_adapter_error_events("r420")) == 1
+
+
+# --- #420 round 3: hard rules hold in every adapter format ---
+
+
+def _harness_payload(harness: str, command: str, session: str) -> dict[str, object]:
+    from omind import harness as harness_mod
+
+    if harness_mod.spec_for(harness).block_format == harness_mod.FMT_AGY:
+        return {
+            "toolCall": {"name": "run_command", "args": {"CommandLine": command}},
+            "conversationId": session,
+        }
+    return {"tool_name": "Bash", "tool_input": {"command": command}, "session_id": session}
+
+
+def _rendered_deny(harness: str, code: int, out: str) -> bool:
+    """Whether the harness reads this adapter output as a hard (non-gate) deny."""
+    from omind import harness as harness_mod
+
+    fmt = harness_mod.spec_for(harness).block_format
+    if fmt == harness_mod.FMT_EXIT2:
+        return code == 2
+    if not out.strip():
+        return False
+    data = json.loads(out)
+    if fmt == harness_mod.FMT_CLAUDE_JSON:
+        return bool(data.get("decision") == "block")
+    if fmt in (harness_mod.FMT_JSON_SIGNAL, harness_mod.FMT_OPENCLAW):
+        # The OpenCode plugin enforces only a rule_id outside the consult gate.
+        rule_id = str(data.get("rule_id") or "")
+        return data.get("allow") is False and bool(rule_id) and not rule_id.startswith("omi-gate")
+    if fmt == harness_mod.FMT_CODEX_HOOK:
+        hook = data["hookSpecificOutput"]
+        decision = hook.get("permissionDecision") or hook.get("decision", {}).get("behavior")
+        return bool(decision == "deny")
+    if fmt in (harness_mod.FMT_GEMINI, harness_mod.FMT_AGY):
+        return bool(data.get("decision") == "deny")
+    if fmt == harness_mod.FMT_POOLSIDE:
+        return bool(data["hook_specific_output"]["permission_decision"] == "deny")
+    raise AssertionError(f"unhandled format {fmt}")
+
+
+def _no_home(*_args: object, **_kwargs: object) -> Path:
+    raise RuntimeError("Could not determine home directory.")
+
+
+_ALL_HARNESSES = sorted(__import__("omind.harness", fromlist=["HARNESSES"]).HARNESSES)
+
+
+@pytest.mark.parametrize("harness", _ALL_HARNESSES)
+@pytest.mark.parametrize("command", ["sudo rm -rf /x", "sudo ls", "gh repo delete foo/bar --yes"])
+def test_run_adapter_hard_rules_hold_with_no_state_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    harness: str,
+    command: str,
+) -> None:
+    """#420 round 3: with no resolvable state dir, load_learned() raised out of
+    load_policy() and the seed hard rules were lost — every format rendered allow."""
+    from omind import paths
+
+    monkeypatch.setattr(paths, "state_dir", _no_home)
+    payload = _harness_payload(harness, command, f"nh-{harness}")
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness=harness)
+    assert _rendered_deny(harness, code, capsys.readouterr().out)
+
+
+def _rule_events(rule_id: str, session: str) -> list[dict[str, object]]:
+    from omind import compliance
+
+    return [
+        e
+        for e in compliance.read_events()
+        if e.get("rule_id") == rule_id and e.get("session") == session
+    ]
+
+
+def test_run_adapter_render_failure_does_not_double_log_a_decided_deny(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """check_action already logged the deny; a render failure after it must log
+    only the internal error, or one attempt counts twice toward escalation."""
+    from omind import harness as harness_mod
+
+    real = harness_mod.render_decision
+    calls: list[bool] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> int:
+        if not calls:
+            calls.append(True)
+            raise RuntimeError("render exploded")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(harness_mod, "render_decision", flaky)
+    payload = {"tool": "shell", "command": "sudo rm -rf /x", "session": "dl420"}
+    assert adapters.run_adapter(io.StringIO(json.dumps(payload))) == 2
+    err = capsys.readouterr().err
+    assert "internal error in guard adapter render" in err
+    assert len(_rule_events("sudo-use-fleet-sudo", "dl420")) == 1
+    errors = _rule_events(guard.GUARD_ERROR_RULE, "dl420")
+    assert len(errors) == 1
+    assert errors[0]["outcome"] == "error"
+
+
+def test_run_adapter_names_the_failing_stage(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("normalize exploded")
+
+    monkeypatch.setattr(adapters, "normalize_action", boom)
+    payload = {"tool": "bash", "command": "ls", "session": "st420"}
+    assert adapters.run_adapter(io.StringIO(json.dumps(payload))) == 0
+    assert "internal error in guard adapter normalize" in capsys.readouterr().err
+
+
+def _render_always_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    from omind import harness as harness_mod
+
+    def boom(*_args: object, **_kwargs: object) -> int:
+        raise RuntimeError("render exploded")
+
+    monkeypatch.setattr(harness_mod, "render_decision", boom)
+
+
+@pytest.mark.parametrize("harness", _ALL_HARNESSES)
+def test_run_adapter_last_resort_renders_a_literal_deny(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], harness: str
+) -> None:
+    """Both renders fail: a standing deny must still read as a deny in the
+    harness's own format — empty stdout is ``{}`` (= allow) for OpenCode."""
+    _render_always_raises(monkeypatch)
+    payload = _harness_payload(harness, "sudo rm -rf /x", f"lr-{harness}")
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness=harness)
+    assert _rendered_deny(harness, code, capsys.readouterr().out)
+
+
+@pytest.mark.parametrize("harness", _ALL_HARNESSES)
+def test_run_adapter_last_resort_renders_a_literal_allow(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], harness: str
+) -> None:
+    _render_always_raises(monkeypatch)
+    monkeypatch.setattr(guard, "check_action", lambda *_a, **_k: guard.Verdict(allow=True))
+    payload = _harness_payload(harness, "ls", f"la-{harness}")
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness=harness)
+    out = capsys.readouterr().out
+    assert code == 0
+    assert not _rendered_deny(harness, code, out)
+    if out.strip():
+        data = json.loads(out)
+        assert data.get("allow", True) is True
+        assert data.get("decision", "allow") == "allow"

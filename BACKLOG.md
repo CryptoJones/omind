@@ -149,6 +149,15 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.8)
+
+- [x] **guard: the hook's check action does not fail open on a classifier exception (AGENTS.md invariant 2)** ([#420](https://github.com/CryptoJones/omind/issues/420)) — **v10.2.8** — _bug_ —
+  `check_action`, `guard preflight` and `guard adapter` now catch an unexpected exception,
+  report it to stderr and (best-effort) the compliance log (`guard-internal-error`), and
+  allow. A deny already decided, and the static hard-policy rules, still block and are
+  logged once under their own rule id. The SEED hard rules hold even when the state dir
+  cannot be resolved, in every entry point and adapter format.
+
 ### Shipped — 2026-10-02 (v10.2.7)
 
 - [x] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — **v10.2.7** — _bug (Windows)_ —

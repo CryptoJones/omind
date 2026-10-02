@@ -2488,8 +2488,16 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
     deliberate Codeberg mirror). Soft rules never block here (Layer E records
     them). The opt-in only skips its own rule, so it can never bypass a
     destructive rule a command also matches.
+
+    The SEED rules live in code and never depend on the state dir: if loading
+    the full policy raises for any reason (e.g. no resolvable home directory),
+    the seed rules are evaluated on their own rather than lost (#420).
     """
-    for rule in policy.load_policy():
+    try:
+        rules: list[policy.Rule] = list(policy.load_policy())
+    except Exception:
+        rules = list(policy.SEED_RULES)
+    for rule in rules:
         if rule.severity != policy.SEVERITY_HARD:
             continue
         # A single malformed rule must never brick the guard on EVERY tool call:
@@ -2712,7 +2720,14 @@ def _rule_severity(rule_id: str) -> str:
     return policy.SEVERITY_HARD
 
 
-def _fail_open_verdict(action: dict[str, Any], exc: Exception, decided: Verdict | None) -> Verdict:
+def _fail_open_verdict(
+    action: dict[str, Any],
+    exc: Exception,
+    decided: Verdict | None,
+    *,
+    stage: str = "check",
+    decided_logged: bool = False,
+) -> Verdict:
     """The verdict when :func:`check_action` hits an unexpected exception (#420).
 
     A deny decided before the exception is a deliberate block and stands. An
@@ -2729,6 +2744,12 @@ def _fail_open_verdict(action: dict[str, Any], exc: Exception, decided: Verdict 
     doctor's ``top_rules``. Both writes are best-effort: logging resolves the
     state dir (``Path.home()``), which can itself raise, and the handler must
     never raise the error it is handling back into the agent.
+
+    ``stage`` names the step that failed in the stderr line (``check``, or an
+    adapter step such as ``adapter render``). ``decided_logged`` says the caller
+    already logged ``decided`` (the adapter, whose :func:`check_action` logs its
+    own deny before rendering): the deny is then not logged a second time, so
+    one attempt never counts twice toward ``learn.escalate``.
     """
     verdict = Verdict(allow=True)
     if decided is not None and not decided.allow:
@@ -2748,7 +2769,7 @@ def _fail_open_verdict(action: dict[str, Any], exc: Exception, decided: Verdict 
     with contextlib.suppress(Exception):
         what = "allowing this action (fail-open)" if verdict.allow else "a deny still applies"
         sys.stderr.write(
-            f"omi-guard: internal error in guard check ({type(exc).__name__}: {exc}); {what}\n"
+            f"omi-guard: internal error in guard {stage} ({type(exc).__name__}: {exc}); {what}\n"
         )
     with contextlib.suppress(Exception):
         compliance.log_event(
@@ -2761,7 +2782,8 @@ def _fail_open_verdict(action: dict[str, Any], exc: Exception, decided: Verdict 
             outcome="fail-open" if verdict.allow else "error",
             detail=f"{type(exc).__name__}: {exc}",
         )
-    if not verdict.allow and verdict.rule_id:
+    already_logged = decided_logged and verdict is decided
+    if not verdict.allow and verdict.rule_id and not already_logged:
         with contextlib.suppress(Exception):
             compliance.log_event(
                 compliance.KIND_DECISION,
@@ -2976,7 +2998,10 @@ def run_guard(
     if action_name == "check":
         verdict = check_action(_load(src), omi_dir=omi_dir)
         if not verdict.allow:
-            sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
+            # The exit code carries the block; a failed stderr write must not
+            # turn it into a traceback.
+            with contextlib.suppress(Exception):
+                sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
         return verdict.exit_code
     return 0
 

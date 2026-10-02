@@ -7,6 +7,52 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.8] - 2026-10-02
+
+### Fixed
+- **The guard's `check` action did not fail open on a classifier exception
+  ([#420](https://github.com/CryptoJones/omind/issues/420)).** `check_action` had no
+  try/except, so a bug in any classifier (`_repo_root_for_action`, the note rules, the
+  budget re-arm, the gate message) escaped as a traceback. Claude Code's `omi-guard.sh`
+  turned that exit 1 into a BLOCK for every tool; Windows Claude, Codex, Gemini,
+  Poolside and Antigravity, which call `omind guard adapter` directly, got a traceback.
+  - `check_action` now catches unexpected exceptions, prints the error to stderr, logs a
+    `guard-internal-error` decision to the compliance log, and allows the action.
+  - A deny decided before the exception still stands, and the static hard-policy rules
+    are re-checked on their own, so a crash in repo detection cannot wave through
+    `sudo` or a repo delete.
+  - **The hard rules hold even when the state dir cannot be resolved.** With no
+    resolvable home (e.g. `docker run --user 12345` with `HOME`/`XDG_STATE_HOME`
+    unset), `paths.state_dir()` raises `RuntimeError`. `policy.load_learned()` let that
+    escape, which took `load_policy()` and the SEED rules (which live in code) down with
+    it, so every hard rule failed open. `load_learned()` now returns `[]` on any
+    exception, and the hard-policy check falls back to `SEED_RULES` if loading the
+    policy raises at all. `check_action`, `omind guard check` and all eight adapter
+    formats deny `sudo` and `gh repo delete` in that state.
+  - A deny on the fail-open path is logged under its real rule id and severity (so a
+    `sudo` blocked during a crash still counts in the recidivism ladder and doctor's
+    `top_rules`), plus a separate `guard-internal-error` event (outcome `fail-open`
+    when the action is allowed, `error` when a deny stands). A deny that
+    `check_action` already logged is not logged again when a later adapter step
+    fails, so one attempt never counts twice toward `learn.escalate`.
+  - The compliance-log writes in the fail-open path are **best-effort**: logging
+    resolves the state dir via `Path.home()`, which can raise, so a failed write is
+    suppressed rather than re-raised into the agent. The stderr line remains, and it
+    names the step that failed (`check`, or `adapter translate`/`normalize`/`check`/
+    `render`).
+  - `omind guard preflight` (the UserPromptSubmit hook) fails open the same way.
+  - `omind guard adapter` (the check dispatch for Codex, Gemini, Poolside, Antigravity
+    and Windows Claude) fails open too: an exception translating the event (e.g. an
+    Antigravity transcript line that is JSON but not an object), normalizing it, or
+    rendering the verdict is logged and rendered as an allow in that harness's own
+    format, with the hard-policy rules still re-checked. If rendering fails twice, the
+    adapter writes a fixed literal verdict per format, so a standing deny is still a
+    deny: empty stdout reads as allow for OpenCode, Hermes and Antigravity.
+  - One hard-policy rule raising mid-match (any exception, not just `re.error`) is
+    skipped without disabling the hard rules after it.
+  - `omind guard check` no longer raises if writing its `BLOCKED by …` line to stderr
+    fails; the exit code still carries the block.
+
 ## [10.2.7] - 2026-10-02
 
 ### Fixed

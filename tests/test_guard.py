@@ -2915,3 +2915,74 @@ def test_preflight_fails_open_when_it_raises(
     assert captured.out == ""
     assert "classifier exploded" in captured.err
     assert compliance.read_events()[-1]["rule_id"] == guard.GUARD_ERROR_RULE
+
+
+# --- #420 round 3: hard rules hold when the state dir cannot be resolved ---
+
+#: Commands a SEED hard rule denies, with the rule id expected (None: any hard rule).
+NO_STATE_DIR_HARD_COMMANDS = (
+    ("sudo rm -rf /x", "sudo-use-fleet-sudo"),
+    ("sudo ls", "sudo-use-fleet-sudo"),
+    ("gh repo delete foo/bar --yes", None),
+)
+
+
+@pytest.mark.parametrize(("command", "rule_id"), NO_STATE_DIR_HARD_COMMANDS)
+def test_check_hard_rules_hold_with_no_state_dir(
+    monkeypatch: pytest.MonkeyPatch, command: str, rule_id: str | None
+) -> None:
+    # With no resolvable home, load_learned() raised out of load_policy() and
+    # took the SEED rules (which live in code) down with it: every hard rule
+    # failed open. The seed rules must still deny.
+    monkeypatch.setattr(paths, "state_dir", _no_home)
+    verdict = guard.check_action({"tool": "Bash", "command": command, "session": "s420nh"})
+    assert not verdict.allow
+    assert verdict.rule_id and not verdict.rule_id.startswith("omi-gate")
+    if rule_id is not None:
+        assert verdict.rule_id == rule_id
+
+
+@pytest.mark.parametrize(("command", "_rule_id"), NO_STATE_DIR_HARD_COMMANDS)
+def test_run_guard_check_blocks_hard_rules_with_no_state_dir(
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
+    command: str,
+    _rule_id: str | None,
+) -> None:
+    monkeypatch.setattr(paths, "state_dir", _no_home)
+    payload = {"tool": "Bash", "command": command, "session": "s420nr"}
+    assert guard.run_guard("check", io.StringIO(json.dumps(payload))) == 2
+    assert "BLOCKED by" in capsys.readouterr().err
+
+
+def test_load_policy_keeps_seed_rules_when_the_state_dir_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omind import policy
+
+    monkeypatch.setattr(paths, "state_dir", _no_home)
+    assert policy.load_learned() == []
+    assert [r.id for r in policy.load_policy()] == [r.id for r in policy.SEED_RULES]
+
+
+def test_hard_policy_verdict_falls_back_to_seed_rules_when_loading_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omind import policy
+
+    monkeypatch.setattr(policy, "load_policy", _no_home)
+    verdict = guard._hard_policy_verdict("sudo rm -rf /x")
+    assert verdict is not None
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+def test_run_guard_check_survives_a_failing_blocked_stderr_write(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    class _BrokenErr(io.StringIO):
+        def write(self, _s: str) -> int:
+            raise OSError("stderr closed")
+
+    monkeypatch.setattr(sys, "stderr", _BrokenErr())
+    payload = {"tool": "Bash", "command": "sudo ls", "session": "s420se"}
+    assert guard.run_guard("check", io.StringIO(json.dumps(payload))) == 2
