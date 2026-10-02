@@ -155,9 +155,12 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 ### Shipped — 2026-10-02 (v10.2.5)
 
 - [x] **rules: repo-scoped rules judge the hook's cwd repo, not the command's target repo** ([#394](https://github.com/CryptoJones/omind/issues/394)) — **v10.2.5** — _bug_ —
-  repo-scoped rules match against shell code text (an ssh payload or quoted string is
-  skipped, not judged against the local repo); the target repo follows `cd <dir> &&` and
-  `(cd <dir>; …)` as well as `git -C`; the hook adapter passes the event `cwd`.
+  each git a repo-scoped rule matches is judged against its own repo (`cd`/`pushd`/`popd`,
+  subshells, `-C`) and refspec; `sh -c`/`eval` bodies are walked as code; only an ssh
+  remote command is skipped; the hook adapters pass the event `cwd`.
+- [x] **rules: seed rule `*git push*` does not match `git -C <dir> push` (or `git -c k=v push`)** ([#414](https://github.com/CryptoJones/omind/issues/414)) — **v10.2.5** — _bug_ —
+  rules also match with git's global options dropped, so `git -C d push` counts as a push
+  and `git log --grep push` does not.
 
 ### Shipped — 2026-10-02 (v10.2.4)
 

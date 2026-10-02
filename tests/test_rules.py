@@ -169,16 +169,12 @@ def test_guard_check_action_denies_via_note_rule(tmp_path: Path, repo: Path, mon
     assert "branch + PR required" in verdict.reason
 
 
-def test_repo_scoped_rule_judges_the_target_repo_not_the_cwd(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    """#394 repro: with the cwd in a PUBLIC repo, a push inside an ssh payload
-    to another host's private repo was denied as a direct push to public main.
-    Repo-scoped rules now judge the repo the command actually targets."""
+@pytest.fixture
+def two_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path]:
+    """(omi, public, private): two repos on main, told apart only by visibility,
+    and an OMI vault holding the seed-shaped `*git push*` rule."""
     omi = tmp_path / "OMI"
-    # `*git*push*` so the `git -C <dir> push` form matches too (the seed's
-    # `*git push*` pattern does not — a separate matter from #394).
-    _note_with_rule(omi, match='"*git*push*"')
+    _note_with_rule(omi)
     public, private = tmp_path / "public", tmp_path / "private"
     for r in (public, private):
         (r / ".git").mkdir(parents=True)
@@ -189,33 +185,240 @@ def test_repo_scoped_rule_judges_the_target_repo_not_the_cwd(
     )
     monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
     monkeypatch.setattr(rules, "_repo_name", lambda r: r.name)
+    return omi, public, private
 
-    def verdict(command: str, cwd: Path) -> guard.Verdict | None:
-        monkeypatch.chdir(cwd)
-        return guard._note_rules_verdict({"tool": "Bash", "command": command}, omi)
 
-    def denied(command: str, cwd: Path) -> bool:
-        v = verdict(command, cwd)
-        return v is not None and not v.allow
+def _denied(
+    omi: Path, command: str, where: Path, monkeypatch: pytest.MonkeyPatch, **extra: str
+) -> bool:
+    """Whether the note rules deny ``command`` with the process cwd at ``where``."""
+    monkeypatch.chdir(where)
+    v = guard._note_rules_verdict({"tool": "Bash", "command": command, **extra}, omi)
+    return v is not None and not v.allow
 
-    repro = (
-        "ssh localhost 'cd /Volumes/X/repos/linear-algebra && git commit -m x"
-        " && git push origin main'"
+
+#: The pre-#394 deny set. Every row was denied by the guard on origin/main
+#: before this fix (b832d60, checked by running this table against it), run
+#: with the process cwd in the repo named second. None of them is a remote
+#: payload, so every one must still be denied.
+_PRE_394_DENIED: tuple[tuple[str, str], ...] = (
+    ("git push", "public"),
+    ("git push origin main", "public"),
+    ("git push -q -u origin main", "public"),
+    ("git push origin +main", "public"),
+    ("git push origin HEAD:main", "public"),
+    ("git push origin main 2>&1 | tail -3", "public"),
+    ("git add -A && git commit -m x && git push origin main", "public"),
+    ("git status; git push origin main", "public"),
+    ("git fetch || git push origin main", "public"),
+    ("sudo git push origin main", "public"),
+    ("env X=1 git push origin main", "public"),
+    ("bash -c 'git push'", "public"),
+    ("sh -c 'git push'", "public"),
+    ("eval 'git push'", "public"),
+    ("sudo sh -c 'git push'", "public"),
+    ("timeout 60 bash -c 'git push'", "public"),
+    ("(cd {private} && git status) && git push origin main", "public"),
+    ("cd {public} && git push origin main", "public"),
+    ("ssh h uptime; git push origin main", "public"),
+    ("git commit -m 'git push later' && git push", "public"),
+    # Quoted text no parsed command accounts for is judged as before #394:
+    ("echo 'git push'", "public"),
+    ("su -c 'git push'", "public"),
+    ("git push origin main # ssh host 'x'", "public"),
+)
+
+#: Denied now, and NOT before #394's review fixes: the push reaches public main
+#: through a cd, a -C, a wrapper or a second push the old resolver missed.
+_NEWLY_DENIED: tuple[tuple[str, str], ...] = (
+    ("bash -c 'git push origin main'", "public"),
+    ('sh -c "git push origin main"', "public"),
+    ("eval 'git push origin main'", "public"),
+    ("sudo sh -c 'git push origin main'", "public"),
+    ("timeout 60 bash -c 'git push origin main'", "public"),
+    ("bash -c 'cd {public} && git push origin main'", "private"),
+    ("bash -lc 'cd {public}; git push origin main'", "private"),
+    ("git status && cd {public} && git push origin main", "private"),
+    ("cd {private} && git status && cd {public} && git push origin main", "private"),
+    ("git -C {private} commit -m x && git -C {public} push origin main", "private"),
+    ("git push origin feature && git push origin main", "public"),
+    ("ssh h 'git push origin feature' && git push origin main", "public"),
+    ("su -c 'git push origin main'", "public"),  # body of an executor not unwrapped
+    ("(cd {private} && git status) && git push origin main", "public"),
+    ("cd {public} && git push origin main", "private"),
+    ("(cd {public}; git push origin main)", "private"),
+    ("git -C {public} push origin main", "private"),
+    ("git -c x=y push origin main", "public"),
+    ("git -C {public} -c x=y push origin main", "private"),
+    ("git --no-pager push origin main", "public"),
+    ("sudo git -C {public} push origin main", "private"),
+    ("env X=1 git -C {public} push origin main", "private"),
+    ("pushd {public} && git push origin main", "private"),
+    ("pushd {private} && popd && git push origin main", "public"),
+    ("cd {public} && eval 'git push origin main'", "private"),
+)
+
+#: Denied before #394 and allowed now, each for a stated reason.
+_NOW_ALLOWED: tuple[tuple[str, str], ...] = (
+    # The push runs on another host: the local repo says nothing about it.
+    ("ssh localhost 'cd {private} && git commit -m x && git push origin main'", "public"),
+    ("ssh -p 22 host 'git push origin main'", "public"),
+    ("ssh host git push origin main", "public"),
+    ("bash -c \"ssh host 'git push origin main'\"", "public"),
+    # The push provably targets the PRIVATE repo, not the public cwd (#394).
+    ("cd {private} && git push origin main", "public"),
+    ("pushd {private} && git push origin main", "public"),
+)
+
+
+@pytest.mark.parametrize(("command", "where"), _PRE_394_DENIED)
+def test_pre_394_deny_set_is_still_denied(
+    two_repos: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    where: str,
+) -> None:
+    """#394 review: enforcement may only loosen for a genuinely remote payload
+    or a provably different target. Everything the old guard denied stays."""
+    omi, public, private = two_repos
+    cmd = command.format(public=public, private=private)
+    assert _denied(omi, cmd, public if where == "public" else private, monkeypatch), cmd
+
+
+@pytest.mark.parametrize(("command", "where"), _NEWLY_DENIED)
+def test_every_git_is_judged_against_its_own_repo(
+    two_repos: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    where: str,
+) -> None:
+    """#394 review items 1-5: local `sh/bash -c` and `eval` bodies are code;
+    each git is resolved at its own cd/-C, after subshells close and behind
+    wrappers; every push's refspec counts; the seed matches past git's global
+    options (#414)."""
+    omi, public, private = two_repos
+    cmd = command.format(public=public, private=private)
+    assert _denied(omi, cmd, public if where == "public" else private, monkeypatch), cmd
+
+
+@pytest.mark.parametrize(("command", "where"), _NOW_ALLOWED)
+def test_remote_or_private_target_is_not_judged_against_the_cwd(
+    two_repos: tuple[Path, Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+    where: str,
+) -> None:
+    """#394 repro: with the cwd in a PUBLIC repo, a push inside an ssh payload
+    to another host's private repo was denied as a direct push to public main."""
+    omi, public, private = two_repos
+    cmd = command.format(public=public, private=private)
+    assert not _denied(omi, cmd, public if where == "public" else private, monkeypatch), cmd
+
+
+def test_private_targets_stay_allowed(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi, public, private = two_repos
+    for command, cwd in (
+        ("git push origin main", private),
+        (f"git -C {private} push origin main", public),
+        (f"cd {public} && git status && cd {private} && git push origin main", public),
+        (f"git -C {public} status && git push origin main", private),
+        (f"bash -c 'cd {private} && git push origin main'", public),
+        ("git push origin feature", public),
+    ):
+        assert not _denied(omi, command, cwd, monkeypatch), command
+
+
+def test_event_cwd_decides_the_repo_end_to_end(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#394: the hook event's cwd (the agent's shell) wins over the hook
+    process's own cwd, in both directions."""
+    omi, public, private = two_repos
+    assert _denied(omi, "git push origin main", private, monkeypatch, cwd=str(public))
+    assert not _denied(omi, "git push origin main", public, monkeypatch, cwd=str(private))
+    assert _denied(omi, "cd ../public && git push", private, monkeypatch, cwd=str(private))
+
+
+def test_seed_matches_push_after_git_global_options(
+    tmp_path: Path, repo: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#414: the seed's `*git push*` used to miss `git -C <dir> push` and
+    `git -c k=v push`. A push as git's subcommand matches after any global
+    option; `git log --grep push` still does not."""
+    omi = tmp_path / "OMI"
+    _note_with_rule(omi)
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    for command in (
+        f"git -C {repo} push origin main",
+        "git -c x=y push",
+        "git -c user.name='A B' push origin main",
+        f'git -C "{repo}" -c x=y push origin main',
+        f"git --git-dir={repo}/.git --work-tree {repo} push origin main",
+        "git --no-pager -P push",
+    ):
+        hit = rules.evaluate(_action(command), omi, repo)
+        assert hit is not None and hit.outcome == "deny", command
+    for command in (
+        "git log --grep push",
+        "git -C x log --grep push",
+        "git --no-pager log -S push",
+    ):
+        assert rules.evaluate(_action(command), omi, repo) is None, command
+    seed = {r.id: r for r in rules.SEED_NOTE_RULES}["no-direct-push-public-main"]
+    hit = rules.evaluate(_action("git -C x push origin main"), omi, repo, rules=[seed])
+    assert hit is not None and hit.outcome == "deny"
+    assert rules.evaluate(_action("git log --grep push"), omi, repo, rules=[seed]) is None
+
+
+def test_rules_without_repo_conditions_still_see_ssh_payloads(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Only REPO-scoped rules skip an ssh payload; a plain rule keeps matching
+    the raw command, because a remote side effect is still a side effect."""
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    (omi / "R.md").write_text(
+        "```omind-rule\nid: no-remote-reboot\ntool: Bash\nmatch: '*reboot*'\n"
+        "action: deny\nmessage: 'no'\n```\n",
+        encoding="utf-8",
     )
-    assert not denied(repro, public)  # remote payload: not judged against the cwd repo
-    assert not denied(repro, private)
-    # Still denied when the LOCAL target is the public repo, however it is named.
-    assert denied(f"cd {public} && git push origin main", private)
-    assert denied(f"(cd {public}; git push origin main)", private)
-    assert denied(f"git -C {public} push origin main", private)
-    assert denied("git push origin main", public)  # plain: cwd as before
-    # ...and not when the target is the private repo, whatever the cwd.
-    assert not denied(f"cd {private} && git push origin main", public)
-    assert not denied(f"git -C {private} push origin main", public)
-    # A local push after a remote one is still judged locally.
-    assert denied("ssh h 'git push origin feature' && git push origin main", public)
-    # A quoted refspec is read from the raw command, not lost to the masking.
-    assert denied('git push origin "main"', public)
+    monkeypatch.chdir(tmp_path)
+    v = guard._note_rules_verdict({"tool": "Bash", "command": "ssh host 'sudo reboot'"}, omi)
+    assert v is not None and not v.allow
+
+
+def test_unknown_visibility_on_any_matching_git_is_reported(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Per-git judging keeps the fail-open contract: an undeterminable
+    visibility is logged, never denied, unless another push hits."""
+    omi, public, private = two_repos
+    monkeypatch.setattr(
+        rules,
+        "_repo_visibility",
+        lambda r, **k: "public" if r == public else "unknown",
+    )
+    view = rules.CommandView(
+        local_text="x",
+        sites=(
+            rules.CommandSite("git push origin main", private),
+            rules.CommandSite("git push origin feature", public),
+        ),
+    )
+    hit = rules.evaluate(_action("x"), omi, private, view=view)
+    assert hit is not None and hit.outcome == "unknown-visibility"
+    view = rules.CommandView(
+        local_text="x",
+        sites=(
+            rules.CommandSite("git push origin main", private),
+            rules.CommandSite("git push origin main", public),
+        ),
+    )
+    hit = rules.evaluate(_action("x"), omi, private, view=view)
+    assert hit is not None and hit.outcome == "deny"
 
 
 def test_pushed_refspec_wins_over_checked_out_branch(

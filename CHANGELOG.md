@@ -14,17 +14,42 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#394](https://github.com/CryptoJones/omind/issues/394)).** With the shell in a public
   repo, `ssh host 'cd /other/repo && git push origin main'` was denied as a direct push
   to a public main, although the push ran on another host against a private repo.
-  - Repo-scoped rules (visibility / branch / except_repos / has-commits) now match against
-    `policy.shell_code_text(command)`, so a match that exists only inside an ssh payload
-    or a quoted string is skipped (fail open) rather than judged against the local repo.
-    The pushed refspec is located the same way. Rules without repo conditions still see
-    the raw command.
-  - The target repo now follows `cd <dir> && …`, `(cd <dir>; …)` and chained `cd` steps
-    before a command's first `git`, on top of the existing `git -C` handling. Anything
-    unparseable (`cd -`, `cd $VAR`, an unbalanced quote) falls back to the cwd.
+  - The guard now walks a Bash command the way the local shell runs it and judges EACH
+    simple command a repo-scoped rule (visibility / branch / except_repos / has-commits)
+    matches against that command's own repo and refspec. The rule fires when any of them
+    hits: `git status && cd /public && git push origin main`,
+    `git -C /private commit && git -C /public push origin main` and
+    `git push origin feature && git push origin main` are all judged at the push to main.
+  - The directory follows `cd`, `pushd` and `popd`; `( … )` and `$( … )` scope a move to
+    the subshell; a `cd` piped or backgrounded with a single `|`/`&` moves nothing; a
+    git's own `-C`, `--work-tree` and `--git-dir` apply on top. Wrappers are skipped
+    (`sudo`, `env X=1`, `timeout 60`, `xargs` …, reusing the #391 stage parser). A `cd`
+    the guard cannot resolve (`cd -`, `cd $VAR`) falls back to the cwd, as documented.
+    `a || b` is read like `a && b`.
+  - Local shell wrappers are code, not data: `sh`/`bash`/`zsh -c '…'` (also `-lc`) and
+    `eval '…'` bodies are walked like the outer command, including a `cd` inside them.
+  - Only an ssh remote command, quoted or not (`ssh host git push origin main`), is
+    treated as remote: a repo-scoped rule whose match exists only there is skipped.
+    Text no parsed command accounts for (quoted data, a body run by an executor the
+    guard does not unwrap such as `su -c`) is judged against the command's repo as
+    before, with the first push anywhere in it read as the refspec. Nothing the guard
+    denied before this release is allowed now except a remote payload or a push that
+    provably targets another repo (`cd /private && git push origin main`).
+  - Rules **without** repo conditions are unchanged: they still match the raw command
+    text, including inside ssh payloads, because a remote side effect is still a side
+    effect.
   - The Claude hook adapter now passes the event's `cwd` (the agent's shell cwd) to
     `omind guard check`, and `normalize_action` carries it, so a worktree commit is no
-    longer resolved against the main checkout the hook process started in.
+    longer resolved against the main checkout the hook process started in. The Hermes
+    adapter forwards its event's `cwd` too; note that Hermes fills it with its own
+    process cwd at hook time, not the terminal tool's `TERMINAL_CWD`.
+- **The seed rule `*git push*` missed `git -C <dir> push` and `git -c k=v push`
+  ([#414](https://github.com/CryptoJones/omind/issues/414)).** A git global option
+  between `git` and the subcommand (`-C`, `-c`, `--git-dir`, `--work-tree`, `--no-pager`,
+  `-P` …) hid the push from every note rule's glob. Rules now also match the text with
+  those options dropped, parsed the way `_PUSH_ARGS_RE` already reads them, so
+  `git -C /public push origin main` is judged as a push while `git log --grep push` is
+  not. A quoted option value with spaces (`-c user.name='A B'`) now counts as one word.
 
 ## [10.2.4] - 2026-10-02
 

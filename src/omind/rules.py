@@ -102,6 +102,8 @@ SEED_NOTE_RULES = (
     NoteRule(
         id="no-direct-push-public-main",
         tool="Bash",
+        # Also matches `git -C <dir> push` / `git -c k=v push`: rules are
+        # tested with git's global options dropped too (#414).
         match="*git push*",
         action=ACTION_DENY,
         message=(
@@ -404,13 +406,34 @@ def _repo_branch(repo: Path) -> str:
 
 
 # Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
-# literals (#317 / #333 / #345) after -C or -c.
-_GIT_OPT_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+(?:"[^"]*"|'[^']*')?\S*)"""
-_GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
+# literals (#317 / #333 / #345) after -C or -c. One shell word: unquoted runs
+# and quoted runs in any order, so `user.name='A B'` is one value (#414).
+_GIT_OPT_VALUE = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
+# git's global options between `git` and the subcommand (#414): `-C <dir>`,
+# `-c k=v`, `--git-dir[=]<p>` and its siblings, and flag-only options such as
+# `--no-pager` / `-P`. A subcommand never starts with `-`, so the run of options
+# stops there and `git log --grep push` still reads as `log`.
+_GIT_GLOBAL_OPTS = (
+    rf"(?:-[Cc][ \t]+{_GIT_OPT_VALUE}[ \t]+"
+    rf"|--(?:git-dir|work-tree|namespace|super-prefix|config-env)(?:=|[ \t]+){_GIT_OPT_VALUE}[ \t]+"
+    rf"|--[a-z][a-z-]*(?:={_GIT_OPT_VALUE})?[ \t]+|-[pP][ \t]+)*"
+)
 _PUSH_ARGS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}push\b(?P<rest>[^;|&`)\n]*)")
+_GIT_OPTS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}")
 
 
-def _pushed_branches(command: str) -> list[str] | None:
+def _canonical_git(text: str) -> str:
+    """``text`` with git's global options dropped (`git -C d -c k=v push` ->
+    `git push`), so a rule written as ``*git push*`` matches a push however its
+    options are spelled (#414)."""
+    return _GIT_OPTS_RE.sub("git ", text)
+
+
+def _rule_matches(text: str, pattern: str) -> bool:
+    return fnmatch.fnmatch(text, pattern) or fnmatch.fnmatch(_canonical_git(text), pattern)
+
+
+def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
     """Branch names a ``git push`` explicitly targets, or ``None`` for a bare
     push (no refspec — the checked-out branch is what gets pushed).
 
@@ -421,12 +444,19 @@ def _pushed_branches(command: str) -> list[str] | None:
 
     The push is located in :func:`policy.shell_code_text` (#394), so a push
     inside an ssh payload or quoted string is never the one judged; its
-    arguments are then read from the same span of the raw command.
+    arguments are then read from the same span of the raw command. With
+    ``in_code=False`` the first push anywhere in the text counts, quoted or not:
+    the fallback for text the guard could not attribute to a command, which is
+    how every push was read before #394.
     """
-    match = _PUSH_ARGS_RE.search(policy.shell_code_text(command))
+    match = _PUSH_ARGS_RE.search(policy.shell_code_text(command) if in_code else command)
     if not match:
         return None
     refs: list[str] = []
+    # shell_code_text is length-preserving (it blanks quoted bodies to spaces,
+    # it never drops them), so the offsets of the match in the masked text are
+    # the same offsets in the raw command. That is what lets this slice read
+    # the real arguments, quotes included (`git push origin "main"`).
     rest = command[match.start("rest") : match.end("rest")]
     tokens = [t.strip("'\"") for t in rest.split() if t.strip("'\"")]
     positional: list[str] = []
@@ -460,28 +490,92 @@ class RuleHit:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CommandSite:
+    """One simple command the local shell runs, and the repo it runs in."""
+
+    text: str
+    repo: Path | None
+
+
+@dataclass(frozen=True)
+class CommandView:
+    """A Bash command as the guard parsed it (#394): ``local_text`` is the raw
+    command with ssh remote payloads blanked; ``sites`` lists each simple
+    command the local shell runs (``sh -c`` / ``eval`` bodies unwrapped)."""
+
+    local_text: str
+    sites: tuple[CommandSite, ...]
+
+
+def _judge(rule: NoteRule, repo: Path | None, pushed: list[str] | None) -> str | None:
+    """Whether ``rule``'s repo conditions hold for ``repo`` and the pushed
+    refspecs: ``"hit"``, ``"unknown"`` (visibility undeterminable) or None."""
+    if repo is None:
+        return None
+    if rule.except_repos and _repo_name(repo) in rule.except_repos:
+        return None
+    if rule.when_branch:
+        branches = pushed if pushed is not None else [_repo_branch(repo)]
+        if not any(branch in rule.when_branch for branch in branches):
+            return None
+    if rule.conditioned_on_has_commits():
+        has_commits = _remote_has_commits(repo)
+        # Fail SAFE: an undeterminable remote must never widen an
+        # exemption, so unknown is treated as satisfying the condition.
+        if has_commits is not None and has_commits != rule.when_has_commits:
+            return None
+    if rule.conditioned_on_visibility():
+        visibility = _repo_visibility(repo)
+        if visibility == _VISIBILITY_UNKNOWN:
+            return "unknown"
+        if visibility != rule.when_visibility:
+            return None
+    return "hit"
+
+
 def evaluate(
     action: dict[str, Any],
     omi_dir: Path | str,
     repo: Path | None,
     *,
     rules: list[NoteRule] | None = None,
+    view: CommandView | None = None,
 ) -> RuleHit | None:
     """First matching rule for ``action``, or ``None``. Deterministic, no model.
 
     ``repo`` is the enclosing git repo when the guard resolved one; rules with
     repo-scoped conditions (visibility/branch/except_repos) require it and do
     not fire without one.
+
+    ``view`` (#394) is the guard's parse of a Bash command. With it, a
+    repo-scoped rule judges EACH simple command it matches against that
+    command's own repo and refspec, and denies when any of them hits
+    (`git status && cd /public && git push origin main` is judged at /public).
+    A rule matching only text the local shell does not run as a command
+    (`echo 'git push origin main'`, a glob spanning commands) is judged
+    against ``repo`` as before. A match that exists only inside an ssh remote
+    payload is skipped: that git runs on another host, so the local repo says
+    nothing about it. Rules WITHOUT repo conditions keep matching the raw
+    command, ssh payloads included: a remote side effect is still a side
+    effect. Without ``view``, the raw command is judged against ``repo``.
+
+    A git global option between ``git`` and its subcommand never hides a
+    match (#414): ``*git push*`` matches ``git -C d push`` and
+    ``git -c k=v push``, but not ``git log --grep push``.
     """
     tool = str(action.get("tool") or "")
     command = str(action.get("command") or "")
     target = command or str(action.get("path") or "")
+    if not command:
+        view = None
     for rule in rules if rules is not None else load_rules(omi_dir):
         if rule.invalid:
             continue
         if rule.tool not in ("*", tool):
             continue
-        if not fnmatch.fnmatch(target, rule.match):
+        site_hits = [s for s in view.sites if _rule_matches(s.text, rule.match)] if view else []
+        if not site_hits and not _rule_matches(target, rule.match):
             continue
         repo_scoped = (
             rule.conditioned_on_visibility()
@@ -490,35 +584,22 @@ def evaluate(
             or rule.conditioned_on_has_commits()
         )
         if repo_scoped:
-            if repo is None:
-                continue
-            # #394: a repo-scoped condition judges the LOCAL repo the guard
-            # resolved. When the match only exists inside data — an
-            # `ssh host 'cd r && git push'` payload or a quoted string — the
-            # command acts on some other repo (often another host), so judging
-            # it against the local cwd repo is meaningless: skip, fail open.
-            if command and not fnmatch.fnmatch(policy.shell_code_text(command), rule.match):
-                continue
-            if rule.except_repos and _repo_name(repo) in rule.except_repos:
-                continue
-            if rule.when_branch:
-                pushed = _pushed_branches(command)
-                branches = pushed if pushed is not None else [_repo_branch(repo)]
-                if not any(branch in rule.when_branch for branch in branches):
-                    continue
-            if rule.conditioned_on_has_commits():
-                has_commits = _remote_has_commits(repo)
-                # Fail SAFE: an undeterminable remote must never widen an
-                # exemption, so unknown is treated as satisfying the condition.
-                if has_commits is not None and has_commits != rule.when_has_commits:
-                    continue
-            if rule.conditioned_on_visibility():
-                visibility = _repo_visibility(repo)
-                if visibility == _VISIBILITY_UNKNOWN:
+            if site_hits:
+                judged = [(s.repo, _pushed_branches(s.text)) for s in site_hits]
+            elif view is None or _rule_matches(view.local_text, rule.match):
+                # Text no parsed command accounts for: quoted data, a glob
+                # spanning commands, or a body run by an executor the guard
+                # does not unwrap (`su -c '…'`). Judge it as before #394.
+                text = command if view is None else view.local_text
+                judged = [(repo, _pushed_branches(text, in_code=False))]
+            else:
+                continue  # the match is only inside an ssh remote payload
+            outcomes = {_judge(rule, r, pushed) for r, pushed in judged}
+            if "hit" not in outcomes:
+                if "unknown" in outcomes:
                     # Fail-open: never deny on a condition we could not check.
                     return RuleHit(rule, "unknown-visibility", "visibility unknown")
-                if visibility != rule.when_visibility:
-                    continue
+                continue
         return RuleHit(rule, rule.action)
     return None
 

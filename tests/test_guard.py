@@ -1410,6 +1410,79 @@ def test_normalize_action_carries_event_cwd() -> None:
     assert action["cwd"] == "/w/t"
 
 
+def _capturing_omind(tmp_path: Path) -> tuple[Path, Path]:
+    """A fake omind that saves the JSON it is piped and allows."""
+    capture = tmp_path / "captured.json"
+    fake = tmp_path / "capture-omind"
+    fake.write_text(f"#!/usr/bin/env bash\ncat > '{capture}'\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    return fake, capture
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_forwards_the_event_cwd_to_the_core(tmp_path: Path) -> None:
+    """#394 review: omi-guard.sh passes the event's `.cwd` (the agent's shell
+    cwd) on the Bash path, so the core resolves the repo from it."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {**_BASH_EVENT, "cwd": "/w/tree"}
+    assert _run_hook(hook, event) == 0
+    assert json.loads(capture.read_text(encoding="utf-8"))["cwd"] == "/w/tree"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard-hermes.sh is a POSIX bash+jq adapter")
+def test_hermes_hook_forwards_the_event_cwd_to_the_core(tmp_path: Path) -> None:
+    """Hermes' shell-hook payload carries `cwd`; its adapter forwards it too."""
+    fake, capture = _capturing_omind(tmp_path)
+    src = importlib.resources.files("omind").joinpath("omi-guard-hermes.sh")
+    text = src.read_text(encoding="utf-8").replace("__OMIND_BIN__", str(fake))
+    hook = tmp_path / "omi-guard-hermes.sh"
+    hook.write_text(text.replace("__OMI_DIR__", str(tmp_path / "OMI")), encoding="utf-8")
+    event = {
+        "hook_event_name": "pre_tool_call",
+        "tool_name": "terminal",
+        "tool_input": {"command": "git status"},
+        "session_id": "h",
+        "cwd": "/w/tree",
+    }
+    subprocess.run(["bash", str(hook)], input=json.dumps(event), text=True, check=True)
+    assert json.loads(capture.read_text(encoding="utf-8"))["cwd"] == "/w/tree"
+
+
+def test_shell_sites_track_cd_pushd_popd_and_subshells(tmp_path: Path) -> None:
+    """#394 review: each simple command carries the directory it runs in.
+    `popd` undoes `pushd`; a subshell's move ends with it; a cd piped or
+    backgrounded with a single `|`/`&` moves nothing; wrappers are skipped;
+    an ssh remote command (quoted or not) is blanked from the local text."""
+
+    def where(command: str) -> list[tuple[str, str | None]]:
+        sites, _cwd, _dirs, _local = guard._shell_sites(command)
+        return [
+            (s.program, None if s.cwd is None else str(s.cwd)) for s in sites if s.program == "git"
+        ]
+
+    assert where("pushd /a && git status && popd && git push") == [("git", "/a"), ("git", ".")]
+    assert where("pushd /a && pushd /b && popd && git push") == [("git", "/a")]
+    assert where("popd && git push") == [("git", ".")]  # empty stack: popd fails, no move
+    assert where("(cd /a && git status) && git push") == [("git", "/a"), ("git", ".")]
+    assert where("echo $(cd /a && git rev-parse HEAD) && git push") == [("git", "/a"), ("git", ".")]
+    assert where("cd /a | true; git push") == [("git", ".")]
+    assert where("cd /a & git push") == [("git", ".")]
+    assert where("cd /a || exit 1; git push") == [("git", "/a")]  # `||` read as `&&`
+    assert where("cd $HOME && git push") == [("git", None)]
+    assert where("cd /a && cd $X && cd /b && git push") == [("git", "/b")]
+    assert where("sudo -u bob git -C /a push") == [("git", "/a")]
+    assert where("env X=1 timeout 60 git push") == [("git", ".")]
+    assert where("git --work-tree=/a --git-dir /b/.git push") == [("git", "/a")]
+    assert where("bash -c 'cd /a && git push' && git status") == [("git", "/a"), ("git", ".")]
+    assert where("eval 'cd /a' && git push") == [("git", "/a")]  # eval shares the shell
+    assert where("ssh -p 22 host git push && git status") == [("git", ".")]
+    _sites, _cwd, _dirs, local = guard._shell_sites("ssh -i k h git push origin main; ls")
+    assert local == "ssh -i k h" + " " * len(" git push origin main") + "; ls"
+    _sites, _cwd, _dirs, local = guard._shell_sites("bash -c \"ssh h 'git push'\"")
+    assert "git push" not in local
+
+
 def test_dash_c_git_writes_are_classified_and_checked_against_the_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
