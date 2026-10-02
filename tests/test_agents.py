@@ -4,11 +4,14 @@
 
 from __future__ import annotations
 
+import contextlib
 import json
 import re
 import shutil
 import sys
+from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
 import tomlkit
@@ -683,7 +686,7 @@ def test_windows_hooks_use_each_harness_shell_syntax(
 
 @pytest.mark.parametrize("exe", [_WIN_PLAIN, _WIN_SPACED], ids=["plain", "spaced"])
 def test_claude_hooks_without_git_bash_render_for_powershell(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exe: str
+    monkeypatch: pytest.MonkeyPatch, exe: str
 ) -> None:
     """Claude Code runs shell-form hooks in PowerShell on Windows when Git Bash
     is missing (hooks docs: ``shell`` "Defaults to "bash", or to "powershell"
@@ -701,11 +704,89 @@ def test_claude_hooks_without_git_bash_render_for_powershell(
     entries = claude._omind_hook_entries()
     hooks = [h for event in entries.values() for e in event for h in e["hooks"]]
     assert hooks and all(h.get("shell") == "powershell" for h in hooks)
+    # Every one hands its exit code back, or a deny's 2 arrives as 1 (#425 review).
+    assert all(h["command"].endswith(provision.POWERSHELL_EXIT_SUFFIX) for h in hooks)
     for event in provision.HANDLED_EVENTS:
         command = claude._hook_command(event)
         assert command.startswith(f"& '{exe}' -m omind hook {event} "), command
         assert f"--vault '{vault}' --folder 'OMI'" in command
         assert provision._hook_omind_argv(command) == [exe, "-m", "omind"]
+
+
+def test_powershell_hook_commands_hand_back_their_exit_code(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Codex and Gemini hooks on Windows end with ``POWERSHELL_EXIT_SUFFIX``
+    (Codex does not propagate the exit code itself); cmd/argv harnesses and
+    POSIX are unchanged (#425 review)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_WIN_SPACED, "-m", "omind"])
+    codex = agents.CodexProvisioner(_config(tmp_path, "codex"), log=_quiet)
+    codex.install_guard()
+    codex.install_priming()
+    codex.install_accounting()
+    codex_cmds = agents._hook_commands_in(
+        json.loads(agents.codex_hooks_path().read_text(encoding="utf-8"))
+    )
+    gemini = agents.GeminiProvisioner(_config(tmp_path, "gemini"), log=_quiet)
+    commands = [*codex_cmds, gemini._guard_hook_group()["hooks"][0]["command"]]
+    assert len(codex_cmds) >= 3
+    assert all(c.endswith(provision.POWERSHELL_EXIT_SUFFIX) for c in commands), commands
+
+    pool = agents.PoolsideProvisioner(_config(tmp_path, "poolside"), log=_quiet)
+    agy = agents.AgyProvisioner(_config(tmp_path, "agy"), log=_quiet)
+    others = [
+        *(pool._hook_command(e) for e in pool.HOOK_EVENTS),
+        *agents._hook_commands_in(agy.desired_hook_block()),
+    ]
+    assert not any("LASTEXITCODE" in c for c in others), others
+
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    assert "LASTEXITCODE" not in gemini._guard_hook_group()["hooks"][0]["command"]
+    assert "LASTEXITCODE" not in codex._guard_hook_group()["hooks"][0]["command"]
+
+
+@pytest.mark.parametrize("agent", ["agy", "poolside"])
+def test_doctor_warns_on_a_go_cmd_hook_with_double_quotes(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agy_home: Path, agent: str
+) -> None:
+    """agy and pool run hooks through Go's ``cmd /c``, which breaks any inner
+    ``"``; with no 8.3 short name setup has to write one, so doctor says so and
+    names the workaround (#425 review)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_WIN_SPACED, "-m", "omind"])
+    monkeypatch.setattr(provision, "windows_short_path", lambda _p: None)
+    if agent == "poolside":
+        _poolside_installed()
+        agents.PoolsideProvisioner(_config(tmp_path, agent), log=_quiet).install_hooks()
+        results = {r.key: r for r in diagnose_poolside(_config(tmp_path, agent))}
+        key = "poolside_cmd_quotes"
+    else:
+        agents.AgyProvisioner(_config(tmp_path, agent), log=_quiet).install_hooks()
+        results = {r.key: r for r in agents.diagnose_agy(_config(tmp_path, agent))}
+        key = "agy_cmd_quotes"
+    assert results[key].level == "warn"
+    assert "without spaces" in results[key].message and "8.3" in results[key].message
+
+    # A short name exists: no quotes, no warning.
+    monkeypatch.setattr(
+        provision, "windows_short_path", lambda p: p.replace("Jane Doe", "JANEDO~1")
+    )
+    if agent == "poolside":
+        agents.PoolsideProvisioner(_config(tmp_path, agent), log=_quiet).install_hooks()
+        results = {r.key: r for r in diagnose_poolside(_config(tmp_path, agent))}
+    else:
+        agents.AgyProvisioner(_config(tmp_path, agent), log=_quiet).install_hooks()
+        results = {r.key: r for r in agents.diagnose_agy(_config(tmp_path, agent))}
+    assert key not in results
+
+
+def test_doctor_does_not_warn_on_posix_double_quotes(tmp_path: Path) -> None:
+    """POSIX pool hooks quote the vault with ``"`` and never run through cmd."""
+    _poolside_installed()
+    run_setup_for(_config(tmp_path, "poolside"), log=_quiet)
+    keys = {r.key for r in diagnose_poolside(_config(tmp_path, "poolside"))}
+    assert "poolside_cmd_quotes" not in keys
 
 
 def test_claude_hooks_with_git_bash_keep_the_bash_form(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -775,6 +856,25 @@ def test_windows_short_path_is_none_off_windows() -> None:
     if sys.platform == "win32":
         pytest.skip("POSIX-only expectation")
     assert provision.windows_short_path("/tmp") is None
+
+
+def test_windows_short_path_is_none_when_the_api_raises(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A raising ``GetShortPathNameW`` (mocked) gives None, never an exception:
+    ``cmd_quote`` then falls back to double quotes (#425 review)."""
+    import ctypes
+
+    class _Kernel32:
+        @staticmethod
+        def GetShortPathNameW(*_args: object) -> int:  # noqa: N802 - Win32 name
+            raise OSError("boom")
+
+    class _WinDLL:
+        kernel32 = _Kernel32()
+
+    monkeypatch.setattr(provision.sys, "platform", "win32")
+    monkeypatch.setattr(ctypes, "windll", _WinDLL(), raising=False)
+    assert provision.windows_short_path(r"C:\Users\Jane Doe\py.exe") is None
+    assert provision.cmd_quote(r"C:\Users\Jane Doe\py.exe") == r'"C:\Users\Jane Doe\py.exe"'
 
 
 def test_windows_quoting_helpers() -> None:
@@ -1200,6 +1300,61 @@ def test_openclaw_setup_drops_an_emptied_hooks_agent(tmp_path: Path, openclaw_ho
     data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
     assert "agent" not in data["hooks"]
     assert {r.key: r for r in diagnose_openclaw(config)}["openclaw_guard"].level == "ok"
+
+
+def test_openclaw_keeps_a_user_hook_that_only_mentions_the_adapter(
+    tmp_path: Path, openclaw_home: Path
+) -> None:
+    """Only an entry whose ``command`` runs the adapter is omind's; a user hook
+    naming it in a ``description`` is left alone (#425 review)."""
+    mine = {
+        "event": "pre_tool",
+        "command": "my-own-hook",
+        "description": "replaces omind guard adapter --harness openclaw",
+    }
+    (openclaw_home / "openclaw.json").write_text(
+        json.dumps({"hooks": {"agent": [mine, _RETIRED_OPENCLAW_GUARD]}}), encoding="utf-8"
+    )
+    config = _config(tmp_path, "openclaw")
+    run_setup_for(config, log=_quiet)
+    data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
+    assert data["hooks"]["agent"] == [mine]
+    assert {r.key: r for r in diagnose_openclaw(config)}["openclaw_guard"].level == "ok"
+
+
+def test_openclaw_config_writes_hold_the_sibling_lock(
+    tmp_path: Path, openclaw_home: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Every read-modify-write of openclaw.json (MCP, priming, the retired-guard
+    removal) holds ``openclaw.json.lock``, per AGENTS.md (#425 review)."""
+    (openclaw_home / "openclaw.json").write_text(
+        json.dumps({"hooks": {"agent": [_RETIRED_OPENCLAW_GUARD]}}), encoding="utf-8"
+    )
+    held: list[str] = []
+    real = agents.filelock.exclusive
+    config_path = agents.openclaw_config_path()
+    real_write = agents.paths.atomic_write_text
+
+    @contextlib.contextmanager
+    def spy(path: Path, **kw: Any) -> Iterator[int]:
+        with real(path, **kw) as fd:
+            held.append(path.name)
+            try:
+                yield fd
+            finally:
+                held.remove(path.name)
+
+    writes: list[bool] = []
+
+    def write(path: Path, text: str, *a: Any, **kw: Any) -> None:
+        if path == config_path:
+            writes.append("openclaw.json.lock" in held)
+        real_write(path, text, *a, **kw)
+
+    monkeypatch.setattr(agents.filelock, "exclusive", spy)
+    monkeypatch.setattr(agents.paths, "atomic_write_text", write)
+    run_setup_for(_config(tmp_path, "openclaw"), log=_quiet)
+    assert len(writes) >= 3 and all(writes), writes
 
 
 # -- #90: Gemini CLI guard ----------------------------------------------------

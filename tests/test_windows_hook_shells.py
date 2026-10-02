@@ -21,17 +21,25 @@ Spawn paths:
 - ``powershell.exe -NoProfile -NonInteractive -Command`` (and ``pwsh`` when
   present): Gemini, Codex, and Claude Code without Git Bash.
 - Git Bash ``bash -c``: Claude Code's default on Windows.
+
+Exit codes (#425 review): a guard deny exits 2 for Claude Code, and
+``powershell -Command`` reports any native exit code other than 0 as 1. So
+:func:`test_powershell_hooks_hand_back_exit_2` runs a stub that exits 2 through
+each PowerShell harness's exact spawn and asserts 2 arrives. It needs only a
+PowerShell, so it also runs off Windows wherever ``pwsh`` is installed.
+
+These are simulated harness spawners (the argv each harness's source builds),
+not real agy, pool, Claude Code, Codex or Gemini processes.
 """
 
 from __future__ import annotations
 
 import json
 import os
-import shlex
 import shutil
 import subprocess
 import sys
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -39,9 +47,15 @@ import pytest
 from omind import agents, provision
 from omind.provision import SetupConfig
 
-pytestmark = pytest.mark.skipif(sys.platform != "win32", reason="spawns real Windows shells")
+_WINDOWS = sys.platform == "win32"
+windows_only = pytest.mark.skipif(not _WINDOWS, reason="spawns real Windows shells")
 
-_STUB_MAIN = "import json, sys\nprint(json.dumps(sys.argv[1:]))\n"
+#: The stub prints its argv, then exits with ``OMIND_STUB_EXIT`` (default 0).
+_STUB_MAIN = (
+    "import json, os, sys\n"
+    "print(json.dumps(sys.argv[1:]))\n"
+    "sys.exit(int(os.environ.get('OMIND_STUB_EXIT', '0')))\n"
+)
 
 _GO_SPAWNER = """package main
 
@@ -66,7 +80,8 @@ class Rig:
 
     def __init__(self, root: Path) -> None:
         self.root = root
-        self.python = root / "venv" / "Scripts" / "python.exe"
+        venv = root / "venv"
+        self.python = venv / "Scripts" / "python.exe" if _WINDOWS else venv / "bin" / "python"
         self.vault = root / "Obsidian Vault"
         self.pkg = root / "stub"
         self.go_spawner: Path | None = None
@@ -88,7 +103,7 @@ def rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rig]:
     (r.pkg / "omind").mkdir(parents=True)
     (r.pkg / "omind" / "__init__.py").write_text("", encoding="utf-8")
     (r.pkg / "omind" / "__main__.py").write_text(_STUB_MAIN, encoding="utf-8")
-    go = shutil.which("go")
+    go = shutil.which("go") if _WINDOWS else None
     if go:
         src = root.parent / "spawner.go"
         src.write_text(_GO_SPAWNER, encoding="utf-8")
@@ -103,7 +118,9 @@ def rig(tmp_path_factory: pytest.TempPathFactory) -> Iterator[Rig]:
 
 @pytest.fixture
 def rendered(rig: Rig, monkeypatch: pytest.MonkeyPatch) -> Rig:
-    """Render hooks with the rig's spaced interpreter pinned."""
+    """Render hooks with the rig's spaced interpreter pinned, as Windows does
+    (off Windows too, so the PowerShell forms can run under ``pwsh``)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [str(rig.python), "-m", "omind"])
     return rig
 
@@ -118,12 +135,50 @@ def _quiet(_msg: str) -> None:
 
 def _intended_argv(command: str) -> list[str]:
     """What *command* means after ``-m omind``: its tail split on whitespace,
-    honouring the single and double quotes the renderers use, no escapes."""
-    tail = command.split(" -m omind ", 1)[1]
-    lex = shlex.shlex(tail, posix=True)
-    lex.whitespace_split = True
-    lex.escape = ""
-    return list(lex)
+    honouring the single and double quotes the renderers use, no escapes. A
+    ``''`` inside a single-quoted word is a PowerShell literal's escaped ``'``
+    (``O''Brien``); no other renderer puts one there."""
+    tail = command.split(" -m omind ", 1)[1].removesuffix(provision.POWERSHELL_EXIT_SUFFIX)
+    words: list[str] = []
+    i, n = 0, len(tail)
+    while i < n:
+        if tail[i].isspace():
+            i += 1
+            continue
+        word: list[str] = []
+        while i < n and not tail[i].isspace():
+            quote = tail[i]
+            if quote not in "'\"":
+                word.append(quote)
+                i += 1
+                continue
+            j = i + 1
+            while True:
+                k = tail.index(quote, j)
+                if quote == "'" and tail[k + 1 : k + 2] == "'":
+                    word.append(tail[j : k + 1])
+                    j = k + 2
+                    continue
+                word.append(tail[j:k])
+                i = k + 1
+                break
+        words.append("".join(word))
+    return words
+
+
+def test_intended_argv_reads_powershell_and_cmd_quoting() -> None:
+    """The oracle itself: PowerShell's doubled ``'`` and cmd's double quotes."""
+    ps = r"& 'C:\py.exe' -m omind hook X --vault 'C:\Users\O''Brien\V' --folder 'OMI'"
+    assert _intended_argv(provision.powershell_hook(ps)) == [
+        "hook",
+        "X",
+        "--vault",
+        r"C:\Users\O'Brien\V",
+        "--folder",
+        "OMI",
+    ]
+    cmd = r'C:\py.exe -m omind hook X --vault "C:\J D\V" --folder OMI'
+    assert _intended_argv(cmd) == ["hook", "X", "--vault", r"C:\J D\V", "--folder", "OMI"]
 
 
 def _same(arrived: str, intended: str) -> bool:
@@ -148,10 +203,9 @@ def _assert_arrives(result: subprocess.CompletedProcess[str], command: str) -> N
         assert _same(got, want), (command, arrived, intended)
 
 
-def _run(argv: list[str] | str, rig: Rig) -> subprocess.CompletedProcess[str]:
-    return subprocess.run(
-        argv, capture_output=True, text=True, env=rig.env, timeout=60, check=False
-    )
+def _run(argv: list[str] | str, rig: Rig, exit_code: int = 0) -> subprocess.CompletedProcess[str]:
+    env = {**rig.env, "OMIND_STUB_EXIT": str(exit_code)}
+    return subprocess.run(argv, capture_output=True, text=True, env=env, timeout=60, check=False)
 
 
 def _cmd_go_escaped(command: str, rig: Rig) -> subprocess.CompletedProcess[str]:
@@ -187,6 +241,7 @@ def _pool_commands(rig: Rig) -> list[str]:
     return [pool._hook_command(e) for e in pool.HOOK_EVENTS]
 
 
+@windows_only
 @pytest.mark.parametrize("spawn", list(_CMD_SPAWNERS), ids=list(_CMD_SPAWNERS))
 @pytest.mark.parametrize("harness", ["agy", "poolside"])
 def test_cmd_hooks_reach_omind_intact(rendered: Rig, harness: str, spawn: str) -> None:
@@ -197,35 +252,137 @@ def test_cmd_hooks_reach_omind_intact(rendered: Rig, harness: str, spawn: str) -
         _assert_arrives(_CMD_SPAWNERS[spawn](command, rendered), command)
 
 
+@windows_only
+@pytest.mark.xfail(
+    strict=True,
+    reason="known limitation (#425): with no 8.3 short name cmd_quote falls back to "
+    "double quotes, which Go's cmd /c escaping breaks; doctor warns about it",
+)
+@pytest.mark.parametrize("spawn", ["go-escaped", "real-go"])
+@pytest.mark.parametrize("harness", ["agy", "poolside"])
+def test_cmd_quote_fallback_breaks_under_go(
+    rendered: Rig, harness: str, spawn: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The double-quote fallback (8.3 names disabled, ReFS Dev Drive, or a path
+    not created yet) through a Go-style spawner. Strict xfail keeps the
+    limitation visible: if this starts passing, the docs and doctor are wrong."""
+    monkeypatch.setattr(provision, "windows_short_path", lambda _path: None)
+    commands = _agy_commands(rendered) if harness == "agy" else _pool_commands(rendered)
+    assert any('"' in c for c in commands), commands
+    for command in commands:
+        _assert_arrives(_CMD_SPAWNERS[spawn](command, rendered), command)
+
+
 def _powershells() -> list[str]:
-    found = [p for p in ("powershell.exe", "pwsh") if shutil.which(p)]
-    return found or ["powershell.exe"]
+    """The PowerShells on this box, for the exit-code test (any OS)."""
+    return [p for p in ("powershell.exe", "pwsh") if shutil.which(p)] or ["<none>"]
 
 
 def _claude_commands(rig: Rig) -> list[str]:
+    """Every omind command hook Claude Code runs, exactly as installed."""
     claude = provision.Provisioner(_config(rig, "claude"), log=_quiet)
-    return [claude._hook_command(e) for e in provision.HANDLED_EVENTS]
+    raw = [
+        *(claude._hook_command(e) for e in provision.HANDLED_EVENTS),
+        *claude._omi_guard_commands(),
+    ]
+    return [claude._claude_hook(c)["command"] for c in raw]
 
 
+def _powershell_hook_commands(rig: Rig) -> dict[str, list[str]]:
+    """Each PowerShell harness's omind hook commands, exactly as installed."""
+    gemini = agents.GeminiProvisioner(_config(rig, "gemini"), log=_quiet)
+    codex = agents.CodexProvisioner(_config(rig, "codex"), log=_quiet)
+    return {
+        "gemini": [gemini._guard_hook_group()["hooks"][0]["command"]],
+        "codex": [
+            codex._guard_hook_group()["hooks"][0]["command"],
+            codex._hook_line(codex._omind_hook_command("SessionStart")),
+            codex._hook_line(codex._omind_hook_command("PostToolUse")),
+        ],
+        "claude": _claude_commands(rig),
+    }
+
+
+def _is_pwsh(shell: str) -> bool:
+    return Path(shell).name.lower().startswith("pwsh")
+
+
+def _claude_spawn(shell: str, command: str) -> list[str]:
+    # Claude Code 2.1.287 (bundle): Sae(MA(), Isn(command)), Isn = [...XG(),
+    # "-Command", command], XG = [-NoProfile, -NonInteractive, -ExecutionPolicy,
+    # Bypass]. Nothing wraps the command. Exit 2 blocks; any other non-zero is
+    # a non-blocking error.
+    return [
+        shell,
+        "-NoProfile",
+        "-NonInteractive",
+        "-ExecutionPolicy",
+        "Bypass",
+        "-Command",
+        command,
+    ]
+
+
+def _codex_spawn(shell: str, command: str) -> list[str]:
+    # Codex 0.154.0: Shell::derive_exec_args (codex-rs/core/src/shell.rs) gives
+    # [pwsh, -NoProfile, -Command]; build_command
+    # (codex-rs/hooks/src/engine/command_runner.rs) appends the command as one
+    # argument, unwrapped.
+    return [shell, "-NoProfile", "-Command", command]
+
+
+def _gemini_spawn(shell: str, command: str) -> list[str]:
+    # gemini-cli 0.46.0: getShellConfiguration gives `pwsh -NoProfile -Command`
+    # (`powershell.exe -NoProfile -NonInteractive -Command`), and
+    # executeCommandHook appends the exit-code guard itself.
+    args = ["-NoProfile"] if _is_pwsh(shell) else ["-NoProfile", "-NonInteractive"]
+    wrapped = f"{command}; if ($LASTEXITCODE -ne 0) {{ exit $LASTEXITCODE }}"
+    return [shell, *args, "-Command", wrapped]
+
+
+#: How each PowerShell harness spawns a hook command, from its own source.
+_PS_SPAWN: dict[str, Callable[[str, str], list[str]]] = {
+    "claude": _claude_spawn,
+    "codex": _codex_spawn,
+    "gemini": _gemini_spawn,
+}
+
+
+@windows_only
 @pytest.mark.parametrize("shell", _powershells())
 def test_powershell_hooks_reach_omind_intact(
     rendered: Rig, shell: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     """Gemini, Codex, and Claude Code on a box without Git Bash."""
+    if shell == "<none>":
+        pytest.skip("no PowerShell on this box")
     monkeypatch.setattr(provision, "git_bash_path", lambda: None)
-    gemini = agents.GeminiProvisioner(_config(rendered, "gemini"), log=_quiet)
-    codex = agents.CodexProvisioner(_config(rendered, "codex"), log=_quiet)
-    commands = [
-        gemini._guard_hook_group()["hooks"][0]["command"],
-        codex._guard_hook_group()["hooks"][0]["command"],
-        codex._omind_hook_command("SessionStart"),
-        *_claude_commands(rendered),
-    ]
-    for command in commands:
-        result = _run([shell, "-NoProfile", "-NonInteractive", "-Command", command], rendered)
-        _assert_arrives(result, command)
+    for harness, commands in _powershell_hook_commands(rendered).items():
+        for command in commands:
+            _assert_arrives(_run(_PS_SPAWN[harness](shell, command), rendered), command)
 
 
+@pytest.mark.parametrize("harness", list(_PS_SPAWN))
+@pytest.mark.parametrize("shell", _powershells())
+def test_powershell_hooks_hand_back_exit_2(
+    rendered: Rig, shell: str, harness: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A guard deny's exit 2 must reach the harness as 2, not PowerShell's 1.
+
+    Claude Code blocks only on exit 2, so before the fix every guard and gate
+    deny on a box without Git Bash let the tool call through (#425 review).
+    """
+    if shell == "<none>":
+        pytest.skip("no PowerShell (pwsh or powershell.exe) on this box")
+    monkeypatch.setattr(provision, "git_bash_path", lambda: None)
+    for command in _powershell_hook_commands(rendered)[harness]:
+        assert command.endswith(provision.POWERSHELL_EXIT_SUFFIX), command
+        for code in (2, 0):
+            result = _run(_PS_SPAWN[harness](shell, command), rendered, exit_code=code)
+            assert result.returncode == code, (harness, command, result.stdout, result.stderr)
+
+
+@windows_only
 def test_claude_hooks_reach_omind_intact_under_git_bash(
     rendered: Rig, monkeypatch: pytest.MonkeyPatch
 ) -> None:

@@ -134,7 +134,25 @@ def powershell_quote(exe: str) -> str:
     return f"& {powershell_literal(exe)}"
 
 
-#: Characters that make cmd.exe need quotes around a path.
+#: Appended to every PowerShell-rendered hook command (#425 review).
+#: ``powershell -Command`` reports any native exit code other than 0 as 1, so
+#: without it a guard deny's exit 2 reaches the harness as a non-blocking 1
+#: (Claude Code blocks only on 2). ``exit $LASTEXITCODE`` alone would turn a
+#: failed launch (missing interpreter: no native exit code, ``$null``) into a
+#: silent 0, so that case still exits 1.
+POWERSHELL_EXIT_SUFFIX = "; exit $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE } else { 1 })"
+
+
+def powershell_hook(command: str) -> str:
+    """*command* as a PowerShell hook line that hands its exit code back."""
+    return command + POWERSHELL_EXIT_SUFFIX
+
+
+#: Characters that make cmd.exe need quotes around a path. ``~`` is not one
+#: (#425): cmd.exe gives it no meaning outside ``%var:~n%`` substrings, and
+#: every 8.3 short name :func:`cmd_quote` relies on carries one (``JANEDO~1``),
+#: so listing it would reject each short name and fall back to the quotes Go's
+#: ``cmd /c`` escaping breaks.
 _CMD_SPECIAL = frozenset(" \t&()[]{}^=;!'+,`%")
 
 
@@ -176,8 +194,11 @@ def cmd_quote(exe: str) -> str:
     (``C:\\Users\\JANEDO~1\\...``): no spaces, no quotes, and it names the same
     file. Only when no short name exists (8.3 generation disabled on that
     volume, or the path does not exist yet) does it fall back to double quotes,
-    which a verbatim ``cmd /d /s /c "<command>"`` spawner still handles. A
-    plain path stays bare, the same bytes the launcher pin wrote before #380.
+    which a verbatim ``cmd /d /s /c "<command>"`` spawner still handles but Go
+    does not; ``omind doctor --agent agy|poolside`` warns when an installed hook
+    carries one. A plain path stays bare, the same bytes the launcher pin wrote
+    before #380. ``~`` no longer counts as special, so a short name (which
+    always has one) is accepted; see :data:`_CMD_SPECIAL`.
     """
     if not any(c in _CMD_SPECIAL for c in exe):
         return exe
@@ -231,12 +252,37 @@ def hook_arg_quote(windows_shell: str, value: str, posix: Callable[[str], str]) 
     return _WINDOWS_ARG_QUOTE[windows_shell](value) if _windows() else posix(value)
 
 
+def hook_line(windows_shell: str, command: str) -> str:
+    """*command* finished for a harness whose hooks run under *windows_shell*:
+    on Windows a PowerShell hook gets :data:`POWERSHELL_EXIT_SUFFIX`, so its
+    exit code reaches the harness. Unchanged for every other shell and on POSIX."""
+    if windows_shell == "powershell" and _windows():
+        return powershell_hook(command)
+    return command
+
+
+def go_cmd_breaks(command: str) -> bool:
+    """Whether a ``cmd /c`` hook *command* breaks under Go's
+    ``exec.Command("cmd", "/c", command)`` (agy, pool) on Windows.
+
+    Go escapes every inner ``"`` as ``\\"``, which cmd.exe does not understand
+    (#425), so any double quote breaks it. :func:`cmd_quote` only emits one when
+    a path needing quotes has no 8.3 short name. Always False on POSIX, whose
+    hook commands are not run through ``cmd``.
+    """
+    return _windows() and '"' in command
+
+
 def git_bash_path() -> str | None:
     """The Git Bash Claude Code would run hooks in on Windows, or None.
 
     Mirrors where Claude Code looks: ``CLAUDE_CODE_GIT_BASH_PATH``, then the
     ``bin\\bash.exe`` of the Git for Windows install that ``git`` on PATH
     belongs to, then the standard install roots. Never raises.
+
+    Setup and Claude Code can still disagree when ``CLAUDE_CODE_GIT_BASH_PATH``
+    is set in only one of their environments. Re-running setup from the shell
+    Claude Code is launched from settles it.
     """
     try:
         override = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
@@ -722,9 +768,10 @@ def _entry_command_text(entry: object) -> str:
 #: hook command — the omind binary that entry actually runs. The Windows module
 #: form puts ``-m omind`` between the interpreter and ``hook`` (#380), and a
 #: quoted token may contain spaces (``C:\Users\Jane Doe\...``, #417): double
-#: quotes on Windows, ``shlex.quote``'s single quotes on POSIX.
+#: quotes on Windows, ``shlex.quote``'s single quotes on POSIX, and PowerShell
+#: literals, where a ``'`` in the path is doubled (``O''Brien``, #425).
 _HOOK_EXE_RE = re.compile(
-    r"""(?P<exe>"[^"]+"|'[^']+'|\S+)(?P<module>\s+-m\s+omind)?\s+hook\s+\S"""
+    r"""(?P<exe>"[^"]+"|'(?:[^']|'')+'|\S+)(?P<module>\s+-m\s+omind)?\s+hook\s+\S"""
 )
 
 
@@ -843,7 +890,11 @@ def _hook_omind_argv(command_text: str) -> list[str] | None:
     ``C:\\venv\\Scripts\\omind`` as escapes and silently flattens the path away.
     """
     for match in _HOOK_EXE_RE.finditer(command_text):
-        token = match.group("exe").strip("\"'")
+        raw = match.group("exe")
+        if len(raw) > 1 and raw[0] == raw[-1] == "'":
+            token = raw[1:-1].replace("''", "'")
+        else:
+            token = raw.strip("\"'")
         if "/" in token or "\\" in token:
             return [token, *MODULE_ARGS] if match.group("module") else [token]
     return None
@@ -1250,7 +1301,10 @@ class Provisioner:
     def _claude_hook(self, command: str, **extra: Any) -> dict[str, Any]:
         """One ``{"type": "command"}`` hook. On a PowerShell box it also pins
         ``"shell": "powershell"``, so the rendering and the shell Claude Code
-        picks can never disagree (#425)."""
+        picks can never disagree (#425), and ends the command with
+        :data:`POWERSHELL_EXIT_SUFFIX` so a deny's exit 2 still blocks."""
+        if self._claude_powershell():
+            command = powershell_hook(command)
         hook: dict[str, Any] = {"type": "command", "command": command, **extra}
         if self._claude_powershell():
             hook["shell"] = "powershell"
@@ -1639,6 +1693,22 @@ class Provisioner:
             # from code, so this file is informational, not load-bearing).
             policy.write_seed_policy()
 
+    def _omi_guard_commands(self) -> tuple[str, str]:
+        """The OMI guard's PreToolUse adapter and UserPromptSubmit gate-reset
+        commands, before :meth:`_claude_hook` adds any shell suffix."""
+        if _windows():
+            # No .sh adapters on native Windows: call omind directly — the same
+            # pure-Python guard path the Codex harness uses (#259).
+            # Module form (`python -m omind`) where it runs: Smart App Control
+            # blocks the unsigned omind.exe trampoline (#380).
+            omind = self._claude_omind_cmd()
+            omi_dir = self._claude_arg(self.config.omi_dir)
+            return (
+                f"{omind} guard adapter --harness claude --omi-dir {omi_dir}",
+                f"{omind} guard preflight --omi-dir {omi_dir}",
+            )
+        return str(_omi_guard_dest()), str(_omi_gate_reset_dest())
+
     def ensure_omi_guard_installed(self) -> None:
         """Idempotently register the OMI-compliance guard: a PreToolUse('*')
         adapter and a UserPromptSubmit gate-reset, plus an allow-list for OMI
@@ -1652,18 +1722,7 @@ class Provisioner:
         if not isinstance(hooks_cfg, dict):
             hooks_cfg = {}
 
-        if _windows():
-            # No .sh adapters on native Windows: call omind directly — the same
-            # pure-Python guard path the Codex harness uses (#259).
-            # Module form (`python -m omind`) where it runs: Smart App Control
-            # blocks the unsigned omind.exe trampoline (#380).
-            omind = self._claude_omind_cmd()
-            omi_dir = self._claude_arg(self.config.omi_dir)
-            guard_command = f"{omind} guard adapter --harness claude --omi-dir {omi_dir}"
-            reset_command = f"{omind} guard preflight --omi-dir {omi_dir}"
-        else:
-            guard_command = str(_omi_guard_dest())
-            reset_command = str(_omi_gate_reset_dest())
+        guard_command, reset_command = self._omi_guard_commands()
         desired: dict[str, dict[str, Any]] = {
             "PreToolUse": {
                 "matcher": "*",
@@ -2161,7 +2220,11 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             missing.append(event)
             continue
         command_text = _entry_command_text(found)
-        if expected_vault not in command_text:
+        # A PowerShell-rendered hook (#425) carries the vault as a literal with
+        # each ' doubled (C:\Users\O''Brien\...); that is the same vault.
+        if not any(
+            form in command_text for form in (expected_vault, expected_vault.replace("'", "''"))
+        ):
             path_mismatch = True
         baked = _hook_omind_argv(command_text)
         # A hook pinned to some *other* omind install keeps running that build

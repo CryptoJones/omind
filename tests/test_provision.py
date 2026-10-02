@@ -1657,6 +1657,31 @@ def test_diagnose_hooks_accepts_the_windows_module_form(
     assert result.level == "ok", result.message
 
 
+def test_diagnose_hooks_reads_powershell_literals_with_an_apostrophe(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``C:\\Users\\O'Brien\\...`` is rendered as a PowerShell literal with the
+    ``'`` doubled (Claude Code without Git Bash, #425). Doctor must read that
+    back as the same vault and the same pin, not report a mismatch."""
+    py = r"C:\Users\O'Brien\Scripts\python.exe"
+    vault = Path(r"C:\Users\O'Brien\Obsidian Vault")
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: None)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [py, "-m", "omind"])
+    monkeypatch.setattr(provision, "_module_runs", lambda _py: True)
+    monkeypatch.setattr(provision, "_resolve_python", lambda: "python")
+    config = SetupConfig(vault=vault)
+    entries = Provisioner(config, log=_quiet)._omind_hook_entries()
+    command = entries["SessionStart"][0]["hooks"][0]["command"]
+    assert "O''Brien" in command
+    assert provision._hook_omind_argv(command) == [py, "-m", "omind"]
+    settings = tmp_path / "settings.json"
+    settings.write_text(json.dumps({"hooks": entries}), encoding="utf-8")
+    _ready_enforce_hook()
+    result = provision._diagnose_hooks(settings, config)
+    assert result.level == "ok", result.message
+
+
 def test_diagnose_hooks_flags_launcher_hooks_once_module_form_resolves(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, live_launchers: None
 ) -> None:

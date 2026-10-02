@@ -26,7 +26,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     Go-built spawner, Go-style escaping, and a verbatim `cmd /d /s /c "..."`. Double
     quotes stay only as the fallback when a volume has no short names (8.3
     generation disabled, or the path does not exist yet). That case still breaks
-    under Go's `cmd /c` and is documented in `provision.cmd_quote`.
+    under Go's `cmd /c` and is documented in `provision.cmd_quote`. `omind doctor
+    --agent agy|poolside` now warns when an installed hook carries a `"`, and
+    names the workaround: install to a path without spaces, or enable 8.3 names
+    on that volume. A strict-xfail Windows test runs the fallback through the
+    Go-style spawners so the limitation stays visible. `~` no longer counts as
+    a cmd special character: cmd.exe gives it no meaning outside `%var:~n%`, and
+    every 8.3 short name carries one, so counting it rejected each short name.
   - **Claude Code without Git Bash: every hook was a PowerShell ParserError.**
     Claude Code runs shell-form hooks in PowerShell on Windows when Git Bash is not
     installed (hooks docs: `shell` "Defaults to "bash", or to "powershell" on Windows
@@ -35,7 +41,23 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     install roots). If it finds none, every omind hook gets the PowerShell form
     (`& '<python.exe>' -m omind ...` with PowerShell literals) and an explicit
     `"shell": "powershell"`. Boxes with Git Bash are unchanged. Verified under
-    `powershell.exe` and `pwsh`, and the bash form under real Git Bash.
+    `powershell.exe` and `pwsh`, and the bash form under real Git Bash. A path with
+    an apostrophe (`C:\Users\O'Brien\...`) is a literal with the `'` doubled, and
+    doctor now reads it back as the same vault and pin.
+  - **PowerShell hooks hand their exit code back.** `powershell -Command` reports
+    any native exit code other than 0 as 1, and Claude Code blocks only on 2, so
+    under PowerShell every guard and gate deny would have let the tool call
+    through. Every PowerShell-rendered hook (Claude Code without Git Bash, Codex,
+    Gemini) now ends with `; exit $(if ($null -ne $LASTEXITCODE) { $LASTEXITCODE }
+    else { 1 })`. A bare `exit $LASTEXITCODE` would turn a failed launch into a
+    silent 0. Codex 0.154.0 passes the command unwrapped (`build_command` in
+    `codex-rs/hooks/src/engine/command_runner.rs`); its deny already rode in stdout
+    JSON, but exit 2 also blocks there. gemini-cli 0.46.0 appends its own
+    `if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }`, and its deny rides in stdout
+    JSON. A test runs a stub that exits 2 through each harness's exact spawn
+    (Claude Code's `-NoProfile -NonInteractive -ExecutionPolicy Bypass -Command`,
+    Codex's `-NoProfile -Command`, Gemini's wrapped form) and asserts 2 arrives. It
+    needs only a PowerShell, so it also runs on macOS and Linux with `pwsh`.
   - **OpenClaw: omind's guard entry stopped the Gateway from starting.** OpenClaw
     has no shell-command hooks. `hooks` is a strict object, and tool gating is the
     in-process plugin hook `before_tool_call`. Against OpenClaw 2026.9.7,
@@ -45,7 +67,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     anywhere, on any OS, and it broke the gateway it was added to. `omind setup
     --agent openclaw` no longer writes it and removes omind's existing entry, leaving
     user content alone. `omind doctor --agent openclaw` fails while the entry is
-    present. MCP memory, the skill and bootstrap priming are unchanged.
+    present. MCP memory, the skill and bootstrap priming are unchanged. Only an
+    entry whose `command` runs the adapter is removed; a user hook that mentions it
+    in a `description` is kept. Every read-modify-write of `openclaw.json` (MCP,
+    priming, this removal) now holds the sibling `openclaw.json.lock`. The
+    `openclaw` guard harness and its output format are marked retired: nothing
+    invokes them, and they remain only for `omind guard selftest`.
 
 ## [10.2.10] - 2026-10-02
 
