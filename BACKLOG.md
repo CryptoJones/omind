@@ -58,8 +58,12 @@ the exact order of operations._
     adherence; read-only replay; verified end-to-end against a live model. See
     [docs/needle.md](docs/needle.md). The large-window, multi-trial run is operator spend.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
-  publish workflow shipped 2026-09-19 (trusted publishing, no token); what remains needs CJ's
-  PyPI account — see [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
+  the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
+  trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
+  stopped at `invalid-publisher`. What remains is two operator steps: (1) on pypi.org, open
+  *Publishing* and add a pending trusted publisher (owner `CryptoJones`, repo `omind`, workflow
+  `publish.yml`, environment `pypi`); (2) cut a GitHub release. See
+  [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
 - [x] **doctor: search index always reads "corrupt or incompatible" when embeddings are on** ([#373](https://github.com/CryptoJones/omind/issues/373)) — **v9.7.5** — _bug_ —
   the index stores the encoder identity (`name:digest`), but `searchindex.health` compared it
   to the bare model name, so every `omind[embed]` machine got a permanent false alarm that
@@ -639,29 +643,32 @@ Each issue below is written to be executable by any agent without further contex
 
 ## PyPI Publish Setup (2026-08-24) ([#267](https://github.com/CryptoJones/omind/issues/267))
 
-- **Status: `omind` is not yet on PyPI — first publish pending** (tracked as the open #267 item above). The package has never
-  been uploaded (HTTP 404 on the simple index, re-checked 2026-09-19). Everything
-  that does not need a PyPI account is done; what is left is operator-only:
-  1. **[operator]** Log in to https://pypi.org/ with the account that will own the
-     project, then *Publishing → Add a pending publisher → GitHub*:
-     owner `CryptoJones`, repository `omind`, workflow `publish.yml`, environment `pypi`.
-     (A pending publisher needs no existing project, but it does NOT reserve the name —
-     the name is only yours after the first successful upload, so do step 4 promptly.)
-  2. [x] **GitHub `pypi` environment** — exists (verified via the API 2026-09-19; it was
-     created when the v9.7.3 publish run referenced it). It has no protection rules:
-     **[operator, optional]** add yourself as a required reviewer in Settings →
-     Environments if you want a manual gate on every upload.
-  3. [x] **Publish workflow** — `.github/workflows/publish.yml` (2026-09-19): trusted
-     publishing over OIDC, so there is **no API token** to mint, store or rotate. Builds
-     sdist + wheel, refuses a release whose tag does not match the `pyproject` version,
-     runs `twine check --strict`, and uploads from a separate job that alone holds
-     `id-token: write`. Actions pinned by commit SHA like the rest of CI.
-  4. **[operator]** Publish: cut the next GitHub release (the workflow fires on
-     `release: published`), or run the workflow by hand with `dry_run` unchecked.
-     Running it with `dry_run` checked (the default) builds and verifies without uploading.
-  - Until step 1 exists the upload step fails closed with `invalid-publisher`; nothing is
-    uploaded and nothing else is affected.
-  - Verified locally 2026-09-19: `omind-9.5.1` sdist + wheel build and pass
-    `twine check --strict`.
+- **Status: `omind` is not on PyPI yet. The first publish is pending** (tracked as the open #267 item above). The package has never
+  been uploaded (HTTP 404 on the simple index, re-checked 2026-10-02). Everything that
+  does not need a PyPI account is done:
+  - [x] **Publish workflow:** `.github/workflows/publish.yml`. It uses trusted publishing over
+    OIDC, so there is **no API token** to mint, store or rotate. It builds sdist + wheel with
+    `uv build`, refuses a release whose tag is not `v` + the `pyproject` version, and runs
+    `twine check --strict`. The upload runs from a separate job in the `pypi` environment, and
+    only that job holds `id-token: write`. Actions are pinned by commit SHA, like the rest of CI.
+  - [x] **GitHub `pypi` environment:** exists. It has no protection rules; if you want a manual
+    gate on every upload, add yourself as a required reviewer under Settings → Environments
+    (optional).
+  - [x] **The pipeline is proven up to PyPI:** the release runs for v9.7.3, v9.7.5, v10.0.0,
+    v10.0.1 and v10.0.2 all built, minted an OIDC token, and were refused with
+    `invalid-publisher` (no matching publisher). That is the expected fail-closed result:
+    nothing is uploaded.
+
+  **What is left. The operator does both steps; there are no credentials anywhere, by design:**
+  1. Log in to https://pypi.org/ with the account that will own the project. Go to
+     *Your account → Publishing → Add a new pending publisher → GitHub* and enter owner
+     `CryptoJones`, repository `omind`, workflow `publish.yml`, environment `pypi`.
+     A pending publisher does not need the project to exist, but it does **not** reserve the
+     name. The name is yours only after the first successful upload, so do step 2 promptly.
+  2. Push a tag or cut a release: publish a GitHub release whose tag is `v<pyproject
+     version>` (see CONTRIBUTING.md → *Releasing*). The workflow fires on
+     `release: published`. You can instead re-run the workflow by hand
+     (*Actions → publish → Run workflow*) with `dry_run` unchecked.
+     After the upload succeeds, tick #267 here and close the issue.
 
 *Proudly Made in Nebraska. Go Big Red! 🌽 <https://xkcd.com/2347/>*

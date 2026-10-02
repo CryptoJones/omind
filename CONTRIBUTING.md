@@ -121,6 +121,33 @@ The version is declared in three places that must stay in lockstep — `pyprojec
 `pyproject.toml`, so a release can't leave one behind. Every version bump gets a
 `CHANGELOG.md` entry under its number.
 
+## Releasing
+
+A release is a **GitHub release** on a `v<version>` tag that points at merged `main`.
+Publishing it is what ships the package to PyPI.
+
+1. Merge the PR that bumped the version (`pyproject.toml`, `src/omind/__init__.py`,
+   `uv.lock`, and its `CHANGELOG.md` heading) to `main`.
+2. Cut the release from `main`, with the tag set to exactly `v` + the `pyproject.toml`
+   version:
+   ```sh
+   gh release create v10.1.2 --target main --title "omind 10.1.2" --notes-file <notes>
+   ```
+3. `.github/workflows/publish.yml` fires on `release: published`. It builds the sdist and
+   wheel with `uv build`, **fails if the tag does not match the packaged version**, runs
+   `twine check --strict`, and uploads to PyPI by **trusted publishing**: an OIDC token
+   from the `pypi` environment, with no API token stored anywhere.
+
+To check a build without uploading, run the workflow by hand
+(*Actions → publish → Run workflow*). The `dry_run` box is checked by default. To
+re-publish a release whose upload failed, run the workflow by hand from that tag with
+`dry_run` unchecked; PyPI never accepts the same version twice.
+
+PyPI trusts this exact workflow file name and environment name. If you rename
+`publish.yml` or the `pypi` environment, update the trusted publisher on pypi.org at the
+same time, or the upload fails with `invalid-publisher`. The one-time pypi.org setup is
+in BACKLOG.md → *PyPI Publish Setup*.
+
 ## Pull requests
 
 1. Branch off `main` with a conventional name: `feat/…`, `fix/…`, `test/…`,
