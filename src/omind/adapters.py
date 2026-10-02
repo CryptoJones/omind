@@ -21,6 +21,7 @@ exercised by the test-suite against each harness's event shape.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import sys
 from pathlib import Path
@@ -162,15 +163,191 @@ def run_adapter(
     # Poolside's event shape differs from Claude's in three places (tool naming,
     # ``cmd``, ``tool_output``); translate ONCE here so the guard, verifier, and
     # accounting all see the Claude-shaped event they were written against.
-    event = harness_mod.translate_event(harness, event)
-    action = normalize_action(event)
-    verdict = guard.check_action(action, omi_dir=omi_dir)
-    # Codex's deny shape depends on which hook fired (PreToolUse vs
-    # PermissionRequest); pass the event name through (ignored by other harnesses).
-    return harness_mod.render_decision(
-        verdict,
-        spec.block_format,
-        sys.stdout,
-        sys.stderr,
-        event=str(event.get("hook_event_name") or ""),
+    #
+    # For Codex, Gemini, Poolside, agy and Windows Claude this IS the check
+    # dispatch, so it fails OPEN the way ``guard.check_action`` does (#420): an
+    # exception translating, normalizing or rendering is reported and logged,
+    # and the action is allowed (static hard-policy rules still apply), rendered
+    # in the harness's own format.
+    action: dict[str, Any] | None = None
+    verdict: guard.Verdict | None = None
+    hook_event = ""
+    stage = "adapter translate"
+    try:
+        event = harness_mod.translate_event(harness, event)
+        # Codex's deny shape depends on which hook fired (PreToolUse vs
+        # PermissionRequest); pass the event name through (ignored by others).
+        hook_event = str(event.get("hook_event_name") or "")
+        stage = "adapter normalize"
+        action = normalize_action(event)
+        stage = "adapter check"
+        verdict = guard.check_action(action, omi_dir=omi_dir)
+        stage = "adapter render"
+        return harness_mod.render_decision(
+            verdict, spec.block_format, sys.stdout, sys.stderr, event=hook_event
+        )
+    except Exception as exc:
+        # ``check_action`` logs its own decision (and never raises), so a verdict
+        # it returned is already on the compliance record: only the internal
+        # error is logged here, never the deny a second time.
+        fallback = _fail_open_verdict(event, action, exc, verdict, stage=stage)
+        try:
+            return harness_mod.render_decision(
+                fallback, spec.block_format, sys.stdout, sys.stderr, event=hook_event
+            )
+        except Exception:
+            return _render_last_resort(spec.block_format, fallback.allow, hook_event)
+
+
+#: Fixed literal outputs for when :func:`omind.harness.render_decision` raises
+#: twice (#420). Empty stdout is NOT a safe universal deny: OpenCode reads it as
+#: ``{}`` (= allow), and agy/Hermes read silence as proceed, so a standing deny
+#: is written in each harness's own shape: ``(stdout, stderr, exit code)``.
+_LAST_RESORT_REASON = "omi-guard: internal error rendering the verdict; a hard rule denies this"
+_LAST_RESORT_DENY: dict[str, tuple[str, str, int]] = {
+    "exit2": ("", f"BLOCKED by {_LAST_RESORT_REASON}\n", 2),
+    "claude_json": (
+        json.dumps({"decision": "block", "reason": _LAST_RESORT_REASON}) + "\n",
+        "",
+        0,
+    ),
+    "json_signal": (
+        json.dumps(
+            {"allow": False, "reason": _LAST_RESORT_REASON, "rule_id": guard.GUARD_ERROR_RULE}
+        )
+        + "\n",
+        "",
+        2,
+    ),
+    "codex_hook": (
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PreToolUse",
+                    "permissionDecision": "deny",
+                    "permissionDecisionReason": f"OMI guard: {_LAST_RESORT_REASON}",
+                }
+            }
+        )
+        + "\n",
+        "",
+        0,
+    ),
+    "codex_hook:PermissionRequest": (
+        json.dumps(
+            {
+                "hookSpecificOutput": {
+                    "hookEventName": "PermissionRequest",
+                    "decision": {
+                        "behavior": "deny",
+                        "message": f"OMI guard: {_LAST_RESORT_REASON}",
+                    },
+                }
+            }
+        )
+        + "\n",
+        "",
+        0,
+    ),
+    "gemini": (json.dumps({"decision": "deny", "reason": _LAST_RESORT_REASON}) + "\n", "", 0),
+    "poolside": (
+        json.dumps(
+            {
+                "hook_specific_output": {
+                    "hook_event_name": "PreToolUse",
+                    "permission_decision": "deny",
+                    "permission_decision_reason": f"BLOCKED by {_LAST_RESORT_REASON}",
+                }
+            }
+        )
+        + "\n",
+        "",
+        0,
+    ),
+    "openclaw": (
+        json.dumps(
+            {"allow": False, "reason": _LAST_RESORT_REASON, "rule_id": guard.GUARD_ERROR_RULE}
+        )
+        + "\n",
+        "",
+        0,
+    ),
+    "agy": (json.dumps({"decision": "deny", "reason": _LAST_RESORT_REASON}) + "\n", "", 0),
+}
+_LAST_RESORT_ALLOW: dict[str, str] = {
+    "json_signal": json.dumps({"allow": True, "reason": "", "rule_id": ""}) + "\n",
+    "openclaw": json.dumps({"allow": True, "reason": "", "rule_id": ""}) + "\n",
+    "agy": json.dumps({"decision": "allow"}) + "\n",
+}
+
+
+def _render_last_resort(fmt: str, allow: bool, hook_event: str) -> int:
+    """Write a fixed literal verdict in ``fmt``'s shape; return its exit code.
+
+    Never raises. An unknown format falls back to the exit-2 contract, which is
+    also what a deny returns when its literal cannot be written.
+    """
+    if allow:
+        with contextlib.suppress(Exception):
+            sys.stdout.write(_LAST_RESORT_ALLOW.get(fmt, ""))
+        return 0
+    key = f"{fmt}:{hook_event}"
+    out, err, code = _LAST_RESORT_DENY.get(
+        key, _LAST_RESORT_DENY.get(fmt, _LAST_RESORT_DENY["exit2"])
+    )
+    try:
+        sys.stdout.write(out)
+        sys.stderr.write(err)
+    except Exception:
+        return 2
+    return code
+
+
+def _fail_open_verdict(
+    event: Any,
+    action: dict[str, Any] | None,
+    exc: Exception,
+    decided: guard.Verdict | None,
+    *,
+    stage: str,
+) -> guard.Verdict:
+    """The adapter's fail-open verdict (#420), via :func:`guard._fail_open_verdict`.
+
+    When the event never normalized, the hard-policy re-check and the compliance
+    event get a best-effort action read straight off the raw event. A
+    ``decided`` verdict came back from :func:`guard.check_action`, which already
+    logged it, so only the internal error is logged for it.
+    """
+    if action is None:
+        action = {}
+        try:
+            # Claude/Codex/Gemini ``tool_input``, Poolside's ``cmd``, agy's
+            # ``toolCall.args.CommandLine``, or a flat ``command``.
+            tool_input = event.get("tool_input")
+            tool_call = event.get("toolCall")
+            args = tool_call.get("args") if isinstance(tool_call, dict) else None
+            command = ""
+            for source, key in (
+                (tool_input, "command"),
+                (tool_input, "cmd"),
+                (args, "CommandLine"),
+                (event, "command"),
+            ):
+                if isinstance(source, dict) and source.get(key):
+                    command = str(source[key])
+                    break
+            action = {
+                "tool": str(event.get("tool_name") or event.get("tool") or ""),
+                "command": command,
+                "session": str(
+                    event.get("session_id")
+                    or event.get("conversationId")
+                    or event.get("session")
+                    or ""
+                ),
+            }
+        except Exception:
+            action = {}
+    return guard._fail_open_verdict(
+        action, exc, decided, stage=stage, decided_logged=decided is not None
     )

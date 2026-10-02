@@ -2481,6 +2481,47 @@ def _is_unauthorized_capability_side_effect(action: dict[str, Any], session: str
     )
 
 
+def _hard_policy_verdict(command: str) -> Verdict | None:
+    """The deny for the first ``hard`` policy rule ``command`` matches, else None.
+
+    The github_push tier is skipped when the command carries its opt-in token (a
+    deliberate Codeberg mirror). Soft rules never block here (Layer E records
+    them). The opt-in only skips its own rule, so it can never bypass a
+    destructive rule a command also matches.
+
+    The SEED rules live in code and never depend on the state dir: if loading
+    the full policy raises for any reason (e.g. no resolvable home directory),
+    the seed rules are evaluated on their own rather than lost (#420).
+    """
+    try:
+        rules: list[policy.Rule] = list(policy.load_policy())
+    except Exception:
+        rules = list(policy.SEED_RULES)
+    for rule in rules:
+        if rule.severity != policy.SEVERITY_HARD:
+            continue
+        # A single malformed rule must never brick the guard on EVERY tool call:
+        # a pattern that fails to compile / errors mid-match is skipped, not
+        # raised, and skipping it leaves every other hard rule in force.
+        # (Learned rules are also validated at load; this is the belt to that
+        # suspenders, covering a bad seed rule or a catastrophic pattern.) Any
+        # exception, not just ``re.error``: one rule raising must not disable
+        # the rules after it.
+        try:
+            if not rule.matches(command):
+                continue
+        except Exception:
+            continue
+        if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
+            continue
+        return Verdict(
+            allow=False,
+            reason=f"omi-guard ({rule.label()}): {rule.message}",
+            rule_id=rule.id,
+        )
+    return None
+
+
 def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdict:
     """The harness-agnostic policy. See the module docstring for the schema.
 
@@ -2506,30 +2547,10 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
             mark_consulted(session)
         return Verdict(allow=True)
 
-    # 2) Hard blocks — every ``hard`` rule in the data-driven policy. The
-    # github_push tier is skipped when the command carries its opt-in token (a
-    # deliberate Codeberg mirror). Soft rules never block here (Layer E records
-    # them). The opt-in only skips its own rule, so it can never bypass a
-    # destructive rule a command also matches.
-    for rule in policy.load_policy():
-        if rule.severity != policy.SEVERITY_HARD:
-            continue
-        # A single malformed rule must never brick the guard on EVERY tool call:
-        # a pattern that fails to compile / errors mid-match is skipped, not
-        # raised. (Learned rules are also validated at load; this is the belt to
-        # that suspenders, covering a bad seed rule or a catastrophic pattern.)
-        try:
-            if not rule.matches(command):
-                continue
-        except re.error:
-            continue
-        if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
-            continue
-        return Verdict(
-            allow=False,
-            reason=f"omi-guard ({rule.label()}): {rule.message}",
-            rule_id=rule.id,
-        )
+    # 2) Hard blocks — every ``hard`` rule in the data-driven policy.
+    hard = _hard_policy_verdict(command)
+    if hard is not None:
+        return hard
 
     if repo is not None and _is_freshness_command(command):
         # Recorded optimistically here (PreToolUse cannot know the exit code);
@@ -2680,83 +2701,192 @@ def _governing_excerpt(omi_dir: Path | str, note: str) -> str:
         return ""
 
 
+#: ``rule_id`` of the compliance event a fail-open logs (#420).
+GUARD_ERROR_RULE = "guard-internal-error"
+
+
+def _rule_severity(rule_id: str) -> str:
+    """The severity a deny under ``rule_id`` is logged with (#420).
+
+    A policy rule's own severity when it is one; the consult gate is soft
+    friction; any other deny is hard, as :func:`check_action` logs it.
+    """
+    if rule_id.startswith("omi-gate"):
+        return policy.SEVERITY_SOFT
+    with contextlib.suppress(Exception):
+        for rule in policy.load_policy():
+            if rule.id == rule_id:
+                return rule.severity
+    return policy.SEVERITY_HARD
+
+
+def _fail_open_verdict(
+    action: dict[str, Any],
+    exc: Exception,
+    decided: Verdict | None,
+    *,
+    stage: str = "check",
+    decided_logged: bool = False,
+) -> Verdict:
+    """The verdict when :func:`check_action` hits an unexpected exception (#420).
+
+    A deny decided before the exception is a deliberate block and stands. An
+    undecided action fails OPEN — enforcement degrades, never raises into the
+    agent — except that the static hard-policy rules are re-checked on their
+    own, so a crash in an unrelated classifier (repo detection, note rules)
+    cannot wave through a command a hard rule plainly names. The error goes to
+    stderr and the compliance log so the hole is visible, not silent.
+
+    Two compliance events are written: the internal error itself
+    (``guard-internal-error``, outcome ``fail-open`` when the action is allowed,
+    ``error`` when a deny still stands), and — for a deny — the deny under its
+    real rule id and severity, so it still counts in the recidivism ladder and
+    doctor's ``top_rules``. Both writes are best-effort: logging resolves the
+    state dir (``Path.home()``), which can itself raise, and the handler must
+    never raise the error it is handling back into the agent.
+
+    ``stage`` names the step that failed in the stderr line (``check``, or an
+    adapter step such as ``adapter render``). ``decided_logged`` says the caller
+    already logged ``decided`` (the adapter, whose :func:`check_action` logs its
+    own deny before rendering): the deny is then not logged a second time, so
+    one attempt never counts twice toward ``learn.escalate``.
+    """
+    verdict = Verdict(allow=True)
+    if decided is not None and not decided.allow:
+        verdict = decided
+    else:
+        with contextlib.suppress(Exception):
+            hard = _hard_policy_verdict(str(action.get("command") or ""))
+            if hard is not None:
+                verdict = hard
+    session = ""
+    tool = ""
+    command = ""
+    with contextlib.suppress(Exception):
+        session = str(action.get("session") or "")
+        tool = str(action.get("tool") or "")
+        command = str(action.get("command") or "")
+    with contextlib.suppress(Exception):
+        what = "allowing this action (fail-open)" if verdict.allow else "a deny still applies"
+        sys.stderr.write(
+            f"omi-guard: internal error in guard {stage} ({type(exc).__name__}: {exc}); {what}\n"
+        )
+    with contextlib.suppress(Exception):
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session=session,
+            tool=tool,
+            command=command,
+            rule_id=GUARD_ERROR_RULE,
+            severity=policy.SEVERITY_SOFT,
+            outcome="fail-open" if verdict.allow else "error",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    already_logged = decided_logged and verdict is decided
+    if not verdict.allow and verdict.rule_id and not already_logged:
+        with contextlib.suppress(Exception):
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=session,
+                tool=tool,
+                command=command,
+                rule_id=verdict.rule_id,
+                severity=_rule_severity(verdict.rule_id),
+                outcome="deny",
+            )
+    return verdict
+
+
 def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict:
     """Decide an action and log a real policy-rule deny to the compliance log.
 
     The shared core behind ``omind guard check`` and the per-harness adapters
     (:mod:`omind.adapters`), so every harness logs + decides identically. The
     routine ``omi-gate`` "you didn't consult" deny is friction, not logged.
+
+    Never raises (#420, invariant 2): an unexpected exception from any
+    classifier fails OPEN via :func:`_fail_open_verdict`. A deny already
+    decided before the exception still stands — only an undecided action is
+    waved through.
     """
-    verdict = _note_rules_verdict(action, omi_dir)
-    if verdict is None:
-        session = str(action.get("session") or "")
-        # #358: once a turn has established the git-rules note is absent, the
-        # marker waives the demand for the rest of it — one log line per turn,
-        # not one per tool call.
-        known_missing = demanded_note(session) == _GIT_RULES_MISSING_MARK
-        verdict = decide(action, git_rules_missing=known_missing)
+    verdict: Verdict | None = None
+    try:
+        verdict = _note_rules_verdict(action, omi_dir)
+        if verdict is None:
+            session = str(action.get("session") or "")
+            # #358: once a turn has established the git-rules note is absent, the
+            # marker waives the demand for the rest of it — one log line per turn,
+            # not one per tool call.
+            known_missing = demanded_note(session) == _GIT_RULES_MISSING_MARK
+            verdict = decide(action, git_rules_missing=known_missing)
+            if (
+                not verdict.allow
+                and verdict.rule_id == "repo-work-read-git-rules"
+                and omi_dir is not None
+                and demanded_note_missing(omi_dir)
+            ):
+                # The demanded note does not exist, so the read this deny asks for
+                # cannot succeed. Degrade LOUDLY instead of demanding a ceremony:
+                # log the gap where `omind doctor` / an audit can find it, tell the
+                # operator the fix, and re-decide with only that demand waived.
+                record_demanded_note(session, _GIT_RULES_MISSING_MARK)
+                compliance.log_event(
+                    compliance.KIND_DECISION,
+                    session=session,
+                    tool=str(action.get("tool") or ""),
+                    command=str(action.get("command") or ""),
+                    rule_id="demanded-note-missing",
+                    severity="soft",
+                    outcome="allowed",
+                    detail=f"missing note: {GIT_RULES_NOTE}",
+                )
+                print(GIT_RULES_MISSING_MESSAGE, file=sys.stderr)
+                verdict = decide(action, git_rules_missing=True)
+        if verdict.allow:
+            # #296: an allowed action still counts against the turn's budget, and at
+            # the budget the core may re-arm the gate around an unseen relevant note.
+            rearm = budget_verdict(action, omi_dir)
+            if rearm is not None:
+                verdict = rearm
         if (
             not verdict.allow
             and verdict.rule_id == "repo-work-read-git-rules"
             and omi_dir is not None
-            and demanded_note_missing(omi_dir)
         ):
-            # The demanded note does not exist, so the read this deny asks for
-            # cannot succeed. Degrade LOUDLY instead of demanding a ceremony:
-            # log the gap where `omind doctor` / an audit can find it, tell the
-            # operator the fix, and re-decide with only that demand waived.
-            record_demanded_note(session, _GIT_RULES_MISSING_MARK)
-            compliance.log_event(
-                compliance.KIND_DECISION,
-                session=session,
-                tool=str(action.get("tool") or ""),
-                command=str(action.get("command") or ""),
-                rule_id="demanded-note-missing",
-                severity="soft",
-                outcome="allowed",
-                detail=f"missing note: {GIT_RULES_NOTE}",
-            )
-            print(GIT_RULES_MISSING_MESSAGE, file=sys.stderr)
-            verdict = decide(action, git_rules_missing=True)
-    if verdict.allow:
-        # #296: an allowed action still counts against the turn's budget, and at
-        # the budget the core may re-arm the gate around an unseen relevant note.
-        rearm = budget_verdict(action, omi_dir)
-        if rearm is not None:
-            verdict = rearm
-    if not verdict.allow and verdict.rule_id == "repo-work-read-git-rules" and omi_dir is not None:
-        # #241: place the governing rule text adjacent to the action it blocks.
-        # The demand sentence stays first — the recall ceremony still runs and
-        # feeds consult telemetry — but the rule itself rides along, because an
-        # instruction next to the action wins attention that one injected 200
-        # turns earlier has lost.
-        excerpt = _governing_excerpt(omi_dir, GIT_RULES_NOTE)
-        if excerpt:
+            # #241: place the governing rule text adjacent to the action it blocks.
+            # The demand sentence stays first — the recall ceremony still runs and
+            # feeds consult telemetry — but the rule itself rides along, because an
+            # instruction next to the action wins attention that one injected 200
+            # turns earlier has lost.
+            excerpt = _governing_excerpt(omi_dir, GIT_RULES_NOTE)
+            if excerpt:
+                verdict = Verdict(
+                    allow=False,
+                    reason=(f"{verdict.reason}\n\n--- Governing memory (excerpt) ---\n{excerpt}"),
+                    rule_id=verdict.rule_id,
+                )
+        if not verdict.allow and verdict.rule_id == "omi-gate" and omi_dir is not None:
+            from omind import retrieve
+
+            session = str(action.get("session") or "")
             verdict = Verdict(
                 allow=False,
-                reason=(f"{verdict.reason}\n\n--- Governing memory (excerpt) ---\n{excerpt}"),
+                reason=f"omi-gate: {retrieve.suggest_message(turn_task(session), omi_dir)}",
                 rule_id=verdict.rule_id,
             )
-    if not verdict.allow and verdict.rule_id == "omi-gate" and omi_dir is not None:
-        from omind import retrieve
-
-        session = str(action.get("session") or "")
-        verdict = Verdict(
-            allow=False,
-            reason=f"omi-gate: {retrieve.suggest_message(turn_task(session), omi_dir)}",
-            rule_id=verdict.rule_id,
-        )
-    if not verdict.allow and verdict.rule_id and not verdict.rule_id.startswith("omi-gate"):
-        compliance.log_event(
-            compliance.KIND_DECISION,
-            session=str(action.get("session") or ""),
-            tool=str(action.get("tool") or ""),
-            command=str(action.get("command") or ""),
-            rule_id=verdict.rule_id,
-            severity=policy.SEVERITY_HARD,
-            outcome="deny",
-        )
-    return verdict
+        if not verdict.allow and verdict.rule_id and not verdict.rule_id.startswith("omi-gate"):
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=str(action.get("session") or ""),
+                tool=str(action.get("tool") or ""),
+                command=str(action.get("command") or ""),
+                rule_id=verdict.rule_id,
+                severity=policy.SEVERITY_HARD,
+                outcome="deny",
+            )
+        return verdict
+    except Exception as exc:
+        return _fail_open_verdict(action, exc, verdict)
 
 
 def _load(stream: TextIO) -> dict[str, Any]:
@@ -2868,7 +2998,10 @@ def run_guard(
     if action_name == "check":
         verdict = check_action(_load(src), omi_dir=omi_dir)
         if not verdict.allow:
-            sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
+            # The exit code carries the block; a failed stderr write must not
+            # turn it into a traceback.
+            with contextlib.suppress(Exception):
+                sys.stderr.write(f"BLOCKED by {verdict.reason}\n")
         return verdict.exit_code
     return 0
 
@@ -3316,11 +3449,35 @@ def _run_preflight(data: dict[str, Any], omi_dir: Path | None, *, harness: str =
     """UserPromptSubmit adapter: inject preflight beside the user prompt, in the
     calling harness's output shape (Claude camelCase by default; Poolside's
     snake_case twin under ``--harness poolside``, whose event is also
-    translated first so a prompt missing from the payload is recovered)."""
+    translated first so a prompt missing from the payload is recovered).
+
+    Fails open (#420): an unexpected exception injects nothing and exits 0,
+    reported to stderr and the compliance log, rather than a traceback that a
+    harness may treat as a blocked prompt."""
     from omind import harness as harness_mod
 
-    data = harness_mod.translate_event(harness, data)
-    context = preflight_turn(data, omi_dir)
+    try:
+        data = harness_mod.translate_event(harness, data)
+        context = preflight_turn(data, omi_dir)
+    except Exception as exc:
+        with contextlib.suppress(Exception):
+            sys.stderr.write(
+                f"omi-guard: internal error in guard preflight ({type(exc).__name__}: {exc}); "
+                "continuing without preflight memory (fail-open)\n"
+            )
+        # Best-effort: logging resolves the state dir, which can raise the very
+        # error being handled (no home directory) — it must not escape.
+        with contextlib.suppress(Exception):
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=str(data.get("session_id") or data.get("session") or ""),
+                tool="UserPromptSubmit",
+                rule_id=GUARD_ERROR_RULE,
+                severity=policy.SEVERITY_SOFT,
+                outcome="fail-open",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
+        return 0
     if context:
         sys.stdout.write(harness_mod.render_context(harness, "UserPromptSubmit", context))
     return 0

@@ -449,10 +449,17 @@ def _rule_to_dict(rule: Rule) -> dict[str, object]:
 
 
 def load_learned() -> list[Rule]:
-    """The learned rules from ``policy.json``; ``[]`` on any miss (never raises)."""
+    """The learned rules from ``policy.json``; ``[]`` on any miss (never raises).
+
+    Any exception, not just a read/parse error: resolving the path goes through
+    ``paths.state_dir()``, which raises ``RuntimeError`` with no resolvable home
+    directory. Letting that escape would take :func:`load_policy` — and with it
+    the SEED rules, which live in code — down too, so every hard rule would
+    fail open (#420).
+    """
     try:
         raw = json.loads(policy_path().read_text(encoding="utf-8"))
-    except (OSError, ValueError):
+    except Exception:
         return []
     if not isinstance(raw, list):
         return []
