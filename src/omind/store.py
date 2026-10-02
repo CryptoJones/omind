@@ -1049,23 +1049,81 @@ class OmiStore:
         for the ``/`` in "end/pause" — an instruction impossible to satisfy.
 
         So when the raw name is rejected, fall back to the sanitized title, and
-        accept it only if that note actually exists. Traversal stays impossible:
+        accept it only if that note actually exists. A name that validates but
+        names no existing note gets a narrower fallback (issue #393: a ``:``
+        passes validation yet is stripped on write): only when it holds a
+        character the sanitizer strips, and only onto a note whose parsed
+        title matches it. Write paths that must not land on another note
+        (import, create) use :meth:`strict_name` instead. Traversal stays impossible:
         the sanitizer strips separators outright, and the fallback re-runs the
         full validation below on its result. Creates are unaffected — a
         nonexistent note still raises.
         """
         try:
             validated = self._validated_name(name)
-            if not validated.exists() and not str(name).endswith(SCRATCH_SUFFIX):
+            if validated.exists():
+                return validated
+            if not str(name).endswith(SCRATCH_SUFFIX):
                 scratch_candidate = validated.with_name(validated.stem + SCRATCH_SUFFIX)
                 if scratch_candidate.exists():
                     return scratch_candidate
+            # A title can pass strict validation yet still not be the stored
+            # filename (``:`` is legal here but stripped on write, issue #393).
+            # Only names holding a character the sanitizer strips take this
+            # branch, and only a note whose own title matches is accepted —
+            # "Build: prod" must never land on an unrelated "Build prod.md".
+            if _ILLEGAL_FILENAME_CHARS.search(str(name)):
+                fallback = self._title_matched_fallback(str(name))
+                if fallback is not None:
+                    return fallback
             return validated
         except NoteError:
             fallback = self._name_from_title(name)
             if fallback is not None:
                 return fallback
             raise
+
+    def strict_name(self, name: str) -> Path:
+        """Resolve ``name`` as a literal filename: full traversal validation,
+        no title or scratch fallback. For write paths (import, must-create)
+        where landing on a *different* existing note would overwrite it."""
+        return self._validated_name(name)
+
+    def _title_matched_fallback(self, name: str) -> Path | None:
+        """The existing note this validated-but-missing name sanitizes to, but
+        only if that note's parsed title matches ``name`` (casefold).
+
+        A ``.scratch.md`` / ``.md`` suffix on ``name`` is tried stripped first,
+        so ``Runbook: deploy.scratch.md`` finds the ``Runbook deploy`` scratch
+        note. A collision with a differently-titled note returns ``None`` and
+        the caller fails loudly ("note not found") instead of reading or
+        editing the wrong note.
+        """
+        stripped = name.strip()
+        candidates: list[tuple[str, str]] = []
+        try:
+            if stripped.endswith(SCRATCH_SUFFIX):
+                base = stripped[: -len(SCRATCH_SUFFIX)]
+                candidates.append((base, self.filename_for_title(base, suffix=SCRATCH_SUFFIX)))
+            elif stripped.endswith(".md"):
+                base = stripped[:-3]
+                candidates.append((base, self.filename_for_title(base)))
+                candidates.append((base, self.filename_for_title(base, suffix=SCRATCH_SUFFIX)))
+            candidates.append((stripped, self.filename_for_title(stripped)))
+            candidates.append((stripped, self.filename_for_title(stripped, suffix=SCRATCH_SUFFIX)))
+        except NoteError:
+            return None
+        for title, filename in candidates:
+            try:
+                path = self._validated_name(filename)
+                if not path.is_file():
+                    continue
+                stored = parse_note(_read_text(path)).title
+            except (NoteError, OSError, ValueError):
+                continue
+            if stored.strip().casefold() == title.strip().casefold():
+                return path
+        return None
 
     def _name_from_title(self, name: str) -> Path | None:
         """The existing note whose filename this *title* sanitizes to, if any."""
@@ -1409,7 +1467,9 @@ class OmiStore:
         *,
         must_create: bool = False,
     ) -> str:
-        path = self.safe_name(name)
+        # A create resolves strictly: a title/scratch fallback could land it on
+        # a different existing note and refuse it as "already exists".
+        path = self.strict_name(name) if must_create else self.safe_name(name)
         self._reject_reserved(path)
         with self.write_lock():
             # ``must_create`` closes the create-note TOCTOU: two sessions saving

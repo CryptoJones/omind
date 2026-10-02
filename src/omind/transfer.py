@@ -308,7 +308,9 @@ def _import_json(
         if filename == paths.INDEX_FILENAME:  # derived; never import
             continue
         try:
-            target = store.safe_name(filename)  # rejects traversal, ensures .md, in-dir
+            # Strict: rejects traversal, ensures .md, in-dir — and never falls
+            # back to a title match, which could overwrite a different note.
+            target = store.strict_name(filename)
         except Exception as exc:  # noqa: BLE001 - store raises NoteError
             raise TransferError(f"unsafe filename in export: {filename!r} ({exc})") from exc
         _classify_and_write(target, content.encode("utf-8"), target.name, force, result, store)

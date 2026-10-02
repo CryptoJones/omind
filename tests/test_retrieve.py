@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
-from omind import guard, retrieve
-from omind.store import NoteFields, OmiStore
+import pytest
+
+from omind import guard, recall, retrieve
+from omind.store import NoteFields, OmiStore, render_fields
 
 
 def _vault(tmp_path: Path) -> Path:
@@ -71,7 +75,7 @@ def test_suggest_message_names_notes_or_falls_back(tmp_path: Path) -> None:
     omi = _vault(tmp_path)
     msg = retrieve.suggest_message("codeberg release push", omi)
     assert "[[Codeberg release workflow]]" in msg
-    assert '`recall-note` with `{"name":"Codeberg release workflow"}`' in msg
+    assert '`recall-note` with `{"name":"Codeberg release workflow.md"}`' in msg
     assert "credential" in msg.lower()  # keeps the do-not-open-secrets caveat
     # No task -> generic gate message (never invents a note).
     assert retrieve.suggest_message("", omi) == guard.GATE_MESSAGE
@@ -173,3 +177,116 @@ def test_preflight_min_terms_env_override(monkeypatch) -> None:
     assert retrieve.preflight_min_terms() == 3  # bad value -> default
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "-4")
     assert retrieve.preflight_min_terms() == 0  # clamped
+
+
+@pytest.mark.parametrize("indexed", [True, False], ids=["index", "keyword-fallback"])
+def test_suggest_message_recall_name_resolves_for_a_retitled_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, indexed: bool
+) -> None:
+    """Issue #393 contract: the name in the gate's ``recall-note`` call must resolve.
+    A retitled note keeps its old filename, so its title resolves nowhere — the
+    call has to carry the stored filename; the title stays in [[…]]."""
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    title = "Deploy runbook: staging (retitled 17:55)"
+    store.write_note(
+        "Old deploy notes.md",
+        render_fields(NoteFields(title=title, summary="deploy staging runbook steps")),
+    )
+    if not indexed:
+        import omind.searchindex
+
+        monkeypatch.setattr(omind.searchindex, "shared", lambda _omi: None)
+    msg = retrieve.suggest_message("deploy staging runbook", omi)
+    assert f"[[{title}]]" in msg
+    found = re.search(r"`recall-note` with `(\{.*?\})`", msg)
+    assert found
+    name = json.loads(found.group(1))["name"]
+    assert name == "Old deploy notes.md"
+    assert recall.compact_recall(omi, name, organic=False)["title"] == title
+
+
+def _gate_recall_name(msg: str) -> str:
+    found = re.search(r"`recall-note` with `(\{.*?\})`", msg)
+    assert found, msg
+    name = json.loads(found.group(1))["name"]
+    assert isinstance(name, str)
+    return name
+
+
+@pytest.mark.parametrize("indexed", [True, False], ids=["index", "keyword-fallback"])
+def test_suggest_message_recall_name_resolves_for_an_md_titled_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, indexed: bool
+) -> None:
+    """Round 2 of #405: a note titled ``Deploy runbook.md`` is stored as
+    ``Deploy runbook.md.md``. Emitting the stem (``Deploy runbook.md``) resolves
+    to the sibling file ``Deploy runbook.md`` — a *different* note. The gate
+    must emit the full stored filename."""
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    title = "Deploy runbook.md"
+    assert store.create_note(NoteFields(title=title, summary="deploy staging runbook steps")) == (
+        "Deploy runbook.md.md"
+    )
+    store.write_note(
+        "Deploy runbook.md",
+        render_fields(NoteFields(title="Unrelated sibling", summary="nothing to see")),
+    )
+    if not indexed:
+        import omind.searchindex
+
+        monkeypatch.setattr(omind.searchindex, "shared", lambda _omi: None)
+    name = _gate_recall_name(retrieve.suggest_message("deploy staging runbook", omi))
+    assert name == "Deploy runbook.md.md"
+    assert recall.compact_recall(omi, name, organic=False)["title"] == title
+
+
+def test_suggest_message_keyword_fallback_when_the_index_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md invariant #2 (round 2 of #405): if the index's ``notes()`` or
+    ``search()`` raises, the gate falls back to keyword scoring and its
+    suggestion still resolves."""
+    import omind.searchindex
+
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    title = "Deploy runbook: staging (17:55 CDT)"
+    filename = store.create_note(NoteFields(title=title, summary="deploy staging runbook"))
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("index exploded")
+
+    for method in ("notes", "search"):
+        index = omind.searchindex.shared(omi)
+        if index is None:
+            pytest.skip("search index unavailable in this build")
+        monkeypatch.setattr(type(index), method, boom)
+        assert (
+            retrieve._indexed_notes("deploy staging runbook", omi, task_is_cred=False, limit=3)
+            is None
+        )
+        name = _gate_recall_name(retrieve.suggest_message("deploy staging runbook", omi))
+        assert name == filename
+        assert recall.compact_recall(omi, name, organic=False)["title"] == title
+        monkeypatch.undo()
+
+
+def test_truncation_marker_names_a_resolvable_note_for_a_retitled_note(tmp_path: Path) -> None:
+    """Round 2 of #405: the truncation marker's follow-up ``recall-note`` call
+    must carry the stored filename — a retitled note's title resolves nowhere."""
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    title = "Deploy runbook: staging (retitled)"
+    store.write_note(
+        "Old deploy notes.md",
+        render_fields(NoteFields(title=title, summary="s", details="x " * 2_000)),
+    )
+    first = recall.compact_recall(omi, "Old deploy notes", max_chars=500, organic=False)
+    assert first["truncated"] is True
+    found = re.search(r"recall-note (\{.*?\}) or request", str(first["content"]))
+    assert found, first["content"]
+    call = json.loads(found.group(1))
+    assert call["name"] == "Old deploy notes.md"
+    again = recall.compact_recall(omi, call["name"], max_chars=call["max_chars"], organic=False)
+    assert again["title"] == title

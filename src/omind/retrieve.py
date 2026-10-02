@@ -374,9 +374,9 @@ def _score_note(
     return score
 
 
-def _indexed_titles(
+def _indexed_notes(
     task: str, omi_dir: Path | str, *, task_is_cred: bool, limit: int
-) -> list[str] | None:
+) -> list[tuple[str, str]] | None:
     """Hybrid-index ranking of notes against the task — the gate/nudge suggestion
     path (5.0.0). Better than keyword overlap alone, and it replaces the two full
     vault listings this used to cost on **every user prompt**: the index answers
@@ -395,24 +395,27 @@ def _indexed_titles(
         hits = index.search(task, limit=limit * 3 + 3)
         if rows is None or hits is None:
             return None
-        title_by_file = {
-            row.filename: row.title
-            or (row.filename[:-3] if row.filename.endswith(".md") else row.filename)
-            for row in rows
-        }
+        title_by_file = {row.filename: row.title or _filename_stem(row.filename) for row in rows}
         cred_files = set()
         if not task_is_cred:
             cred_files = {
                 row.filename for row in rows if _looks_credential(row.title, " ".join(row.tags))
             }
-        titles = [
-            title_by_file[hit.filename]
+        found = [
+            (title_by_file[hit.filename], hit.filename)
             for hit in hits
             if hit.filename in title_by_file and hit.filename not in cred_files
         ]
-        return titles[:limit]
+        return found[:limit]
     except Exception:
         return None
+
+
+def _filename_stem(filename: str) -> str:
+    """A note's stored filename without ``.md`` -- the display fallback for an
+    untitled note. Never a ``recall-note`` name: a note titled ``X.md`` is
+    stored as ``X.md.md`` and its stem ``X.md`` names a different file."""
+    return filename[:-3] if filename.endswith(".md") else filename
 
 
 def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[str]:
@@ -421,11 +424,23 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
     Best-effort: any read/parse failure yields ``[]`` so the gate falls back to
     its generic message rather than wedging.
     """
+    return [title for title, _name in _relevant_notes(task, omi_dir, limit=limit)]
+
+
+def _relevant_notes(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[tuple[str, str]]:
+    """``(title, stored filename)`` of the notes most relevant to ``task``.
+
+    The title is for display; the full stored filename (with ``.md``) is what a
+    ``recall-note`` call should carry: ``safe_name`` takes a name ending in
+    ``.md`` as-is, so it opens exactly that file. A title may hold stripped
+    characters or be stale after a retitle, and a stem is ambiguous for a title
+    ending in ``.md`` (issue #393). Fails open to ``[]``.
+    """
     task_terms = _tokens(task)
     if not task_terms:
         return []
     task_is_cred = bool(task_terms & _CREDENTIAL_STEMS)
-    indexed = _indexed_titles(task, omi_dir, task_is_cred=task_is_cred, limit=limit)
+    indexed = _indexed_notes(task, omi_dir, task_is_cred=task_is_cred, limit=limit)
     if indexed is not None:
         return indexed
     try:
@@ -434,9 +449,9 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
         notes = OmiStore(omi_dir).list_notes()
     except Exception:
         return []
-    scored: list[tuple[float, str]] = []
+    scored: list[tuple[float, str, str]] = []
     for note in notes:
-        stem = note.filename[:-3] if note.filename.endswith(".md") else note.filename
+        stem = _filename_stem(note.filename)
         score = _score_note(
             task,
             title=note.title,
@@ -446,9 +461,9 @@ def relevant_titles(task: str, omi_dir: Path | str, *, limit: int = 3) -> list[s
             task_is_cred=task_is_cred,
         )
         if score > 0:
-            scored.append((score, note.title or stem))
+            scored.append((score, note.title or stem, note.filename))
     scored.sort(key=lambda s: (-s[0], s[1].lower()))
-    return [title for _score, title in scored[:limit]]
+    return [(title, filename) for _score, title, filename in scored[:limit]]
 
 
 def suggest_message(task: str, omi_dir: Path | str, *, limit: int = 3) -> str:
@@ -459,10 +474,15 @@ def suggest_message(task: str, omi_dir: Path | str, *, limit: int = 3) -> str:
     """
     from omind.guard import GATE_MESSAGE
 
-    titles = relevant_titles(task, omi_dir, limit=limit) if task else []
-    if not titles:
+    notes = _relevant_notes(task, omi_dir, limit=limit) if task else []
+    if not notes:
         return GATE_MESSAGE
-    call = json.dumps({"name": titles[0]}, ensure_ascii=False, separators=(",", ":"))
+    titles = [title for title, _name in notes]
+    # The call carries the full stored filename, not the title or the stem: a
+    # title may hold stripped characters or be stale after a retitle, and the
+    # stem of ``X.md.md`` (a note titled ``X.md``) is ``X.md``, a different
+    # file (issue #393). The title stays in the [[...]] display for the reader.
+    call = json.dumps({"name": notes[0][1]}, ensure_ascii=False, separators=(",", ":"))
     alternatives = ", ".join(f"[[{title}]]" for title in titles[1:])
     extra = f" Other candidates: {alternatives}." if alternatives else ""
     return (

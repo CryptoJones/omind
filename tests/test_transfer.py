@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import io
 import json
+import sys
 import tarfile
 from pathlib import Path
 
@@ -234,3 +235,24 @@ def test_bundles_never_carry_lock_or_temp_files(tmp_path: Path) -> None:
     dest = tmp_path / "dest" / "OMI"
     import_dataset(dest, evil, log=_quiet)
     assert not (dest / ".tmp-abc.md").exists()
+
+
+@pytest.mark.skipif(sys.platform == "win32", reason="':' is not a legal filename char on Windows")
+@pytest.mark.parametrize("entry", ["a:b.md", "a:b"])
+def test_json_import_resolves_filenames_strictly(tmp_path: Path, entry: str) -> None:
+    """Review of #405: an export entry named ``a:b.md`` (legal on POSIX) must land
+    on ``a:b.md`` itself — never fall back onto the existing ``a b.md`` note and,
+    with ``force``, overwrite a different note."""
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    store.create_note(NoteFields(title="a:b", summary="existing"))
+    assert (omi / "a b.md").is_file()
+    bundle = tmp_path / "omi.json"
+    incoming = "---\ntitle: imported\n---\n\n# imported\n"
+    bundle.write_text(
+        json.dumps({"notes": [{"filename": entry, "content": incoming}]}), encoding="utf-8"
+    )
+    result = import_dataset(omi, bundle, force=True, log=_quiet)
+    assert result.added == ["a:b.md"]
+    assert (omi / "a:b.md").read_text(encoding="utf-8") == incoming
+    assert store.read_fields("a b.md").summary == "existing"

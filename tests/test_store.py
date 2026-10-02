@@ -1019,3 +1019,99 @@ def test_safe_name_still_rejects_a_title_with_no_matching_note(tmp_path: Path) -
     store = OmiStore(tmp_path)
     with pytest.raises(NoteError):
         store.safe_name("no/such/note")
+
+
+def test_safe_name_resolves_a_title_with_a_colon(tmp_path: Path) -> None:
+    """Issue #393: a `:` is legal to the strict validator, so the colon form of a
+    title used to pass validation, miss on disk, and skip the title fallback —
+    the guard's suggested recall then failed with "note not found"."""
+    store = OmiStore(tmp_path)
+    title = "RESUME HERE — harvest + SSD migration (2026-09-25 17:55 CDT)"
+    store.create_note(NoteFields(title=title, summary="s"))
+    assert (tmp_path / "RESUME HERE — harvest + SSD migration (2026-09-25 17 55 CDT).md").is_file()
+    resolved = store.safe_name(title)
+    assert resolved.name == "RESUME HERE — harvest + SSD migration (2026-09-25 17 55 CDT).md"
+    assert store.read_note(title)
+
+
+def test_safe_name_keeps_the_literal_path_when_no_title_note_exists(
+    tmp_path: Path,
+) -> None:
+    """A missing literal name still resolves to itself (creates are unaffected)
+    when no sanitized-title note exists either."""
+    store = OmiStore(tmp_path)
+    assert store.safe_name("brand new: note").name == "brand new: note.md"
+
+
+def test_relevant_titles_with_stripped_characters_resolve_via_read_note(
+    tmp_path: Path,
+) -> None:
+    """Issue #393, fixture-level: titles holding characters the sanitizer
+    strips (``:``, ``?``, ``/``, ``"``, ``<>``) resolve through ``read_note``.
+    Not a live-vault property: the gate's real contract (it emits the stored
+    filename, which also covers retitled notes) is
+    ``test_retrieve.py::test_suggest_message_recall_name_resolves_for_a_retitled_note``."""
+    from omind import retrieve
+
+    store = OmiStore(tmp_path)
+    titles = [
+        "Deploy runbook: staging (17:55 CDT)",
+        "Deploy checklist? prod/staging",
+        'Deploy "quoted" notes <draft>',
+        "Deploy plain notes",
+    ]
+    for title in titles:
+        store.create_note(NoteFields(title=title, summary="deploy staging runbook"))
+    suggested = retrieve.relevant_titles("deploy staging runbook", tmp_path, limit=10)
+    assert suggested
+    for title in suggested:
+        assert store.read_note(title)
+
+
+def test_safe_name_colon_fallback_refuses_a_differently_titled_note(tmp_path: Path) -> None:
+    """Review of #405: ``Build: prod`` sanitizes to ``Build prod.md``. If that file
+    belongs to an unrelated note titled ``Build prod``, resolving onto it would
+    read — and let edits overwrite — the wrong note. Fail loudly instead."""
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="Build prod", summary="unrelated"))
+    assert store.safe_name("Build: prod").name == "Build: prod.md"
+    with pytest.raises(NoteNotFoundError):
+        store.read_note("Build: prod")
+    with pytest.raises(NoteNotFoundError):
+        store.disable_note("Build: prod")
+    assert not store.read_fields("Build prod").disabled
+
+
+def test_safe_name_resolves_a_scratch_suffixed_colon_name(tmp_path: Path) -> None:
+    """Review of #405: the colon fallback used to sit under the scratch-suffix
+    guard, so ``Runbook: deploy.scratch.md`` never reached it."""
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="Runbook: deploy", summary="s"), scratch=True)
+    assert (tmp_path / "Runbook deploy.scratch.md").is_file()
+    assert store.safe_name("Runbook: deploy.scratch.md").name == "Runbook deploy.scratch.md"
+    assert store.read_note("Runbook: deploy.scratch.md")
+
+
+def test_create_resolves_strictly_and_ignores_title_fallback(tmp_path: Path) -> None:
+    """Review of #405: a note titled ``X.md`` is stored as ``X.md.md``. Creating a
+    note titled ``X`` (filename ``X.md``) must not resolve onto it via the title
+    fallback and fail with "already exists"."""
+    store = OmiStore(tmp_path)
+    store.create_note(NoteFields(title="X.md", summary="first"))
+    assert (tmp_path / "X.md.md").is_file()
+    assert store.create_note(NoteFields(title="X", summary="second")) == "X.md"
+    assert store.read_fields("X.md.md").summary == "first"
+    assert store.read_fields("X.md").summary == "second"
+
+
+def test_create_beside_a_scratch_note_creates_the_durable_note(tmp_path: Path) -> None:
+    """Round 2 of #405 (the CHANGELOG's advertised behaviour change): creating
+    ``X`` beside an existing ``X.scratch.md`` creates ``X.md`` instead of
+    resolving onto the scratch note and refusing it as "already exists"."""
+    store = OmiStore(tmp_path)
+    assert store.create_note(NoteFields(title="X", summary="scratch"), scratch=True) == (
+        "X.scratch.md"
+    )
+    assert store.create_note(NoteFields(title="X", summary="durable")) == "X.md"
+    assert store.read_fields("X.scratch.md").summary == "scratch"
+    assert store.read_fields("X.md").summary == "durable"
