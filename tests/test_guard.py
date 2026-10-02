@@ -1458,7 +1458,9 @@ def test_shell_sites_track_cd_pushd_popd_and_subshells(tmp_path: Path) -> None:
     def where(command: str) -> list[tuple[str, str | None]]:
         sites, _cwd, _dirs, _local = guard._shell_sites(command)
         return [
-            (s.program, None if s.cwd is None else str(s.cwd)) for s in sites if s.program == "git"
+            (s.program, None if s.cwd is None else s.cwd.as_posix())
+            for s in sites
+            if s.program == "git"
         ]
 
     assert where("pushd /a && git status && popd && git push") == [("git", "/a"), ("git", ".")]
