@@ -4,16 +4,20 @@ and the guard wiring (#240)."""
 
 from __future__ import annotations
 
+import fnmatch
 import functools
+import os
+import random
+import re
 import shlex
 import subprocess
 import time
 from pathlib import Path
 
 import pytest
-from conftest import hard_time_limit
+from conftest import cold_shell_caches, hard_time_limit, traced_bound
 
-from omind import guard, rules
+from omind import guard, policy, rules
 
 
 def _note_with_rule(omi: Path, name: str = "Guard Rules.md", **overrides: str) -> Path:
@@ -1466,3 +1470,67 @@ def test_matching_push_to_an_unfetched_remote_or_url_judges_every_branch(
     _git(repo, "config", "push.default", "matching")
     for command in ("git push", "git push origin", f"git push {url}"):
         assert _denied(omi, command, repo, monkeypatch), command
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+@pytest.mark.parametrize("shape", ["x=1;", "bash -c 'echo hi; '"], ids=["assignments", "bash-c"])
+def test_long_repeats_are_judged_within_a_second(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, shape: str, count: int
+) -> None:
+    """#445: `x=1;` and `bash -c 'echo hi; '` repeated, then a push, through
+    the hard rules' subjects and the note rules, each from cold caches, under
+    the SIGALRM bound. The push is still denied."""
+    omi, public, _private = two_repos
+    command = shape * count + "; git push origin main"
+    cold_shell_caches()
+    with hard_time_limit(traced_bound(1.0)):
+        guard._hard_rule_subjects(command)
+    cold_shell_caches()
+    with hard_time_limit(traced_bound(1.0)):
+        assert _denied(omi, command, public, monkeypatch)
+
+
+_GLOB_TEXT = ["git", " ", "push", "P", "*", "?", "[", "]", "/", "\n", "a", "A", "-"]
+_GLOB_CORE = ["git", " ", "push", "P", "*", "**", "?", "[a]", "]", "/", "a", "A", "!", "\n"]
+
+
+def _glob_cases(rng: random.Random) -> tuple[str, str]:
+    text = "".join(rng.choice(_GLOB_TEXT) for _ in range(rng.randint(0, 8)))
+    core = "".join(rng.choice(_GLOB_CORE) for _ in range(rng.randint(0, 4)))
+    return text, rng.choice([f"*{core}*", core, f"*{core}", f"{core}*", f"**{core}**"])
+
+
+@pytest.mark.parametrize("normcase", [os.path.normcase, str.lower], ids=["native", "folded"])
+def test_glob_matches_answers_as_fnmatch(monkeypatch: pytest.MonkeyPatch, normcase: object) -> None:
+    """#445 EM review: the `*literal*` fast path answers as `fnmatch.fnmatch`,
+    `**` and case folding included (`str.lower` stands in for Windows'
+    `normcase`, which both read through `os.path`)."""
+    monkeypatch.setattr(os.path, "normcase", normcase)
+    rng = random.Random(445)
+    for _ in range(20_000):
+        text, pattern = _glob_cases(rng)
+        assert rules._glob_matches(text, pattern) == fnmatch.fnmatch(text, pattern), (text, pattern)
+    # Windows' native normcase folds case too, so ask fnmatch, not the stand-in.
+    assert rules._glob_matches("GIT PUSH x", "*git push*") == fnmatch.fnmatch(
+        "GIT PUSH x", "*git push*"
+    )
+
+
+def _slow_code_text(text: str) -> str:
+    """`rules._code_text` without its fast path: every blanked quote tried."""
+
+    def unquote(m: re.Match[str]) -> str:
+        inner = text[m.start() + 1 : m.end() - 1]
+        return inner if inner and not any(ch.isspace() for ch in inner) else m.group()
+
+    return rules._BLANKED_QUOTE_RE.sub(unquote, policy.shell_code_text(text))
+
+
+def test_code_text_fast_path_answers_as_the_slow_path() -> None:
+    """#445 EM review: skipping the unquote pass when the raw text holds no
+    quoted single word changes nothing."""
+    pieces = ["git", " ", "push", "'", '"', "\\", "$(", ")", "`", "\n", "\t", "x", ";", "<<E", "E"]
+    rng = random.Random(445)
+    for _ in range(20_000):
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 12)))
+        assert rules._code_text(text) == _slow_code_text(text), repr(text)

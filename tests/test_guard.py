@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from conftest import cold_shell_caches, traced_bound
 from conftest import hard_time_limit as _hard_time_limit
 
 from omind import compliance, guard, paths, policy
@@ -4462,3 +4463,243 @@ def test_target_repo_walk_is_memoised_per_command(
     action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
     assert guard._bash_write_repo(action) == repo.resolve()
     assert len(calls) == len(set(calls))  # every directory is checked once
+
+
+#: #445: the two shapes the issue measured. `x=1;` repeated was quadratic in
+#: the hard rules' command-position search (over ten seconds at 10,000); the
+#: `bash -c` run took 2.9 s at 100,000 in the walk's per-character passes.
+_LONG_REPEATS_445 = {"assignments": "x=1;", "bash-c": "bash -c 'echo hi; '"}
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+@pytest.mark.parametrize("shape", list(_LONG_REPEATS_445.values()), ids=list(_LONG_REPEATS_445))
+def test_long_repeats_are_judged_within_a_second(shape: str, count: int) -> None:
+    """Every judge of one long command, each from cold caches, under the
+    SIGALRM bound: the walk, the hard rules' subjects and verdict, and the
+    repo-work classifier. The bound is 1 s on a plain interpreter and 3 s
+    under coverage (`conftest.traced_bound`): CI runs every test under
+    `--cov` on runners about 2.5x slower than a laptop, where a flat 1 s
+    would flake; untraced, every judge here takes at most about 0.35 s."""
+    command = shape * count
+    judges: list[Callable[[], object]] = [
+        lambda: guard._shell_walk(command),
+        lambda: guard._hard_rule_subjects(command),
+        lambda: guard._hard_policy_verdict(command),
+        lambda: guard._is_repo_sensitive_action({"tool": "Bash", "command": command}),
+    ]
+    for judge in judges:
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(1.0)):
+            judge()
+
+
+def test_long_repeats_keep_their_verdicts() -> None:
+    """The fast paths judge as before: a long run with no `sudo` passes, one
+    that ends in a command-position `sudo` is denied."""
+    for shape in _LONG_REPEATS_445.values():
+        cold_shell_caches()
+        assert guard._hard_policy_verdict(shape * 10_000) is None
+        verdict = guard._hard_policy_verdict(shape * 10_000 + "; sudo id")
+        assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+def test_command_position_search_fails_closed_past_its_budget() -> None:
+    """#445: where the anchored search could run for seconds and the keyword
+    is present, the hard rule fires rather than time the hook out. Under the
+    budget the same shape is judged exactly (`grep sudo` is an argument)."""
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    small = "x=1;" * 100 + " ; grep sudo f"
+    assert policy._cmd_position_cost(policy.shell_code_text(small)) <= policy.CMD_SEARCH_BUDGET
+    assert not rule.matches(small)
+    large = "x=1;" * 5_000 + " ; grep sudo f"
+    assert policy._cmd_position_cost(policy.shell_code_text(large)) > policy.CMD_SEARCH_BUDGET
+    with _hard_time_limit(traced_bound(1.0)):
+        assert rule.judge(large) is None  # not judged
+        assert not rule.matches(large)  # which is no match outside the hard path
+        verdict = guard._hard_policy_verdict(large)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+    assert guard.BUDGET_EXCEEDED_MESSAGE in verdict.reason
+    # No `sudo` anywhere: nothing to search for, however costly a search.
+    assert rule.judge("x=1;" * 5_000 + " ; grep x f") is False
+    assert guard._hard_policy_verdict("x=1;" * 5_000 + " ; grep x f") is None
+
+
+def test_budget_denial_has_its_own_reason_and_event() -> None:
+    """#445 EM review: past the budget a hard rule denies with a reason that
+    says the command was too costly to judge, not the rule's own message,
+    and logs a `budget-exceeded` event; a real match keeps the rule's
+    message."""
+    command = "a=1; " * 1000 + "grep -r sudo /etc"
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    verdict = guard._hard_policy_verdict(command, "budget-session")
+    assert verdict is not None and not verdict.allow
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
+    assert verdict.reason == f"omi-guard ({rule.label()}): {guard.BUDGET_EXCEEDED_MESSAGE}"
+    assert rule.message not in verdict.reason
+    events = compliance.read_events()
+    assert [(e["kind"], e["rule_id"], e["session"]) for e in events] == [
+        (compliance.KIND_BUDGET_EXCEEDED, "sudo-use-fleet-sudo", "budget-session")
+    ]
+    # Under the budget, a real match is still the rule's own deny.
+    real = guard._hard_policy_verdict("a=1; " * 10 + "sudo id")
+    assert real is not None and rule.message in real.reason
+    # The opt-in covers its own rule's budget denial too.
+    assert guard._hard_policy_verdict("OMI_SUDO_OK=1 " + command) is None
+
+
+def test_explain_reports_a_budget_denial(capsys: pytest.CaptureFixture[str]) -> None:
+    """`omind guard explain` says why an over-budget command is denied."""
+    guard._run_explain("a=1; " * 1000 + "grep -r sudo /etc")
+    out = capsys.readouterr().out
+    assert guard.BUDGET_EXCEEDED_MESSAGE in out
+    assert out.rstrip().splitlines()[-1].startswith("DENY")
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+def test_heredocs_after_assignments_are_judged_within_a_second(count: int) -> None:
+    """#445 EM review: `a=1 ` repeated, then `<<E ` repeated. Each heredoc's
+    owner lookup walked every assignment from the separator, so 12,000 of
+    each took 28 s in `shell_code_text` alone. Bounded as the other shapes
+    are (see `conftest.traced_bound`: 3x under coverage)."""
+    command = "a=1 " * count + "<<E " * count
+    judges: list[Callable[[], object]] = [
+        lambda: policy.shell_code_text(command),
+        lambda: guard._shell_walk(command),
+        lambda: guard._hard_policy_verdict(command),
+        lambda: guard._is_repo_sensitive_action({"tool": "Bash", "command": command}),
+    ]
+    for judge in judges:
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(1.0)):
+            judge()
+
+
+def _reference_owner_is_shell(command: str, start: int) -> bool:
+    """The heredoc owner lookup as it was before #445: a scan back per heredoc."""
+    segment = command[:start]
+    cut = max(segment.rfind(c) for c in "\n;&|(`")
+    for token in segment[cut + 1 :].split():
+        base = token.rsplit("/", 1)[-1]
+        if "=" in token and not token.startswith("-"):
+            continue
+        if base in policy._HEREDOC_OWNER_SKIP:
+            continue
+        return base in policy._SHELL_HEREDOC_BINARIES
+    return False
+
+
+def test_heredoc_owner_lookup_matches_the_scan_back() -> None:
+    """#445: the one-pass owner lookup answers as the per-heredoc scan back
+    did, at every `<<`, including one inside a word (`bash<<E`, `a=b<<E`)."""
+    import random
+
+    pieces = ["<<", "E", " ", "\t", "\n", ";", "|", "&", "(", "`", "a=1", "=", "-",
+              "/", "bin/", "bash", "sh", "env", "cat", "x", "exec", "time"]  # fmt: skip
+    rng = random.Random(445)
+    for _ in range(20_000):
+        command = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 12)))
+        owners = policy._HeredocOwners(command)
+        for at in (m.start() for m in re.finditer("<<", command)):
+            assert owners.is_shell(at) == _reference_owner_is_shell(command, at), (command, at)
+
+
+def test_heredoc_ops_between_falls_back_where_a_heredoc_straddles() -> None:
+    """#445 EM review: the straddle fallback is reachable. A wrapper's switch
+    can take `<<` as its value, so the stage starts at `bash`, inside the
+    `<< bash` heredoc: a search bounded there finds no heredoc, while the
+    matches found once per text hold one. The fallback answers as the
+    bounded search does."""
+    command = "sudo -u << bash\ngit push\nbash\n"
+    code = policy.shell_code_text(command)
+    stop = command.index("bash")
+    _starts, found = guard._heredoc_ops(code)
+    assert found and found[0].start() < stop < found[0].end()  # it straddles
+    spans = [m.span() for m in guard._heredoc_ops_between(code, 0, stop)]
+    assert spans == [m.span() for m in policy._HEREDOC_RE.finditer(code, 0, stop)] == []
+    # Away from a straddle, the matches found once are the bounded search's.
+    for line, bound in ((0, len(code)), (0, stop - 3)):
+        assert [m.span() for m in guard._heredoc_ops_between(code, line, bound)] == [
+            m.span() for m in policy._HEREDOC_RE.finditer(code, line, bound)
+        ]
+
+
+def test_split_words_tokenizes_a_nul_text_like_shlex() -> None:
+    """#445 EM review: a text holding NUL joins its words on another absent
+    character, and still tokenizes as shlex does."""
+    import shlex
+
+    for text in ("a\0b 'c\0d' \"e f\"", '\0 \x01 \'\\x\' "\\"\0"', "x\\\0y"):
+        assert list(guard._split_words(text)) == shlex.split(text), repr(text)
+    assert guard._absent_char("a") == "\0"
+    assert guard._absent_char("\0\x01\x02") == "\x03"
+
+
+def test_command_position_cost_bounds_the_chain_shapes() -> None:
+    """The bound grows with every separator that restarts a chain the search
+    must rescan, and stays near the length for ordinary text and for chains a
+    newline ends (the assignment skip never crosses one)."""
+    for text in ("echo one; echo two && echo three | cat\n" * 2_000, "x=1 x=1\n" * 2_000):
+        assert policy._cmd_position_cost(text) < 4 * len(text), text[:8]
+    for chain in ("x=1;" * 2_000, "a=1 a=1;" * 2_000, "env -x;" * 2_000):
+        assert policy._cmd_position_cost(chain) > policy.CMD_SEARCH_BUDGET, chain[:8]
+
+
+def test_split_words_tokenizes_like_shlex() -> None:
+    """#445: the regex tokenizer gives shlex's tokens and raises where shlex
+    does, with and without an escape character, over a dense alphabet."""
+    import random
+    import shlex
+
+    def reference(text: str, escape: bool) -> list[str] | None:
+        try:
+            if escape:
+                return shlex.split(text)
+            lexer = shlex.shlex(text, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            lexer.escape = ""
+            return list(lexer)
+        except ValueError:
+            return None
+
+    def ours(text: str, escape: bool) -> list[str] | None:
+        try:
+            return list(guard._split_words(text, escape))
+        except ValueError:
+            return None
+
+    alphabet = list("ab '\"\\ \n\t\r#;$`\x0b\0")
+    rng = random.Random(445)
+    for _ in range(20_000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+        for escape in (True, False):
+            assert ours(text, escape) == reference(text, escape), (text, escape)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "cat <<E\nx\nE\n",
+        "python3 - <<E\nx\nE\n",
+        "x<<<y ",
+        "2>&1 ",
+        "pushd x; popd; ",
+        "source /dev/stdin <<< x; ",
+    ],
+)
+def test_other_long_repeats_stay_linear(tmp_path: Path, shape: str) -> None:
+    """#445 sweep: heredoc owners, here-strings, redirections, `cd` sites and
+    a line of here-string shells each copied or rescanned the text before
+    them per site, so 20,000 repeats took seconds to minutes. Judged from
+    inside a repo, so the redirect check reads every target too."""
+    repo, _outside = _write_probe_repo(tmp_path)
+    command = shape * 20_000
+    action = {"tool": "Bash", "command": command, "cwd": repo.as_posix()}
+    judges: list[Callable[[], object]] = [
+        lambda: guard._hard_policy_verdict(command),
+        lambda: guard._is_repo_sensitive_action(action),
+    ]
+    for judge in judges:
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(2.0)):
+            judge()

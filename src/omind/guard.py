@@ -38,6 +38,7 @@ cannot be skipped by a broken adapter or a missing policy file.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
 import functools
 import json
@@ -1883,7 +1884,9 @@ def _shell_sites(
     code = policy.shell_code_text(command).replace("\\\n", "  ")
     local = list(raw)
     stages = _program_stages(code, raw)
-    events: list[tuple[int, int, Any]] = [(i, 0, ch) for i, ch in enumerate(code) if ch in "()"]
+    events: list[tuple[int, int, Any]] = [
+        (m.start(), 0, m.group()) for m in re.finditer(r"[()]", code)
+    ]
     events += [(stage[2], 1, stage) for stage in stages]
     # Each stage's text stops at the next stage's start, so a long `find
     # -exec … {} +` chain (no separator) is not rescanned to the end for
@@ -1911,12 +1914,15 @@ def _shell_sites(
         except ValueError:
             tokens = None
         if program in ("cd", "pushd", "popd"):
-            before = code[:pos].rstrip()
-            after = code[end:]
+            # Read around the stage by offset, not by copying the text before
+            # and after it, which was quadratic in a run of `cd`s (#445).
+            last = pos - 1
+            while last >= 0 and code[last].isspace():
+                last -= 1
             in_subshell = (
-                (after.startswith("|") and not after.startswith("||"))
-                or (after.startswith("&") and not after.startswith("&&"))
-                or (before.endswith("|") and not before.endswith("||"))
+                (code.startswith("|", end) and not code.startswith("||", end))
+                or (code.startswith("&", end) and not code.startswith("&&", end))
+                or (last >= 0 and code[last] == "|" and not (last >= 1 and code[last - 1] == "|"))
             )
             if not in_subshell:
                 if program == "popd":
@@ -2058,20 +2064,30 @@ def _stage_ends(code: str, starts: list[int]) -> dict[int, int]:
     ``2>&1 …``, the target of ``&>f``) is the stage splitter cutting at a
     redirect, not a new command: it does not bound the stage before it."""
     n = len(code)
-    next_sep = [n] * (n + 1)
-    for k in range(n - 1, -1, -1):
-        sep = code[k] in ";&|\n()`" and not _is_redirect_char(code, k)
-        next_sep[k] = k if sep else next_sep[k + 1]
+    # Separator offsets in one regex pass, not a Python loop per character
+    # (#445); each stage looks up the first one at or after it.
+    seps = [
+        m.start() for m in _STAGE_SEP_RE.finditer(code) if not _is_redirect_char(code, m.start())
+    ]
+    seps.append(n)
     real = [s for s in starts if not _after_redirect(code, s)] + [n]
     ends: dict[int, int] = {}
+    following = [*starts[1:], n]  # built once: per stage it was quadratic (#445)
     r = 0
     for idx, pos in enumerate(starts):
         while real[r] <= pos:
             r += 1
         # A split-off redirect target ends at the next stage of any kind.
-        bound = real[r] if not _after_redirect(code, pos) else (starts + [n])[idx + 1]
-        ends[pos] = min(next_sep[pos], bound)
+        bound = real[r] if not _after_redirect(code, pos) else following[idx]
+        ends[pos] = min(seps[bisect.bisect_left(seps, pos)], bound)
     return ends
+
+
+_STAGE_SEP_RE = re.compile(r"[;&|\n()`]")
+#: One simple command's text between separators; an escaped `\;` (find's
+#: -exec terminator) is a word, not a separator (#419). Runs of plain
+#: characters are taken whole, not one alternation per character (#445).
+_SEGMENT_RE = re.compile(r"(?:[^;&|\n(`)\\]+|\\.)+")
 
 
 def _after_redirect(code: str, pos: int) -> bool:
@@ -2164,11 +2180,50 @@ def _owned_heredocs(raw: str, code: str, start: int, stop: int) -> str:
     command, is skipped: its body comes first and is not this one's (#432)."""
     if "<<" not in code[start:stop]:
         return ""
-    line = raw.rfind("\n", 0, start) + 1
-    heredocs = list(policy._HEREDOC_RE.finditer(code, line, stop))
+    newline = _next_line_break(raw, stop)
+    if newline < 0:
+        return ""  # no line after it: every body is empty (#445)
+    breaks = _line_breaks(raw)
+    before = bisect.bisect_left(breaks, start)
+    line = breaks[before - 1] + 1 if before else 0
+    heredocs = _heredoc_ops_between(code, line, stop)
     if not any(m.start() >= start for m in heredocs):
         return ""
-    return _heredoc_bodies(raw, raw.find("\n", stop), heredocs, start)
+    return _heredoc_bodies(raw, newline, heredocs, start)
+
+
+@functools.lru_cache(maxsize=8)
+def _line_breaks(text: str) -> tuple[int, ...]:
+    """Every newline offset in ``text``, in order: found once per text, so a
+    line holding thousands of stages is not rescanned per stage (#445). A
+    tuple: the memo is shared, so no caller may change it."""
+    return tuple(m.start() for m in re.finditer("\n", text))
+
+
+def _next_line_break(text: str, at: int) -> int:
+    """``text.find("\\n", at)`` by bisection over :func:`_line_breaks`."""
+    breaks = _line_breaks(text)
+    k = bisect.bisect_left(breaks, at)
+    return breaks[k] if k < len(breaks) else -1
+
+
+@functools.lru_cache(maxsize=8)
+def _heredoc_ops(code: str) -> tuple[list[int], list[re.Match[str]]]:
+    """Every ``policy._HEREDOC_RE`` match in ``code``, and their offsets."""
+    found = list(policy._HEREDOC_RE.finditer(code))
+    return [m.start() for m in found], found
+
+
+def _heredoc_ops_between(code: str, line: int, stop: int) -> list[re.Match[str]]:
+    """``list(policy._HEREDOC_RE.finditer(code, line, stop))`` from the matches
+    found once per text (#445). Where a match straddles ``line`` or ``stop``,
+    a search bounded there could match differently, so it searches as before."""
+    starts, found = _heredoc_ops(code)
+    lo = bisect.bisect_left(starts, line)
+    hi = bisect.bisect_left(starts, stop)
+    if (lo and found[lo - 1].end() > line) or (hi and found[hi - 1].end() > stop):
+        return list(policy._HEREDOC_RE.finditer(code, line, stop))
+    return found[lo:hi]
 
 
 def _is_redirect_char(code: str, k: int) -> bool:
@@ -2231,14 +2286,77 @@ def _shell_tokens(part: str) -> list[str]:
     mid-word, so ``<<<'x y'`` and ``--split-string='x y'`` are one unquoted
     word each. (Non-POSIX shlex split them at the blank and kept the quotes,
     so the code in them was never judged; #430.) Raises ``ValueError`` on an
-    unbalanced quote."""
-    if not (_windows_shell() or re.search(r"(?<!\w)[A-Za-z]:\\", part)):
-        return shlex.split(part)
-    lexer = shlex.shlex(part, posix=True)
-    lexer.whitespace_split = True
-    lexer.commenters = ""
-    lexer.escape = ""  # keep backslashes: `C:\repo` stays `C:\repo`
-    return list(lexer)
+    unbalanced quote.
+
+    The split is :func:`_split_words`, which yields exactly what
+    ``shlex.split`` (or the escape-free lexer) would, in C-speed regex passes:
+    shlex reads one character at a time in Python, which made a 2 MB command
+    take seconds to judge (#445)."""
+    escape = not (_windows_shell() or (":\\" in part and re.search(r"(?<!\w)[A-Za-z]:\\", part)))
+    return list(_split_words(part, escape))
+
+
+#: One shell word as POSIX ``shlex`` (``whitespace_split``, no commenters)
+#: reads it: runs of plain characters, ``\\x`` escapes, ``'…'`` and ``"…"``
+#: (where a backslash escapes the next character). Each alternative starts on
+#: a distinct character, so the match never backtracks (#445).
+_SHLEX_WORD_RE = re.compile(r"""(?:[^ \t\r\n'"\\]+|\\.|'[^']*'|"(?:[^"\\]|\\.)*")+""", re.S)
+_SHLEX_PIECE_RE = re.compile(r"""\\(.)|'([^']*)'|"((?:[^"\\]|\\.)*)\"""", re.S)
+#: The same with no escape character (``lexer.escape = ""``): a backslash is
+#: an ordinary character everywhere, quotes included.
+_SHLEX_RAW_WORD_RE = re.compile(r"""(?:[^ \t\r\n'"]+|'[^']*'|"[^"]*")+""")
+_SHLEX_RAW_PIECE_RE = re.compile(r"""'([^']*)'|"([^"]*)\"""")
+_SHLEX_BLANKS = " \t\r\n"
+
+
+def _shlex_piece(match: re.Match[str]) -> str:
+    """One quoted or escaped piece of a word, unquoted the way shlex does: in
+    double quotes a backslash escapes only ``"`` and itself."""
+    if match.group(1) is not None:
+        return match.group(1)
+    if match.group(2) is not None:
+        return match.group(2)
+    return re.sub(
+        r"\\(.)",
+        lambda m: m.group(1) if m.group(1) in '"\\' else m.group(0),
+        match.group(3),
+        flags=re.S,
+    )
+
+
+@functools.lru_cache(maxsize=16)
+def _split_words(text: str, escape: bool = True) -> tuple[str, ...]:
+    """``shlex.split(text)`` (``escape``) or the escape-free POSIX lexer,
+    token for token, without its per-character Python loop (#445). Raises
+    ``ValueError`` where shlex would: an unclosed quote, a trailing escape.
+    Memoised: the walk and the hard rules split the same stage text."""
+    word_re = _SHLEX_WORD_RE if escape else _SHLEX_RAW_WORD_RE
+    if word_re.sub("", text).strip(_SHLEX_BLANKS):
+        raise ValueError("No closing quotation")  # a quote or escape no word took
+    words = word_re.findall(text)
+    if not words:
+        return ()
+    # Unquote every word in one pass over them joined by a character none
+    # holds: a word's quotes pair up within it, so no piece spans two words.
+    # With no escapes, the pieces are bare quotes, which a template unquotes
+    # without a Python call per piece.
+    sep = _absent_char(text)
+    joined = sep.join(words)
+    if escape and "\\" in joined:
+        joined = _SHLEX_PIECE_RE.sub(_shlex_piece, joined)
+    else:
+        joined = _SHLEX_RAW_PIECE_RE.sub(r"\1\2", joined)
+    return tuple(joined.split(sep))
+
+
+def _absent_char(text: str) -> str:
+    """A character ``text`` does not hold, and not a quote or backslash (it
+    joins words that :func:`_split_words` then unquotes): NUL, unless the text
+    holds one."""
+    if "\0" not in text:
+        return "\0"
+    present = set(text) | set("'\"\\")
+    return next(ch for ch in map(chr, range(1, 0x110000)) if ch not in present)
 
 
 def _action_command(action: dict[str, Any]) -> str:
@@ -2607,6 +2725,16 @@ def _runs_repo_work(raw: str) -> bool:
 _OUT_REDIRECT_RE = re.compile(r"(?<![<>&\d\\])(?:\d+|&)?>>?\|?")
 #: One shell word: unquoted and quoted runs, ending at a blank or operator.
 _SHELL_WORD_RE = re.compile(r"""(?:\\.|[^\s"'\\;&|<>()`]|"[^"]*"|'[^']*')+""")
+#: A run of blanks, possibly empty: always matches.
+_BLANK_RUN_RE = re.compile(r"[ \t]*")
+
+
+def _skip_blanks(text: str, at: int) -> int:
+    """The offset of the first non-blank (space/tab) at or after ``at``."""
+    blanks = _BLANK_RUN_RE.match(text, at)
+    return at if blanks is None else blanks.end()
+
+
 #: File operations whose operands are written or removed (#434, #450):
 #: ``tee``, ``rm``, ``truncate`` and ``touch`` write/remove every operand,
 #: ``mv`` removes its sources and writes its destination, ``cp``, ``install``
@@ -2683,15 +2811,19 @@ def _redirect_targets(text: str) -> list[str]:
     ``>&word`` / ``>& word`` with a non-numeric word writes that file."""
     code = policy.shell_code_text(text)
     targets: list[str] = []
+    if ">" not in code:
+        return targets  # every output redirection has one (#445)
     for m in _OUT_REDIRECT_RE.finditer(code):
-        rest = text[m.end() :].lstrip(" \t")
-        if rest[:1] == "&":
-            rest = rest[1:].lstrip(" \t")
-            if rest[:1].isdigit() or rest[:1] == "-":
+        # Read on from the operator by offset: slicing off the rest of the
+        # text per redirection was quadratic in a long run of them (#445).
+        at = _skip_blanks(text, m.end())
+        if text.startswith("&", at):
+            at = _skip_blanks(text, at + 1)
+            if text[at : at + 1].isdigit() or text.startswith("-", at):
                 continue
-        if rest[:1] == "(":
+        if text.startswith("(", at):
             continue
-        word = _SHELL_WORD_RE.match(rest)
+        word = _SHELL_WORD_RE.match(text, at)
         if word is not None:
             try:
                 targets.append("".join(_shell_tokens(word.group())))
@@ -3071,6 +3203,35 @@ def _basename(word: str) -> str:
 
 def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int, int]]:
     """Split shell ``code`` into simple commands: ``(program, args, start, end)``.
+    See :func:`_program_stages_cached`; each call gets its own ``args`` lists."""
+    return [
+        (program, list(args), start, end)
+        for program, args, start, end in _program_stages_cached(code, raw)
+    ]
+
+
+#: A leading ``VAR=value`` word.
+_ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_]\w*=")
+
+
+def _word_offset(text: str, words: list[str], offsets: list[int], k: int) -> int:
+    """Where ``words[k]`` (``text.split()``) starts in ``text``. ``offsets``
+    caches the words located so far, so a segment's words are found once each
+    and only up to the last one a stage asks for (#445)."""
+    while len(offsets) <= k:
+        last = len(offsets) - 1
+        prev = offsets[last] + len(words[last]) if offsets else 0
+        offsets.append(text.find(words[last + 1], prev))
+    return offsets[k]
+
+
+@functools.lru_cache(maxsize=16)
+def _program_stages_cached(
+    code: str, raw: str = ""
+) -> tuple[tuple[str, tuple[str, ...], int, int], ...]:
+    """Split shell ``code`` into simple commands: ``(program, args, start, end)``.
+    Memoised: the walk, the hard rules and the repo-work classifier split the
+    same command (#445).
 
     ``code`` is ``policy.shell_code_text`` output — the same length as the raw
     command, so ``start:end`` slices the raw text too. Backslash-newline
@@ -3086,21 +3247,34 @@ def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int,
     n = len(code)
     # A raw text of another length cannot be read at the same offsets: ignore it.
     raw = raw.replace("\\\n", "  ") if len(raw) == n else ""
-    stages: list[tuple[str, list[str], int, int]] = []
+    stages: list[tuple[str, tuple[str, ...], int, int]] = []
     # An escaped `\;` (find's -exec terminator) is a word, not a separator (#419).
-    for seg in re.finditer(r"(?:\\.|[^;&|\n(`)\\])+", code):
+    for seg in _SEGMENT_RE.finditer(code):
         end = seg.end()
         while end < n and code[end].isspace():
             end += 1
-        toks = [(m.group(), seg.start() + m.start()) for m in re.finditer(r"\S+", seg.group())]
+        # Words by `str.split` (the same Unicode blanks as `\S+`), offsets
+        # only where a stage needs one, and the next `-exec` by bisection, so
+        # one long segment is not walked word by word in Python (#445).
+        text = seg.group()
+        base_at = seg.start()
+        words = text.split()
+        offsets: list[int] = []
+        ntok = len(words)
+        execs = (
+            []
+            if _EXEC_ACTIONS.isdisjoint(words)
+            else [k for k, w in enumerate(words) if w in _EXEC_ACTIONS]
+        )
+        execs.append(ntok)
         in_exec = False
-        i, ntok = 0, len(toks)
+        i = 0
         while i < ntok:
             j = i
             env_prefix = False
             while j < ntok:
-                word = toks[j][0]
-                if re.match(r"[A-Za-z_]\w*=", word):
+                word = words[j]
+                if _ASSIGNMENT_WORD_RE.match(word):
                     j += 1
                     continue
                 base = _basename(word)
@@ -3108,47 +3282,56 @@ def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int,
                     # The tool's global options may sit before `run`
                     # (`poetry -C sub run`, `uv --directory . run`).
                     k = j + 1
-                    while k < ntok and toks[k][0].startswith("-"):
-                        k += 2 if toks[k][0] in _RUN_WRAPPERS[base] else 1
-                    if k < ntok and toks[k][0] == "run":
+                    while k < ntok and words[k].startswith("-"):
+                        k += 2 if words[k] in _RUN_WRAPPERS[base] else 1
+                    if k < ntok and words[k] == "run":
                         j = k + 1
-                        while j < ntok and toks[j][0].startswith("-"):
-                            j += 2 if toks[j][0] in _RUN_WRAPPERS[base] else 1
+                        while j < ntok and words[j].startswith("-"):
+                            j += 2 if words[j] in _RUN_WRAPPERS[base] else 1
                         env_prefix = base == "hatch"
                         continue
                     break
                 if base not in _STAGE_WRAPPERS:
                     break
                 j += 1
-                while j < ntok and toks[j][0].startswith("-"):
-                    j += _switch_width(toks[j][0], _STAGE_WRAPPERS[base])
+                while j < ntok and words[j].startswith("-"):
+                    j += _switch_width(words[j], _STAGE_WRAPPERS[base])
                 if base in _WRAPPER_POSITIONAL and j < ntok:
                     # Switches and `--` may follow the duration too
                     # (`timeout 5s -k 2s cmd`, `timeout 5 -- cmd`; #430 review).
                     j += 1
-                    while j < ntok and toks[j][0].startswith("-"):
-                        j += _switch_width(toks[j][0], _STAGE_WRAPPERS[base])
+                    while j < ntok and words[j].startswith("-"):
+                        j += _switch_width(words[j], _STAGE_WRAPPERS[base])
             if j >= ntok:
                 break
+            # The stage runs to the next find action at most.
+            limit = execs[bisect.bisect_left(execs, j + 1)]
             cut = j + 1
-            while cut < ntok and toks[cut][0] not in _EXEC_ACTIONS:
-                w = toks[cut][0]
-                if in_exec and (
+            while in_exec and cut < limit:
+                w = words[cut]
+                if (
                     w == "\\;"
-                    or (w == "+" and toks[cut - 1][0] == "{}")
-                    or (raw and raw.startswith(_QUOTED_EXEC_END, toks[cut][1]))
+                    or (w == "+" and words[cut - 1] == "{}")
+                    or (
+                        raw
+                        and raw.startswith(
+                            _QUOTED_EXEC_END, base_at + _word_offset(text, words, offsets, cut)
+                        )
+                    )
                 ):
                     break
                 cut += 1
-            program = toks[j][0].split(":", 1)[-1] if env_prefix else toks[j][0]
-            stages.append((_basename(program), [t for t, _ in toks[j + 1 : cut]], toks[j][1], end))
+            if not in_exec:
+                cut = limit
+            program = words[j].split(":", 1)[-1] if env_prefix else words[j]
+            start = base_at + _word_offset(text, words, offsets, j)
+            stages.append((_basename(program), tuple(words[j + 1 : cut]), start, end))
             # An -exec command ended at its `\;`/`+`: what follows is find's own
             # expression up to its next -exec (`-iname` there is not sed's `-i`).
-            while cut < ntok and toks[cut][0] not in _EXEC_ACTIONS:
-                cut += 1
+            cut = execs[bisect.bisect_left(execs, cut)]
             i = cut + 1
             in_exec = True
-    return stages
+    return tuple(stages)
 
 
 def _runs_in_place_edit(stages: list[tuple[str, list[str], int, int]]) -> bool:
@@ -3474,6 +3657,8 @@ def _here_strings(words: list[str]) -> list[str]:
     """The here-strings among ``words`` (``<<< '…'``, ``<<<'…'``): what a
     shell whose ``-c`` body reads its stdin is given as code (#432 review)."""
     here: list[str] = []
+    if "<<<" not in "\0".join(words):
+        return here  # none at all: skip the per-word scan (#445)
     i = 0
     while i < len(words):
         attached = _HERE_STRING_RE.fullmatch(words[i])
@@ -3542,6 +3727,8 @@ def _heredoc_bodies(
     body: list[str] = []
     start = newline + 1 if newline >= 0 else len(text)
     for match in heredocs:
+        if start >= len(text):
+            break  # no lines left for this body or any after it (#445)
         delimiter = match.group(3) or match.group(4)
         while start < len(text):
             end = text.find("\n", start)
@@ -3692,8 +3879,8 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
         # bash`), past this stage: it is the code the shell reads.
         heredocs = list(policy._HEREDOC_RE.finditer(masked, head, own))
         if heredocs:
-            code.append(_heredoc_bodies(text, text.find("\n", own), heredocs))
-    for segment in re.finditer(r"(?:\\.|[^;&|\n(`)\\])+", masked):
+            code.append(_heredoc_bodies(text, _next_line_break(text, own), heredocs))
+    for segment in _SEGMENT_RE.finditer(masked):
         if not re.search(r"(?:^|[\s/])env\s", segment.group() + " "):
             continue
         try:
@@ -3758,15 +3945,39 @@ def _quoted_code_re(pattern: str) -> re.Pattern[str]:
 def _hard_rule_hits(rule: policy.Rule, command: str, subjects: _HardSubjects) -> list[str]:
     """The subjects ``rule`` matches. A match in ``words``/``quoted`` is
     reported as ``command``: only an opt-in on the command itself covers it.
-    May raise on a malformed rule; the callers skip that rule."""
-    hits = [text for text in subjects.code if rule.matches(text)]
+
+    Raises :class:`policy.SearchBudgetExceededError` when nothing matched but a
+    subject was too costly to judge (#445): the hard-rule callers deny that
+    with its own reason. May raise on a malformed rule; the callers skip that
+    rule."""
+    over_budget = False
+
+    def found(regex: re.Pattern[str] | None, text: str) -> bool:
+        nonlocal over_budget
+        if regex is None:
+            judged = rule.judge(text)
+        elif rule.match == "command":
+            # A command-position search is bounded (#445).
+            try:
+                judged = policy.command_search(regex, rule.pattern, text)
+            except policy.SearchBudgetExceededError:
+                judged = None
+        else:
+            judged = regex.search(text) is not None
+        over_budget = over_budget or judged is None
+        return judged is True
+
+    hits = [text for text in subjects.code if found(None, text)]
     if hits:
         return hits
-    if any(rule.compiled().search(text) for text in subjects.words):
+    compiled = rule.compiled()
+    quoted = _quoted_code_re(rule.pattern) if rule.match == "command" else compiled
+    if any(found(compiled, text) for text in subjects.words):
         return [command]
-    quoted = _quoted_code_re(rule.pattern) if rule.match == "command" else rule.compiled()
-    if any(quoted.search(text) for text in subjects.quoted):
+    if any(found(quoted, text) for text in subjects.quoted):
         return [command]
+    if over_budget:
+        raise policy.SearchBudgetExceededError(rule.pattern)
     return []
 
 
@@ -3781,7 +3992,26 @@ def _hard_rule_opted_in(rule: policy.Rule, command: str, hits: list[str]) -> boo
     )
 
 
-def _hard_policy_verdict(command: str) -> Verdict | None:
+#: The reason a hard rule denies a command too costly to judge (#445).
+BUDGET_EXCEEDED_MESSAGE = "command too large/complex to judge safely — split it or shorten it"
+
+
+def _log_budget_exceeded(rule: policy.Rule, command: str, session: str) -> None:
+    """Record a budget denial as its own compliance event, so the audit trail
+    tells it from a real match (#445). Never raises."""
+    with contextlib.suppress(Exception):
+        compliance.log_event(
+            compliance.KIND_BUDGET_EXCEEDED,
+            session=session,
+            tool="Bash",
+            command=command,
+            rule_id=rule.id,
+            severity=rule.severity,
+            outcome="deny",
+        )
+
+
+def _hard_policy_verdict(command: str, session: str = "") -> Verdict | None:
     """The deny for the first ``hard`` policy rule ``command`` matches, else None.
 
     A rule is tested against every text :func:`_hard_rule_subjects` returns, so
@@ -3795,6 +4025,12 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
     The SEED rules live in code and never depend on the state dir: if loading
     the full policy raises for any reason (e.g. no resolvable home directory),
     the seed rules are evaluated on their own rather than lost (#420).
+
+    A command whose command-position search could run past
+    :data:`policy.CMD_SEARCH_BUDGET`, and which holds a hard rule's keyword,
+    is denied with :data:`BUDGET_EXCEEDED_MESSAGE` and logged as a
+    ``budget-exceeded`` event under ``session`` (#445): the hard rules fail
+    CLOSED there, and only they do.
     """
     try:
         rules: list[policy.Rule] = list(policy.load_policy())
@@ -3813,6 +4049,17 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
         # the rules after it.
         try:
             hits = _hard_rule_hits(rule, command, subjects)
+        except policy.SearchBudgetExceededError:
+            # Too costly to judge, and the rule's keyword is in it: a hard
+            # rule fails CLOSED, with a reason that says why (#445).
+            if _hard_rule_opted_in(rule, command, [command]):
+                continue
+            _log_budget_exceeded(rule, command, session)
+            return Verdict(
+                allow=False,
+                reason=f"omi-guard ({rule.label()}): {BUDGET_EXCEEDED_MESSAGE}",
+                rule_id=rule.id,
+            )
         except Exception:
             continue
         if not hits or _hard_rule_opted_in(rule, command, hits):
@@ -3851,7 +4098,7 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
         return Verdict(allow=True)
 
     # 2) Hard blocks — every ``hard`` rule in the data-driven policy.
-    hard = _hard_policy_verdict(command)
+    hard = _hard_policy_verdict(command, session)
     if hard is not None:
         return hard
 
@@ -4070,7 +4317,9 @@ def _fail_open_verdict(
         verdict = decided
     else:
         with contextlib.suppress(Exception):
-            hard = _hard_policy_verdict(str(action.get("command") or ""))
+            hard = _hard_policy_verdict(
+                str(action.get("command") or ""), str(action.get("session") or "")
+            )
             if hard is not None:
                 verdict = hard
     session = ""
@@ -4944,6 +5193,12 @@ def _run_explain(command: str) -> int:
     for rule in policy.load_policy():
         try:
             hits = _hard_rule_hits(rule, command, subjects)
+        except policy.SearchBudgetExceededError:
+            if rule.severity == policy.SEVERITY_HARD:
+                sys.stdout.write(f"  [{rule.severity}] {rule.id}: {BUDGET_EXCEEDED_MESSAGE}\n")
+                hits = [command]
+            else:
+                continue  # not judged: no match
         except Exception:
             continue
         if hits:

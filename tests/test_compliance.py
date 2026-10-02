@@ -150,6 +150,18 @@ def test_detector_honors_github_push_opt_in_and_skips_non_bash() -> None:
     assert compliance.record_post_tool(read) == 0  # non-Bash has no command to scan
 
 
+def test_detector_does_not_log_an_over_budget_command() -> None:
+    """#445 EM review: a command too costly to judge is not a match for Layer
+    E. Only the hard-rule block path fails closed on it; recording it here
+    would log a false `escaped` event."""
+    command = "a=1; " * 1000 + "grep -r sudo /etc"
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    assert rule.judge(command) is None
+    event = {"tool_name": "Bash", "session_id": "s", "tool_input": {"command": command}}
+    assert compliance.record_post_tool(event) == 0
+    assert compliance.read_events() == []
+
+
 def test_guard_check_logs_policy_deny_but_not_gate_deny() -> None:
     # A bare unconsulted action is an omi-gate deny — friction, not logged.
     guard.run_guard("check", io.StringIO(json.dumps({"command": "ls", "session": "g"})))

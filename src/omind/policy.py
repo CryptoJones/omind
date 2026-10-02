@@ -23,7 +23,9 @@ place: ``github-push`` for that tier, otherwise the severity.
 
 from __future__ import annotations
 
+import bisect
 import contextlib
+import functools
 import json
 import os
 import re
@@ -160,6 +162,94 @@ _CMD_POSITION = (
     r"(?:[./][^\s;&|`()]*/)?"
 )
 
+#: The most work :func:`command_search` lets one ``_CMD_POSITION`` search do,
+#: in :func:`_cmd_position_cost` units (about a character step each). The
+#: prefix's ``\w+=\S*`` assignment skip rescans a blank-free run from every
+#: separator inside it, so ``x=1;`` repeated 10,000 times took over ten seconds
+#: per hard rule and timed the hook out (#445). Ordinary commands cost a few
+#: thousand units; a search above the budget fails closed instead of running.
+CMD_SEARCH_BUDGET = 2_000_000
+_SEPARATOR_CHARS = "\n;&|`("
+#: A word that may be a link in that chain: an assignment, a switch, a
+#: duration, or a wrapper (optionally by path).
+_CHAIN_LINK_RE = re.compile(
+    r"\w+=|-|\d|(?:[./][^\s;&|`()]*/)?(?:"
+    + "|".join(re.escape(name) for name in sorted(STAGE_WRAPPERS))
+    + r")"
+)
+_CHAIN_GAP_RE = re.compile(r"[ \t]+")
+_WORD_SPAN_RE = re.compile(r"\S+")
+
+
+@functools.lru_cache(maxsize=256)
+def _bare_pattern(pattern: str) -> re.Pattern[str] | None:
+    """``pattern`` compiled on its own, or ``None`` when only its anchored
+    form compiles."""
+    try:
+        return re.compile(pattern)
+    except re.error:
+        return None
+
+
+def _cmd_position_cost(text: str) -> int:
+    """An upper bound on the work a ``_CMD_POSITION`` search of ``text`` does
+    (#445). The search tries every separator as a start, and from each one
+    skips a chain of assignment and wrapper words, each a blank-free run
+    joined by blanks; so the bound sums, over the starts, the extent of the
+    chain each could skip. A word counts as a link unless it cannot be an
+    assignment, a wrapper, a switch or a switch's value, so the bound only
+    overestimates. Linear; a short text returns its trivial bound unscanned."""
+    n = len(text)
+    if n * n <= CMD_SEARCH_BUDGET:
+        return n * n
+    spans = [(m.start(), m.end()) for m in _WORD_SPAN_RE.finditer(text)]
+    count = len(spans)
+    # joined[i]: word i + 1 follows word i across blanks only (`[ \t]+`).
+    joined = [
+        bool(_CHAIN_GAP_RE.fullmatch(text, spans[i][1], spans[i + 1][0])) for i in range(count - 1)
+    ] + [False]
+    # reach[i]: how far a chain that enters word i can run.
+    reach = [n] * (count + 1)
+    for i in range(count - 1, -1, -1):
+        start, end = spans[i]
+        link = bool(_CHAIN_LINK_RE.match(text, start)) or (
+            i > 0 and text[spans[i - 1][0]] == "-"  # a switch's value
+        )
+        reach[i] = reach[i + 1] if link and joined[i] else end
+    cost = n
+    previous_end = 0
+    for i, (start, end) in enumerate(spans):
+        # A newline before this word starts a chain at it; `^` at offset 0.
+        cost += (text.count("\n", previous_end, start) + (i == 0)) * (reach[i] - previous_end)
+        # A separator inside it starts a chain at the rest of it.
+        seps = sum(text.count(ch, start, end) for ch in _SEPARATOR_CHARS if ch != "\n")
+        if seps:
+            cost += seps * ((reach[i + 1] if joined[i] else end) - start)
+        previous_end = end
+    return cost
+
+
+class SearchBudgetExceededError(Exception):
+    """A command-position search that could exceed :data:`CMD_SEARCH_BUDGET`
+    on a text holding the rule's keyword: the command was not judged (#445)."""
+
+
+def command_search(compiled: re.Pattern[str], pattern: str, text: str) -> bool:
+    """``compiled.search(text)`` for ``compiled``, a ``_CMD_POSITION``-anchored
+    ``pattern``, in bounded time (#445). A text where ``pattern`` occurs
+    nowhere cannot match its anchored form, so it is answered at once. Where
+    it does occur and the anchored search could exceed
+    :data:`CMD_SEARCH_BUDGET`, raises :class:`SearchBudgetExceededError`: the
+    caller decides. The hard rules deny such a command with a reason of its
+    own (fail CLOSED); everything else treats it as not judged, no match."""
+    bare = _bare_pattern(pattern)
+    if bare is not None and bare.search(text) is None:
+        return False
+    if _cmd_position_cost(text) > CMD_SEARCH_BUDGET:
+        raise SearchBudgetExceededError(pattern)
+    return compiled.search(text) is not None
+
+
 #: Interpreters whose heredoc body IS shell code for THIS shell to run, so its
 #: separators are real and its body must stay visible to
 #: :func:`shell_code_text`. Anything else (``cat``, ``python``, ``gh issue
@@ -172,24 +262,106 @@ _HEREDOC_RE = re.compile(
 )
 
 
+#: The characters a heredoc's owning command starts after.
+_OWNER_SEP_RE = re.compile(r"[\n;&|(`]")
+
+
 def _heredoc_owner_is_shell(command: str, start: int) -> bool:
     """True when the simple command owning the heredoc at ``start`` is a shell.
 
     Scans back to the nearest separator and takes the first token that is not a
     ``VAR=val`` assignment or a transparent wrapper, comparing its basename.
+    One heredoc's answer; :class:`_HeredocOwners` answers a run of them.
     """
-    segment = command[:start]
-    cut = max(segment.rfind(c) for c in "\n;&|(`")
-    for token in segment[cut + 1 :].split():
-        base = token.rsplit("/", 1)[-1]
-        if "=" in token and not token.startswith("-"):
-            continue
-        if base in _HEREDOC_OWNER_SKIP:
-            continue
+    return _HeredocOwners(command).is_shell(start)
+
+
+def _owner_word_skipped(token: str) -> bool:
+    """Whether a word before a heredoc's owner is passed over: a ``VAR=val``
+    assignment or a transparent wrapper."""
+    if "=" in token and not token.startswith("-"):
+        return True
+    return token.rsplit("/", 1)[-1] in _HEREDOC_OWNER_SKIP
+
+
+#: The longest name the owner lookup compares a basename against: a longer
+#: one is neither skipped nor a shell.
+_OWNER_NAME_MAX = max(len(name) for name in _HEREDOC_OWNER_SKIP | _SHELL_HEREDOC_BINARIES)
+
+
+class _HeredocOwners:
+    """:func:`_heredoc_owner_is_shell` for every heredoc in ``command``, in
+    linear time overall (#445). Each separator-bounded segment's words are
+    found once, with the first one that is not skipped; a heredoc's owner is
+    that word when it ends before the heredoc. Walking the words from the
+    separator per heredoc was quadratic in a run of assignments followed by
+    a run of heredocs (``a=1 a=1 … <<E <<E …``)."""
+
+    def __init__(self, command: str) -> None:
+        self.command = command
+        self.seps = [m.start() for m in _OWNER_SEP_RE.finditer(command)]
+        # Per segment (keyed by its separator): its words' spans, their
+        # ends, and the index of the first word not skipped (or the count).
+        self.segments: dict[int, tuple[list[tuple[int, int]], list[int], int]] = {}
+
+    def _segment(self, k: int) -> tuple[list[tuple[int, int]], list[int], int]:
+        cut = self.seps[k - 1] if k else -1
+        found = self.segments.get(cut)
+        if found is None:
+            stop = self.seps[k] if k < len(self.seps) else len(self.command)
+            spans = [m.span() for m in _WORD_SPAN_RE.finditer(self.command, cut + 1, stop)]
+            first = len(spans)
+            for idx, (ws, we) in enumerate(spans):
+                if not _owner_word_skipped(self.command[ws:we]):
+                    first = idx
+                    break
+            found = (spans, [we for _ws, we in spans], first)
+            self.segments[cut] = found
+        return found
+
+    def is_shell(self, start: int) -> bool:
+        command = self.command
+        spans, ends, first = self._segment(bisect.bisect_left(self.seps, start))
+        # The words wholly before the heredoc are read as they are; the one
+        # it starts inside (`bash<<E`) is read up to it, as a scan bounded at
+        # the heredoc would.
+        whole = bisect.bisect_right(ends, start)
+        if first < whole:
+            ws, we = spans[first]
+            return command[ws:we].rsplit("/", 1)[-1] in _SHELL_HEREDOC_BINARIES
+        if whole == len(spans) or spans[whole][0] >= start:
+            return False
+        ws = spans[whole][0]
+        # Its base is the text after its last `/` before the heredoc; only a
+        # short one can be a name, so read no further back than that.
+        slash = command.rfind("/", max(ws, start - _OWNER_NAME_MAX - 1), start)
+        base_at = slash + 1 if slash >= 0 else ws
+        if start - base_at > _OWNER_NAME_MAX:
+            return False  # neither skipped nor a shell
+        base = command[base_at:start]
+        assignment = command[ws] != "-" and command.find("=", ws, start) >= 0
+        if assignment or base in _HEREDOC_OWNER_SKIP:
+            return False  # skipped, and no word follows it before the heredoc
         return base in _SHELL_HEREDOC_BINARIES
-    return False
 
 
+#: What :func:`shell_code_text` takes in one step: in code context, a stretch
+#: of plain text and whole single-quoted strings; in a double-quoted body, the
+#: text before the next character it acts on. So a megabyte of plain text is
+#: not walked a character at a time (#445).
+_CODE_STRETCH_RE = re.compile(r"(?:[^\\'\"$`)<\n]+|'[^']*')+")
+_DQUOTE_STOP_RE = re.compile(r"[\\\"$`]")
+
+
+def _blank_single_quoted(text: str) -> str:
+    """``text`` (plain shell code and whole ``'…'`` strings) with every
+    single-quoted body blanked to spaces, in C-level passes (#445)."""
+    parts = text.split("'")  # odd parts are the bodies
+    parts[1::2] = map(" ".__mul__, map(len, parts[1::2]))
+    return "'".join(parts)
+
+
+@functools.lru_cache(maxsize=16)
 def shell_code_text(command: str) -> str:
     """``command`` with every DATA region blanked out, length-preserving.
 
@@ -218,11 +390,24 @@ def shell_code_text(command: str) -> str:
     out = list(command)
     stack: list[str] = []
     heredocs: list[tuple[str, bool, bool]] = []
+    owners: _HeredocOwners | None = None
     i, n = 0, len(command)
     while i < n:
         ch = command[i]
         if stack and stack[-1] in "'\"":
             # --- DATA context: blank everything up to the closing quote. ---
+            # Skip straight to the next character that can end or re-open
+            # code (#445); everything before it is blanked.
+            if stack[-1] == "'":
+                stop = command.find("'", i)
+                stop = n if stop == -1 else stop
+            else:
+                found = _DQUOTE_STOP_RE.search(command, i)
+                stop = n if found is None else found.start()
+            if stop > i:
+                out[i:stop] = " " * (stop - i)
+                i = stop
+                continue
             if stack[-1] == '"':
                 # Only a double-quoted body re-enters code for a substitution,
                 # and only there does a backslash escape the next character.
@@ -247,6 +432,18 @@ def shell_code_text(command: str) -> str:
             i += 1
             continue
         # --- CODE context. ---
+        if ch not in '\\"$`)<\n':
+            # Plain text and whole single-quoted strings, which hold nothing
+            # to act on, are taken as one stretch: its quoted bodies are
+            # blanked at once, not a character or a quote at a time (#445).
+            stretch = _CODE_STRETCH_RE.match(command, i)
+            if stretch is None:  # a quote that never closes: data to the end
+                out[i + 1 :] = " " * (n - i - 1)
+                break
+            if "'" in stretch.group():
+                out[i : stretch.end()] = _blank_single_quoted(stretch.group())
+            i = stretch.end()
+            continue
         if ch == "\\" and i + 1 < n:
             i += 2
             continue
@@ -271,10 +468,10 @@ def shell_code_text(command: str) -> str:
             continue
         match = _HEREDOC_RE.match(command, i)
         if match:
+            if owners is None:  # every heredoc's owner, found in one pass
+                owners = _HeredocOwners(command)
             delimiter = match.group(3) or match.group(4)
-            heredocs.append(
-                (delimiter, bool(match.group(1)), not _heredoc_owner_is_shell(command, i))
-            )
+            heredocs.append((delimiter, bool(match.group(1)), not owners.is_shell(i)))
             i = match.end()
             continue
         if ch == "\n" and heredocs:
@@ -308,6 +505,17 @@ def _blank_heredoc_bodies(
     return pos
 
 
+@functools.lru_cache(maxsize=512)
+def _compile_rule(pattern: str, match: str) -> re.Pattern[str]:
+    """A rule's regex, anchored to command position for ``match="command"``.
+    Memoised: the hard rules test every subject of a command, thousands for a
+    long one, and rebuilding the anchored pattern each time cost more than
+    the search (#445). Raises ``re.error`` on a bad pattern, every time."""
+    if match == "command":
+        return re.compile(_CMD_POSITION + r"(?:" + pattern + r")")
+    return re.compile(pattern)
+
+
 @dataclass
 class Rule:
     """One policy rule. ``seed`` rules ship in code; ``learned`` rules persist
@@ -334,9 +542,7 @@ class Rule:
     verify: bool = False
 
     def compiled(self) -> re.Pattern[str]:
-        if self.match == "command":
-            return re.compile(_CMD_POSITION + r"(?:" + self.pattern + r")")
-        return re.compile(self.pattern)
+        return _compile_rule(self.pattern, self.match)
 
     def matches(self, command: str) -> bool:
         """True when this rule fires on ``command``.
@@ -345,10 +551,22 @@ class Rule:
         the keyword must be in command position in code the LOCAL shell runs —
         not inside a quoted payload or a prose heredoc body (#317). A
         ``match="search"`` rule keeps the raw text: those patterns are
-        deliberately substring searches.
+        deliberately substring searches. A command too costly to judge is no
+        match here (fail open); see :meth:`judge`.
         """
-        subject = shell_code_text(command) if self.match == "command" else command
-        return bool(self.compiled().search(subject))
+        return self.judge(command) is True
+
+    def judge(self, command: str) -> bool | None:
+        """:meth:`matches`, or ``None`` when ``command`` is too costly to
+        judge (:class:`SearchBudgetExceededError`, #445). Only the hard-rule
+        enforcement path acts on ``None`` (it denies); compliance logging and
+        soft rules read it as no match."""
+        if self.match == "command":
+            try:
+                return command_search(self.compiled(), self.pattern, shell_code_text(command))
+            except SearchBudgetExceededError:
+                return None
+        return bool(self.compiled().search(command))
 
     def label(self) -> str:
         """The parenthetical the guard prints: ``github-push`` for that tier,
