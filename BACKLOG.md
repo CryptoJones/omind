@@ -88,10 +88,12 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 - [x] **guard: hard seed rules miss `bash -c` / `eval` / piped-shell bodies and `env`/`nice`/`timeout`-wrapped `sudo`** ([#430](https://github.com/CryptoJones/omind/issues/430)) — **v10.2.14** — _bug (security)_ —
   Each hard rule is now tested against every `-c`/`eval` body the cached shell walk
-  unwraps. The quoted text of an opaque site, including a shell that reads code from
-  stdin, is judged as code. The command-position wrapper list is derived from the
-  stage parser's wrapper table (`policy.STAGE_WRAPPERS`), so `env`, `nice` and
-  `timeout 5` are covered. The audit's false-positive probe suites are unchanged.
+  unwraps, the stages piped into a shell that reads stdin, a here-string, the
+  positional words a `-c` body runs, `env -S` values, and an opaque site's quoted
+  text. The command-position wrapper list is derived from the stage parser's
+  wrapper table (`policy.STAGE_WRAPPERS`), so `env`, `nice` and `timeout` are
+  covered in every argument shape. `command -v sudo` stays allowed, and
+  `guard explain` agrees with `check`.
 
 ### Shipped — 2026-10-02 (v10.2.13)
 

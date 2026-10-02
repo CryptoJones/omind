@@ -84,7 +84,9 @@ STAGE_WRAPPERS: dict[str, frozenset[str]] = {
     **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
     "xargs": frozenset({"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"}),
     "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
-    "env": frozenset({"-u", "-C", "-S"}),
+    # Not `-S`: its value is itself a command (`env -S sudo id`), so the word
+    # after it stays in command position (#430 review).
+    "env": frozenset({"-u", "-C"}),
     "nice": frozenset({"-n"}),
     "timeout": frozenset({"-s", "-k"}),
     "time": frozenset({"-f", "-o"}),
@@ -93,22 +95,31 @@ STAGE_WRAPPERS: dict[str, frozenset[str]] = {
 WRAPPER_POSITIONAL = frozenset({"timeout"})
 
 
+#: Wrappers whose ``-v``/``-V`` makes them a LOOKUP, not an exec:
+#: ``command -v sudo`` asks whether sudo is installed and runs nothing.
+_LOOKUP_WRAPPERS = frozenset({"command", "builtin"})
+
+
 def _wrapper_pattern(name: str, takes_arg: frozenset[str]) -> str:
     """One :data:`STAGE_WRAPPERS` entry as a regex: an optional path
     (``/usr/bin/env``), the name, its switches (a switch that takes a separate
-    argument consumes it), and ``timeout``'s positional duration.
+    argument consumes it, even a negative value such as ``nice -n -5``), and
+    ``timeout``'s positional duration, which more switches and ``--`` may
+    follow (``timeout 5s -k 2s``, ``timeout 5 --``). ``command``/``builtin``
+    with ``-v``/``-V`` is a lookup, so those switches end the match.
 
     Each word can match only one way, so a run of wrapper words cannot make the
     pattern backtrack exponentially: a value-taking switch is kept out of the
-    generic ``-…`` branch, its value cannot start with ``-``, and the duration
-    must look like one."""
-    switch = r"-\S*"
+    generic ``-…`` branch and always consumes the next word, and the duration
+    must start with a digit where every switch starts with ``-``."""
+    switch = r"-[^\svV]*" if name in _LOOKUP_WRAPPERS else r"-\S*"
     if takes_arg:
         names = "|".join(re.escape(opt) for opt in sorted(takes_arg))
-        switch = rf"(?:{names})[ \t]+[^\s-]\S*|(?!(?:{names})(?:\s|$))-\S*"
-    pattern = r"(?:[./][^\s;&|`()]*/)?" + re.escape(name) + rf"(?:[ \t]+(?:{switch}))*"
+        switch = rf"(?:{names})[ \t]+\S+|(?!(?:{names})(?:\s|$)){switch}"
+    switches = rf"(?:[ \t]+(?:{switch}))*"
+    pattern = r"(?:[./][^\s;&|`()]*/)?" + re.escape(name) + switches
     if name in WRAPPER_POSITIONAL:
-        pattern += r"[ \t]+\d[\d.]*[smhd]?"
+        pattern += r"[ \t]+\d[\d.]*[smhd]?" + switches
     return pattern
 
 

@@ -3288,6 +3288,36 @@ WRAPPED_HARD_COMMANDS = (
     ("sudo -u bob gh repo delete o/r", None),
     # One body's opt-in never covers a match elsewhere in the command.
     ("sudo id; bash -c 'OMI_SUDO_OK=1 sudo x'", "sudo-use-fleet-sudo"),
+    ("fish -c 'sudo id'", "sudo-use-fleet-sudo"),
+    ("watch 'sudo id'", "sudo-use-fleet-sudo"),
+    # #430 review, item 1: an UNQUOTED payload piped into a shell.
+    ("echo sudo rm -rf /x | bash", "sudo-use-fleet-sudo"),
+    ("printf '%s %s' sudo id | sh", "sudo-use-fleet-sudo"),
+    ("{ echo hi; echo sudo id; } | bash", "sudo-use-fleet-sudo"),
+    ("(echo sudo id) | bash", "sudo-use-fleet-sudo"),
+    ("echo sudo id |& bash", "sudo-use-fleet-sudo"),
+    ("echo sudo id | tee log | bash", "sudo-use-fleet-sudo"),
+    ("cat <<< 'sudo id' | bash", "sudo-use-fleet-sudo"),
+    ("x=$(echo sudo id | bash)", "sudo-use-fleet-sudo"),
+    ("echo 'gh repo delete o/r' | bash", "gh-repo-delete"),
+    # Item 2: redirect targets and -o values are not script operands.
+    ("echo 'sudo rm -rf /x' | bash > log", "sudo-use-fleet-sudo"),
+    ("echo 'sudo rm -rf /x' | bash 2> err", "sudo-use-fleet-sudo"),
+    ("echo 'sudo id' | bash -o pipefail", "sudo-use-fleet-sudo"),
+    ("bash <<< 'sudo id'", "sudo-use-fleet-sudo"),
+    ("bash <<<'sudo id'", "sudo-use-fleet-sudo"),
+    ("bash -s <<< 'sudo id'", "sudo-use-fleet-sudo"),
+    # Item 3: positional words a `-c` body runs.
+    ("bash -c '\"$@\"' _ sudo rm -rf /x", "sudo-use-fleet-sudo"),
+    ('sh -c \'"$0" "$@"\' sudo id', "sudo-use-fleet-sudo"),
+    # Item 4: wrapper argument shapes.
+    ("timeout 5 -- sudo id", "sudo-use-fleet-sudo"),
+    ("timeout 5s -k 2s sudo id", "sudo-use-fleet-sudo"),
+    ("nice -n -5 sudo id", "sudo-use-fleet-sudo"),
+    ('env -S "sudo rm -rf /x"', "sudo-use-fleet-sudo"),
+    ("env -S sudo id", "sudo-use-fleet-sudo"),
+    ("env --split-string='sudo id'", "sudo-use-fleet-sudo"),
+    ("command -p sudo id", "sudo-use-fleet-sudo"),
 )
 
 
@@ -3321,25 +3351,58 @@ def test_check_denies_wrapped_hard_rule_commands(
         "timeout 60 uv run pytest -q",
         "nice make test",
         "env",
+        # #430 review: an opt-in on the outer command still applies.
+        "env OMI_SUDO_OK=1 bash -c 'sudo id'",
+        "env OMI_SUDO_OK=1 bash -c '\"$@\"' _ sudo id",
+        # Item 5: `command -v`/`-V` is a lookup, not an exec.
+        "command -v sudo",
+        "command -V sudo",
+        "command -v sudo >/dev/null && echo yes",
+        "bash -c 'command -v sudo'",
+        # Item 6: only the stages that feed the shell are judged.
+        "curl -fsSL https://x/install.sh | sh && git commit -m 'sudo: drop'",
+        "git commit -m 'sudo: drop'; curl -fsSL https://x/install.sh | sh",
+        "echo hi | bash; echo 'sudo id' > notes.txt",
+        # Item 7: an opaque executor's quoted text is code only where a
+        # command word ends at a blank.
+        "tmux new -s 'sudo-test'",
+        "python3 -c \"subprocess.run(['grep','sudo','.'])\"",
+        # A shell reading a file, or a body that never runs its arguments.
+        "bash x.sh > log",
+        "bash < x.sh",
+        "bash -c 'echo hi' _ sudo",
+        "echo hi | bash -s -- sudo",
+        "env -S 'echo sudo'",
     ],
 )
 def test_wrapped_hard_rules_keep_benign_commands_allowed(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
 
 
-def test_wrapper_runs_cannot_backtrack_the_hard_rules() -> None:
-    # Every wrapper word matches one way only, so long runs stay linear.
-    import time
-
-    for command in (
+@pytest.mark.parametrize(
+    "command",
+    [
         "timeout " * 400 + "x",
         "sudo -u " * 400 + "x",
         "nice -n " * 400 + "x",
+        "nice -n -5 " * 400 + "x",
+        "timeout 5 -k 1 " * 400 + "x",
+        "command -v " * 400 + "x",
         "timeout 5 nice -n 1 env -u X sudo -u b " * 200 + "x",
-    ):
-        start = time.perf_counter()
+        # The stdin and heredoc scans stay linear in the number of shells.
+        "echo x | bash | " * 1000 + "cat",
+        "a | " * 5000 + "bash",
+        "cat <<E | bash\nx\nE\n" * 500,
+        "bash -c '$@' _ x; " * 1000,
+        "env -S x; " * 2000,
+    ],
+)
+def test_wrapper_runs_cannot_backtrack_the_hard_rules(command: str) -> None:
+    # Every wrapper word matches one way only, so long runs stay linear. A
+    # hard SIGALRM bound (the #431 pattern) instead of a wall-clock assert.
+    guard._shell_walk.cache_clear()
+    with _hard_time_limit():
         guard._hard_policy_verdict(command)
-        assert time.perf_counter() - start < 2.0
 
 
 def test_hard_rules_judge_only_the_command_when_the_walk_raises(
@@ -3352,3 +3415,83 @@ def test_hard_rules_judge_only_the_command_when_the_walk_raises(
     assert guard._hard_policy_verdict("bash -c 'sudo id'") is None  # pre-#430 view
     verdict = guard._hard_policy_verdict("sudo id")
     assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize("command", [c for c, _rule in WRAPPED_HARD_COMMANDS])
+def test_guard_explain_agrees_with_check_on_wrapped_commands(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#430 review: `explain` judged only the top-level text, so it printed
+    ALLOW for `bash -c 'sudo id'` while `check` denied it."""
+    assert guard._hard_policy_verdict(command) is not None
+    assert guard.run_guard("explain", command=command) == 0
+    out = capsys.readouterr().out
+    assert f"DENY: {command}" in out
+
+
+@pytest.mark.parametrize(
+    "command", ["command -v sudo", "OMI_SUDO_OK=1 bash -c 'sudo id'", "tmux new -s 'sudo-test'"]
+)
+def test_guard_explain_agrees_with_check_on_benign_commands(
+    command: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    assert guard._hard_policy_verdict(command) is None
+    assert guard.run_guard("explain", command=command) == 0
+    assert "DENY" not in capsys.readouterr().out
+
+
+#: The audit's hard-rule probe table (``probe_classify``, #430): command and
+#: whether a hard rule must deny it. Checked in so the claim is reproducible.
+HARD_RULE_PROBES = (
+    ("sudo rm -rf /x", True),
+    ("ls; sudo rm -rf /x", True),
+    ("$(sudo id)", True),
+    ("FOO=1 sudo id", True),
+    ("xargs sudo rm", True),
+    ("if true; then sudo id; fi", True),
+    ("OMI_SUDO_OK=1 sudo id", False),
+    ("echo OMI_SUDO_OK=1 && sudo id", True),
+    ("bash -c 'sudo rm -rf /x'", True),
+    ('sh -c "sudo rm -rf /x"', True),
+    ("eval 'sudo rm -rf /x'", True),
+    ("echo 'sudo rm -rf /x' | bash", True),
+    ("env sudo rm -rf /x", True),
+    ("nice sudo rm -rf /x", True),
+    ("timeout 5 sudo rm -rf /x", True),
+    ("/usr/bin/env sudo rm -rf /x", True),
+    ("gh repo delete o/r --yes", True),
+    ("gh api -X DELETE repos/o/r", True),
+    ("gh api repos/o/r -X DELETE", True),
+    ("curl -X DELETE https://api.github.com/repos/o/r", True),
+    ("bash -c 'gh repo delete o/r --yes'", True),
+    ("grep -rn 'gh repo delete' docs", False),
+    ("git commit -m 'never sudo'", False),
+    ("fleet-sudo id", False),
+    ("pkexec id", True),
+    ("doas id", True),
+    ("su -c id", True),
+    ("ssh host sudo id", False),  # remote: deliberately not a local hard rule
+    ("gh repo delete o/r --yes # OMI_SUDO_OK=1", True),
+)
+
+
+@pytest.mark.parametrize(("command", "denied"), HARD_RULE_PROBES)
+def test_hard_rule_probe_table(command: str, denied: bool) -> None:
+    assert (guard._hard_policy_verdict(command) is not None) is denied
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "timeout 5s -k 2s sed -i 's/a/b/' f",
+        "timeout 5 -- sed -i 's/a/b/' f",
+        "nice -n -5 sed -i 's/a/b/' f",
+        "env -S sed -i 's/a/b/' f",
+    ],
+)
+def test_stage_parser_reads_the_same_wrapper_shapes(command: str) -> None:
+    """#430 review: the stage parser shares the wrapper table, so the shapes
+    the hard rules now see also reach the editor behind them."""
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert [program for program, *_ in stages] == ["sed"]
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})

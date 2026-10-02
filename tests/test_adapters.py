@@ -558,6 +558,20 @@ WRAPPED_HARD_COMMANDS = (
     "nice sudo rm -rf /x",
     "timeout 5 sudo rm -rf /x",
     "/usr/bin/env sudo rm -rf /x",
+    # #430 review: every bypass the roundtable found, in every adapter.
+    "echo sudo rm -rf /x | bash",
+    "printf '%s %s' sudo id | sh",
+    "echo 'sudo rm -rf /x' | bash > log",
+    "echo 'sudo rm -rf /x' | bash 2> err",
+    "echo 'sudo id' | bash -o pipefail",
+    "bash <<< 'sudo id'",
+    "bash -c '\"$@\"' _ sudo rm -rf /x",
+    'sh -c \'"$0" "$@"\' sudo id',
+    "timeout 5 -- sudo id",
+    "timeout 5s -k 2s sudo id",
+    "nice -n -5 sudo id",
+    'env -S "sudo rm -rf /x"',
+    "env -S sudo id",
 )
 
 
