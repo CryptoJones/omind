@@ -58,7 +58,29 @@ replication (`mesh.py`, `merge.py`). Know which subsystem you are in.
 
 ---
 
-## Handoff: the 2026-08-27 multi-agent review (shipped)
+## Handoff: the 2026-10-02 backlog sweep (shipped)
+
+The 2026-08-27 handoff below is history too. Current state: **v10.2.11 on `main`**.
+Trust **BACKLOG.md + CHANGELOG.md** (10.1.1–10.2.11) for detail.
+
+The sweep closed #393 #392 #391 #394 #414 #402 #403 #406 #416 #377 #380 #417 #419
+#420 #423 #425 via PRs #405, #407–#413, #415, #418, #421, #422, #424 and #426.
+The only open item is **#267**: the owner must register the PyPI trusted publisher.
+
+Lessons for the next agent:
+
+- `windows-latest` CI runners are real Windows. Tests must be platform-correct: use
+  `tmp_path` absolute paths, `.as_posix()` in command text, and pin `provision._windows`.
+- PowerShell `-Command` turns a native exit 2 into 1 unless the command ends with
+  the null-guarded `exit $LASTEXITCODE`.
+- Recall names must be stored filenames, never titles.
+- Enforcement classifiers must bind markers to their own stage; repo-scoped rules
+  match only real command sites.
+- Fail-open must never drop the seed hard rules.
+
+---
+
+## Handoff: the 2026-08-27 multi-agent review (shipped — history)
 
 The 2026-07-24 retrieval handoff below is history: `feat/hybrid-retrieval-token-budgets`
 landed long ago, and #167–#178 all shipped (see BACKLOG.md). Current state at this
@@ -121,8 +143,7 @@ user's PyPI account/credentials).
   issue for every backlog line and link it both ways; check the box when it
   ships. Both had drifted badly before 2026-07-24 (every "Open" item was already
   closed upstream) — don't let that happen again.
-- **Two mirrors:** GitHub and Codeberg, kept at the same `main`. Commits land on
-  both.
+- **GitHub is the only remote** (Codeberg is end-of-life).
 - **Commit/push only when asked.** Branch off `main` (`feat/`, `fix/`, `docs/`,
   `chore/`, `refactor/`), conventional-commit subjects.
 - **Docs carry the footer** (`*Proudly Made in Nebraska. Go Big Red! 🌽

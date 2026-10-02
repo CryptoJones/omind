@@ -11,88 +11,14 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [x] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (2/2 — both children shipped; closed 2026-09-19 with #290)_ —
-  the enforcement gaps where the guard does not see part of the session it governs. Both
-  children are the same defect class: the guard reads a slice of the session, treats it as
-  the whole, and reports itself as functioning.
-  - [x] **[Priority 3 / P1] Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — **v9.5.3** — _bug (enforcement)_ —
-    authorization is classified from the *opening* message of a turn, but Claude Code
-    delivers messages sent while a turn is running alongside a tool result. An explicit
-    mid-turn imperative therefore cannot lift a block the opening message armed.
-    **Shipped 2026-09-19:** the guard reads this turn's human `queued_command` transcript
-    entries when a turn-level authorization block would fire; the latest one can lift it.
-    Machine-authored `task-notification` entries never count.
-  - [x] **[Priority 4 / P1] Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ — **shipped in this PR** (consult continuity: continuation-aware preflight + retry carry + per-turn action budget). —
-    measured on hermes across every transcript since 2026-08-24: 362 turns where the
-    per-turn gate auto-cleared with nothing injected carried 2,037 tool calls and only
-    97 consults. Longest single turn: 152 tool calls. Compaction is ruled out —
-    `SessionStart(source=compact)` re-primes correctly. The gate keys off continuation
-    prompts, so a long turn is one gate event no matter how much work happens inside it.
-- [x] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (2/2 — both children shipped; closed 2026-09-19 with #321)_ —
-  omind detecting and reporting its own retrieval failures instead of assuming its
-  instrumentation is sound. Both children share one thesis: omind was measuring itself
-  the whole time and nobody read the meter.
-  - [x] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — **v9.6.0** — _enhancement (instrument)_ —
-    every omind surface that spends the agent's context gets a measured number, a
-    declared threshold and a verdict — and the tool must be able to return a failing
-    one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
-    the one surface that happened to get caught. The others are in exactly the state
-    preflight was in the day before #321: instrumented, unexamined, assumed fine —
-    priming 2.88M tokens, MCP responses 2.49M, verifier 642K, none with a threshold.
-    #321 was found by accident after months invisible; the ledger that proved it had
-    been written faithfully since 4.0.0 and never read.
-    **Shipped 2026-09-19:** `omind audit` — 14 declared thresholds across 7 surfaces,
-    `ok`/`FAIL`/`unmeasured` verdicts, exit 1 on any fail, `--json`, read-only. First run
-    on the real vault: 6 failing. See [docs/audit.md](docs/audit.md).
-  - [x] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — **v9.7.0** — _bug + enhancement_ —
-    the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
-    ~25% precision, framed as binding instruction and never removed. Invisible by
-    construction; surfaced as "the model has gotten worse in long sessions". **The
-    push→pull rework, the framing revert, stale/action-item filtering, the session
-    budget, `omind bench --precision` and `omind rules export` shipped in v9.2.0.**
-    Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
-    depth, preflight on vs off) — the one acceptance criterion that needs an
-    instrument, not a change.
-    **Shipped 2026-09-19:** `omind bench --needle` — replays a real transcript with and
-    without the preflight, needles at 20/50/80% depth, scoring recall and instruction
-    adherence; read-only replay; verified end-to-end against a live model. See
-    [docs/needle.md](docs/needle.md). The large-window, multi-trial run is operator spend.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
   trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
-  stopped at `invalid-publisher`; 10.1.0 through 10.2.1 were never released. What remains is two
+  stopped at `invalid-publisher`; 10.1.0 through 10.2.11 were never released. What remains is two
   operator steps: (1) on pypi.org, open *Publishing* and add a pending trusted publisher (owner
   `CryptoJones`, repo `omind`, workflow `publish.yml`, environment `pypi`); (2) publish a GitHub
   release (`gh release create vX.Y.Z`); pushing a tag alone does not trigger the upload. See
   [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
-- [x] **doctor: search index always reads "corrupt or incompatible" when embeddings are on** ([#373](https://github.com/CryptoJones/omind/issues/373)) — **v9.7.5** — _bug_ —
-  the index stores the encoder identity (`name:digest`), but `searchindex.health` compared it
-  to the bare model name, so every `omind[embed]` machine got a permanent false alarm that
-  `reindex --rebuild` could not clear. Found on makemake after the 9.4.0 → 9.7.3 upgrade.
-  **Shipped 2026-09-19:** health matches on the configured name, with or without a digest.
-- [x] **filelock: a real lock failure is polled for 10 s and misreported as contention** ([#371](https://github.com/CryptoJones/omind/issues/371)) — **v9.7.4** — _bug_ —
-  `try_lock_fd` returned `False` for every `OSError`, so `EBADF`/`ENOLCK` stalled the Windows
-  `lock_fd` poll for its full ceiling and came back as `EDEADLK`, and made `omind maintain`
-  refuse with "already running". **Shipped 2026-09-19:** only the contention errnos mean
-  "held elsewhere"; anything else propagates on the first attempt, and `try_exclusive` no
-  longer leaks its fd on that path. The one piece of #362 that #368 did not carry over.
-- [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — _bug (hooks)_ — **shipped in this PR** (`_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands). —
-
-### ✅ Epic: memory reaches the agent when the named thing appears, not just when the prompt's words match ([#384](https://github.com/CryptoJones/omind/issues/384))
-
-_Done 2026-10-01: all six children merged (PRs #396–#401) and every definition-of-done line verified on main at `6228405`. Ships in the unreleased 10.1.0._
-
-_Filed 2026-09-30 after an agent saw a volume label only in `diskutil` output, never got the
-~10 notes explaining that the label had moved between three drives, and wrote a wrong claim
-into a new note. In dependency order; each child is flag-gated._
-
-- [x] **Name index: identifiers → notes** ([#385](https://github.com/CryptoJones/omind/issues/385)) — _enhancement_ — exact-token index of
-  labels, hosts, serials, repos and domains; foundation, injects nothing. — **shipped** in [#396](https://github.com/CryptoJones/omind/pull/396)
-  - [x] **Preflight: a rare identifier hit clears the 3-term threshold** ([#386](https://github.com/CryptoJones/omind/issues/386)) — _enhancement_ — **shipped** in [#397](https://github.com/CryptoJones/omind/pull/397)
-  - [x] **Budget: the agent's own reads don't spend the push-injection budget** ([#387](https://github.com/CryptoJones/omind/issues/387)) — _enhancement_ — **shipped** in [#398](https://github.com/CryptoJones/omind/pull/398)
-  - [x] **PostToolUse: name hints from tool output, once per name per session** ([#388](https://github.com/CryptoJones/omind/issues/388)) — _enhancement_ — **shipped** in [#399](https://github.com/CryptoJones/omind/pull/399)
-  - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
-  - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
 
 ## Not planned
 
@@ -260,6 +186,24 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   retitled notes), and `safe_name` resolves a validated-but-missing name holding a stripped
   character onto the note whose title matches it. Import and create resolve strictly.
 
+### Shipped — 2026-10-01 (v10.1.0)
+
+#### ✅ Epic: memory reaches the agent when the named thing appears, not just when the prompt's words match ([#384](https://github.com/CryptoJones/omind/issues/384))
+
+_Done 2026-10-01: all six children merged (PRs #396–#401) and every definition-of-done line verified on main at `6228405`. Shipped in v10.1.0._
+
+_Filed 2026-09-30 after an agent saw a volume label only in `diskutil` output, never got the
+~10 notes explaining that the label had moved between three drives, and wrote a wrong claim
+into a new note. In dependency order; each child is flag-gated._
+
+- [x] **Name index: identifiers → notes** ([#385](https://github.com/CryptoJones/omind/issues/385)) — _enhancement_ — exact-token index of
+  labels, hosts, serials, repos and domains; foundation, injects nothing. — **shipped** in [#396](https://github.com/CryptoJones/omind/pull/396)
+  - [x] **Preflight: a rare identifier hit clears the 3-term threshold** ([#386](https://github.com/CryptoJones/omind/issues/386)) — _enhancement_ — **shipped** in [#397](https://github.com/CryptoJones/omind/pull/397)
+  - [x] **Budget: the agent's own reads don't spend the push-injection budget** ([#387](https://github.com/CryptoJones/omind/issues/387)) — _enhancement_ — **shipped** in [#398](https://github.com/CryptoJones/omind/pull/398)
+  - [x] **PostToolUse: name hints from tool output, once per name per session** ([#388](https://github.com/CryptoJones/omind/issues/388)) — _enhancement_ — **shipped** in [#399](https://github.com/CryptoJones/omind/pull/399)
+  - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
+  - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
+
 ### Shipped — 2026-09-29 (v10.0.3)
 
 - [x] **`mesh daemon` log lines were block-buffered under systemd; sync failures invisible until restart** ([#382](https://github.com/CryptoJones/omind/issues/382)) — **v10.0.3** — _bug (mesh, observability)_ —
@@ -282,6 +226,58 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ### Shipped — 2026-09-19
 
+- [x] **[Tracking / Priority 3-4] The guard's blind spots** ([#329](https://github.com/CryptoJones/omind/issues/329)) — _tracking (2/2 — both children shipped; closed 2026-09-19 with #290)_ —
+  the enforcement gaps where the guard does not see part of the session it governs. Both
+  children are the same defect class: the guard reads a slice of the session, treats it as
+  the whole, and reports itself as functioning.
+  - [x] **[Priority 3 / P1] Guard: mid-turn user messages are invisible to the authorization classifier** ([#290](https://github.com/CryptoJones/omind/issues/290)) — **v9.5.3** — _bug (enforcement)_ —
+    authorization is classified from the *opening* message of a turn, but Claude Code
+    delivers messages sent while a turn is running alongside a tool result. An explicit
+    mid-turn imperative therefore cannot lift a block the opening message armed.
+    **Shipped 2026-09-19:** the guard reads this turn's human `queued_command` transcript
+    entries when a turn-level authorization block would fire; the latest one can lift it.
+    Machine-authored `task-notification` entries never count.
+  - **[Priority 4 / P1] Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — shipped in v9.5.0; listed under that release below.
+- [x] **[Tracking / Priority 5-6] Memory that knows when it is wrong** ([#328](https://github.com/CryptoJones/omind/issues/328)) — _tracking (2/2 — both children shipped; closed 2026-09-19 with #321)_ —
+  omind detecting and reporting its own retrieval failures instead of assuming its
+  instrumentation is sound. Both children share one thesis: omind was measuring itself
+  the whole time and nobody read the meter.
+  - [x] **[Priority 5 / P2] `omind audit`: a self-assessment that can indict omind** ([#326](https://github.com/CryptoJones/omind/issues/326)) — **v9.6.0** — _enhancement (instrument)_ —
+    every omind surface that spends the agent's context gets a measured number, a
+    declared threshold and a verdict — and the tool must be able to return a failing
+    one, including "turn this off". Generalizes the two instruments 9.2.0 shipped for
+    the one surface that happened to get caught. The others are in exactly the state
+    preflight was in the day before #321: instrumented, unexamined, assumed fine —
+    priming 2.88M tokens, MCP responses 2.49M, verifier 642K, none with a threshold.
+    #321 was found by accident after months invisible; the ledger that proved it had
+    been written faithfully since 4.0.0 and never read.
+    **Shipped 2026-09-19:** `omind audit` — 14 declared thresholds across 7 surfaces,
+    `ok`/`FAIL`/`unmeasured` verdicts, exit 1 on any fail, `--json`, read-only. First run
+    on the real vault: 6 failing. See [docs/audit.md](docs/audit.md).
+  - [x] **[Priority 6 / P2] Preflight injection is a context-rot engine: A/B needle replay harness** ([#321](https://github.com/CryptoJones/omind/issues/321)) — **v9.7.0** — _bug + enhancement_ —
+    the per-turn push shipped ~3.4M tokens of unrequested recall across 5,816 turns at
+    ~25% precision, framed as binding instruction and never removed. Invisible by
+    construction; surfaced as "the model has gotten worse in long sessions". **The
+    push→pull rework, the framing revert, stale/action-item filtering, the session
+    budget, `omind bench --precision` and `omind rules export` shipped in v9.2.0.**
+    Still open: the A/B needle-in-haystack replay harness (planted needles at 20/50/80%
+    depth, preflight on vs off) — the one acceptance criterion that needs an
+    instrument, not a change.
+    **Shipped 2026-09-19:** `omind bench --needle` — replays a real transcript with and
+    without the preflight, needles at 20/50/80% depth, scoring recall and instruction
+    adherence; read-only replay; verified end-to-end against a live model. See
+    [docs/needle.md](docs/needle.md). The large-window, multi-trial run is operator spend.
+- [x] **doctor: search index always reads "corrupt or incompatible" when embeddings are on** ([#373](https://github.com/CryptoJones/omind/issues/373)) — **v9.7.5** — _bug_ —
+  the index stores the encoder identity (`name:digest`), but `searchindex.health` compared it
+  to the bare model name, so every `omind[embed]` machine got a permanent false alarm that
+  `reindex --rebuild` could not clear. Found on makemake after the 9.4.0 → 9.7.3 upgrade.
+  **Shipped 2026-09-19:** health matches on the configured name, with or without a digest.
+- [x] **filelock: a real lock failure is polled for 10 s and misreported as contention** ([#371](https://github.com/CryptoJones/omind/issues/371)) — **v9.7.4** — _bug_ —
+  `try_lock_fd` returned `False` for every `OSError`, so `EBADF`/`ENOLCK` stalled the Windows
+  `lock_fd` poll for its full ceiling and came back as `EDEADLK`, and made `omind maintain`
+  refuse with "already running". **Shipped 2026-09-19:** only the contention errnos mean
+  "held elsewhere"; anything else propagates on the first attempt, and `try_exclusive` no
+  longer leaks its fd on that path. The one piece of #362 that #368 did not carry over.
 - [x] **Guard/merge: review findings on #363 — pristine-seed check ignored summary/tags; a failed read still cleared the ordinary gate** ([#369](https://github.com/CryptoJones/omind/issues/369)) — **v9.7.3** — _bug (data loss + enforcement)_ —
   found by the automated review of #363, read only after it merged. An operator's
   summary-only or tags-only edit to the starter git-rules note was discarded on mesh
@@ -307,6 +303,10 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   refuses an un-fenced `##` heading inside `summary`/`details` (fence-aware) and
   recommends `###`, instead of silently relocating the content.
 
+### Shipped — 2026-09-16 (v9.5.1)
+
+- [x] **Windows: hooks fail silently when `python3` resolves to the Store app-execution-alias stub** ([#356](https://github.com/CryptoJones/omind/issues/356)) — **v9.5.1** — _bug (hooks)_ — **Shipped 2026-09-16:** `_resolve_python` prefers `python` over `python3` on Windows and detects the `WindowsApps` stub; `check_prereqs` fails setup with a `winget install` hint; `omind doctor` adds a `tool:python` check and flags stale stub-based enforcement hook commands.
+
 ### Shipped — 2026-09-15 (v9.5.0)
 
 - [x] **Agents: add Antigravity CLI (`agy`) as an omind setup target** ([#354](https://github.com/CryptoJones/omind/issues/354)) — _enhancement (agents)_ —
@@ -321,7 +321,7 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   - `omind quickstart --agent agy` renders copy-paste manual configuration steps.
 - [x] **Guard: long sessions run dozens of tool calls with no memory contact** ([#296](https://github.com/CryptoJones/omind/issues/296)) — _bug (enforcement)_ —
   consult continuity: continuation-aware preflight + retry carry + per-turn action budget.
-- [x] **Agents: add goose (Block) as an omind setup target** ([#353](https://github.com/CryptoJones/omind/issues/353)) — _enhancement (agents)_ —
+- [x] **Agents: add goose (Block) as an omind setup target** ([PR #353](https://github.com/CryptoJones/omind/pull/353)) — _enhancement (agents)_ —
   wire Block's `goose` agent into OMI memory + priming.
 
 ### Shipped — 2026-09-13 (v9.4.0)
@@ -515,7 +515,7 @@ These are the next tier, ranked by leverage._
 
 ### Memory shape
 
-_No open items._
+- [x] **Typed confidence + symmetric `Conflicts with` provenance on notes** ([#195](https://github.com/CryptoJones/omind/issues/195)) — _enhancement_ — optional `Confidence:` and `Conflicts with:` note fields. Shipped in 6.6.0.
 
 ### Efficiency
 
@@ -603,6 +603,9 @@ Each issue below is written to be executable by any agent without further contex
   ([#306](https://github.com/CryptoJones/omind/issues/306)) — _fix (journal/test)_ —
   Journal rollup re-opened a file it held a mandatory Windows lock on; and a test
   moved `HOME` without `USERPROFILE`.
+- [x] **CI: Windows test jobs failed on every run since 2026-08-26**
+  ([#297](https://github.com/CryptoJones/omind/issues/297)) — _fix (ci)_ —
+  The same two root causes as #306; closed as fixed by it.
 - [x] **Version lockstep unguarded for `uv.lock`; two releases had no CHANGELOG section**
   ([#307](https://github.com/CryptoJones/omind/issues/307)) — _fix (test/docs)_ —
   `test_version_is_set` now checks `uv.lock` as well; 8.10.0 and 8.10.1 backfilled
@@ -613,6 +616,10 @@ Each issue below is written to be executable by any agent without further contex
   `pool mcp list` reported "No MCP servers configured", so the CmdrData/Laguna
   roundtable lane ran with no memory. `PoolsideProvisioner` registers the omi
   MCP server in `~/.config/poolside/settings.yaml`.
+- [x] **Poolside (`pool`) client doesn't surface omi MCP tools**
+  ([#309](https://github.com/CryptoJones/omind/issues/309)) — _closed: not a bug_ —
+  A JSON-RPC wire trace showed `initialize`, `tools/list` (all omi tools) and
+  `tools/call` succeeding; the integration works.
 - [x] **Nothing enforced the `Co-authored-by` trailer**
   ([#303](https://github.com/CryptoJones/omind/issues/303)) — _chore (ci)_ —
   Five commits in `v8.8.0..v8.10.1` carry no trailer, so 8.10.0 and 8.10.1 are
@@ -710,6 +717,46 @@ Each issue below is written to be executable by any agent without further contex
 - [x] **More `omind setup --agent` targets: Claude Desktop, Kiro, VS Code, Amazon Q** ([#100](https://github.com/CryptoJones/omind/issues/100), [Codeberg #79](https://codeberg.org/CryptoJones/omind/issues/79)) — _enhancement_ — register the `omi` MCP server into each tool's config (`claude-desktop`, `kiro`, `vscode`, `q`); MCP-registration only, idempotent, with `quickstart`/`doctor` support. Shipped in 3.3.0.
 - [x] **Knowledge Graph Functionality** ([#99](https://github.com/CryptoJones/omind/issues/99)) — _enhancement_ — `omind graph` (neighbors, path, orphans, dangling, stats, export) + `graph-*` MCP tools over the `[[wikilink]]` vault. Shipped in 3.2.0.
 
+### Earlier closed issues (filed before BACKLOG.md tracked every issue)
+
+_Added 2026-10-02 so every closed issue has a line here. Details live on each issue._
+
+- [x] Implement omind setup + serve (MCP provisioning + memory web UI) ([#1](https://github.com/CryptoJones/omind/issues/1))
+- [x] Docs: end-user install methods + CONTRIBUTING guide ([#3](https://github.com/CryptoJones/omind/issues/3))
+- [x] Redesign the web UI + add theme switcher ([#5](https://github.com/CryptoJones/omind/issues/5))
+- [x] Add a web UI screenshot to the README ([#7](https://github.com/CryptoJones/omind/issues/7))
+- [x] i18n: switchable UI language with RTL support ([#9](https://github.com/CryptoJones/omind/issues/9))
+- [x] v1.0.0: bundle offline UI, conflict guard, backlinks, shortcuts, and omind doctor ([#11](https://github.com/CryptoJones/omind/issues/11))
+- [x] obsidian-mcp orphans on Claude Code exit; tool calls can appear to hang ([#13](https://github.com/CryptoJones/omind/issues/13))
+- [x] Trim dead code and run mypy in CI ([#15](https://github.com/CryptoJones/omind/issues/15))
+- [x] Add a pip-audit dependency CVE scan to CI ([#17](https://github.com/CryptoJones/omind/issues/17))
+- [x] feat: `omind backup` — encrypted, unattended vault backup (the vault currently has zero redundancy) ([#21](https://github.com/CryptoJones/omind/issues/21))
+- [x] fix: `_write_index` destroys hand-curated descriptions and lists every note unbounded ([#22](https://github.com/CryptoJones/omind/issues/22))
+- [x] feat: prime the latest Session State note (and journal tail) at SessionStart ([#23](https://github.com/CryptoJones/omind/issues/23))
+- [x] fix: daily journals accumulate in the vault root and will pollute the index/priming ([#24](https://github.com/CryptoJones/omind/issues/24))
+- [x] fix: `_extract_outcome` marks any tool response with stderr as "error" ([#25](https://github.com/CryptoJones/omind/issues/25))
+- [x] doctor/setup false-negative when CLAUDE_CONFIG_DIR is set ([#27](https://github.com/CryptoJones/omind/issues/27))
+- [x] Headline description says Claude Code; should be AI agents (generalized) ([#29](https://github.com/CryptoJones/omind/issues/29))
+- [x] Provision Hermes Agent and OpenClaw, not just Claude Code ([#31](https://github.com/CryptoJones/omind/issues/31))
+- [x] omind is POSIX-only: fcntl import crashes every command on Windows ([#35](https://github.com/CryptoJones/omind/issues/35))
+- [x] obsidian-mcp goes silently deaf after idle: MCP transport detaches from stdin, requests discarded, clients hang forever ([#49](https://github.com/CryptoJones/omind/issues/49))
+- [x] mesh: peers with a space in the URL silently disappear ([#61](https://github.com/CryptoJones/omind/issues/61))
+- [x] mesh: one-command provisioning for a passive bare seed repo (+ hosted mirror) ([#63](https://github.com/CryptoJones/omind/issues/63))
+- [x] omind setup should install a fresh-base git guard hook ([#76](https://github.com/CryptoJones/omind/issues/76))
+- [x] Extend OMI session-priming to Hermes Agent and OpenClaw ([#81](https://github.com/CryptoJones/omind/issues/81))
+- [x] Cross-harness: OpenAI Codex CLI guard installer ([#89](https://github.com/CryptoJones/omind/issues/89))
+- [x] Cross-harness: Google Gemini CLI guard installer ([#90](https://github.com/CryptoJones/omind/issues/90))
+- [x] Verifier (Layer C): prime with the agent's past mistakes on that action-type ([#92](https://github.com/CryptoJones/omind/issues/92))
+- [x] Verifier (Layer C): score relevance against what the agent is DOING, not just the last user message ([#95](https://github.com/CryptoJones/omind/issues/95))
+- [x] Verifier: blend the gate-blocked action (pending intent) so the first consult after a work-transition clears ([#96](https://github.com/CryptoJones/omind/issues/96))
+- [x] Verifier: strip path/scaffold noise from the pending intent (#96) so path-heavy blocked commands clear cleanly ([#97](https://github.com/CryptoJones/omind/issues/97))
+- [x] Consult-gate dodge: reading the vault index (`index.md`) clears the gate without a real consult ([#109](https://github.com/CryptoJones/omind/issues/109))
+- [x] Guard current-turn authorization does not unblock global hook mutations ([#121](https://github.com/CryptoJones/omind/issues/121))
+- [x] Guard should block side effects from capability questions without explicit authorization ([#122](https://github.com/CryptoJones/omind/issues/122))
+- [x] guard: git -C freshness misattributed to cwd; single-slot marker; consult-gate blocks provably-inert commands ([#147](https://github.com/CryptoJones/omind/issues/147))
+- [x] verifier: credit guard-demanded note reads; stop scoring vault writes as consults; log judgement context on off-topic denials ([#148](https://github.com/CryptoJones/omind/issues/148))
+- [x] omind guard locked on new repos with no remotes because pulls / fetches are not possible ([#149](https://github.com/CryptoJones/omind/issues/149))
+
 ---
 
 ## PyPI Publish Setup (2026-08-24) ([#267](https://github.com/CryptoJones/omind/issues/267))
@@ -728,7 +775,7 @@ Each issue below is written to be executable by any agent without further contex
   - [x] **The pipeline is proven up to PyPI:** the release runs for v9.7.3, v9.7.5, v10.0.0,
     v10.0.1 and v10.0.2 all built, minted an OIDC token, and were refused with
     `invalid-publisher` (no matching publisher). That is the expected fail-closed result:
-    nothing is uploaded. Versions 10.1.0 through 10.2.1 were never released (no GitHub
+    nothing is uploaded. Versions 10.1.0 through 10.2.11 were never released (no GitHub
     release was cut for them), so the workflow never ran for them.
 
   **What is left. The operator does both steps; there are no credentials anywhere, by design:**
