@@ -1789,7 +1789,7 @@ def _shell_sites(
     code = policy.shell_code_text(command).replace("\\\n", "  ")
     local = list(raw)
     events: list[tuple[int, int, Any]] = [(i, 0, ch) for i, ch in enumerate(code) if ch in "()"]
-    events += [(stage[2], 1, stage) for stage in _program_stages(code)]
+    events += [(stage[2], 1, stage) for stage in _program_stages(code, raw)]
     sites: list[_ShellSite] = []
     scopes: list[tuple[Path | None, tuple[Path | None, ...]]] = []
     for pos, _kind, item in sorted(events, key=lambda e: (e[0], e[1])):
@@ -2144,7 +2144,7 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
             return True
         if _REPO_TEST_RE.search(command):
             return True
-        stages = _program_stages(command)
+        stages = _program_stages(command, str(action.get("command") or ""))
         if _runs_in_place_edit(stages):
             return True
         if _runs_script_write(stages, str(action.get("command") or "")):
@@ -2170,12 +2170,90 @@ _STAGE_WRAPPERS: dict[str, frozenset[str]] = {
 #: Wrappers that take one positional argument before the command (``timeout 5``).
 _WRAPPER_POSITIONAL = frozenset({"timeout"})
 #: Tools whose ``run`` subcommand execs the next word (``poetry run python …``,
-#: #419). The value is the switches after ``run`` that take a separate argument.
+#: #419). The value is every switch that takes a SEPARATE argument, before
+#: ``run`` (``poetry -C sub run``, ``uv --directory . run``) or after it
+#: (``uv run --extra dev``, ``conda run -n env``). A ``--opt=value`` word is
+#: one word whatever the table says. The uv set is every value-taking option
+#: ``uv run --help`` lists (uv 0.12); pipx's is ``pipx run --help``'s; the
+#: others come from each tool's documented CLI.
 _RUN_WRAPPERS: dict[str, frozenset[str]] = {
     "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
-    "pipx": frozenset({"--spec", "--python", "--pip-args", "--index-url"}),
-    "uv": frozenset({"--with", "--python", "-p", "--package", "--directory", "--project"}),
+    "pipx": frozenset(
+        {
+            "--spec",
+            "--python",
+            "--python-args",
+            "--with",
+            "--pip-args",
+            "--index-url",
+            "-i",
+            "--fetch-python",
+            "--cooldown",
+            "--backend",
+        }
+    ),
+    "uv": frozenset(
+        {
+            "--extra",
+            "--no-extra",
+            "--group",
+            "--no-group",
+            "--only-group",
+            "--no-editable-package",
+            "--env-file",
+            "-w",
+            "--with",
+            "--with-editable",
+            "--with-requirements",
+            "--package",
+            "--python-platform",
+            "--index",
+            "--default-index",
+            "-i",
+            "--index-url",
+            "--extra-index-url",
+            "-f",
+            "--find-links",
+            "--index-strategy",
+            "--keyring-provider",
+            "-P",
+            "--upgrade-package",
+            "--upgrade-group",
+            "--resolution",
+            "--prerelease",
+            "--prerelease-package",
+            "--fork-strategy",
+            "--exclude-newer",
+            "--exclude-newer-package",
+            "--no-sources-package",
+            "--reinstall-package",
+            "--link-mode",
+            "-C",
+            "--config-setting",
+            "--config-settings-package",
+            "--no-build-isolation-package",
+            "--no-build-package",
+            "--no-binary-package",
+            "--cache-dir",
+            "--refresh-package",
+            "-p",
+            "--python",
+            "--color",
+            "--allow-insecure-host",
+            "--directory",
+            "--project",
+            "--config-file",
+        }
+    ),
+    "pipenv": frozenset({"--python", "--pypi-mirror"}),
+    "pdm": frozenset({"-c", "--config", "-p", "--project", "--venv", "--skip"}),
+    # `hatch run [ENV:]CMD`: the `ENV:` prefix is stripped from the program.
+    "hatch": frozenset({"-e", "--env", "-p", "--project", "--data-dir", "--cache-dir", "--config"}),
+    "conda": frozenset({"-n", "--name", "-p", "--prefix", "--cwd"}),
 }
+#: A quoted ``find -exec`` terminator (``';'``, ``";"``). ``shell_code_text``
+#: blanks its body, so it is recognised in the raw text at the same offset.
+_QUOTED_EXEC_END = ("';'", '";"')
 #: ``find`` actions whose following words are a command of their own.
 _EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: Per editor: (switches meaning in-place — BSD ``sed -I`` too; switches after
@@ -2197,12 +2275,27 @@ _WRITE_MODE = r"""\\?['"](?:[bt]*[wax][bt+]*|r[bt]*\+[bt]*)\\?['"]"""
 _SCRIPT_WRITE_RE = re.compile(
     r"\b(?:write_text|write_bytes|writeFile|writeFileSync|appendFile|appendFileSync)\s*\("
     r"|\bFile\.write\s*\("
-    r"|\.unlink(?:Sync)?\s*\(|\bos\.(?:remove|replace|renames?)\s*\("
-    r"|\bshutil\.(?:rmtree|move)\s*\(|\.(?:rm|rmdir|rename)(?:Sync)?\s*\("
+    r"|\.unlink(?:Sync)?\s*\(|\bos\.(?:remove|replace|renames?|rmdir)\s*\("
+    r"|\bshutil\.(?:rmtree|move)\s*\("
+    # rm/rmdir/rename count only on a file-system receiver: `df.rename(…)`
+    # (pandas) and `db.rename('t')` are not file writes (#419 review).
+    r"|\.(?:rm|rmdir|rename)Sync\s*\("
+    r"|\b(?:fs(?:\.promises)?|fsPromises)\.(?:rm|rmdir|rename)\s*\("
+    r"""|\brequire\s*\(\s*\\?['"](?:node:)?fs(?:/promises)?\\?['"]\s*\)"""
+    r"(?:\.promises)?\.(?:rm|rmdir|rename)\s*\("
+    r"|\bPath\s*\([^()\n]*\)\.(?:rename|rmdir)\s*\("
+    r"|\b(?:File|FileUtils|Dir)\.(?:rename|rm|rmdir|mv|delete)\s*\("
     # open(p, 'w'|'a'|'x'|'r+'…), open(p, mode="wb"), Path(p).open("w")
     rf"|\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?{_WRITE_MODE}"
     rf"|\.open\s*\(\s*(?:mode\s*=\s*)?{_WRITE_MODE}"
 )
+
+
+#: A pathlib object held in a variable (``p = Path('a'); p.rename('b')``): its
+#: ``.rename(``/``.rmdir(`` counts only in a script that uses pathlib, so a
+#: pandas ``df.rename(…)`` elsewhere stays read-only (#419 review).
+_PATHLIB_RE = re.compile(r"\bpathlib\b|\bPath\s*\(")
+_PATHLIB_OP_RE = re.compile(r"\.(?:rename|rmdir)\s*\(")
 
 
 def _basename(word: str) -> str:
@@ -2210,7 +2303,7 @@ def _basename(word: str) -> str:
     return base[:-4] if base.lower().endswith(".exe") else base
 
 
-def _program_stages(code: str) -> list[tuple[str, list[str], int, int]]:
+def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int, int]]:
     """Split shell ``code`` into simple commands: ``(program, args, start, end)``.
 
     ``code`` is ``policy.shell_code_text`` output — the same length as the raw
@@ -2221,9 +2314,12 @@ def _program_stages(code: str) -> list[tuple[str, list[str], int, int]]:
     assignments, wrappers (``poetry run`` too) and keywords are skipped, so
     ``program`` is the basename (``.exe`` stripped) of what actually runs.
     ``end`` extends over trailing blanked text: the heredoc body that stage
-    owns."""
+    owns. ``raw`` (the unmasked command, same length) lets a quoted ``';'``
+    terminator end an ``-exec`` too; ``shell_code_text`` blanked its ``;``."""
     code = code.replace("\\\n", "  ")
     n = len(code)
+    # A raw text of another length cannot be read at the same offsets: ignore it.
+    raw = raw.replace("\\\n", "  ") if len(raw) == n else ""
     stages: list[tuple[str, list[str], int, int]] = []
     # An escaped `\;` (find's -exec terminator) is a word, not a separator (#419).
     for seg in re.finditer(r"(?:\\.|[^;&|\n(`)\\])+", code):
@@ -2235,17 +2331,26 @@ def _program_stages(code: str) -> list[tuple[str, list[str], int, int]]:
         i, ntok = 0, len(toks)
         while i < ntok:
             j = i
+            env_prefix = False
             while j < ntok:
                 word = toks[j][0]
                 if re.match(r"[A-Za-z_]\w*=", word):
                     j += 1
                     continue
                 base = _basename(word)
-                if base in _RUN_WRAPPERS and j + 1 < ntok and toks[j + 1][0] == "run":
-                    j += 2
-                    while j < ntok and toks[j][0].startswith("-"):
-                        j += 2 if toks[j][0] in _RUN_WRAPPERS[base] else 1
-                    continue
+                if base in _RUN_WRAPPERS:
+                    # The tool's global options may sit before `run`
+                    # (`poetry -C sub run`, `uv --directory . run`).
+                    k = j + 1
+                    while k < ntok and toks[k][0].startswith("-"):
+                        k += 2 if toks[k][0] in _RUN_WRAPPERS[base] else 1
+                    if k < ntok and toks[k][0] == "run":
+                        j = k + 1
+                        while j < ntok and toks[j][0].startswith("-"):
+                            j += 2 if toks[j][0] in _RUN_WRAPPERS[base] else 1
+                        env_prefix = base == "hatch"
+                        continue
+                    break
                 if base not in _STAGE_WRAPPERS:
                     break
                 j += 1
@@ -2258,12 +2363,15 @@ def _program_stages(code: str) -> list[tuple[str, list[str], int, int]]:
             cut = j + 1
             while cut < ntok and toks[cut][0] not in _EXEC_ACTIONS:
                 w = toks[cut][0]
-                if in_exec and (w == "\\;" or (w == "+" and toks[cut - 1][0] == "{}")):
+                if in_exec and (
+                    w == "\\;"
+                    or (w == "+" and toks[cut - 1][0] == "{}")
+                    or (raw and raw.startswith(_QUOTED_EXEC_END, toks[cut][1]))
+                ):
                     break
                 cut += 1
-            stages.append(
-                (_basename(toks[j][0]), [t for t, _ in toks[j + 1 : cut]], toks[j][1], end)
-            )
+            program = toks[j][0].split(":", 1)[-1] if env_prefix else toks[j][0]
+            stages.append((_basename(program), [t for t, _ in toks[j + 1 : cut]], toks[j][1], end))
             # An -exec command ended at its `\;`/`+`: what follows is find's own
             # expression up to its next -exec (`-iname` there is not sed's `-i`).
             while cut < ntok and toks[cut][0] not in _EXEC_ACTIONS:
@@ -2318,7 +2426,11 @@ def _runs_script_write(stages: list[tuple[str, list[str], int, int]], raw: str) 
     stage is searched, so ``grep "write_text" src | python3 -m json.tool`` is
     not a script write (#391)."""
     return any(
-        _INTERPRETER_RE.fullmatch(program) and _SCRIPT_WRITE_RE.search(raw[start:end])
+        _INTERPRETER_RE.fullmatch(program)
+        and (
+            _SCRIPT_WRITE_RE.search(raw[start:end])
+            or (_PATHLIB_RE.search(raw[start:end]) and _PATHLIB_OP_RE.search(raw[start:end]))
+        )
         for program, _args, start, end in stages
     )
 

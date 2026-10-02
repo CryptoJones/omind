@@ -19,10 +19,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `-exec` command runs to its `\;` or `{} +`, and find's own expression after it
     (`-iname`) is not read as the editor's switches.
   - `case $1 in fix) sed -i …`: `)` now ends a stage.
-  - `poetry run`, `pipx run` and `uv run` exec the next word, so the program behind them
-    is the one classified.
-  - Script calls `fs.rmSync(` / `.rm(` / `.rmdir(` / `.rename(Sync)(`, `os.rename(`,
-    `os.renames(` and `shutil.move(`.
+  - `poetry run`, `pipx run`, `uv run`, `pipenv run`, `pdm run`, `hatch run [ENV:]` and
+    `conda run -n env` exec the next word, so the program behind them is the one
+    classified. The tool's global options may come before `run` (`poetry -q run`,
+    `poetry -C sub run`, `uv --directory . run`), and each value-taking option is skipped
+    with its value; the `uv` table is every value-taking option `uv run --help` lists
+    (`--extra`, `--group`, `--env-file`, `--index`, `-w`/`--with`, `--python`,
+    `--package`, `--project` …).
+  - Script calls `fs.rmSync(` / `.rmdirSync(` / `.renameSync(`, `os.rename(`,
+    `os.renames(`, `os.rmdir(` and `shutil.move(`. `rm`/`rmdir`/`rename` without `Sync`
+    count only on a file-system receiver: `fs.`, `fs.promises.`, `fsPromises.`,
+    `require('fs').`, `Path(…).`, a pathlib object in a script that uses pathlib, and
+    Ruby's `File.`/`FileUtils.`/`Dir.`. A pandas `df.rename(columns=…)` or a
+    `db.rename('t')` is not a file write.
+  - A quoted `';'` ends a `find -exec` like `\;`, so `find . -exec sed -n p {} ';' -iname x`
+    does not read find's `-iname` as sed's `-i`.
   - Read-only forms of the same tools (`gsed -n`, `poetry show`, `pipx list`,
     `os.path.exists`, `shutil.which`) stay unflagged.
 

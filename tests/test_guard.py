@@ -15,7 +15,7 @@ from pathlib import Path
 
 import pytest
 
-from omind import compliance, guard, paths
+from omind import compliance, guard, paths, policy
 
 #: The omi-guard.sh adapter is a POSIX bash+jq deployment artifact (Claude Code on
 #: Linux/macOS). Its subprocess tests only make sense where a real bash + jq run it —
@@ -2302,6 +2302,111 @@ def test_issue_419_read_only_forms_stay_unflagged(command):
     assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
 
 
+@pytest.mark.parametrize(
+    ("command", "program"),
+    [
+        # A wrapper's global options before `run` (#419 review).
+        ("poetry -q run sed -i 's/a/b/' f", "sed"),
+        ("poetry -C sub run sed -i 's/a/b/' f", "sed"),
+        ("poetry --directory=sub run sed -i 's/a/b/' f", "sed"),
+        ("uv --directory . run sed -i 's/a/b/' f", "sed"),
+        ("uv --project sub --cache-dir /tmp/c run sed -i 's/a/b/' f", "sed"),
+        # Value-taking `uv run` options must not leave their value as the program.
+        ("uv run --extra dev python -c \"open('x','w')\"", "python"),
+        ("uv run --group test python -c 1", "python"),
+        ("uv run --env-file .env python -c 1", "python"),
+        ("uv run --index https://x.invalid/simple python -c 1", "python"),
+        ("uv run -w rich python -c 1", "python"),
+        ("uv run --with rich python -c 1", "python"),
+        ("uv run --python 3.12 python -c 1", "python"),
+        ("uv run --package core python -c 1", "python"),
+        ("uv run --project sub python -c 1", "python"),
+        ("uv run --no-sync --extra dev -- sed -i 's/a/b/' f", "sed"),
+        # More run-wrappers, same mechanism.
+        ("pipenv run sed -i 's/a/b/' f", "sed"),
+        ("pipenv --python 3.12 run python -c 1", "python"),
+        ("pdm run sed -i 's/a/b/' f", "sed"),
+        ("pdm run -p sub python -c 1", "python"),
+        ("hatch run sed -i 's/a/b/' f", "sed"),
+        ("hatch run dev:sed -i 's/a/b/' f", "sed"),
+        ("hatch -e dev run python -c 1", "python"),
+        ("conda run -n env sed -i 's/a/b/' f", "sed"),
+        ("conda run --prefix /opt/env python -c 1", "python"),
+        # Not running anything: the tool itself is the program.
+        ("poetry -q show", "poetry"),
+        ("uv --directory . sync", "uv"),
+    ],
+)
+def test_issue_419_review_run_wrapper_resolves_program(command, program):
+    """#419 review: global options before `run`, the full `uv run` option table,
+    and pipenv/pdm/hatch/conda run all resolve to the program they exec."""
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert stages[0][0] == program
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "poetry -q run sed -i 's/a/b/' f",
+        "poetry -C sub run sed -i 's/a/b/' f",
+        "poetry -C sub run python3 -c \"open('x','w')\"",
+        "pipenv run sed -i 's/a/b/' f",
+        "pdm run sed -i 's/a/b/' f",
+        "conda run -n env sed -i 's/a/b/' f",
+        "conda run -n env python3 -c \"open('x','w')\"",
+        # rm/rmdir/rename on a file-system receiver.
+        "node -e \"require('fs').rename('a', 'b', () => {})\"",
+        "node -e \"const fs = require('fs'); fs.rm('x', () => {})\"",
+        "node -e \"const fs = require('fs'); fs.rmdir('d', () => {})\"",
+        "node -e \"require('fs').promises.rm('x')\"",
+        "node -e \"const {fsPromises} = x; fsPromises.rename('a', 'b')\"",
+        "node -e \"require('fs').rmdirSync('d')\"",
+        "python3 -c \"import os; os.rmdir('d')\"",
+        "python3 -c \"from pathlib import Path; Path('a').rename('b')\"",
+        "python3 -c \"from pathlib import Path; p = Path('a'); p.rename('b')\"",
+        "python3 -c \"import pathlib; pathlib.Path('d').rmdir()\"",
+        "ruby -e \"File.rename('a', 'b')\"",
+        "ruby -e \"require 'fileutils'; FileUtils.rm('x')\"",
+    ],
+)
+def test_issue_419_review_wrappers_and_fs_receivers_are_repo_work(command):
+    """#419 review: wrapped writers and rm/rmdir/rename on file-system
+    receivers are repo work."""
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # rename/rm on a non-file-system receiver is not a file write.
+        "python3 -c \"import pandas as pd; df = pd.DataFrame(); df.rename(columns={'a': 'b'})\"",
+        "python3 -c \"import sqlite3; db = sqlite3.connect('x'); db.rename('table')\"",
+        "node -e \"db.rename('table')\"",
+        'node -e "const list = []; list.rm(0)"',
+        "node -e \"tree.rmdir('n')\"",
+        # A quoted `;` still ends the -exec: find's `-iname` is not sed's `-i`.
+        "find . -exec sed -n p {} ';' -iname x",
+        'find . -exec sed -n p {} ";" -iname x',
+        # An escaped `|` is a word, not a pipe: one `echo` stage.
+        "echo a\\|sed -i s/a/b/ f",
+        # A run-wrapper that is not running anything.
+        "poetry -q show",
+        "conda run -n env python3 -c 'print(1)'",
+    ],
+)
+def test_issue_419_review_read_only_forms_stay_unflagged(command):
+    """#419 review: non-file `rename`/`rm`, a quoted find terminator, an escaped
+    `|`, and wrappers not running a writer stay read-only."""
+    assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+def test_issue_419_escaped_pipe_is_one_echo_stage():
+    """#419 review: `a\\|sed` is one word, so the stage list is a single `echo`."""
+    command = "echo a\\|sed -i s/a/b/ f"
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert [s[0] for s in stages] == ["echo"]
+
+
 def test_record_freshness_outcome_retracts_for_dash_c_repo(tmp_path: Path) -> None:
     # #346: record_freshness_outcome must resolve -C repo from hook event and retract it
     repo = _mk_repo(tmp_path, "subrepo")
@@ -2647,7 +2752,9 @@ def _tool_result() -> dict[str, object]:
     return {"type": "user", "message": {"role": "user", "content": [block]}}
 
 
-def _queued(prompt: str, *, mode: str = "prompt", origin: object = ("human",)) -> dict[str, object]:
+def _queued(
+    prompt: str, *, mode: str = "prompt", origin: object = ("human",)
+) -> dict[str, object]:
     attachment: dict[str, object] = {
         "type": "queued_command",
         "prompt": prompt,
@@ -2715,12 +2822,8 @@ def test_midturn_authorization_never_lifts_a_destructive_hard_rule(tmp_path: Pat
     guard.begin_turn(session, "can you clean this up?")
     path = _transcript(tmp_path, _opener("can you clean this up?"), _queued("go ahead, do it"))
     verdict = guard.decide(
-        {
-            "tool": "Bash",
-            "command": "gh repo delete me/x --yes",
-            "session": session,
-            "transcript_path": path,
-        }
+        {"tool": "Bash", "command": "gh repo delete me/x --yes", "session": session,
+         "transcript_path": path}
     )
     assert not verdict.allow
     assert verdict.rule_id not in ("", "capability-question-explicit-auth")
