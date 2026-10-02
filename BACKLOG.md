@@ -94,6 +94,14 @@ Follow-ups:
 - [ ] **entities: dotted Python names like `asyncio.run` are read as hostnames** ([#402](https://github.com/CryptoJones/omind/issues/402)) — _bug, follow-up of #384_
 - [ ] **Name hints: names shown at write time are not marked as already hinted** ([#403](https://github.com/CryptoJones/omind/issues/403)) — _enhancement, follow-up of #384_
 
+### Windows
+
+- [ ] **Windows: `canonical_omind_exe()` extension gap pins an orphaned shim, breaking the omi MCP server (CONNECTION_CLOSED)** ([#377](https://github.com/CryptoJones/omind/issues/377)) — _bug (Windows)_ —
+  the stable pin never engages, so it falls back to `shutil.which("omind")`. Setup and doctor can then
+  bake an orphaned pip shim into the MCP entry and every hook.
+- [ ] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — _bug (Windows)_ —
+  with SAC enforcing, all hooks and the `omi` MCP server stop working, while `python -m omind` still runs.
+
 ### Guard bugs found in the same session (2026-09-30)
 
 - [ ] **guard: any `-i` flag (e.g. `grep -iE`) next to sed/perl marks a command as repo work** ([#391](https://github.com/CryptoJones/omind/issues/391)) — _bug_
@@ -103,7 +111,9 @@ Follow-ups:
 
 ## Not planned
 
-- [ ] **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
+_Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
+
+- **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
   they declare every capability's tier, read/write scope, network need, and
   destructiveness in `config/capabilities.json`, verify it, and state explicitly
   where no automated verifier exists. omind's `doctor` checks are hand-written per
@@ -114,7 +124,7 @@ Follow-ups:
   file: `docs/serve.md` (v6.4.0) states the risk model for the unauthenticated destructive
   API this issue called out as its natural home.
 
-- [ ] **Contextual-prefix indexed chunks (Anthropic Contextual Retrieval)** ([#193](https://github.com/CryptoJones/omind/issues/193), closed not-planned) — _rejected on measurement_ —
+- **Contextual-prefix indexed chunks (Anthropic Contextual Retrieval)** ([#193](https://github.com/CryptoJones/omind/issues/193), closed not-planned) — _rejected on measurement_ —
   built behind `OMI_CONTEXTUAL_CHUNKS` and evaluated on the live 784-note vault, both
   ways, with the semantic leg on. **recall@1 60% → 60%, recall@5 60% → 60%, MRR 0.640 →
   0.640**, for +31% index size (13,908 → 18,248 KiB) and +20% rebuild time. Of the five
@@ -134,8 +144,8 @@ Follow-ups:
   effect under ~15% could hide. A 25–40 case set is worth building for retrieval work in
   general — and would be the thing that could reopen this.
 
-- [ ] **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
-- [ ] **claude-obsidian's source capture, Canvas/Bases emitters, and methodology filing modes** — _rejected_ —
+- **Long game: fine-tune a model on the accumulated violation corpus** ([#91](https://github.com/CryptoJones/omind/issues/91), closed not-planned) — _roadmap (Phase 4)_ — deferred: the blocker is data, not compute. The live `compliance.jsonl` corpus is ~91% relevance-noise, ~6% real denies, and 100% DENY (zero ALLOW), so training on it as-is yields an always-deny model. Revisit only after `export-corpus` is reworked to synthesize balanced ALLOW examples (from the deterministic `guard.decide()`) and split the relevance corpus from the action corpus. The mechanical guard remains the backstop.
+- **claude-obsidian's source capture, Canvas/Bases emitters, and methodology filing modes** — _rejected_ —
   evaluated during the 2026-08-02 comparison. Their `capture` (immutable content-addressed
   copies of PDFs/images/URLs under `.raw/`), their Obsidian Canvas and `.base` emitters, and
   their PARA/LYT/Zettelkasten routing modes are all well built, and all solve a problem omind
@@ -144,7 +154,7 @@ Follow-ups:
   Canvas/Bases emitters are Obsidian-presentation features; omind already ships a web graph
   view and leaves presentation to Obsidian itself. Revisit only if omind ever grows an ingest
   path for external material.
-- [ ] **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
+- **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
 
@@ -602,7 +612,7 @@ Each issue below is written to be executable by any agent without further contex
 
 ## PyPI Publish Setup (2026-08-24) ([#267](https://github.com/CryptoJones/omind/issues/267))
 
-- [ ] **`omind` is not yet on PyPI — first publish pending.** The package has never
+- **Status: `omind` is not yet on PyPI — first publish pending** (tracked as the open #267 item above). The package has never
   been uploaded (HTTP 404 on the simple index, re-checked 2026-09-19). Everything
   that does not need a PyPI account is done; what is left is operator-only:
   1. **[operator]** Log in to https://pypi.org/ with the account that will own the
