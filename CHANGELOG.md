@@ -16,9 +16,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `… (2026-09-25 17:55 CDT)` is stored as `… 17 55 CDT).md`. `OmiStore.safe_name` only
   tried the title-to-filename fallback when strict validation *rejected* the name, and a
   `:` is legal to the validator — so the colon form validated, missed on disk, and failed
-  with "note not found", leaving the gate's own remediation call unsatisfiable. The
-  fallback now also runs when a validated name names no existing note; a name with no
-  matching note still resolves to its literal path, so creates are unaffected.
+  with "note not found", leaving the gate's own remediation call unsatisfiable.
+  - The gate's `recall-note` call now carries the note's **stored filename stem**, which
+    resolves by construction — including for a note retitled after creation, whose title
+    resolves nowhere. The human title stays in the `[[…]]` display.
+  - `safe_name` also falls back when a name validates but names no existing note, but
+    only if the name holds a character the sanitizer strips (`:`, `?`, `"`, …), and only
+    onto a note whose parsed title matches it (casefold). A collision such as
+    `Build: prod` vs an unrelated `Build prod.md` now fails with "note not found" instead
+    of reading or editing the wrong note. Scratch-suffixed names (`Runbook:
+    deploy.scratch.md`) take the same fallback.
+  - Write paths that must not land on a different note resolve strictly, with no
+    title or scratch fallback: JSON import (new `OmiStore.strict_name`) and
+    `write_note(must_create=True)` (so `create_note`). Creating `X` beside an existing
+    `X.scratch.md` therefore now creates `X.md` instead of refusing it as "already
+    exists". Purge and other edit paths still use `safe_name`, with the narrower
+    fallback above.
 
 ## [10.1.0] - 2026-10-01
 

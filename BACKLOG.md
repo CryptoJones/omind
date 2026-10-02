@@ -93,6 +93,7 @@ Follow-ups:
 
 - [ ] **entities: dotted Python names like `asyncio.run` are read as hostnames** ([#402](https://github.com/CryptoJones/omind/issues/402)) — _bug, follow-up of #384_
 - [ ] **Name hints: names shown at write time are not marked as already hinted** ([#403](https://github.com/CryptoJones/omind/issues/403)) — _enhancement, follow-up of #384_
+- [ ] **namehints/timeline: `…`-truncated titles are documented as resolvable by recall-note, but nothing resolves a prefix** ([#406](https://github.com/CryptoJones/omind/issues/406)) — _bug, follow-up of #384 (raised in the #405 review)_
 
 ### Windows
 
@@ -160,8 +161,9 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 ### Shipped — 2026-10-01 (v10.1.1)
 
 - [x] **recall-note: gate-suggested titles containing `:` fail with "note not found"** ([#393](https://github.com/CryptoJones/omind/issues/393)) — **v10.1.1** — _bug_ —
-  `safe_name` now falls back to the sanitized title whenever the literal name validates
-  but names no existing note, so every title the gate emits resolves.
+  the gate's `recall-note` call now carries the stored filename stem (resolves even for
+  retitled notes), and `safe_name` resolves a validated-but-missing name holding a stripped
+  character onto the note whose title matches it. Import and create resolve strictly.
 
 ### Shipped — 2026-09-29 (v10.0.3)
 

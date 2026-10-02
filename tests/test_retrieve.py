@@ -4,10 +4,14 @@
 
 from __future__ import annotations
 
+import json
+import re
 from pathlib import Path
 
-from omind import guard, retrieve
-from omind.store import NoteFields, OmiStore
+import pytest
+
+from omind import guard, recall, retrieve
+from omind.store import NoteFields, OmiStore, render_fields
 
 
 def _vault(tmp_path: Path) -> Path:
@@ -173,3 +177,30 @@ def test_preflight_min_terms_env_override(monkeypatch) -> None:
     assert retrieve.preflight_min_terms() == 3  # bad value -> default
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "-4")
     assert retrieve.preflight_min_terms() == 0  # clamped
+
+
+@pytest.mark.parametrize("indexed", [True, False], ids=["index", "keyword-fallback"])
+def test_suggest_message_recall_name_resolves_for_a_retitled_note(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, indexed: bool
+) -> None:
+    """Issue #393 contract: the name in the gate's ``recall-note`` call must resolve.
+    A retitled note keeps its old filename, so its title resolves nowhere — the
+    call has to carry the stored filename stem; the title stays in [[…]]."""
+    omi = tmp_path / "OMI"
+    store = OmiStore(omi)
+    title = "Deploy runbook: staging (retitled 17:55)"
+    store.write_note(
+        "Old deploy notes.md",
+        render_fields(NoteFields(title=title, summary="deploy staging runbook steps")),
+    )
+    if not indexed:
+        import omind.searchindex
+
+        monkeypatch.setattr(omind.searchindex, "shared", lambda _omi: None)
+    msg = retrieve.suggest_message("deploy staging runbook", omi)
+    assert f"[[{title}]]" in msg
+    found = re.search(r"`recall-note` with `(\{.*?\})`", msg)
+    assert found
+    name = json.loads(found.group(1))["name"]
+    assert name == "Old deploy notes"
+    assert recall.compact_recall(omi, name, organic=False)["title"] == title
