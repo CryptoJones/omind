@@ -2244,6 +2244,64 @@ def test_wrapped_or_continued_in_place_edit_is_repo_work(command):
     assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Homebrew GNU sed, the usual dodge around BSD `-i ''` on darwin.
+        "gsed -i 's/a/b/' f",
+        "/opt/homebrew/bin/gsed -i 's/a/b/' f",
+        "gsed --in-place 's/a/b/' f",
+        # The escaped `\;` ending the first -exec is not a shell separator.
+        "find . -exec echo {} \\; -exec sed -i 's/a/b/' {} \\;",
+        "find . -name x -print -exec grep -l y {} \\; -exec perl -pi -e 's/a/b/' {} +",
+        # A case arm's `)` ends the pattern; the editor runs after it.
+        "case $1 in fix) sed -i 's/a/b/' f ;; esac",
+        "case $1 in a|b) sed -i 's/a/b/' f ;; esac",
+        # `poetry run` / `pipx run` / `uv run` exec the next word.
+        "poetry run python -c \"open('x','w').write('y')\"",
+        "poetry run sed -i 's/a/b/' f",
+        "pipx run --spec foo python -c \"open('x','w')\"",
+        "uv run python -c \"from pathlib import Path; Path('x').write_text('y')\"",
+        # Destructive/moving script calls.
+        "node -e \"require('fs').rmSync('x', {recursive: true})\"",
+        "node -e \"require('fs').renameSync('a', 'b')\"",
+        "python3 -c \"import os; os.rename('a', 'b')\"",
+        "python3 -c \"import shutil; shutil.move('a', 'b')\"",
+    ],
+)
+def test_issue_419_in_place_edits_are_repo_work(command):
+    """#419: gsed, a second `find -exec` after `\\;`, case arms, `poetry`/`pipx run`
+    and fs.rmSync/os.rename/shutil.move all edit files and must be repo work."""
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "gsed -n 's/a/b/p' f",
+        "gsed 's/a/b/' f | grep -i x",
+        "find . -exec echo {} \\; -exec grep -i x {} \\;",
+        "find . -exec ls -i {} \\; -print",
+        # find's own `-iname` after the -exec ends is not sed's `-i`.
+        "find . -exec sed -n p {} \\; -iname x",
+        "case $1 in fix) sed -n 's/a/b/p' f ;; esac",
+        "case $1 in a) grep -i x f ;; esac",
+        "echo $(ls -i) foo",
+        "poetry show",
+        "poetry run python -c 'print(1)'",
+        "pipx list",
+        "pipx run cowsay -i hi",
+        "node -e \"console.log(require('fs').readdirSync('.'))\"",
+        "python3 -c \"import os; print(os.path.exists('a'))\"",
+        "python3 -c \"import shutil; print(shutil.which('git'))\"",
+        "grep -rn 'shutil.move(' src",
+    ],
+)
+def test_issue_419_read_only_forms_stay_unflagged(command):
+    """#419: the read-only forms of the same tools must not become repo work."""
+    assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
 def test_record_freshness_outcome_retracts_for_dash_c_repo(tmp_path: Path) -> None:
     # #346: record_freshness_outcome must resolve -C repo from hook event and retract it
     repo = _mk_repo(tmp_path, "subrepo")
@@ -2589,9 +2647,7 @@ def _tool_result() -> dict[str, object]:
     return {"type": "user", "message": {"role": "user", "content": [block]}}
 
 
-def _queued(
-    prompt: str, *, mode: str = "prompt", origin: object = ("human",)
-) -> dict[str, object]:
+def _queued(prompt: str, *, mode: str = "prompt", origin: object = ("human",)) -> dict[str, object]:
     attachment: dict[str, object] = {
         "type": "queued_command",
         "prompt": prompt,
@@ -2659,8 +2715,12 @@ def test_midturn_authorization_never_lifts_a_destructive_hard_rule(tmp_path: Pat
     guard.begin_turn(session, "can you clean this up?")
     path = _transcript(tmp_path, _opener("can you clean this up?"), _queued("go ahead, do it"))
     verdict = guard.decide(
-        {"tool": "Bash", "command": "gh repo delete me/x --yes", "session": session,
-         "transcript_path": path}
+        {
+            "tool": "Bash",
+            "command": "gh repo delete me/x --yes",
+            "session": session,
+            "transcript_path": path,
+        }
     )
     assert not verdict.allow
     assert verdict.rule_id not in ("", "capability-question-explicit-auth")

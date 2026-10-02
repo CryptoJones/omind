@@ -2169,6 +2169,13 @@ _STAGE_WRAPPERS: dict[str, frozenset[str]] = {
 }
 #: Wrappers that take one positional argument before the command (``timeout 5``).
 _WRAPPER_POSITIONAL = frozenset({"timeout"})
+#: Tools whose ``run`` subcommand execs the next word (``poetry run python …``,
+#: #419). The value is the switches after ``run`` that take a separate argument.
+_RUN_WRAPPERS: dict[str, frozenset[str]] = {
+    "poetry": frozenset({"-C", "--directory", "-P", "--project"}),
+    "pipx": frozenset({"--spec", "--python", "--pip-args", "--index-url"}),
+    "uv": frozenset({"--with", "--python", "-p", "--package", "--directory", "--project"}),
+}
 #: ``find`` actions whose following words are a command of their own.
 _EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: Per editor: (switches meaning in-place — BSD ``sed -I`` too; switches after
@@ -2178,6 +2185,7 @@ _EXEC_ACTIONS = frozenset({"-exec", "-execdir", "-ok", "-okdir"})
 #: script, not the flag).
 _EDITOR_SWITCHES: dict[str, tuple[frozenset[str], frozenset[str], frozenset[str]]] = {
     "sed": (frozenset("iI"), frozenset("efl"), frozenset("efl")),
+    "gsed": (frozenset("i"), frozenset("efl"), frozenset("efl")),
     "perl": (frozenset("i"), frozenset("dDeEIMmx"), frozenset("eE")),
     "ruby": (frozenset("i"), frozenset("CeEFIrx"), frozenset("CeEIr")),
 }
@@ -2189,7 +2197,8 @@ _WRITE_MODE = r"""\\?['"](?:[bt]*[wax][bt+]*|r[bt]*\+[bt]*)\\?['"]"""
 _SCRIPT_WRITE_RE = re.compile(
     r"\b(?:write_text|write_bytes|writeFile|writeFileSync|appendFile|appendFileSync)\s*\("
     r"|\bFile\.write\s*\("
-    r"|\.unlink(?:Sync)?\s*\(|\bos\.(?:remove|replace)\s*\(|\bshutil\.rmtree\s*\("
+    r"|\.unlink(?:Sync)?\s*\(|\bos\.(?:remove|replace|renames?)\s*\("
+    r"|\bshutil\.(?:rmtree|move)\s*\(|\.(?:rm|rmdir|rename)(?:Sync)?\s*\("
     # open(p, 'w'|'a'|'x'|'r+'…), open(p, mode="wb"), Path(p).open("w")
     rf"|\bopen\s*\([^)\n]*,\s*(?:mode\s*=\s*)?{_WRITE_MODE}"
     rf"|\.open\s*\(\s*(?:mode\s*=\s*)?{_WRITE_MODE}"
@@ -2206,40 +2215,61 @@ def _program_stages(code: str) -> list[tuple[str, list[str], int, int]]:
 
     ``code`` is ``policy.shell_code_text`` output — the same length as the raw
     command, so ``start:end`` slices the raw text too. Backslash-newline
-    continuations are joined; stages break at ``; & | ( `` ` `` and newlines,
-    and again at a ``find -exec``. Leading ``VAR=x`` assignments, wrappers and
-    keywords are skipped, so ``program`` is the basename (``.exe`` stripped) of
-    what actually runs. ``end`` extends over trailing blanked text: the heredoc
-    body that stage owns."""
+    continuations are joined; stages break at unescaped ``; & | ( ) `` ` `` and
+    newlines (``)`` ends a ``case`` arm's pattern), and again at a ``find
+    -exec``, whose command runs to its ``\\;`` or ``{} +``. Leading ``VAR=x``
+    assignments, wrappers (``poetry run`` too) and keywords are skipped, so
+    ``program`` is the basename (``.exe`` stripped) of what actually runs.
+    ``end`` extends over trailing blanked text: the heredoc body that stage
+    owns."""
     code = code.replace("\\\n", "  ")
     n = len(code)
     stages: list[tuple[str, list[str], int, int]] = []
-    for seg in re.finditer(r"[^;&|\n(`]+", code):
+    # An escaped `\;` (find's -exec terminator) is a word, not a separator (#419).
+    for seg in re.finditer(r"(?:\\.|[^;&|\n(`)\\])+", code):
         end = seg.end()
         while end < n and code[end].isspace():
             end += 1
         toks = [(m.group(), seg.start() + m.start()) for m in re.finditer(r"\S+", seg.group())]
-        while toks:
-            j = 0
-            while j < len(toks):
+        in_exec = False
+        i, ntok = 0, len(toks)
+        while i < ntok:
+            j = i
+            while j < ntok:
                 word = toks[j][0]
                 if re.match(r"[A-Za-z_]\w*=", word):
                     j += 1
                     continue
                 base = _basename(word)
+                if base in _RUN_WRAPPERS and j + 1 < ntok and toks[j + 1][0] == "run":
+                    j += 2
+                    while j < ntok and toks[j][0].startswith("-"):
+                        j += 2 if toks[j][0] in _RUN_WRAPPERS[base] else 1
+                    continue
                 if base not in _STAGE_WRAPPERS:
                     break
                 j += 1
-                while j < len(toks) and toks[j][0].startswith("-"):
+                while j < ntok and toks[j][0].startswith("-"):
                     j += 2 if toks[j][0] in _STAGE_WRAPPERS[base] else 1
-                if base in _WRAPPER_POSITIONAL and j < len(toks):
+                if base in _WRAPPER_POSITIONAL and j < ntok:
                     j += 1
-            toks = toks[j:]
-            if not toks:
+            if j >= ntok:
                 break
-            cut = next((k for k, (w, _) in enumerate(toks) if k and w in _EXEC_ACTIONS), len(toks))
-            stages.append((_basename(toks[0][0]), [w for w, _ in toks[1:cut]], toks[0][1], end))
-            toks = toks[cut + 1 :]
+            cut = j + 1
+            while cut < ntok and toks[cut][0] not in _EXEC_ACTIONS:
+                w = toks[cut][0]
+                if in_exec and (w == "\\;" or (w == "+" and toks[cut - 1][0] == "{}")):
+                    break
+                cut += 1
+            stages.append(
+                (_basename(toks[j][0]), [t for t, _ in toks[j + 1 : cut]], toks[j][1], end)
+            )
+            # An -exec command ended at its `\;`/`+`: what follows is find's own
+            # expression up to its next -exec (`-iname` there is not sed's `-i`).
+            while cut < ntok and toks[cut][0] not in _EXEC_ACTIONS:
+                cut += 1
+            i = cut + 1
+            in_exec = True
     return stages
 
 
