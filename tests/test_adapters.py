@@ -372,3 +372,18 @@ def test_normalize_carries_the_transcript_path_for_midturn_authorization() -> No
     event = {"tool_name": "Bash", "tool_input": {"command": "ls"}, "transcript_path": "/t.jsonl"}
     assert adapters.normalize_action(event)["transcript_path"] == "/t.jsonl"
     assert adapters.normalize_action({"tool_name": "Bash"})["transcript_path"] == ""
+
+
+def test_run_adapter_fails_open_when_a_classifier_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#420: every harness reaches the core through check_action, so a crashing
+    classifier must render an ALLOW, not escape as a traceback."""
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("classifier exploded")
+
+    monkeypatch.setattr(guard, "_repo_root_for_action", boom)
+    guard.clear_gate("a420")
+    event = io.StringIO(json.dumps({"tool": "shell", "command": "ls", "session": "a420"}))
+    assert adapters.run_adapter(event) == 0

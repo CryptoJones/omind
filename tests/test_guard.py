@@ -2773,3 +2773,63 @@ def test_over_budget_notice_reports_push_only(
     assert "over budget" in context
     assert "61,000 unrequested characters" in context
     assert "your own OMI reads are not counted" in context
+
+
+# --- #420: the check action fails OPEN on an unexpected classifier exception ---
+
+
+def _boom(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError("classifier exploded")
+
+
+def test_check_fails_open_when_a_classifier_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(guard, "_repo_root_for_action", _boom)
+    guard.clear_gate("s420")
+    payload = {"tool": "Bash", "command": "ls", "session": "s420"}
+    assert guard.run_guard("check", io.StringIO(json.dumps(payload))) == 0
+    assert "classifier exploded" in capsys.readouterr().err
+    event = compliance.read_events()[-1]
+    assert event["rule_id"] == guard.GUARD_ERROR_RULE
+    assert event["outcome"] == "fail-open"
+    assert "RuntimeError: classifier exploded" in event["detail"]
+
+
+def test_check_fail_open_still_honours_hard_policy_rules(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # A crash in an unrelated classifier must not wave through a command a hard
+    # policy rule plainly names.
+    monkeypatch.setattr(guard, "_repo_root_for_action", _boom)
+    verdict = guard.check_action({"tool": "Bash", "command": "sudo rm x", "session": "s420h"})
+    assert not verdict.allow
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
+    assert compliance.read_events()[-1]["outcome"] == "deny"
+
+
+def test_check_keeps_a_decided_deny_when_a_later_step_raises(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    # decide() blocked on the consult gate; decorating the message then raised.
+    from omind import retrieve
+
+    monkeypatch.setattr(retrieve, "suggest_message", _boom)
+    guard.clear_gate("s420g")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    verdict = guard.check_action({"tool": "Bash", "command": "ls", "session": "s420g"}, omi)
+    assert not verdict.allow
+    assert verdict.rule_id == "omi-gate"
+
+
+def test_preflight_fails_open_when_it_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(guard, "preflight_turn", _boom)
+    payload = {"session_id": "s420p", "prompt": "do the thing"}
+    assert guard.run_guard("preflight", io.StringIO(json.dumps(payload))) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "classifier exploded" in captured.err
+    assert compliance.read_events()[-1]["rule_id"] == guard.GUARD_ERROR_RULE
