@@ -85,17 +85,20 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.23)
+
+- [x] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — **v10.2.23** — _bug_ —
+  the consult and freshness classifiers reuse the hard rules' subjects, so the words a positional
+  body runs (`bash -c '"$@"' _ git commit -m x`) and code piped into a shell on stdin
+  (`printf 'git commit -m x' | sh`, `cat <<'EOF' | bash`) are repo work, and a commit reached either
+  way hits the freshness gate.
+
 ### Shipped — 2026-10-02 (v10.2.22)
 
 - [x] **guard: `_shell_walk` / `_program_stages` scale superlinearly** ([#445](https://github.com/CryptoJones/omind/issues/445)) — **v10.2.22** — _bug_ —
   `x=1;` and `bash -c 'echo hi; '` repeated 100,000 times are judged in under
   0.35 s each by the walk, the hard rules, the note rules and the repo-work
   classifier. A command-position search too costly to run fails closed.
-- [x] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — **v10.2.22** — _bug_ —
-  the consult and freshness classifiers reuse the hard rules' subjects, so the words a positional
-  body runs (`bash -c '"$@"' _ git commit -m x`) and code piped into a shell on stdin
-  (`printf 'git commit -m x' | sh`, `cat <<'EOF' | bash`) are repo work, and a commit reached either
-  way hits the freshness gate.
 
 ### Shipped — 2026-10-02 (v10.2.21)
 

@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.23] - 2026-10-02
+
+### Fixed
+- **Positional shell bodies and code fed to a shell on stdin are repo work
+  ([#449](https://github.com/CryptoJones/omind/issues/449)).** The consult and
+  freshness classifiers saw only the command and its unwrapped `-c`/`eval`
+  bodies, so `bash -c '"$@"' _ git commit -m x`, `echo 'sed -i s/a/b/ f' |
+  bash` and `cat <<'EOF' | bash` with a `git commit` body were not repo work,
+  though the hard rules (#440, #446) already judged them.
+  - The classifiers now read the hard rules' subjects (`_hard_rule_subjects`,
+    cached per command, so `decide` searches once for the hard rules and both
+    classifiers): the words a positional body runs, the producer piped into a
+    shell reading stdin with its heredoc, and the here-strings and `env -S`
+    values fed to a shell are classified as code.
+  - An unquoted producer is classified too: `echo git commit -m x | bash`,
+    `echo sed -i s/a/b/ f | bash` and `printf '%s ' git commit -m x | sh`.
+    Besides the one-word-per-line form the hard rules search, the classifiers
+    get each word joined with up to 15 words after it, so a multi-word verb
+    stays on one line.
+  - A stdin script that expands its positional words runs them: `bash -s git
+    commit -m x <<< '"$@"'`, with a heredoc, or with `echo '"$@"' | bash -s
+    …`. This is in the shared search, so the hard rules deny `bash -s sudo id
+    <<< '"$@"'` too.
+  - A partly positional body is classified with `"$@"`, `$@`, `"$*"` and `$*`
+    filled in: `bash -c 'git "$@"' _ commit -m x` is a commit.
+  - A commit reached any of these ways is a commit action, so it hits the
+    freshness gate.
+  - `echo hi | bash`, `curl … | sh`, `bash -c '"$@"' _ ls` and `echo hi |
+    bash -s git commit` stay out. When the subject search fails partway, what
+    it already found is kept; when the walk fails, the command alone is
+    judged.
+
 ## [10.2.22] - 2026-10-02
 
 ### Fixed
@@ -37,34 +69,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `source /dev/stdin <<< x;` took over 17 s).
   - The note rules match a `*literal*` glob as a substring, and skip unquoting
     when a command has no quoted single word.
-- **Positional shell bodies and code fed to a shell on stdin are repo work
-  ([#449](https://github.com/CryptoJones/omind/issues/449)).** The consult and
-  freshness classifiers saw only the command and its unwrapped `-c`/`eval`
-  bodies, so `bash -c '"$@"' _ git commit -m x`, `echo 'sed -i s/a/b/ f' |
-  bash` and `cat <<'EOF' | bash` with a `git commit` body were not repo work,
-  though the hard rules (#440, #446) already judged them.
-  - The classifiers now read the hard rules' subjects (`_hard_rule_subjects`,
-    cached per command, so `decide` searches once for the hard rules and both
-    classifiers): the words a positional body runs, the producer piped into a
-    shell reading stdin with its heredoc, and the here-strings and `env -S`
-    values fed to a shell are classified as code.
-  - An unquoted producer is classified too: `echo git commit -m x | bash`,
-    `echo sed -i s/a/b/ f | bash` and `printf '%s ' git commit -m x | sh`.
-    Besides the one-word-per-line form the hard rules search, the classifiers
-    get each word joined with up to 15 words after it, so a multi-word verb
-    stays on one line.
-  - A stdin script that expands its positional words runs them: `bash -s git
-    commit -m x <<< '"$@"'`, with a heredoc, or with `echo '"$@"' | bash -s
-    …`. This is in the shared search, so the hard rules deny `bash -s sudo id
-    <<< '"$@"'` too.
-  - A partly positional body is classified with `"$@"`, `$@`, `"$*"` and `$*`
-    filled in: `bash -c 'git "$@"' _ commit -m x` is a commit.
-  - A commit reached any of these ways is a commit action, so it hits the
-    freshness gate.
-  - `echo hi | bash`, `curl … | sh`, `bash -c '"$@"' _ ls` and `echo hi |
-    bash -s git commit` stay out. When the subject search fails partway, what
-    it already found is kept; when the walk fails, the command alone is
-    judged.
 
 ## [10.2.21] - 2026-10-02
 

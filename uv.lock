@@ -2364,7 +2364,7 @@ wheels = [
 
 [[package]]
 name = "omind"
-version = "10.2.22"
+version = "10.2.23"
 source = { editable = "." }
 dependencies = [
     { name = "cryptography" },
