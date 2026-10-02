@@ -2655,23 +2655,19 @@ def _local_code_texts(command: str) -> list[str]:
     so each is classified on its own. Just ``[command]`` when the walk fails.
 
     Also what a local shell runs that the walk does not unwrap, found by the
-    hard rules' :func:`_local_shell_subjects` (#449): the words a positional
-    body runs (``bash -c '"$@"' _ git commit``), the producer text and heredoc
-    piped into a shell reading stdin (``printf 'git commit' | sh``, ``cat
-    <<EOF | bash``), and a here-string given to one. When that search fails,
-    the command and its bodies are still classified."""
+    hard rules' :func:`_local_shell_subjects` (#449), read from the same
+    cached :func:`_hard_rule_subjects`: the words a positional body runs
+    (``bash -c '"$@"' _ git commit``, ``bash -s git commit <<< '"$@"'``) and
+    the body with them filled in (``bash -c 'git "$@"' _ commit``), the
+    producer piped into a shell reading stdin (``printf 'git commit' | sh``,
+    ``echo git commit | bash``, also as :func:`_word_runs`), its heredoc, a
+    here-string given to a shell, and ``env -S`` values. When that search
+    fails partway, what it found is still classified."""
     try:
-        texts = [command, *_shell_walk(command)[3]]
+        subjects = _hard_rule_subjects(command)
     except Exception:
         return [command]
-    try:
-        code: list[str] = []
-        words: list[str] = []
-        for text in texts:
-            _local_shell_subjects(text, code, words)
-    except Exception:
-        return texts
-    return [*texts, *code, *words]
+    return [*subjects.code, *subjects.words, *subjects.runs]
 
 
 def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
@@ -3716,20 +3712,42 @@ def _pipeline_head(code: str, at: int, floor: int = 0) -> int:
     return floor
 
 
-def _words_in_command_position(text: str) -> str:
-    """``text`` (a pipeline's producer stages) with every shell word on its
-    own line, so each one is in command position: ``echo sudo id | bash``
-    runs ``sudo``. A quoted word stays one word, so ``echo 'never use sudo
-    here' | bash`` still runs ``never``; inside it, quotes and ``\\n``
-    escapes become newlines (``printf 'ls\\nsudo id' | sh``). A leading
-    redirection (``<<<'sudo id'``) is dropped. Unparseable text splits on
-    every blank and quote, which judges the most text."""
+def _producer_words(text: str) -> list[str]:
+    """The shell words of ``text`` (a pipeline's producer stages). A quoted
+    word stays one word; inside it, quotes and ``\\n`` escapes become
+    newlines (``printf 'ls\\nsudo id' | sh``). A leading redirection
+    (``<<<'sudo id'``) is dropped. Unparseable text splits on every blank and
+    quote, which judges the most text."""
     try:
         words = shlex.split(text)
     except ValueError:
         words = re.split(r"[\s'\"]+", text)
     lines = (_LEADING_REDIRECT_RE.sub("", word) for word in words)
-    return "\n".join(re.sub(r"['\"]|\\n", "\n", line) for line in lines)
+    return [re.sub(r"['\"]|\\n", "\n", line) for line in lines]
+
+
+def _words_in_command_position(text: str) -> str:
+    """``text`` (a pipeline's producer stages) with every shell word on its
+    own line, so each one is in command position: ``echo sudo id | bash``
+    runs ``sudo``. A quoted word stays one word, so ``echo 'never use sudo
+    here' | bash`` still runs ``never`` (see :func:`_producer_words`)."""
+    return "\n".join(_producer_words(text))
+
+
+#: How many words a :func:`_word_runs` line holds: enough for a git verb
+#: behind its global options (``git -C dir -c k=v commit``).
+_WORD_RUN = 16
+
+
+def _word_runs(text: str) -> str:
+    """``text`` (a pipeline's producer stages) as one line per word, holding
+    that word and the ones after it, space-joined (#449 review): ``echo git
+    commit -m x | bash`` runs ``git commit -m x``, which the multi-word repo
+    work classifiers see only on one line. For the classifiers alone; the
+    hard rules search :func:`_words_in_command_position`. Each line holds at
+    most :data:`_WORD_RUN` words, so the text stays linear in the producer."""
+    words = _producer_words(text)
+    return "\n".join(" ".join(words[k : k + _WORD_RUN]) for k in range(len(words)))
 
 
 def _heredoc_bodies(
@@ -3767,11 +3785,14 @@ class _HardSubjects:
     positional words a ``bash -c '"$@"'`` body runs), searched as is.
     ``quoted``: an opaque site's text with its quotes turned into newlines; a
     command there must be followed by a blank or the end of the text
-    (``watch 'sudo id'``), so ``tmux new -s 'sudo-test'`` stays data."""
+    (``watch 'sudo id'``), so ``tmux new -s 'sudo-test'`` stays data.
+    ``runs``: the :func:`_word_runs` of each producer piped into a shell, for
+    the repo work classifiers only (#449 review); no hard rule reads them."""
 
     code: tuple[str, ...]
     words: tuple[str, ...] = ()
     quoted: tuple[str, ...] = ()
+    runs: tuple[str, ...] = ()
 
 
 def _without_substitution(masked: str, stop: int, tokens: list[str]) -> list[str] | None:
@@ -3824,13 +3845,64 @@ def _process_substitution_code(
     return text[stop + 1 :]
 
 
-def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
+def _stdin_positional_words(words: list[str]) -> list[str]:
+    """The positional words of the local shell ``words`` that reads its
+    script from stdin (``bash -s a b``, ``bash - a b``, ``bash /dev/stdin a
+    b``): what ``"$@"`` expands to in that script (#449 review). Switches
+    before the first one, ``--`` and redirections are not positional words.
+    Read the way :func:`_shell_code_source` reads them."""
+    positional: list[str] = []
+    reads_stdin = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        if _REDIRECT_OP_RE.fullmatch(word):
+            i += 2  # `<<< '…'`, `> log`: the operator and its target
+            continue
+        if _REDIRECT_RE.match(word):
+            pass  # `<<<'…'`, `2>&1`, `>log`
+        elif positional or (reads_stdin and word[:1] not in ("-", "+")):
+            positional.append(word)
+        elif word in ("-o", "+o", "-O", "+O"):
+            i += 2
+            continue
+        elif word in _STDIN_OPERANDS:
+            reads_stdin = True
+        elif len(word) > 1 and word[0] in "-+" and word != "--":
+            reads_stdin = reads_stdin or _is_stdin_switch(word)
+        i += 1
+    return positional
+
+
+#: A body's positional expansion that :func:`_with_positionals` fills in.
+_ALL_POSITIONALS_RE = re.compile(r'"\$[@*]"|\$[@*]')
+
+
+def _with_positionals(body: str, positional: list[str]) -> str | None:
+    """``body`` with each ``"$@"``, ``$@``, ``"$*"`` and ``$*`` replaced by
+    the space-joined ``positional`` words (#449 review): ``bash -c 'git
+    "$@"' _ commit -m x`` runs ``git commit -m x``. One form per body, so it
+    stays bounded. ``None`` when the body expands none of them."""
+    if not _ALL_POSITIONALS_RE.search(body):
+        return None
+    joined = " ".join(positional)
+    return _ALL_POSITIONALS_RE.sub(lambda _m: joined, body)
+
+
+def _local_shell_subjects(
+    text: str, code: list[str], words: list[str], runs: list[str] | None = None
+) -> None:
     """Add to ``code``/``words`` what each local shell in ``text`` runs that
     the walk does not unwrap (#430 review): a ``bash -c`` body's positional
-    words, a here-string, and the stages of the pipeline that feed a shell
-    reading code from stdin, with a heredoc they own. Only those stages, so
-    ``curl … | sh && git commit -m 'sudo: drop'`` judges the curl alone. Also
-    every ``env -S`` value, which env splits and runs as a command."""
+    words, and that body with them filled in, a here-string, and the stages
+    of the pipeline that feed a shell reading code from stdin, with a heredoc
+    they own. Only those stages, so ``curl … | sh && git commit -m 'sudo:
+    drop'`` judges the curl alone. When that stdin script expands its
+    positional words (``bash -s sudo id <<< '"$@"'``), those words too. Also
+    every ``env -S`` value, which env splits and runs as a command.
+
+    ``runs`` gets the :func:`_word_runs` of each producer, for the repo work
+    classifiers (#449 review)."""
     masked = policy.shell_code_text(text)
     stages = _program_stages(masked, text)
     # Each stage stops at the next stage's start too, so a `find -exec sh x
@@ -3851,6 +3923,8 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
             # substitution prints is the code the shell runs (#444).
             if producer.strip():
                 words.append(_words_in_command_position(producer))
+                if runs is not None:
+                    runs.append(_word_runs(producer))
             continue
         # The substitution is a positional word (`… | bash -s <(:)`), not a
         # `<` redirect: drop it, so the pipeline producer is judged.
@@ -3861,6 +3935,7 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
         head = _pipeline_head(masked, pos, floor)
         floor = stop
         own = pos  # where a heredoc the shell reads may open (its own: masked)
+        stdin_shell = False  # a local shell reading its script from stdin
         if program not in _LOCAL_SHELLS:
             # `… | source /dev/stdin`, `. /dev/stdin <<EOF`, `. /dev/stdin <<< '…'`
             here: list[str] = _here_strings(tokens[1:])
@@ -3872,6 +3947,11 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
                     # `bash -c '"$@"' _ sudo id`: $0 is `_`, so judge from both.
                     words.append(" ".join(tokens[at_body + 1 :]))
                     words.append(" ".join(tokens[at_body + 2 :]))
+                    # `bash -c 'git "$@"' _ commit -m x`: the body with them
+                    # filled in (#449 review). Words, so no opt-in counts there.
+                    filled = _with_positionals(tokens[at_body], tokens[at_body + 2 :])
+                    if filled is not None:
+                        words.append(filled)
                 if not _body_reads_stdin(tokens, at_body):
                     continue
                 # `… | bash -c 'eval "$(cat)"'`: the body runs its stdin.
@@ -3881,7 +3961,9 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
                 source, here = _shell_code_source(tokens)
                 if source != "stdin":
                     continue
+                stdin_shell = True
         code.extend(here)
+        script = list(here)
         producer_start, producer_end = head, pos
         if not text[head:pos].strip() and head >= 2 and masked[head - 2 : head] == ">(":
             # `echo sudo id > >(bash)`, `… | tee >(bash)`: the shell reads
@@ -3889,12 +3971,29 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
             producer_end = head - 2
             producer_start = _pipeline_head(masked, producer_end, outer_floor)
         if text[producer_start:producer_end].strip():
-            words.append(_words_in_command_position(text[producer_start:producer_end]))
+            script.append(text[producer_start:producer_end])
+            words.append(_words_in_command_position(script[-1]))
+            if runs is not None:
+                runs.append(_word_runs(script[-1]))
         # A producer's heredoc body starts on the next line (`cat <<EOF |
         # bash`), past this stage: it is the code the shell reads.
         heredocs = list(policy._HEREDOC_RE.finditer(masked, head, own))
         if heredocs:
             code.append(_heredoc_bodies(text, _next_line_break(text, own), heredocs))
+            script.append(code[-1])
+        if stdin_shell:
+            # Its own heredoc (`bash -s a <<'EOF'`) is judged as an opaque
+            # site; here it only says whether the script runs `"$@"`.
+            own_docs = list(policy._HEREDOC_RE.finditer(masked, head, stop))
+            if own_docs:
+                newline = _next_line_break(text, pos)
+                script.append(_heredoc_bodies(text, newline, own_docs, keep_from=pos))
+        if stdin_shell and any(_POSITIONAL_REF_RE.search(part) for part in script):
+            # `bash -s sudo id <<< '"$@"'`: the script runs its positional
+            # words, like a `-c` body does (#449 review).
+            positional = _stdin_positional_words(tokens)
+            if positional:
+                words.append(" ".join(positional))
     for segment in _SEGMENT_RE.finditer(masked):
         if not re.search(r"(?:^|[\s/])env\s", segment.group() + " "):
             continue
@@ -3911,6 +4010,7 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
                 code.append(token[2:])
 
 
+@functools.lru_cache(maxsize=8)
 def _hard_rule_subjects(command: str) -> _HardSubjects:
     """The texts a hard rule is tested against (#430).
 
@@ -3923,15 +4023,27 @@ def _hard_rule_subjects(command: str) -> _HardSubjects:
     its quoted text is code, so it fails closed, like an opaque site for note
     rules.
 
+    ``runs`` (#449 review) is for the repo work classifiers, which read these
+    subjects through :func:`_local_code_texts`. Cached per command, so
+    :func:`decide` searches once for the hard rules and both classifiers.
+
     Pure and never raises: on any walk error only the command itself is
-    judged, which is the pre-#430 behaviour."""
+    judged, which is the pre-#430 behaviour. When the subject search fails
+    partway, what it already found is kept (#449 review)."""
     try:
         sites, _cwd, _local, bodies = _shell_walk(command)
-        code: list[str] = [command, *bodies]
-        words: list[str] = []
+    except Exception:
+        return _HardSubjects((command,))
+    code: list[str] = [command, *bodies]
+    words: list[str] = []
+    runs: list[str] = []
+    try:
         for text in (command, *bodies):
-            _local_shell_subjects(text, code, words)
-        quoted: list[str] = []
+            _local_shell_subjects(text, code, words, runs)
+    except Exception:
+        pass  # keep what was already found: more text judged, never less
+    quoted: list[str] = []
+    try:
         for site in sites:
             if not site.opaque:
                 continue
@@ -3945,9 +4057,9 @@ def _hard_rule_subjects(command: str) -> _HardSubjects:
                 if not has_body:
                     continue  # it reads stdin or a file: judged above
             quoted.append(re.sub(r"['\"]|\\n", "\n", site.text))
-        return _HardSubjects(tuple(code), tuple(words), tuple(quoted))
     except Exception:
-        return _HardSubjects((command,))
+        pass  # likewise: keep the sites already read
+    return _HardSubjects(tuple(code), tuple(words), tuple(quoted), tuple(runs))
 
 
 @functools.lru_cache(maxsize=64)

@@ -169,6 +169,18 @@ def _git_bash_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
 
 
+@pytest.fixture(autouse=True)
+def _cold_hard_rule_subjects() -> Iterator[None]:
+    """Each test starts with an empty `guard._hard_rule_subjects` cache (#449
+    review): a test that patches the walk or the subject search must not see
+    what an earlier test cached for the same command."""
+    from omind import guard
+
+    guard._hard_rule_subjects.cache_clear()
+    yield
+    guard._hard_rule_subjects.cache_clear()
+
+
 @pytest.fixture
 def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
     """Drive `guard._shell_tokens` down its Windows branch on any runner (#430:
@@ -178,8 +190,10 @@ def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
     monkeypatch.setattr(guard, "_windows_shell", lambda: True)
     guard._shell_walk.cache_clear()
+    guard._hard_rule_subjects.cache_clear()
     yield
     guard._shell_walk.cache_clear()
+    guard._hard_rule_subjects.cache_clear()
 
 
 class HardTimeLimitExceeded(BaseException):
@@ -234,6 +248,7 @@ def cold_shell_caches() -> None:
     from omind import guard, policy
 
     guard._shell_walk.cache_clear()
+    guard._hard_rule_subjects.cache_clear()  # #449 review
     guard._split_words.cache_clear()
     guard._program_stages_cached.cache_clear()
     guard._line_breaks.cache_clear()

@@ -14,6 +14,7 @@ import sys
 import time
 from collections.abc import Callable
 from pathlib import Path
+from typing import Any
 
 import pytest
 from conftest import cold_shell_caches, traced_bound
@@ -3286,6 +3287,8 @@ WRAPPED_HARD_COMMANDS = (
     ("bash <<< 'sudo id'", "sudo-use-fleet-sudo"),
     ("bash <<<'sudo id'", "sudo-use-fleet-sudo"),
     ("bash -s <<< 'sudo id'", "sudo-use-fleet-sudo"),
+    # #449 review: a stdin script that runs its positional words.
+    ("bash -s sudo id <<< '\"$@\"'", "sudo-use-fleet-sudo"),
     # Item 3: positional words a `-c` body runs.
     ("bash -c '\"$@\"' _ sudo rm -rf /x", "sudo-use-fleet-sudo"),
     ('sh -c \'"$0" "$@"\' sudo id', "sudo-use-fleet-sudo"),
@@ -4795,3 +4798,107 @@ def test_positional_and_stdin_commit_gets_the_freshness_verdict_end_to_end(
     assert not verdict.allow
     assert verdict.rule_id == "repo-work-fresh-base"
     guard.clear_gate(session)
+
+
+# --- #449 review: unquoted producers, stdin positionals, filled-in bodies ---
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Item 1: an unquoted producer's words, one per line, miss the
+        # multi-word classifiers; the word runs reach them.
+        "echo git commit -m x | bash",
+        "printf '%s ' git commit -m x | sh",
+        # Item 2: a stdin script that runs its positional words.
+        "bash -s git commit -m x <<< '\"$@\"'",
+        "bash -s -- git commit -m x <<< '\"$@\"'",
+        "bash -s git commit -m x <<'EOF'\n\"$@\"\nEOF",
+        "echo '\"$@\"' | bash -s git commit -m x",
+        # Item 3: a partly positional body, filled in.
+        "bash -c 'git \"$@\"' _ commit -m x",
+        "bash -c 'git $*' _ commit -m x",
+        # A wrapped shell still runs its positional words.
+        "sudo bash -c '\"$@\"' _ git commit -m x",
+    ],
+)
+def test_review_449_shell_code_shapes_are_commit_actions(command: str) -> None:
+    """#449 review: each shape runs `git commit` on this machine."""
+    action = {"tool": "Bash", "command": command}
+    assert guard._is_repo_sensitive_action(action), command
+    assert guard._is_commit_action(action), command
+
+
+def test_review_449_unquoted_in_place_edit_producer_is_repo_work() -> None:
+    """#449 review, item 1: `echo sed -i s/a/b/ f | bash` edits in place."""
+    action = {"tool": "Bash", "command": "echo sed -i s/a/b/ f | bash"}
+    assert guard._is_repo_sensitive_action(action)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hi | bash -s git commit -m x",  # the script never runs "$@"
+        "bash -s ls <<< '\"$@\"'",
+        "bash -c 'git \"$@\"' _ status",
+        "echo git status | bash",
+    ],
+)
+def test_review_449_benign_shapes_stay_out_of_repo_work(command: str) -> None:
+    """#449 review: no repo verb in what the shell runs."""
+    action = {"tool": "Bash", "command": command}
+    assert not guard._is_repo_sensitive_action(action), command
+    assert not guard._is_commit_action(action), command
+
+
+def test_review_449_word_runs_stay_bounded() -> None:
+    """#449 review, item 1: each word run holds at most `_WORD_RUN` words, so
+    a long producer stays linear."""
+    runs = guard._word_runs("echo " + "a " * 1000).splitlines()
+    assert len(runs) == 1001
+    assert max(len(run.split()) for run in runs) == guard._WORD_RUN
+
+
+def test_review_449_subject_search_keeps_what_it_found_before_failing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#449 review, item 4 (AGENTS.md invariant 2): when the subject search
+    raises on the second text, the first text's subjects are still
+    classified."""
+    real = guard._local_shell_subjects
+    calls: list[str] = []
+
+    def second_raises(text: str, *args: Any) -> None:
+        calls.append(text)
+        if len(calls) > 1:
+            raise RuntimeError("subject search exploded")
+        real(text, *args)
+
+    monkeypatch.setattr(guard, "_local_shell_subjects", second_raises)
+    command = "printf 'git commit -m x' | sh && bash -c 'echo hi'"
+    texts = guard._local_code_texts(command)
+    assert len(calls) == 2
+    assert texts[:2] == [command, "echo hi"]
+    assert any("git commit -m x" in text for text in texts[2:])  # the printf's
+    assert guard._is_commit_action({"tool": "Bash", "command": command})
+
+
+def test_review_449_decide_searches_the_subjects_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#449 review, item 4: the hard rules and both repo work classifiers
+    read one cached subject search per command."""
+    real = guard._local_shell_subjects
+    calls: list[str] = []
+
+    def counting(text: str, *args: Any) -> None:
+        calls.append(text)
+        real(text, *args)
+
+    monkeypatch.setattr(guard, "_local_shell_subjects", counting)
+    command = "echo git commit -m x | bash"
+    action = {"tool": "Bash", "command": command}
+    guard._hard_policy_verdict(command)
+    assert guard._is_repo_sensitive_action(action)
+    assert guard._is_commit_action(action)
+    assert calls == [command]
