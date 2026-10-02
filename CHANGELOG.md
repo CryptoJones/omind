@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.14] - 2026-10-02
+
+### Security
+- **Hard seed rules now see code run inside a local shell wrapper, and `env`,
+  `nice` and `timeout` in front of `sudo`
+  ([#430](https://github.com/CryptoJones/omind/issues/430)).** None of these were
+  denied: `bash -c 'sudo rm -rf /x'`, `sh -c "…"`, `eval '…'`, `echo '…' | bash`,
+  `bash -c 'gh repo delete o/r --yes'`, `env sudo …`, `nice sudo …`,
+  `timeout 5 sudo …` and `/usr/bin/env sudo …`.
+  - A `match="command"` rule is tested against `shell_code_text`, which blanks a
+    quoted body. `_hard_policy_verdict` now also tests each hard rule against every
+    `-c`/`eval` body the cached shell walk (`guard._shell_walk`, #413) unwraps. When
+    a site is opaque (`su -c '…'`, `watch '…'`, or a shell that reads code from
+    stdin, as in `… | bash`), its quoted text is judged as code, which fails
+    closed. A shell running a script file (`bash x.sh 'sudo'`) still treats its
+    arguments as data.
+  - An opt-in counts only where it takes effect: on the command, or inside the
+    body the rule matched. One body's opt-in never covers a match elsewhere.
+  - The command-position wrapper list (`policy._CMD_WRAPPERS`) is now derived from
+    the stage parser's wrapper table, which moved to `policy.STAGE_WRAPPERS`
+    (`guard._STAGE_WRAPPERS` aliases it). That table includes each wrapper's
+    value-taking switches, `timeout`'s duration, and an optional binary path. Each
+    word can match only one way, so long runs of wrappers cannot make the regex
+    backtrack exponentially.
+  - The seed rules still apply when the state dir cannot resolve (#421). If the
+    walk raises, the command alone is judged, as before.
+  - The audit's false-positive suites (`probe_rules`, `probe412`, `probe413*`, and
+    the classifier half of `probe_classify`) produce the same output before and
+    after this change. The hard-rule half of `probe_classify` went from 9
+    unexpected results to 0 out of 29.
 ## [10.2.13] - 2026-10-02
 
 ### Fixed

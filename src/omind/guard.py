@@ -1766,9 +1766,11 @@ def _shell_sites(
     cwd: Path | None = Path("."),
     dirs: tuple[Path | None, ...] = (),
     depth: int = 0,
+    bodies: list[str] | None = None,
 ) -> tuple[list[_ShellSite], Path | None, tuple[Path | None, ...], str]:
     """Walk ``command`` as the local shell would and list every simple command
-    it runs, each with the directory it runs in (#394).
+    it runs, each with the directory it runs in (#394). Every ``-c``/``eval``
+    body the walk unwraps, at any depth, is appended to ``bodies`` when given.
 
     Returns ``(sites, cwd, dirs, local_text)``: the final ``cwd`` and
     ``pushd`` stack (an ``eval`` body shares them with its caller), and
@@ -1877,7 +1879,11 @@ def _shell_sites(
                 # run (`bash -c '"$@"' _ <cmd>`): code the walk does not
                 # follow, so the whole command fails closed.
                 sites.append(_ShellSite(program, text, cwd, True))
-            inner, inner_cwd, inner_dirs, inner_local = _shell_sites(body, cwd, dirs, depth + 1)
+            if bodies is not None:
+                bodies.append(body)
+            inner, inner_cwd, inner_dirs, inner_local = _shell_sites(
+                body, cwd, dirs, depth + 1, bodies
+            )
             sites.extend(inner)
             if program == "eval":
                 cwd, dirs = inner_cwd, inner_dirs
@@ -1921,7 +1927,7 @@ def _git_dash_c_path(command: str) -> Path | None:
     per command). Note rules judge every git separately, through
     :func:`_rules_command_view`."""
     try:
-        sites, cwd, _local = _shell_walk(command)
+        sites, cwd, _local, _bodies = _shell_walk(command)
     except Exception:
         return None
     for site in sites:
@@ -1931,12 +1937,17 @@ def _git_dash_c_path(command: str) -> Path | None:
 
 
 @functools.lru_cache(maxsize=8)
-def _shell_walk(command: str) -> tuple[tuple[_ShellSite, ...], Path | None, str]:
+def _shell_walk(
+    command: str,
+) -> tuple[tuple[_ShellSite, ...], Path | None, str, tuple[str, ...]]:
     """:func:`_shell_sites` from the start directory, memoised: the repo
-    resolver and the note-rule view walk the same command in one check (#413
-    review 3). Pure in ``command``: sites hold paths relative to the start."""
-    sites, cwd, _dirs, local = _shell_sites(command)
-    return tuple(sites), cwd, local
+    resolver, the note-rule view and the hard rules (#430) walk the same
+    command in one check (#413 review 3). Pure in ``command``: sites hold
+    paths relative to the start. The last item is every unwrapped
+    ``-c``/``eval`` body."""
+    bodies: list[str] = []
+    sites, cwd, _dirs, local = _shell_sites(command, bodies=bodies)
+    return tuple(sites), cwd, local, tuple(bodies)
 
 
 def _shell_tokens(part: str) -> list[str]:
@@ -2034,7 +2045,7 @@ def _rules_command_view(action: dict[str, Any]) -> rules_mod.CommandView | None:
         from omind import rules as rules_mod
 
         base = _action_base_dir(action)
-        sites, _cwd, local_text = _shell_walk(command)
+        sites, _cwd, local_text, _bodies = _shell_walk(command)
         repos: dict[Path | None, Path | None] = {}  # 1,600 chained pushes share one cwd
         for site in sites:
             if site.cwd not in repos:
@@ -2160,23 +2171,12 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
     return bool(path)
 
 
-#: Words in command position that are not the program a stage runs: wrappers
-#: that exec the next word (``xargs``, ``sudo``, ``env``, ``timeout`` …) and
-#: shell keywords that introduce a command (``do``, ``then``, ``{`` …). The
-#: value is the wrapper's switches that take a SEPARATE argument, so
-#: ``sudo -u bob sed -i`` and ``xargs -I {} sed -i`` still reach the editor.
-_STAGE_WRAPPERS: dict[str, frozenset[str]] = {
-    **{name: frozenset() for name in policy._HEREDOC_OWNER_SKIP},
-    **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
-    "xargs": frozenset({"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"}),
-    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
-    "env": frozenset({"-u", "-C", "-S"}),
-    "nice": frozenset({"-n"}),
-    "timeout": frozenset({"-s", "-k"}),
-    "time": frozenset({"-f", "-o"}),
-}
+#: Wrappers and keywords a stage skips to reach its program, with their
+#: value-taking switches. The table lives in policy so the hard rules'
+#: command-position anchor is derived from the same list (#430).
+_STAGE_WRAPPERS = policy.STAGE_WRAPPERS
 #: Wrappers that take one positional argument before the command (``timeout 5``).
-_WRAPPER_POSITIONAL = frozenset({"timeout"})
+_WRAPPER_POSITIONAL = policy.WRAPPER_POSITIONAL
 #: Tools whose ``run`` subcommand execs the next word (``poetry run python …``,
 #: #419). The value is every switch that takes a SEPARATE argument, before
 #: ``run`` (``poetry -C sub run``, ``uv --directory . run``) or after it
@@ -2631,8 +2631,56 @@ def _is_unauthorized_capability_side_effect(action: dict[str, Any], session: str
     )
 
 
+def _shell_code_source(site: _ShellSite) -> str:
+    """Where an opaque local-shell site gets the code it runs: ``"stdin"``
+    (``… | bash``, ``bash -s``), ``"arg"`` (a ``-c`` body the walk did not
+    unwrap) or ``"file"`` (``bash x.sh 'arg'``: its arguments are data).
+    Unparseable text counts as stdin, which judges the most text."""
+    try:
+        words = _shell_tokens(site.text)
+    except ValueError:
+        return "stdin"
+    if _shell_body_index(words) is not None:
+        return "arg"
+    operands = [w for w in words[1:] if not re.match(r"-|\d*[<>]", w)]
+    return "stdin" if not operands or "-s" in words else "file"
+
+
+def _hard_rule_subjects(command: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """The texts a hard rule is tested against (#430): ``(code, quoted_code)``.
+
+    ``code`` is the command plus every ``bash -c``/``eval`` body the cached
+    shell walk unwrapped, each judged by :meth:`policy.Rule.matches` as usual.
+    ``quoted_code`` holds text whose QUOTED parts are code the walk could not
+    follow: an opaque site (``su -c '…'``, ``watch '…'``) and, when a local
+    shell reads code from stdin (``echo '…' | bash``), the whole command. Its
+    quotes and ``\\n`` escapes become newlines so a command inside them is in
+    command position; it fails closed, like an opaque site for note rules.
+
+    Pure and never raises: on any walk error only the command itself is
+    judged, which is the pre-#430 behaviour."""
+    try:
+        sites, _cwd, local, bodies = _shell_walk(command)
+        opaque: list[str] = []
+        for site in sites:
+            if not site.opaque:
+                continue
+            source = _shell_code_source(site) if site.program in _LOCAL_SHELLS else "arg"
+            if source == "arg":
+                opaque.append(site.text)
+            elif source == "stdin" and local not in opaque:
+                opaque.append(local)
+        quoted = tuple(re.sub(r"['\"]|\\n", "\n", text) for text in opaque)
+        return (command, *bodies), quoted
+    except Exception:
+        return (command,), ()
+
+
 def _hard_policy_verdict(command: str) -> Verdict | None:
     """The deny for the first ``hard`` policy rule ``command`` matches, else None.
+
+    A rule is tested against every text :func:`_hard_rule_subjects` returns, so
+    a body run through ``bash -c``/``eval``/a piped shell is judged too (#430).
 
     The github_push tier is skipped when the command carries its opt-in token (a
     deliberate Codeberg mirror). Soft rules never block here (Layer E records
@@ -2647,6 +2695,7 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
         rules: list[policy.Rule] = list(policy.load_policy())
     except Exception:
         rules = list(policy.SEED_RULES)
+    code, quoted = _hard_rule_subjects(command)
     for rule in rules:
         if rule.severity != policy.SEVERITY_HARD:
             continue
@@ -2657,12 +2706,21 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
         # suspenders, covering a bad seed rule or a catastrophic pattern.) Any
         # exception, not just ``re.error``: one rule raising must not disable
         # the rules after it.
+        # The opt-in counts where it really takes effect: on the command, or
+        # inside the body the rule matched (`bash -c 'OMI_…=1 git push …'`).
+        # Every match must be opted in; one body's opt-in never covers another.
         try:
-            if not rule.matches(command):
-                continue
+            hits = [text for text in code if rule.matches(text)]
+            if not hits and any(rule.compiled().search(text) for text in quoted):
+                hits = [command]
         except Exception:
             continue
-        if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
+        if not hits:
+            continue
+        if rule.opt_in and (
+            _opt_in_satisfied(rule.opt_in, command)
+            or all(_opt_in_satisfied(rule.opt_in, text) for text in hits)
+        ):
             continue
         return Verdict(
             allow=False,

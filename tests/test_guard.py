@@ -3265,3 +3265,90 @@ def test_git_global_options_still_match_after_the_431_fix() -> None:
     assert guard._RISKY_SIDE_EFFECT_RE.search(f"git {opts}push")
     assert guard._is_repo_sensitive_action({"tool": "Bash", "command": f"git {opts}merge x"})
     assert not guard._GIT_FRESH_SUB_RE.search(f"git {opts}fetch | tee x")
+
+
+# --- #430: hard rules see shell-wrapper bodies and env/nice/timeout wrappers ---
+
+WRAPPED_HARD_COMMANDS = (
+    ("bash -c 'sudo rm -rf /x'", "sudo-use-fleet-sudo"),
+    ('sh -c "sudo rm -rf /x"', "sudo-use-fleet-sudo"),
+    ("eval 'sudo rm -rf /x'", "sudo-use-fleet-sudo"),
+    ("echo 'sudo rm -rf /x' | bash", "sudo-use-fleet-sudo"),
+    ("printf 'ls\\nsudo id\\n' | sh", "sudo-use-fleet-sudo"),
+    ("cat <<'EOF' | bash\nsudo id\nEOF", "sudo-use-fleet-sudo"),
+    ("bash -lc 'eval \"sudo id\"'", "sudo-use-fleet-sudo"),
+    ("bash -c 'gh repo delete o/r --yes'", "gh-repo-delete"),
+    ("env sudo rm -rf /x", "sudo-use-fleet-sudo"),
+    ("nice sudo rm -rf /x", "sudo-use-fleet-sudo"),
+    ("timeout 5 sudo rm -rf /x", "sudo-use-fleet-sudo"),
+    ("/usr/bin/env sudo rm -rf /x", "sudo-use-fleet-sudo"),
+    ("timeout -k 2 5s sudo id", "sudo-use-fleet-sudo"),
+    ("nice -n 5 sudo id", "sudo-use-fleet-sudo"),
+    ("env -u FOO BAR=1 sudo id", "sudo-use-fleet-sudo"),
+    ("sudo -u bob gh repo delete o/r", None),
+    # One body's opt-in never covers a match elsewhere in the command.
+    ("sudo id; bash -c 'OMI_SUDO_OK=1 sudo x'", "sudo-use-fleet-sudo"),
+)
+
+
+@pytest.mark.parametrize("no_state_dir", [False, True])
+@pytest.mark.parametrize(("command", "rule_id"), WRAPPED_HARD_COMMANDS)
+def test_check_denies_wrapped_hard_rule_commands(
+    monkeypatch: pytest.MonkeyPatch, command: str, rule_id: str | None, no_state_dir: bool
+) -> None:
+    if no_state_dir:  # #421
+        monkeypatch.setattr(paths, "state_dir", _no_home)
+    verdict = guard.check_action({"tool": "Bash", "command": command, "session": "s430"})
+    assert not verdict.allow
+    assert verdict.rule_id and not verdict.rule_id.startswith("omi-gate")
+    if rule_id is not None:
+        assert verdict.rule_id == rule_id
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "OMI_SUDO_OK=1 sudo id",
+        "bash -c 'OMI_SUDO_OK=1 sudo id'",
+        "OMI_SUDO_OK=1 bash -c 'sudo id'",
+        "bash -c 'git commit -m \"drop sudo usage\"'",
+        "bash -c 'grep -rn sudo docs'",
+        "echo 'never use sudo here' | bash",
+        "bash scripts/x.sh 'sudo'",
+        "git commit -m 'env sudo is now blocked'",
+        "grep -rn 'timeout 5 sudo' tests/",
+        "ssh host 'sudo id'",
+        "timeout 60 uv run pytest -q",
+        "nice make test",
+        "env",
+    ],
+)
+def test_wrapped_hard_rules_keep_benign_commands_allowed(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
+def test_wrapper_runs_cannot_backtrack_the_hard_rules() -> None:
+    # Every wrapper word matches one way only, so long runs stay linear.
+    import time
+
+    for command in (
+        "timeout " * 400 + "x",
+        "sudo -u " * 400 + "x",
+        "nice -n " * 400 + "x",
+        "timeout 5 nice -n 1 env -u X sudo -u b " * 200 + "x",
+    ):
+        start = time.perf_counter()
+        guard._hard_policy_verdict(command)
+        assert time.perf_counter() - start < 2.0
+
+
+def test_hard_rules_judge_only_the_command_when_the_walk_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    def boom(_command: str) -> object:
+        raise RuntimeError("walk exploded")
+
+    monkeypatch.setattr(guard, "_shell_walk", boom)
+    assert guard._hard_policy_verdict("bash -c 'sudo id'") is None  # pre-#430 view
+    verdict = guard._hard_policy_verdict("sudo id")
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
