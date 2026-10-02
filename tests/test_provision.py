@@ -509,7 +509,7 @@ def test_hook_commands_quote_the_windows_exe_path(
         cmd = Provisioner(_config(tmp_path), log=_quiet)._hook_command(event)
         assert cmd.startswith(f'"{exe}" hook {event} ')
         assert provision._command_is_omind_hook(cmd)
-        assert provision._hook_exe_path(cmd) == exe
+        assert provision._hook_omind_argv(cmd) == [exe]
 
 
 def test_setup_installs_hooks_idempotently(tmp_path: Path, isolate_settings: Path) -> None:
@@ -1434,23 +1434,20 @@ def test_doctor_does_not_probe_a_bare_omind(
     assert results["mcp_registration"].level == "ok"
 
 
-def test_hook_exe_path_reads_only_absolute_pins() -> None:
+def test_hook_omind_argv_reads_only_absolute_pins() -> None:
     """A bare `omind` resolves through PATH at run time and cannot go stale.
 
     Both separators count on every platform: settings.json is portable data, so a
     POSIX-style pin must still be recognised when doctor runs on Windows.
     """
-    assert (
-        provision._hook_exe_path('/venv/bin/omind hook Stop --vault "/v" --folder "OMI"')
-        == "/venv/bin/omind"
-    )
-    assert (
-        provision._hook_exe_path(r'C:\venv\Scripts\omind hook Stop --vault "C:\v" --folder "OMI"')
-        == r"C:\venv\Scripts\omind"
-    )
-    assert provision._hook_exe_path('omind hook Stop --vault "/v" --folder "OMI"') is None
-    assert provision._hook_exe_path("python3 /home/x/.claude/hooks/omi-enforce.py") is None
-    assert provision._hook_exe_path('unbalanced "quote') is None
+    argv = provision._hook_omind_argv
+    assert argv('/venv/bin/omind hook Stop --vault "/v" --folder "OMI"') == ["/venv/bin/omind"]
+    assert argv(r'C:\venv\Scripts\omind hook Stop --vault "C:\v" --folder "OMI"') == [
+        r"C:\venv\Scripts\omind"
+    ]
+    assert argv('omind hook Stop --vault "/v" --folder "OMI"') is None
+    assert argv("python3 /home/x/.claude/hooks/omi-enforce.py") is None
+    assert argv('unbalanced "quote') is None
 
 
 # -- #380: Windows pins `python -m omind`, not the unsigned omind.exe ----------
@@ -1539,7 +1536,6 @@ def test_windows_hook_command_uses_the_module_form(
         assert cmd.startswith(f'"{_WIN_PY}" -m omind hook {event} ')
         assert provision._command_is_omind_hook(cmd)
         assert provision._hook_omind_argv(cmd) == _WIN_MODULE
-        assert provision._hook_exe_path(cmd) == _WIN_PY
 
 
 def test_hook_omind_argv_reads_quoted_paths_with_spaces() -> None:
@@ -1548,6 +1544,68 @@ def test_hook_omind_argv_reads_quoted_paths_with_spaces() -> None:
     assert provision._hook_omind_argv(cmd) == [spaced, "-m", "omind"]
     launcher = r"C:\Users\Jane Doe\.local\bin\omind.exe"
     assert provision._hook_omind_argv(f'"{launcher}" hook Stop --vault "v"') == [launcher]
+
+
+@pytest.mark.parametrize(
+    ("windows", "argv"),
+    [
+        (True, [r"C:\Users\Jane Doe\Scripts\python.exe", "-m", "omind"]),
+        (True, [r"C:\Users\Jane Doe\.local\bin\omind.exe"]),
+        (False, ["/home/Jane Doe/.local/bin/omind"]),
+    ],
+    ids=["windows-module", "windows-launcher", "posix-launcher"],
+)
+def test_quoted_spaced_pin_round_trips_setup_to_doctor(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    isolate_settings: Path,
+    windows: bool,
+    argv: list[str],
+) -> None:
+    """A pin under a profile with a space (``Jane Doe``) is quoted by setup and
+    read back whole by doctor: healthy, not truncated to a dead or
+    non-canonical ``C:\\Users\\Jane`` (#417)."""
+    monkeypatch.setattr(provision, "_windows", lambda: windows)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(argv))
+    monkeypatch.setattr(provision, "_module_runs", lambda _py: True)
+    monkeypatch.setattr(provision, "_launcher_runs", lambda _exe: True)
+    config = _config(tmp_path)
+    _install_hooks(config)
+    for event in provision.HANDLED_EVENTS:
+        (entry,) = _omind_entries(isolate_settings, event)
+        assert provision._hook_omind_argv(provision._entry_command_text(entry)) == argv
+    result = provision._diagnose_hooks(isolate_settings, config)
+    assert result.level == "ok", result.message
+
+
+def test_canonical_omind_cmd_quotes_by_default(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The default rendering is shell-safe; ``quote=str`` is the explicit opt-out."""
+    spaced = r"C:\Users\Jane Doe\Scripts\python.exe"
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [spaced, "-m", "omind"])
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    assert provision.canonical_omind_cmd() == f'"{spaced}" -m omind'
+    assert provision.canonical_omind_cmd(str) == f"{spaced} -m omind"
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: ["/home/J D/bin/omind"])
+    assert provision.canonical_omind_cmd() == "'/home/J D/bin/omind'"
+
+
+def test_module_probe_outlasts_a_cold_start(monkeypatch: pytest.MonkeyPatch) -> None:
+    """A cold interpreter under antivirus can pass 5 s; timing out there falls
+    back to the very launcher Smart App Control blocks (#380)."""
+    seen: dict[str, object] = {}
+
+    def fake_run(argv: list[str], **kw: object) -> subprocess.CompletedProcess[str]:
+        seen.update(kw)
+        return subprocess.CompletedProcess(argv, 0, "", "")
+
+    provision._module_runs.cache_clear()
+    monkeypatch.setattr(provision.subprocess, "run", fake_run)
+    try:
+        assert provision._module_runs("/x/python.exe") is True
+    finally:
+        provision._module_runs.cache_clear()
+    assert isinstance(seen["timeout"], float) and seen["timeout"] >= 20
 
 
 def test_windows_mcp_entry_runs_python_module(
@@ -1611,6 +1669,8 @@ def test_diagnose_hooks_flags_launcher_hooks_once_module_form_resolves(
     result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
     assert result.level == "fail"
     assert launcher in result.message and f"{_WIN_PY} -m omind" in result.message
+    # omind.exe is the blocked launcher, so the advice names the interpreter.
+    assert f'`"{_WIN_PY}" -m omind setup`' in result.message
 
 
 def test_doctor_fails_a_module_mcp_pin_that_does_not_run(

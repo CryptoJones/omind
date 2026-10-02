@@ -325,6 +325,21 @@ def test_install_timer_writes_units_and_enables(
     assert ["systemctl", "--user", "enable", "--now", "omind-backup.timer"] in fake_subprocess
 
 
+def test_install_timer_quotes_a_spaced_omind_path(
+    restic_present: None,
+    fake_subprocess: list[list[str]],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """systemd word-splits an unquoted ExecStart path (``/home/Jane Doe/...``)."""
+    import omind.provision
+
+    _configure()
+    monkeypatch.setattr(omind.provision, "canonical_omind_argv", lambda: ["/home/J D/bin/omind"])
+    backup.install_timer(SetupConfig(vault=tmp_path / "vault"), log=_quiet)
+    service = (backup.systemd_user_dir() / "omind-backup.service").read_text(encoding="utf-8")
+    assert 'ExecStart="/home/J D/bin/omind" backup run --vault' in service
+
 def test_install_timer_requires_configured_backup(
     restic_present: None, fake_subprocess: list[list[str]], tmp_path: Path
 ) -> None:

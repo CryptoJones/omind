@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import json
+import re
+import shutil
 from pathlib import Path
 
 import pytest
@@ -414,7 +416,9 @@ def test_hermes_wiring_uses_the_python_module_form(
     assert server["args"][:3] == ["-m", "omind", "node"]
     priming = [e for e in data["hooks"]["pre_llm_call"] if "omind hook" in e["command"]]
     assert len(priming) == 1
-    assert priming[0]["command"].startswith(f"{_WIN_PY} -m omind hook pre_llm_call ")
+    assert priming[0]["command"].startswith(
+        f"{provision.shell_quote(_WIN_PY)} -m omind hook pre_llm_call "
+    )
 
     allow = json.loads((hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8"))
     assert any(a["command"] == priming[0]["command"] for a in allow["approvals"])
@@ -444,6 +448,131 @@ def test_guard_templates_keep_posix_launcher_unchanged(monkeypatch: pytest.Monke
     template = files("omind").joinpath("omi-guard-hermes.sh").read_text(encoding="utf-8")
     body = agents._substitute_omind(template)
     assert "OMIND='/usr/bin/omind'" in body and "OMIND_ARGS=''" in body
+
+
+# -- #418 review: JS-safe template values, DSH spawn helper, quoted pins -------
+
+#: A Windows path that breaks every naive JS literal: `\u` (malformed unicode
+#: escape, a SyntaxError), `\n` and `\t` (silently rewritten), plus a space.
+_NASTY_WIN = r"C:\Users\Jane Doe\uv\tools\new\Scripts\python.exe"
+#: Resolved at import, before the autouse fixture fakes ``shutil.which``.
+_NODE = shutil.which("node")
+_JS_CONST_RE = re.compile(r'const (OMIND|OMI_DIR|OMI_VAULT|OMI_FOLDER) = "((?:[^"\\]|\\.)*)";')
+
+
+def _js_consts(body: str) -> dict[str, str]:
+    """Decode each substituted ``const X = "..."`` literal the way JS would."""
+    return {name: json.loads(f'"{lit}"') for name, lit in _JS_CONST_RE.findall(body)}
+
+
+def _node_check(tmp_path: Path, name: str, body: str) -> None:
+    """``node --check`` the rendered plugin when node is installed (ESM: .mjs)."""
+    if _NODE is None:
+        return
+    import subprocess
+
+    rendered = tmp_path / f"{name}.mjs"
+    rendered.write_text(body, encoding="utf-8")
+    result = subprocess.run([_NODE, "--check", str(rendered)], capture_output=True, text=True)
+    assert result.returncode == 0, result.stderr
+
+
+def test_js_guard_templates_escape_windows_paths(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A raw `C:\\...\\uv\\...` path in a JS string literal is a SyntaxError, so
+    the OpenCode/DSH guard never loaded. Every placeholder is JSON-escaped and
+    decodes back to the exact value."""
+    monkeypatch.setattr(agents, "canonical_omind_argv", lambda: [_NASTY_WIN, "-m", "omind"])
+    vault = Path(r"C:\Users\Jane Doe\new\tools\uv\vault")
+    config = SetupConfig(vault=vault, folder=r"O\tM I", agent="dsh")  # type: ignore[arg-type]
+
+    agents.opencode_config_dir().mkdir(parents=True, exist_ok=True)
+    agents.OpenCodeProvisioner(config, log=_quiet).install_guard()
+    body = agents.opencode_guard_plugin_path().read_text(encoding="utf-8")
+    assert _js_consts(body) == {"OMIND": _NASTY_WIN, "OMI_DIR": str(config.omi_dir)}
+    assert 'const OMIND_ARGS = "-m omind"' in body
+    _node_check(tmp_path, "opencode", body)
+
+    agents.DeepseekProvisioner(config, log=_quiet).install_guard()
+    body = agents.dsh_guard_plugin_path().read_text(encoding="utf-8")
+    assert _js_consts(body) == {
+        "OMIND": _NASTY_WIN,
+        "OMI_DIR": str(config.omi_dir),
+        "OMI_VAULT": str(vault),
+        "OMI_FOLDER": r"O\tM I",
+    }
+    _node_check(tmp_path, "dsh", body)
+
+
+def test_hermes_shell_template_keeps_its_own_quoting(module_form: list[str]) -> None:
+    """The shell template is not JSON-escaped: its single quotes keep the path."""
+    from importlib.resources import files
+
+    template = files("omind").joinpath("omi-guard-hermes.sh").read_text(encoding="utf-8")
+    assert f"OMIND='{_WIN_PY}'" in agents._substitute_omind(template)
+
+
+@pytest.mark.parametrize("name", ["omi-guard.opencode.js", "omi-guard.dsh.js"])
+def test_js_guard_templates_define_every_spawn_helper_they_call(name: str) -> None:
+    """The DSH guard called `spawnOmind` but defined `spawnOminor`, so every path
+    threw a ReferenceError and the guard never worked."""
+    from importlib.resources import files
+
+    body = files("omind").joinpath(name).read_text(encoding="utf-8")
+    defined = set(re.findall(r"\bfunction\s+(spawnOm\w*)\s*\(", body))
+    called = set(re.findall(r"\b(spawnOm\w*)\s*\(", body))
+    assert called <= defined, f"{name}: called but undefined: {called - defined}"
+
+
+_SPACED_POSIX = "/home/Jane Doe/.local/bin/omind"
+
+
+@pytest.fixture(params=["windows", "posix"])
+def spaced_pin(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """A pin whose path contains a space: the Windows module form under
+    ``C:\\Users\\Jane Doe`` (double quotes), or a POSIX launcher (shlex)."""
+    windows = request.param == "windows"
+    argv = [r"C:\Users\Jane Doe\Scripts\python.exe", "-m", "omind"] if windows else [_SPACED_POSIX]
+    monkeypatch.setattr(provision, "_windows", lambda: windows)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(argv))
+    return argv
+
+
+def _quoted_prefix(argv: list[str]) -> str:
+    exe = f'"{argv[0]}"' if len(argv) > 1 else f"'{argv[0]}'"
+    return " ".join([exe, *argv[1:]])
+
+
+def test_hermes_hook_command_quotes_a_spaced_pin(
+    tmp_path: Path, hermes_home: Path, spaced_pin: list[str]
+) -> None:
+    config = _config(tmp_path, "hermes")
+    cmd = HermesProvisioner(config, log=_quiet)._omind_hook_command("pre_llm_call")
+    assert cmd.startswith(f"{_quoted_prefix(spaced_pin)} hook pre_llm_call ")
+    assert provision._hook_omind_argv(cmd) == spaced_pin
+
+    HermesProvisioner(config, log=_quiet).install_priming()
+    allow = json.loads((hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8"))
+    assert any(a["command"] == cmd for a in allow["approvals"])
+
+
+def test_openclaw_gemini_poolside_quote_a_spaced_pin(tmp_path: Path, spaced_pin: list[str]) -> None:
+    prefix = _quoted_prefix(spaced_pin)
+
+    agents.openclaw_config_path().parent.mkdir(parents=True, exist_ok=True)
+    OpenClawProvisioner(_config(tmp_path, "openclaw"), log=_quiet).install_guard()
+    data = json.loads(agents.openclaw_config_path().read_text(encoding="utf-8"))
+    commands = [h["command"] for h in data["hooks"]["agent"]]
+    assert f"{prefix} guard adapter --harness openclaw" in commands
+
+    gemini = agents.GeminiProvisioner(_config(tmp_path, "gemini"), log=_quiet)
+    assert gemini._guard_hook_group()["hooks"][0]["command"].startswith(f"{prefix} guard adapter ")
+
+    pool = agents.PoolsideProvisioner(_config(tmp_path, "poolside"), log=_quiet)
+    for event in ("PreToolUse", "UserPromptSubmit", "SessionStart"):
+        assert pool._hook_command(event).startswith(f"{prefix} "), event
+    assert provision._hook_omind_argv(pool._hook_command("SessionStart")) == spaced_pin
 
 
 # -- MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q -----------------
@@ -1212,6 +1341,9 @@ def test_command_is_omind_hook_forms() -> None:
     assert command_is_omind_hook(posix)
     assert command_is_omind_hook(win)
     assert command_is_omind_hook(quoted)
+    # The Windows module form (#380), quoted with a space in the profile path.
+    module = '"C:\\Users\\Jane Doe\\Scripts\\python.exe" -m omind hook Stop --vault "C:\\V"'
+    assert command_is_omind_hook(module)
     assert not command_is_omind_hook("some-other-tool hook SessionStart")
     assert not command_is_omind_hook("omind guard adapter --harness codex")
 

@@ -27,6 +27,7 @@ import os
 import shlex
 import shutil
 import sys
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -51,17 +52,38 @@ from omind.provision import (
 )
 
 
-def _substitute_omind(content: str) -> str:
+def _js_string(value: str) -> str:
+    """*value* escaped for the inside of a double-quoted JavaScript string literal.
+
+    A raw Windows path is not a valid literal: every uv tool path holds ``\\uv``,
+    which JavaScript reads as a malformed ``\\uXXXX`` escape, so the whole
+    OpenCode/DSH guard failed to load. JSON string syntax is a subset of
+    JavaScript's, so the JSON-encoded body round-trips exactly.
+    """
+    return json.dumps(value)[1:-1]
+
+
+def _substitute_omind(
+    content: str,
+    extra: dict[str, str] | None = None,
+    *,
+    escape: Callable[[str], str] = str,
+) -> str:
     """Fill a guard template's omind placeholders from :func:`canonical_omind_argv`.
 
     ``__OMIND_BIN__`` is the executable and ``__OMIND_ARGS__`` the space-joined
     tail: empty for a launcher, ``-m omind`` for the Windows module form (#380).
     Templates invoke ``$OMIND $OMIND_ARGS ...`` so both forms run unchanged.
+    *extra* maps further placeholders (``__OMI_DIR__`` …) to their values.
+    Every value goes through *escape*: :func:`_js_string` for the JavaScript
+    templates, while the shell template keeps its own single-quote literals.
     """
     argv = canonical_omind_argv()
-    return content.replace("__OMIND_BIN__", argv[0]).replace(
-        "__OMIND_ARGS__", " ".join(argv[1:])
-    )
+    values = {"__OMIND_BIN__": argv[0], "__OMIND_ARGS__": " ".join(argv[1:])}
+    values.update(extra or {})
+    for placeholder, value in values.items():
+        content = content.replace(placeholder, escape(value))
+    return content
 
 
 # -- agent locations ---------------------------------------------------------
@@ -655,9 +677,7 @@ class HermesProvisioner(AgentProvisioner):
         except Exception as exc:
             self.log(f"  WARNING: could not read omi-guard-hermes.sh from package data: {exc}")
             return
-        content = _substitute_omind(content).replace(
-            "__OMI_DIR__", str(self.config.omi_dir)
-        )
+        content = _substitute_omind(content, {"__OMI_DIR__": str(self.config.omi_dir)})
         self._write_managed(dest, content)
         if not self.config.dry_run:
             with contextlib.suppress(OSError):
@@ -1326,8 +1346,8 @@ class OpenCodeProvisioner(AgentProvisioner):
         except Exception as exc:
             self.log(f"  WARNING: could not read omi-guard.opencode.js from package data: {exc}")
             return
-        content = _substitute_omind(content).replace(
-            "__OMI_DIR__", str(self.config.omi_dir)
+        content = _substitute_omind(
+            content, {"__OMI_DIR__": str(self.config.omi_dir)}, escape=_js_string
         )
         self._write_managed(dest, content)
 
@@ -1524,11 +1544,14 @@ class DeepseekProvisioner(AgentProvisioner):
                 f"  WARNING: could not read omi-guard.dsh.js from package data: {exc}"
             )
             return
-        content = (
-            _substitute_omind(content)
-            .replace("__OMI_DIR__", str(self.config.omi_dir))
-            .replace("__OMI_VAULT__", str(self.config.vault))
-            .replace("__OMI_FOLDER__", self.config.folder)
+        content = _substitute_omind(
+            content,
+            {
+                "__OMI_DIR__": str(self.config.omi_dir),
+                "__OMI_VAULT__": str(self.config.vault),
+                "__OMI_FOLDER__": self.config.folder,
+            },
+            escape=_js_string,
         )
         self._write_managed(dest, content)
         # Register both the MCP server and guard entry in the patch file.

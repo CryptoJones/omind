@@ -255,6 +255,36 @@ and tells you the steps below instead.
 3. Restart your agent sessions. Notes, state and wiring live outside the tool
    environment and are untouched.
 
+## Windows Smart App Control blocks `omind.exe`
+
+### Symptoms
+
+- Hooks fail, the guard never fires, and the `omi` MCP server will not connect.
+- Running `omind` (or `omind setup`) itself fails with "An Application Control
+  policy has blocked this file" or a Smart App Control notification.
+
+### Root cause
+
+`omind.exe` is uv's unsigned launcher. With Smart App Control enforcing, Windows refuses
+to load it, while the tool environment's own `python.exe` is still allowed. Since #380,
+`omind setup` pins `<python.exe> -m omind` in every hook, MCP entry, guard script and
+service line instead of the launcher. A box wired before that upgrade is still on
+`omind.exe`, and `omind doctor` reports those hooks as non-canonical.
+
+### Recovery
+
+`omind setup` launched through `omind.exe` is blocked too, so run it through the
+interpreter. From PowerShell or cmd:
+
+```
+& "$env:APPDATA\uv\tools\omind\Scripts\python.exe" -m omind setup
+```
+
+(In cmd: `"%APPDATA%\uv\tools\omind\Scripts\python.exe" -m omind setup`.) For a pip
+install, use that environment's `Scripts\python.exe`. Setup logs the form it pinned
+(`omind pinned as: ...`), and `omind doctor` prints the exact invocation when it flags
+hooks still on the launcher. Restart your agent sessions afterwards.
+
 ## Memory writes are silently failing (`vault_writes` doctor check)
 
 A machine can keep *reading* the vault while every *write* fails — on macOS the

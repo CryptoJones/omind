@@ -221,7 +221,7 @@ async function journalTool(exec, result) {
     const event = buildGuardEvent(exec);
     event.hook_event_name = "PostToolUse";
     event.tool_response = normalizeResponse(result);
-    await spawnOminor(
+    await spawnOmind(
         ["hook", "PostToolUse", "--vault", OMI_VAULT, "--folder", OMI_FOLDER],
         event,
     );
@@ -358,7 +358,7 @@ function injectContext(agent, text) {
 }
 
 /** Spawn the omind binary, pipe a JSON event to stdin, collect stdout/stderr. */
-function spawnOminor(args, stdinObj) {
+function spawnOmind(args, stdinObj) {
     return new Promise((resolve, reject) => {
         const child = spawn(OMIND, [...OMIND_ARGS, ...args], {
             stdio: ["pipe", "pipe", "pipe"],

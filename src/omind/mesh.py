@@ -966,14 +966,15 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
     if load_node_config(omi_dir) is None:
         raise MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
     # Imported lazily: provision imports mesh, so a module-level import cycles.
-    from omind.provision import canonical_omind_argv
+    from omind.provision import canonical_omind_argv, canonical_omind_cmd, double_quote
 
     # `python -m omind` on Windows, where Smart App Control blocks omind.exe (#380).
     omind_argv = canonical_omind_argv()
     # Quoted like the hook command: systemd ExecStart and schtasks both
-    # word-split an unquoted folder name containing a space.
+    # word-split an unquoted path or folder name containing a space, and the
+    # Windows interpreter path holds the username (`C:\Users\Jane Doe\...`).
     daemon_cmd = (
-        f'{" ".join(omind_argv)} mesh daemon --vault "{vault}" --folder "{folder}"'
+        f'{canonical_omind_cmd(double_quote)} mesh daemon --vault "{vault}" --folder "{folder}"'
     )
 
     if sys.platform == "linux":
@@ -1045,7 +1046,9 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
         return
 
     log("Windows: auto-install is not supported in 2.0; run the daemon at logon with:")
-    log(f'  schtasks /Create /SC ONLOGON /TN omind-mesh /TR "{daemon_cmd}"')
+    # Inside /TR "...", schtasks takes an embedded double quote as \".
+    tr = daemon_cmd.replace('"', '\\"')
+    log(f'  schtasks /Create /SC ONLOGON /TN omind-mesh /TR "{tr}"')
 
 
 # -- doctor ---------------------------------------------------------------------

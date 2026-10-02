@@ -608,11 +608,36 @@ def test_install_service_systemd_unit_is_unbuffered(
     unit = (tmp_path / "systemd-user" / mesh.MESH_SERVICE_UNIT).read_text(encoding="utf-8")
     service = unit.split("[Service]", 1)[1].split("[Install]", 1)[0]
     assert "Environment=PYTHONUNBUFFERED=1\n" in service
-    assert "ExecStart=/opt/bin/omind mesh daemon" in service
+    assert 'ExecStart="/opt/bin/omind" mesh daemon' in service
     assert [c[:3] for c in calls] == [
         ["systemctl", "--user", "daemon-reload"],
         ["systemctl", "--user", "enable"],
     ]
+
+
+def test_install_service_quotes_a_spaced_interpreter(
+    pair: tuple[Path, str, Path, str], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """systemd ExecStart and schtasks /TR both word-split an unquoted path, and
+    the Windows interpreter path now holds the username (#380)."""
+    import omind.provision
+
+    a, _, _b, _ = pair
+    _fake_service_env(tmp_path, monkeypatch, "linux")
+    monkeypatch.setattr(omind.provision, "canonical_omind_argv", lambda: ["/home/J D/bin/omind"])
+    mesh.install_service(a.parent, a.name, log=quiet)
+    unit = (tmp_path / "systemd-user" / mesh.MESH_SERVICE_UNIT).read_text(encoding="utf-8")
+    assert 'ExecStart="/home/J D/bin/omind" mesh daemon --vault' in unit
+
+    spaced = r"C:\Users\Jane Doe\Scripts\python.exe"
+    _fake_service_env(tmp_path, monkeypatch, "win32")
+    monkeypatch.setattr(omind.provision, "canonical_omind_argv", lambda: [spaced, "-m", "omind"])
+    lines: list[str] = []
+    mesh.install_service(a.parent, a.name, log=lines.append)
+    (schtasks,) = [line for line in lines if "schtasks" in line]
+    # Inside /TR "...", every embedded double quote is escaped as \".
+    assert f'/TR "\\"{spaced}\\" -m omind mesh daemon --vault \\"' in schtasks
+    assert schtasks.rstrip().endswith('\\""')
 
 
 @pytest.mark.skipif(os.name == "nt", reason="launchd path calls os.getuid")

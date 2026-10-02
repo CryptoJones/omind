@@ -18,7 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - On Windows, setup now pins `<python.exe> -m omind` in place of the launcher. The
     interpreter is the one running omind (`pythonw.exe` is swapped for `python.exe`), and it
     is pinned only after `-m omind --version` exits 0. Otherwise resolution falls back to the
-    #377 launcher. The probe has a 5 s timeout, is cached, and never raises.
+    #377 launcher. The probe has a 20 s timeout (a cold start under antivirus can
+    pass 5 s), is cached, and never raises. On Windows, setup logs which form it pinned.
   - Every surface takes the new shape: the MCP entries (`command` is the interpreter, `args`
     starts `-m omind`), the Claude Code, Hermes, Codex, Gemini, pool, OpenClaw and agy hook
     commands, the Hermes, OpenCode and DSH guard scripts (a new `__OMIND_ARGS__`
@@ -26,8 +27,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - `omind doctor` reads the module form back out of hook commands, probes a module pin as
     `-m omind --version` (a bare `python --version` would pass with the package gone), and
     reports hooks still on `omind.exe` as non-canonical, so re-running `omind setup` moves
-    them off the blocked launcher. A quoted pin path containing spaces is now parsed whole.
-  - macOS and Linux are unchanged.
+    them off the blocked launcher. Its advice names `"<python.exe>" -m omind setup`, because
+    `omind setup` launched through the blocked `omind.exe` is blocked too
+    (see docs/troubleshooting.md).
+  - The pinned path is quoted at every shell-string surface: the Hermes, OpenClaw, Gemini and
+    pool hook commands, the mesh daemon (systemd `ExecStart` and the schtasks hint, whose
+    inner quotes are now `\"`), and the backup timer's `ExecStart`. The interpreter path holds
+    the username, so `C:\Users\Jane Doe\...` used to word-split.
+    `canonical_omind_cmd()` quotes by default (double quotes on Windows, `shlex.quote` on
+    POSIX).
+  - macOS and Linux are otherwise unchanged.
+- **The OpenCode and DSH guard plugins were invalid JavaScript on Windows.** Placeholders
+  were pasted raw into `"..."` literals, and every uv tool path holds `\uv`, a malformed
+  `\u` escape, so the plugin never loaded. Every value is now JSON-escaped.
+- **The DSH guard never worked on any platform.** It called `spawnOmind` but defined
+  `spawnOminor`, so every guard path threw a `ReferenceError`. The helper is renamed.
+- **doctor truncated a quoted omind path containing a space
+  ([#417](https://github.com/CryptoJones/omind/issues/417)).** `C:\Users\Jane Doe\...` was read
+  as `C:\Users\Jane` and reported as non-canonical or dead. The quote-aware hook parser
+  now takes a double- or single-quoted path whole, so a spaced pin round-trips setup to
+  doctor as healthy.
 
 ## [10.2.6] - 2026-10-02
 
