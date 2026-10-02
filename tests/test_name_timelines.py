@@ -442,6 +442,16 @@ def test_write_context_related_entries_carry_the_stored_filename(
     _resolves(omi, [r["note"] for r in related], files)
 
 
+def _emitted_names(context: str) -> list[str]:
+    """The [[…]] names preflight itself wrote: its first line, plus an inject
+    runner-up line. An injected excerpt's own wikilinks are the note's
+    content, not names omind emitted."""
+    lines = context.split("\n")
+    own = [lines[0]] + [ln for ln in lines if ln.startswith("Also possibly relevant: ")]
+    return [m for ln in own for m in _LINK.findall(ln)]
+
+
+@pytest.mark.parametrize("mode", ["hint", "inject"])
 @pytest.mark.parametrize(
     ("prompt", "expected"),
     [
@@ -460,17 +470,142 @@ def test_preflight_names_resolve_through_recall(
     monkeypatch: pytest.MonkeyPatch,
     prompt: str,
     expected: str,
+    mode: str,
 ) -> None:
-    # #416: the preflight topic hint named its candidates by title.
+    # #416: the preflight topic hint named its candidates by title; under
+    # OMIND_PREFLIGHT=inject the recalled line and its runner-up did too.
     from omind import recall
 
     omi, _files = awkward
     monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
     monkeypatch.setenv(timeline.ENABLE_ENV, "0")
-    context = guard.preflight_turn({"session_id": f"pf-416-{expected[:12]}", "prompt": prompt}, omi)
-    names = _LINK.findall(context)
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, mode)
+    context = guard.preflight_turn(
+        {"session_id": f"pf-416-{mode}-{expected[:12]}", "prompt": prompt}, omi
+    )
+    names = _emitted_names(context)
     assert names and names[0] == expected, context
     for name in names:
+        assert recall.compact_recall(omi, name, organic=False)["filename"] == name
+
+
+@pytest.mark.parametrize("mode", ["hint", "inject"])
+@pytest.mark.parametrize(
+    ("notes", "prompt", "expected"),
+    [
+        # A ``.md`` title whose stem names a NEWER, unrelated note.
+        (
+            [
+                (
+                    "Qz77 notes about README.md.md",
+                    "Qz77 notes about README.md",
+                    "Qz77 setup readme guidance zebra.",
+                    "2026-09-01",
+                ),
+                ("Qz77 notes about README.md", "Unrelated", "x", "2026-09-30"),
+            ],
+            "Qz77 notes about README zebra",
+            "Qz77 notes about README.md.md",
+        ),
+        # Two notes share a title; the newer one is the off-topic one.
+        (
+            [
+                (
+                    "Kp12 deploy A.md",
+                    "Kp12 deploy steps",
+                    "Kp12 deploy steps via ansible playbook frobnicate.",
+                    "2026-09-01",
+                ),
+                (
+                    "Kp12 deploy B.md",
+                    "Kp12 deploy steps",
+                    "unrelated garden tomatoes.",
+                    "2026-09-30",
+                ),
+            ],
+            "Kp12 deploy steps ansible playbook frobnicate",
+            "Kp12 deploy A.md",
+        ),
+        # A retitled note whose title is a NEWER note's stem.
+        (
+            [
+                (
+                    "Old name.md",
+                    "Mx55 backup policy",
+                    "Mx55 backup policy restic nightly glacier.",
+                    "2026-09-01",
+                ),
+                ("Mx55 backup policy.md", "Something else", "garden tomatoes.", "2026-09-30"),
+            ],
+            "Mx55 backup policy restic nightly glacier",
+            "Old name.md",
+        ),
+    ],
+)
+def test_preflight_names_the_ranked_note_not_a_newer_decoy(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    notes: list[tuple[str, str, str, str]],
+    prompt: str,
+    expected: str,
+    mode: str,
+) -> None:
+    # #416 round 2: re-resolving the top title picked the NEWEST note whose
+    # title, filename or stem matched — a decoy, not the note retrieval ranked.
+    from omind import recall
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    for filename, title, details, created in notes:
+        _raw(omi, filename, title, details, created=created)
+    _fillers(omi)
+    _refresh(omi)
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
+    monkeypatch.setenv(timeline.ENABLE_ENV, "0")
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, mode)
+    assert retrieve.relevant_notes(prompt, omi, limit=1)[0][1] == expected
+    context = guard.preflight_turn(
+        {"session_id": f"pf-decoy-{mode}-{expected[:12]}", "prompt": prompt}, omi
+    )
+    names = _emitted_names(context)
+    assert names and names[0] == expected, context
+    for name in names:
+        assert recall.compact_recall(omi, name, organic=False)["filename"] == name
+
+
+def test_inject_mode_names_both_notes_by_stored_filename(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #416 round 2: inject mode named the recalled note and the colon-titled
+    # runner-up by title, and neither opened through recall-note.
+    from omind import recall
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    _raw(
+        omi,
+        "Rq88 first.md",
+        "Rq88 restic backup nightly glacier",
+        "Rq88 restic backup nightly glacier.",
+        created="2026-09-01",
+    )
+    _raw(
+        omi,
+        "Rq88 colon.md",
+        "Rq88: restic backup glacier",
+        "Rq88 restic backup glacier tiers.",
+        created="2026-09-02",
+    )
+    _fillers(omi)
+    _refresh(omi)
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
+    monkeypatch.setenv(timeline.ENABLE_ENV, "0")
+    monkeypatch.setenv(guard.PREFLIGHT_MODE_ENV, "inject")
+    prompt = "Rq88 restic backup nightly glacier"
+    context = guard.preflight_turn({"session_id": "pf-inject-416", "prompt": prompt}, omi)
+    assert "Also possibly relevant" in context, context
+    assert _emitted_names(context) == ["Rq88 first.md", "Rq88 colon.md"], context
+    for name in ("Rq88 first.md", "Rq88 colon.md"):
         assert recall.compact_recall(omi, name, organic=False)["filename"] == name
 
 

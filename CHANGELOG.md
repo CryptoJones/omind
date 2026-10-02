@@ -38,6 +38,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   `title`. The preflight hint and its stale-note message name each candidate by its
   stored filename, and the hint drops the runner-up rather than let its 500-char cap
   slice a link. `retrieve.relevant_notes()` returns `(title, filename)` pairs for it.
+  The preflight takes those filenames straight from the ranking: it used to re-resolve
+  the top title, which picked the newest note sharing that title or stem rather than
+  the one retrieval ranked. Under `OMIND_PREFLIGHT=inject`, the `recalled [[…]]` line
+  and the `Also possibly relevant: [[…]]` runner-up name stored filenames too.
 
 ## [10.2.5] - 2026-10-02
 

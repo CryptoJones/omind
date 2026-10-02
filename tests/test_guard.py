@@ -509,7 +509,8 @@ def test_turn_preflight_inject_mode_recalls_full_memory(
     _token_note(omi)
     event = {"session_id": "preflight-1", "prompt": "reduce OMI token usage"}
     context = guard.preflight_turn(event, omi)
-    assert "[[Token Usage Strategy]]" in context
+    # #416: named by the stored filename recall-note opens as-is.
+    assert "[[Token Usage Strategy.md]]" in context
     assert "compact recall" in context
     assert guard.consulted_this_turn("preflight-1")
     usage = ai_usage.read_events(omi)

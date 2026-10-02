@@ -2977,26 +2977,28 @@ def _name_timelines(omi_dir: Path | str, names: list[str]) -> list[Any]:
         return []
 
 
-def _second_title_line(omi_dir: Path | str, titles: list[str], first: str) -> str:
-    """Title + summary of the runner-up preflight match, never a full body
-    (#241). Skipped on the economy profile, where the preflight budget is too
-    tight for a second note. Best-effort — a failure adds nothing."""
-    if len(titles) < 2:
+def _second_title_line(omi_dir: Path | str, relevant: list[tuple[str, str]], first: str) -> str:
+    """Stored filename + summary of the runner-up preflight match, never a
+    full body (#241). Skipped on the economy profile, where the preflight
+    budget is too tight for a second note. Best-effort — a failure adds
+    nothing."""
+    if len(relevant) < 2:
         return ""
     try:
         from omind import ai_usage, recall
 
         if ai_usage.policy(omi_dir).preflight_chars < 2_000:
             return ""
-        filename = recall.filename_for_title(omi_dir, titles[1])
-        if filename is None or filename == first:
+        # #416: the filename retrieval ranked, not a re-resolved title — that
+        # can open a newer note sharing the title or stem, or nothing at all.
+        filename = relevant[1][1]
+        if not filename or filename == first:
             return ""
         memory = recall.compact_recall(
             omi_dir, filename, max_chars=recall.MIN_RECALL_CHARS, organic=False
         )
-        title = str(memory.get("title") or Path(filename).stem)
         summary = str(memory.get("summary") or "").strip()
-        line = f"\n\nAlso possibly relevant: [[{title}]]"
+        line = f"\n\nAlso possibly relevant: [[{filename}]]"
         return line + (f" — {summary}" if summary else "")
     except Exception:
         return ""
@@ -3066,10 +3068,11 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     from omind import ai_usage, recall, retrieve
 
     relevant = retrieve.relevant_notes(retrieval_task, omi_dir, limit=2) if task else []
-    titles = [title for title, _name in relevant]
-    filename = recall.filename_for_title(omi_dir, titles[0]) if titles else None
+    # #416: the stored filename retrieval ranked first. Re-resolving its title
+    # picks the NEWEST note whose title, filename or stem matches — a decoy.
+    filename = (relevant[0][1] or None) if relevant else None
     if filename is None:
-        if task and not titles and not _miss_strict():
+        if task and not relevant and not _miss_strict():
             record_consult(session, kind="no-match", target="", relevant=False)
             compliance.log_event(
                 compliance.KIND_DECISION,
@@ -3295,7 +3298,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
     context = (
         "OMI turn preflight"
         + (" (continuing the prior task)" if continuation else "")
-        + f" recalled [[{title}]]"
+        + f" recalled [[{filename}]]"
         + (
             " (full excerpt already injected earlier this session)"
             if repeated and not action_shaped
@@ -3304,7 +3307,7 @@ def preflight_turn(data: dict[str, Any], omi_dir: Path | None) -> str:
         + framing
         + content
     )
-    context += _second_title_line(omi_dir, titles, filename)
+    context += _second_title_line(omi_dir, relevant, filename)
     ai_usage.record_context(omi_dir, "recall", len(context), session_id=session)
     return context
 
