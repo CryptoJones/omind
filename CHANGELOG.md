@@ -7,6 +7,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.17] - 2026-10-02
+
+### Fixed
+- **The repo-work classifier saw more of what a Bash command does
+  ([#434](https://github.com/CryptoJones/omind/issues/434)).** Gaps found by the
+  2026-10-02 audit let a repo-mutating command skip the git-rules consult gate,
+  and in one case the freshness gate too.
+  - **`bash -c` / `sh -c` / `zsh -c` and `eval` bodies are classified.** Their
+    text is a string literal to the caller, so `bash -c 'sed -i …'` and
+    `bash -c "git commit -m x"` were never repo work, and the commit form also
+    skipped the freshness demand. Every body the shell walk (#413/#440) unwraps,
+    at any depth, now goes through the same stage classifier, and
+    `_is_commit_action` searches the bodies too.
+  - **Writes into the repo through redirects and file tools count.** An output
+    redirection (`>`, `>>`, `>|`, `N>`, `&>`, `>&file`), `tee`, the destination of `cp`
+    (`-t`/`--target-directory` included), any operand of `mv`, or an `rm`
+    operand that resolves inside the target repo is repo work. Each simple
+    command is judged from the directory its `cd`s leave it in. `>/dev/null`,
+    `2>&1`, `>&2`, Windows `NUL`, a `$VAR` target and anything outside the repo
+    (`> /tmp/log`, `tee` to an outside log, `cp` out of the repo) still are not.
+    Nor is a `>` that compares (`[[ a > b ]]`, `(( n > 3 ))`, `$(( … ))`,
+    `[ a \> b ]`), or a `find -exec` placeholder (`{}`, `+`, `;`, `\;`).
+  - **Every python spelling follows one rule.** `_REPO_TEST_RE` matched
+    `python\b` only, so bare `python` counted whatever it ran while `python3`,
+    `python3.N` and `.venv/bin/python3` never did (`python3 tests/test_x.py`
+    missed). Now `python`, `python3`, `python3.N`, a path-prefixed interpreter
+    and `poetry run`/`uv run` python are judged alike: `-m pytest|unittest|tox|nox`
+    (interpreter flags first, or `-mpytest`) or a script-file operand is repo
+    work; `-c …`, any other `-m` module (`json.tool`, `http.server`, `pip`),
+    `-`, stdin and a heredoc are not, and stay the script-write and commit
+    detectors' business. This narrows bare `python -c …` to match `python3`.
+  - **Wrappers no longer hide git, `gh` or a test run.** `chronic git commit`,
+    `stdbuf -oL git push` and `nice -n 5 python3 -m pytest` were not repo
+    work, and the wrapped commits skipped the freshness gate. The git-verb,
+    `gh`, test-runner and commit patterns now also match each simple command
+    from its program on, after wrappers are peeled. `stdbuf`, `caffeinate`,
+    `ionice` and `chronic` joined `policy.STAGE_WRAPPERS`, which the hard
+    rules' command-position anchor shares.
+
 ## [10.2.16] - 2026-10-02
 
 ### Fixed

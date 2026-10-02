@@ -1312,8 +1312,10 @@ _WRITE_TOOLS = frozenset(
     }
 )
 _READ_REVIEW_TOOLS = frozenset({"Read", "Grep", "Glob", "LS", "find", "rg"})
+# A python interpreter is not listed: `_python_runs_tests` judges every
+# spelling (`python`, `python3`, `python3.N`) by one rule (#434 review).
 _REPO_TEST_RE = re.compile(
-    r"(?:^|[;&|\n(]\s*)(?:uv|pytest|python|tox|nox|hatch|npm|pnpm|yarn|cargo|go|make)\b"
+    r"(?:^|[;&|\n(]\s*)(?P<prog>uv|pytest|tox|nox|hatch|npm|pnpm|yarn|cargo|go|make)\b"
 )
 # Optional leading git global options (``-C <dir>``, ``-c key=val``) so a
 # freshness command run with an explicit repo dir — ``git -C <repo> fetch`` — is
@@ -2389,43 +2391,314 @@ def _is_commit_action(action: dict[str, Any]) -> bool:
         return False
     # policy.shell_code_text (#317): a `git commit` inside an ssh payload, a
     # heredoc body, or a string literal is not a commit onto THIS machine's
-    # base, so demanding a local fetch for it certifies nothing.
-    return bool(_GIT_COMMIT_RE.search(policy.shell_code_text(str(action.get("command") or ""))))
+    # base, so demanding a local fetch for it certifies nothing. A `bash -c` /
+    # `eval` body is code this shell runs, so it is searched too (#434).
+    return any(
+        _GIT_COMMIT_RE.search(code)
+        for text in _local_code_texts(str(action.get("command") or ""))
+        for code in _stage_code_texts(text)
+    )
 
 
-def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
+def _stage_code_texts(raw: str) -> list[str]:
+    """``raw`` as code (``policy.shell_code_text``), plus each simple command
+    in it rebuilt from its program on: leading ``VAR=x``, wrappers
+    (``chronic``, ``stdbuf -oL``, ``nice -n 5`` …) and keywords peeled, and
+    the program reduced to its basename (``.venv/bin/python3`` → ``python3``).
+    The command-anchored patterns then see ``git``/``gh``/``pytest`` behind a
+    wrapper too (#434 review). Just the code when the split fails."""
+    code = policy.shell_code_text(raw)
+    stages = _safe_program_stages(code, raw)
+    return [code, *(" ".join([program, *args]) for program, args, _s, _e in stages)]
+
+
+def _safe_program_stages(code: str, raw: str) -> list[tuple[str, list[str], int, int]]:
+    """:func:`_program_stages`, or no stages at all when the split fails:
+    classification fails open (AGENTS.md invariant 2)."""
+    try:
+        return _program_stages(code, raw)
+    except Exception:
+        return []
+
+
+#: A python interpreter's basename: ``python``, ``python3``, ``python3.12``.
+_PYTHON_PROGRAM_RE = re.compile(r"python[\d.]*")
+#: The modules whose ``-m`` run is a test run (#434 review).
+_PYTHON_TEST_MODULES = frozenset({"pytest", "unittest", "tox", "nox"})
+#: Interpreter switches whose value is the rest of the cluster or the next word.
+_PYTHON_VALUE_SWITCHES = frozenset("XW")
+_PYTHON_LONG_VALUE_SWITCHES = frozenset({"--check-hash-based-pycs"})
+
+
+def _python_runs_tests(args: list[str]) -> bool:
+    """Whether a python interpreter given ``args`` runs tests or a script file
+    (#434 review): ``-m pytest|unittest|tox|nox`` (flags may come first, and
+    ``-mpytest`` is one word), or a first operand that is a path
+    (``tests/test_x.py``, ``run.py``). ``-c``, any other ``-m`` module, ``-``
+    and stdin (a redirect or heredoc) are not: what such code does is the
+    script-write and commit detectors' business. One rule for every spelling,
+    ``python`` and ``python3`` alike."""
+    i = 0
+    while i < len(args):
+        tok = args[i]
+        i += 1
+        if _REDIRECT_RE.match(tok):
+            # `<`, `2>`: the target is the next word; `<in`, `<<'EOF'` carry it.
+            if _REDIRECT_OP_RE.fullmatch(tok):
+                i += 1
+            continue
+        if tok == "-":
+            return False
+        if tok == "--":
+            continue
+        if tok.startswith("--"):
+            if tok in _PYTHON_LONG_VALUE_SWITCHES:
+                i += 1
+            continue
+        if tok.startswith("-"):
+            for pos, ch in enumerate(tok[1:], start=1):
+                rest = tok[pos + 1 :]
+                if ch == "c":
+                    return False
+                if ch == "m":
+                    module = rest or (args[i] if i < len(args) else "")
+                    return module in _PYTHON_TEST_MODULES
+                if ch in _PYTHON_VALUE_SWITCHES:
+                    if not rest:
+                        i += 1
+                    break
+            continue
+        return True
+    return False
+
+
+def _runs_test_runner(code: str, stages: list[tuple[str, list[str], int, int]]) -> bool:
+    """Whether ``code`` runs a test runner: a :data:`_REPO_TEST_RE` word at
+    command position, or a python stage that :func:`_python_runs_tests`. A
+    run wrapper's word (``uv run python3 -c …``, ``hatch run python …``) yields
+    to the python rule for the interpreter it runs, so every python spelling is
+    judged alike (#434 review)."""
+    for m in _REPO_TEST_RE.finditer(code):
+        if m.group("prog") in _RUN_WRAPPERS:
+            nxt = next((s for s in stages if s[2] >= m.end()), None)
+            if (
+                nxt is not None
+                and _PYTHON_PROGRAM_RE.fullmatch(nxt[0])
+                and not re.search(r"[;&|\n()`]", code[m.end() : nxt[2]])
+            ):
+                continue
+        return True
+    return any(
+        _PYTHON_PROGRAM_RE.fullmatch(program) and _python_runs_tests(args)
+        for program, args, _s, _e in stages
+    )
+
+
+def _local_code_texts(command: str) -> list[str]:
+    """``command`` plus every ``sh/bash/zsh -c`` and ``eval`` body the shell
+    walk unwraps from it, at any depth (#434): each is code this machine runs,
+    so each is classified on its own. Just ``[command]`` when the walk fails."""
+    try:
+        return [command, *_shell_walk(command)[3]]
+    except Exception:
+        return [command]
+
+
+def _is_repo_sensitive_action(action: dict[str, Any], repo: Path | None = None) -> bool:
+    """Whether ``action`` is repo work. ``repo``, when the caller already
+    resolved it, spares :func:`_writes_into_repo` resolving it again."""
     tool = str(action.get("tool") or "")
     # Classify LOCAL repo work against code this shell actually runs (#317).
     # `ssh host 'cd /p && git commit …'` supplied the separator from inside its
     # payload, so a remote commit was judged local — and the repo was then
     # resolved from the local cwd, making the freshness fetch it demanded
     # vacuous: it refreshed an unrelated repo and recorded a false attestation.
-    command = policy.shell_code_text(str(action.get("command") or ""))
+    raw = str(action.get("command") or "")
     path = _action_path(action)
     if tool in _WRITE_TOOLS or tool in _READ_REVIEW_TOOLS:
         return True
     if tool == "Bash":
-        if _is_readonly_git_command(command):
+        if _is_readonly_git_command(policy.shell_code_text(raw)):
             return False
+        # A `bash -c '…'` / `eval '…'` body is blanked as a string literal in
+        # its caller, but this shell runs it: classify each body like the
+        # command itself (#434).
+        if any(_runs_repo_work(text) for text in _local_code_texts(raw)):
+            return True
+        if _writes_into_repo(action, repo):
+            return True
+    return bool(path)
+
+
+def _runs_repo_work(raw: str) -> bool:
+    """Whether one piece of shell code runs a git write verb, a ``gh``
+    pr/release/repo command, a test runner, an in-place editor, or a script
+    that writes files. Quoted literals, heredoc bodies and ssh payloads are
+    blanked first (#317)."""
+    command = policy.shell_code_text(raw)
+    if _is_readonly_git_command(command):
+        return False
+    stages = _safe_program_stages(command, raw)
+    # Each simple command is also matched from its program on, so a wrapper
+    # (`chronic git commit`, `nice -n 5 python3 -m pytest`) hides nothing
+    # (#434 review).
+    peeled = [" ".join([program, *args]) for program, args, _s, _e in stages]
+    if _runs_test_runner(command, stages):
+        return True
+    for code in (command, *peeled):
         # Tolerate the ``-C <dir>``/``-c k=v`` global opts before the verb —
         # without this, ``git -C <repo> commit`` was never classified as repo
         # work at all and sailed past the rules-note + freshness checks (#147).
         if re.search(
             rf"(?:^|[;&|\n(]\s*)git[ \t]+{_GIT_GLOBAL_OPTS}"
             r"(?:add|commit|push|merge|rebase|checkout|switch)\b",
-            command,
+            code,
         ):
             return True
-        if re.search(r"(?:^|[;&|\n(]\s*)gh\s+(?:pr|release|repo)\b", command):
+        if re.search(r"(?:^|[;&|\n(]\s*)gh\s+(?:pr|release|repo)\b", code):
             return True
-        if _REPO_TEST_RE.search(command):
-            return True
-        stages = _program_stages(command, str(action.get("command") or ""))
-        if _runs_in_place_edit(stages):
-            return True
-        if _runs_script_write(stages, str(action.get("command") or "")):
-            return True
-    return bool(path)
+    # A wrapped test runner (`nice -n 5 pytest`): python stages were judged above.
+    if any(_REPO_TEST_RE.search(code) for code in peeled):
+        return True
+    return _runs_in_place_edit(stages) or _runs_script_write(stages, raw)
+
+
+#: An output redirection operator in shell code: ``>``, ``>>``, ``>|``,
+#: ``N>``, ``&>``, ``&>>``. The second ``>`` of ``>>`` and the ``>`` of
+#: ``<>`` (read-write, never a truncating write) are not matched again, nor
+#: is an escaped ``\>`` (``[ a \> b ]`` compares strings; #434 review).
+_OUT_REDIRECT_RE = re.compile(r"(?<![<>&\d\\])(?:\d+|&)?>>?\|?")
+#: One shell word: unquoted and quoted runs, ending at a blank or operator.
+_SHELL_WORD_RE = re.compile(r"""(?:\\.|[^\s"'\\;&|<>()`]|"[^"]*"|'[^']*')+""")
+#: File operations whose operands are written or removed (#434): ``tee`` and
+#: ``rm`` write/remove every operand, ``mv`` removes its sources and writes
+#: its destination, ``cp`` writes only its destination.
+_FILE_OPS = frozenset({"tee", "cp", "mv", "rm"})
+#: ``cp``/``mv`` switches that take a separate value (GNU).
+_FILE_OP_ARG_SWITCHES = frozenset({"-t", "-S", "--target-directory", "--suffix"})
+#: ``find -exec`` placeholders and terminators: never a file operand (#434
+#: review). The walk leaves a lone ``\`` where ``\;`` ended the site.
+_EXEC_PLACEHOLDERS = frozenset({"{}", "+", ";", "\\;", "\\"})
+
+
+def _redirect_targets(text: str) -> list[str]:
+    """The files one simple command's output redirections write, as raw shell
+    words. A descriptor duplication (``2>&1``, ``>&2``, ``>&-``) and a
+    process substitution (``>(cmd)``) name no file; a quoted ``>`` is data.
+    ``>&word`` / ``>& word`` with a non-numeric word writes that file."""
+    code = policy.shell_code_text(text)
+    targets: list[str] = []
+    for m in _OUT_REDIRECT_RE.finditer(code):
+        rest = text[m.end() :].lstrip(" \t")
+        if rest[:1] == "&":
+            rest = rest[1:].lstrip(" \t")
+            if rest[:1].isdigit() or rest[:1] == "-":
+                continue
+        if rest[:1] == "(":
+            continue
+        word = _SHELL_WORD_RE.match(rest)
+        if word is not None:
+            try:
+                targets.append("".join(_shell_tokens(word.group())))
+            except ValueError:
+                continue
+    return targets
+
+
+def _file_op_targets(program: str, text: str) -> list[str]:
+    """The operands a ``tee``/``cp``/``mv``/``rm`` site writes or removes."""
+    # A `find -exec … \;` site ends at the `\` of its terminator; a lone
+    # trailing backslash would make shlex reject the whole site.
+    text = text.rstrip()
+    if text.endswith("\\") and not text.endswith("\\\\"):
+        text = text[:-1]
+    try:
+        words = _without_redirects(_shell_tokens(text))[1:]
+    except ValueError:
+        return []
+    operands: list[str] = []
+    target_dir: list[str] = []
+    i, options = 0, True
+    while i < len(words):
+        word = words[i]
+        i += 1
+        if options and word == "--":
+            options = False
+        elif options and word.startswith("-") and len(word) > 1:
+            if program not in ("cp", "mv"):
+                continue
+            if word in _FILE_OP_ARG_SWITCHES:
+                if word in ("-t", "--target-directory") and i < len(words):
+                    target_dir.append(words[i])
+                i += 1
+            elif word.startswith("--target-directory="):
+                target_dir.append(word.split("=", 1)[1])
+            elif word.startswith("-t") and not word.startswith("--"):
+                target_dir.append(word[2:])
+        elif word not in _EXEC_PLACEHOLDERS:
+            operands.append(word)
+    if program == "cp":
+        return target_dir or operands[-1:]
+    return target_dir + operands
+
+
+def _path_in_repo(word: str, cwd: Path | None, repo: Path) -> bool:
+    """Whether the literal path ``word``, used from ``cwd`` (``None``: not
+    knowable, so only an absolute path is judged), names something inside
+    ``repo``. A word with a parameter or command substitution is not a literal
+    and never counts, nor does a null device (``/dev/null``, Windows ``NUL``)."""
+    if not word or "$" in word or "`" in word:
+        return False
+    if word.startswith("/dev/") or word.lower() in ("nul", "nul:"):
+        return False
+    try:
+        target = Path(word).expanduser()
+        if not target.is_absolute():
+            if cwd is None:
+                return False
+            target = cwd / target
+        return target.resolve().is_relative_to(repo.resolve())
+    except (OSError, RuntimeError, ValueError):
+        return False
+
+
+#: A ``[[ … ]]`` test or a ``(( … ))`` / ``$(( … ))`` arithmetic expression on
+#: one line with no quote in it: a ``>`` there compares, it does not redirect.
+_COMPARE_EXPR_RE = re.compile(r"""\[\[[^'"\n]*?\]\]|\(\([^'"\n]*?\)\)""")
+
+
+def _without_comparisons(command: str) -> str:
+    """``command`` with every ``>`` inside a ``[[ … ]]`` test or a ``(( … ))``
+    arithmetic expression blanked, so the walk never reads ``[[ a > b ]]`` or
+    ``(( n > 3 ))`` as a redirect to ``b``/``3`` (#434 review). A region that
+    holds a quote is left alone: ``echo '((' > f; echo '))'`` stays a write."""
+    return _COMPARE_EXPR_RE.sub(lambda m: m.group().replace(">", " "), command)
+
+
+def _writes_into_repo(action: dict[str, Any], repo: Path | None = None) -> bool:
+    """Whether a Bash command writes a file inside its target repo through an
+    output redirection, ``tee``, ``cp`` or ``mv``, or removes one with ``rm``
+    or ``mv`` (#434). Every simple command the local shell runs, ``-c``/``eval``
+    bodies included, is judged from the directory it runs in. A target outside
+    the repo (``>/dev/null``, ``2>&1``, ``> /tmp/log``) is not repo work.
+    ``repo`` is the already-resolved target repo, if the caller has it.
+    ``False`` on any failure: classification fails open."""
+    try:
+        if repo is None:
+            repo = _repo_root_for_action(action)
+        if repo is None:
+            return False
+        base = _action_base_dir(action)
+        for site in _shell_walk(_without_comparisons(_action_command(action)))[0]:
+            cwd = None if site.cwd is None else base / site.cwd
+            targets = _redirect_targets(site.text)
+            if site.program in _FILE_OPS:
+                targets += _file_op_targets(site.program, site.text)
+            if any(_path_in_repo(word, cwd, repo) for word in targets):
+                return True
+    except Exception:
+        return False
+    return False
 
 
 #: Wrappers and keywords a stage skips to reach its program, with their
@@ -3319,7 +3592,7 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
             rule_id="global-config-explicit-auth",
         )
 
-    if repo is not None and _is_repo_sensitive_action(action):
+    if repo is not None and _is_repo_sensitive_action(action, repo):
         if not git_rules_missing and not _has_consulted_git_rules(session):
             record_pending(session, command or _action_path(action))
             # Name the demanded note so the verifier credits the obeying read

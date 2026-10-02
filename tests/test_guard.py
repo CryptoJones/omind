@@ -3545,3 +3545,388 @@ def test_stage_parser_reads_the_same_wrapper_shapes(command: str) -> None:
     stages = guard._program_stages(policy.shell_code_text(command), command)
     assert [program for program, *_ in stages] == ["sed"]
     assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+# --- #434: repo-work classifier gaps -----------------------------------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c 'sed -i s/a/b/ f'",
+        'bash -c "git commit -m x"',
+        "sh -c 'perl -pi -e s/a/b/ f'",
+        "eval 'git add -A'",
+        "bash -c \"sh -c 'sed -i s/a/b/ f'\"",
+        "zsh -c 'python3 -m pytest -q'",
+    ],
+)
+def test_shell_c_and_eval_bodies_are_classified_as_repo_work(command: str) -> None:
+    """#434: a `-c`/`eval` body is blanked as a string literal in its caller,
+    but this shell runs it, so the stage classifier judges it too."""
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+def test_bash_c_commit_trips_the_freshness_gate() -> None:
+    """#434: `bash -c "git commit …"` also skipped the freshness demand."""
+    assert guard._is_commit_action({"tool": "Bash", "command": 'bash -c "git commit -m x"'})
+    assert not guard._is_commit_action({"tool": "Bash", "command": "bash -c 'git status'"})
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["bash -c 'git status'", "bash -c 'ls >/dev/null 2>&1'", "eval 'echo hi'"],
+)
+def test_shell_c_bodies_that_only_read_stay_out_of_repo_work(command: str) -> None:
+    assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+#: Interpreter spellings that classify identically (#434 review): one
+#: python rule for all of them, run wrappers included.
+_PYTHON_SPELLINGS = (
+    "python",
+    "python3",
+    "python3.12",
+    ".venv/bin/python3",
+    "/usr/bin/python",
+    "poetry run python",
+    "uv run python3",
+)
+
+
+@pytest.mark.parametrize("interp", _PYTHON_SPELLINGS)
+@pytest.mark.parametrize(
+    ("args", "sensitive"),
+    [
+        # A test module, with or without interpreter flags before `-m`.
+        ("-m pytest tests/", True),
+        ("-m unittest discover", True),
+        ("-m tox", True),
+        ("-m nox", True),
+        ("-X dev -m pytest", True),
+        ("-B -m pytest -q", True),
+        ("-mpytest", True),
+        ("-Bm pytest", True),
+        # A script-file operand.
+        ("tests/test_x.py", True),
+        ("run.py --flag", True),
+        ("-u run.py", True),
+        # Neither: a `-c` body, another module, stdin, a REPL, a version.
+        ("-c 'print(1)'", False),
+        ("-m json.tool", False),
+        ("-m http.server", False),
+        ("-m pip list", False),
+        ("-mjson.tool", False),
+        ("-", False),
+        ("- < in.txt", False),
+        ("< run.py", False),
+        ("-i", False),
+        ("--version", False),
+        ("-X dev -c 'print(1)'", False),
+    ],
+)
+def test_every_python_spelling_follows_one_rule(interp: str, args: str, sensitive: bool) -> None:
+    """#434 review: `python`, `python3`, `python3.N`, a path-prefixed
+    interpreter and `poetry run`/`uv run` python are judged by one rule: a test
+    module (`-m pytest|unittest|tox|nox`) or a script-file operand is repo
+    work; `-c`, any other module, stdin and a heredoc are not (those stay the
+    script-write and commit detectors' business). Bare `python` used to count
+    whatever it ran, and `python3 tests/test_x.py` used to miss."""
+    for command in (f"{interp} {args}", f"cd x && {interp} {args}", f"ls | {interp} {args}"):
+        action = {"tool": "Bash", "command": command}
+        assert guard._is_repo_sensitive_action(action) is sensitive, command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python tests/test_x.py",
+        "python3 -X dev -m pytest",
+        ".venv/bin/python3 -m pytest",
+        "python3 -mpytest",
+    ],
+)
+def test_python_test_runs_are_repo_work(command: str) -> None:
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "python -c 'print(1)'",
+        "python -m json.tool",
+        "python - <<'EOF'\nprint(1)\nEOF",
+        "python3 <<'EOF'\nprint(1)\nEOF",
+    ],
+)
+def test_python_reads_are_not_repo_work(command: str) -> None:
+    """#434 review: bare `python` is narrowed to match `python3`."""
+    assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+def test_python_heredoc_that_writes_is_still_repo_work() -> None:
+    """The script-write detector still judges a heredoc body (#391)."""
+    command = "python - <<'EOF'\nopen('x', 'w').write('y')\nEOF"
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+#: Wrappers from the stage-wrapper table that exec their trailing command,
+#: with switches (#434 review: git/gh/test runners behind them were missed).
+_WRAPPER_PREFIXES = (
+    "chronic",
+    "caffeinate",
+    "caffeinate -t 60",
+    "stdbuf -oL",
+    "stdbuf -o L",
+    "ionice -c 3",
+    "nice -n 5",
+    "nice",
+    "timeout 5",
+    "env FOO=1",
+    "time",
+    "sudo -u bob",
+    "xargs -n 1",
+    "/usr/bin/env",
+)
+
+
+@pytest.mark.parametrize("wrapper", _WRAPPER_PREFIXES)
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git commit -m x",
+        "git push",
+        "git -C . add -A",
+        "gh pr create",
+        "pytest -q",
+        "python3 -m pytest",
+        ".venv/bin/python3 -m pytest",
+    ],
+)
+def test_git_gh_and_test_runners_behind_wrappers_are_repo_work(wrapper: str, command: str) -> None:
+    """#434 review: the git-verb, `gh`, test-runner and commit patterns are
+    matched against each stage's program, after wrappers are peeled."""
+    for text in (f"{wrapper} {command}", f"cd x && {wrapper} {command}"):
+        action = {"tool": "Bash", "command": text}
+        assert guard._is_repo_sensitive_action(action), text
+        assert guard._is_commit_action(action) is (" commit" in command), text
+
+
+def test_wrapped_read_only_git_is_not_repo_work() -> None:
+    for command in ("chronic git status", "stdbuf -oL git log -1", "nice -n 5 git diff"):
+        action = {"tool": "Bash", "command": command}
+        assert not guard._is_repo_sensitive_action(action), command
+        assert not guard._is_commit_action(action), command
+
+
+@pytest.mark.parametrize(
+    "command", ['bash -c "git commit -m x"', "chronic git commit -m x", "nice -n 5 git commit -m x"]
+)
+def test_wrapped_commit_gets_the_freshness_verdict_end_to_end(tmp_path: Path, command: str) -> None:
+    """#434 review: not only `_is_commit_action`: the full check demands a
+    fresh base for a commit hidden in a `-c` body or behind a wrapper."""
+    repo = tmp_path / "wrapped"
+    repo.mkdir()
+    _git_init(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://x.invalid/y.git"],
+        check=True,
+    )
+    session = "wrapped-commit-fresh"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    verdict = guard.decide(
+        {"tool": "Bash", "command": command, "cwd": repo.as_posix(), "session": session}
+    )
+    assert not verdict.allow
+    assert verdict.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
+
+
+def _raise(*_args: object, **_kwargs: object) -> None:
+    raise RuntimeError("walker exploded")
+
+
+def test_local_code_texts_fails_open_when_the_walk_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#434 review (AGENTS.md invariant 2): a walker crash degrades to the
+    command alone, it never raises into the agent."""
+    monkeypatch.setattr(guard, "_shell_walk", _raise)
+    assert guard._local_code_texts("bash -c 'git commit -m x'") == ["bash -c 'git commit -m x'"]
+    action = {"tool": "Bash", "command": "git commit -m x"}
+    assert guard._is_repo_sensitive_action(action)
+    assert guard._is_commit_action(action)
+
+
+def test_writes_into_repo_fails_open_when_the_walk_raises(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    repo, outside = _write_probe_repo(tmp_path)
+    monkeypatch.setattr(guard, "_shell_walk", _raise)
+    action = _repo_write_action("echo x > src/x.py", repo, outside)
+    assert guard._writes_into_repo(action) is False
+    assert guard._writes_into_repo(action, repo) is False
+    assert guard._is_repo_sensitive_action(action) is False
+
+
+def test_stage_code_texts_fails_open_when_the_stage_split_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(guard, "_program_stages", _raise)
+    assert guard._stage_code_texts("chronic git commit -m x") == ["chronic git commit -m x"]
+
+
+def test_writes_into_repo_uses_the_repo_it_is_given(tmp_path: Path) -> None:
+    """#434 review (optional): the caller's resolved repo is used as-is."""
+    repo, outside = _write_probe_repo(tmp_path)
+    action = {"tool": "Bash", "command": f"echo x > {outside.as_posix()}/f", "cwd": "/"}
+    assert not guard._writes_into_repo(action, repo)
+    assert guard._writes_into_repo(action, outside)
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "stdbuf -oL sed -i 's/a/b/' f",
+        "stdbuf -o L sed -i 's/a/b/' f",
+        "caffeinate sed -i 's/a/b/' f",
+        "caffeinate -t 60 sed -i 's/a/b/' f",
+        "ionice -c 3 sed -i 's/a/b/' f",
+        "chronic sed -i 's/a/b/' f",
+    ],
+)
+def test_more_stage_wrappers_reach_the_program_behind_them(command: str) -> None:
+    """#434: stdbuf/caffeinate/ionice/chronic exec their trailing command."""
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert [program for program, *_ in stages] == ["sed"]
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+def _write_probe_repo(tmp_path: Path) -> tuple[Path, Path]:
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / "src").mkdir()
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    return repo, outside
+
+
+#: Commands that write or remove a file inside the repo (#434).
+_WRITES_INTO_REPO = (
+    "echo x > src/x.py",
+    "echo x >> src/x.py",
+    "echo x >src/x.py",
+    "echo x 1> src/x.py",
+    "echo x &> src/x.py",
+    "echo x >| src/x.py",
+    "echo x > 'src/x y.py'",
+    "cat > src/x.py <<'EOF'\nprint(1)\nEOF",
+    "echo x > {repo}/src/x.py",
+    "cd src && echo x > x.py",
+    "cd {outside} && echo x > {repo}/x",
+    "tee src/x.py < in",
+    "ls | tee -a src/log.txt",
+    "ls | tee {outside}/a.log src/b.log",
+    "cp a src/b",
+    "cp {outside}/a {repo}/src/b",
+    "cp -t src {outside}/a",
+    "cp --target-directory=src {outside}/a",
+    "mv a src/b",
+    "mv src/a {outside}/b",
+    "rm src/x.py",
+    "rm -rf -- src",
+    "stdbuf -oL rm {repo}/src/x.py",
+    "bash -c 'echo x > src/x.py'",
+    "bash -c 'cd src && rm x.py'",
+    # #434 review: `>&word` and `>& word` write the file (stdout and stderr).
+    "echo x >& src/x.py",
+    "echo x >&src/x.py",
+    # A placeholder is not a target, but a real destination still is.
+    "find {outside} -exec cp {{}} src/ \\;",
+    # A quote inside the "(( … ))" region: not arithmetic, the write stands.
+    "echo '((' > src/x; echo '))'",
+)
+
+#: Commands whose writes all land OUTSIDE the repo: they must not count (the
+#: #412 false-positive class must not grow).
+_WRITES_OUTSIDE_REPO = (
+    "ls > /dev/null",
+    "ls >/dev/null 2>&1",
+    "echo hi 2>&1",
+    "ls 1>/dev/null 2>/dev/null",
+    "echo x >&2",
+    "ls &> /dev/null",
+    "echo x > {outside}/out.log",
+    "pwd >> {outside}/a",
+    "ls | tee {outside}/log.txt",
+    "ls | tee -a {outside}/log.txt",
+    "cp src/a {outside}/b",
+    "rm -rf {outside}/scratch",
+    "mv {outside}/a {outside}/b",
+    "cd {outside} && echo x > y",
+    "echo 'a > b'",
+    "grep -rn '>' src",
+    "diff <(ls) <(ls src)",
+    "echo x > $OUT",
+    "rm $TMP/x",
+    "cat src/x.py",
+    "ls src | grep x",
+    "bash -c 'ls > /dev/null'",
+    # #434 review: a `>` that compares is not a redirect.
+    "[[ a > b ]] && echo y",
+    "(( n > 3 )) && echo y",
+    "if (( $# > 1 )); then echo y; fi",
+    "[ a \\> b ]",
+    "echo $(( 3 > 1 ))",
+    "bash -c '[[ a > b ]]'",
+    # #434 review: `find -exec` placeholders are never file operands.
+    "find /var/log -name '*.old' -exec rm {{}} +",
+    "find /var/log -name '*.old' -exec rm {{}} \\;",
+)
+
+
+def _repo_write_action(command: str, repo: Path, outside: Path) -> dict[str, object]:
+    command = command.format(repo=repo.as_posix(), outside=outside.as_posix())
+    return {"tool": "Bash", "command": command, "cwd": repo.as_posix()}
+
+
+@pytest.mark.parametrize("command", _WRITES_INTO_REPO)
+def test_redirects_and_file_ops_into_the_repo_are_repo_work(tmp_path: Path, command: str) -> None:
+    """#434: a redirect, `tee`, `cp`, `mv` or `rm` aimed inside the target
+    repo writes the repo as surely as `sed -i` does."""
+    repo, outside = _write_probe_repo(tmp_path)
+    assert guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.parametrize("command", _WRITES_OUTSIDE_REPO)
+def test_redirects_and_file_ops_outside_the_repo_are_not_repo_work(
+    tmp_path: Path, command: str
+) -> None:
+    repo, outside = _write_probe_repo(tmp_path)
+    assert not guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", _WRITES_INTO_REPO)
+def test_windows_tokenizing_redirects_into_the_repo_are_repo_work(
+    tmp_path: Path, command: str
+) -> None:
+    repo, outside = _write_probe_repo(tmp_path)
+    assert guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", _WRITES_OUTSIDE_REPO)
+def test_windows_tokenizing_redirects_outside_the_repo_are_not_repo_work(
+    tmp_path: Path, command: str
+) -> None:
+    repo, outside = _write_probe_repo(tmp_path)
+    assert not guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+def test_redirect_with_no_target_repo_is_not_repo_work(tmp_path: Path) -> None:
+    """No target repo, nothing to protect: the redirect check fails open."""
+    action = {"tool": "Bash", "command": "echo x > x.py", "cwd": tmp_path.as_posix()}
+    assert not guard._writes_into_repo(action)
