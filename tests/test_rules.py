@@ -1027,3 +1027,114 @@ def test_branch_lookup_failure_stays_quiet(
     assert rules._default_push_branches(on_main, "origin") == [""]
     for command in ("git push origin HEAD", "git push", "git push origin"):
         assert rules.evaluate(_action(command), omi, on_main) is None, command
+
+
+@pytest.fixture
+def remote_has_main(head_repos: tuple[Path, Path, Path], tmp_path: Path) -> tuple[Path, Path]:
+    """(omi, repo): the public repo checked out on `feature/x`, with a local
+    `main` and a REAL bare remote `origin` that has `main` too (#433)."""
+    omi, _on_main, on_feature = head_repos
+    remote = tmp_path / "remote-433.git"
+    subprocess.run(["git", "init", "-q", "--bare", remote.as_posix()], check=True)
+    _git(on_feature, "remote", "add", "origin", remote.as_posix())
+    _git(on_feature, "push", "-q", "origin", "main")
+    return omi, on_feature
+
+
+#: #433: every local branch goes out, whatever is checked out.
+_ALL_PUSHES: tuple[str, ...] = (
+    "git push --all origin",
+    "git push --all",
+    "git push origin --all",
+    "git push -u --all origin",
+    "git push --branches origin",
+    "git push --mirror origin",
+    "git push --mirror",
+)
+
+
+@pytest.mark.parametrize("command", _ALL_PUSHES)
+def test_all_branch_push_from_feature_branch_is_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#433: `--all` / `--mirror` from `feature/x` also push the local `main`."""
+    omi, repo = remote_has_main
+    assert rules._repo_branch(repo) == "feature/x"
+    assert _denied(omi, command, repo, monkeypatch), command
+    assert _denied(omi, f"git -C {repo.as_posix()} {command[4:]}", repo.parent, monkeypatch)
+
+
+@pytest.mark.parametrize("command", _ALL_PUSHES)
+def test_all_branch_push_without_main_is_allowed(
+    head_repos: tuple[Path, Path, Path],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    command: str,
+) -> None:
+    """#433: with no local main/master, `--all` pushes nothing the rule guards."""
+    omi, _on_main, _on_feature = head_repos
+    repo = _real_repo(tmp_path / "no-main", "feature/x")
+    _git(repo, "branch", "-q", "-D", "main")
+    remote = tmp_path / "no-main-remote.git"
+    subprocess.run(["git", "init", "-q", "--bare", remote.as_posix()], check=True)
+    _git(repo, "remote", "add", "origin", remote.as_posix())
+    assert rules._local_branches(repo) == ["feature/x"]
+    assert not _denied(omi, command, repo, monkeypatch), command
+
+
+@pytest.mark.parametrize("command", ["git push", "git push origin", "git push -u origin"])
+def test_matching_push_from_feature_branch_is_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#433: under `push.default=matching` a bare push from `feature/x` also
+    pushes `main`, because the remote has a `main`."""
+    omi, repo = remote_has_main
+    _git(repo, "config", "push.default", "matching")
+    assert _denied(omi, command, repo, monkeypatch), command
+    # Not matching: the bare push lands on feature/x alone.
+    _git(repo, "config", "push.default", "current")
+    assert not _denied(omi, command, repo, monkeypatch), command
+    # A configured `:` refspec is matching too, and wins over push.default.
+    _git(repo, "config", "remote.origin.push", ":")
+    assert _denied(omi, command, repo, monkeypatch), command
+
+
+def test_matching_push_ignores_branches_the_remote_lacks(
+    head_repos: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433: matching sends only branches the remote also has, so a remote
+    holding just `feature/x` takes no `main` from a matching push."""
+    omi, _on_main, repo = head_repos
+    remote = tmp_path / "feature-only.git"
+    subprocess.run(["git", "init", "-q", "--bare", remote.as_posix()], check=True)
+    _git(repo, "remote", "add", "origin", remote.as_posix())
+    _git(repo, "push", "-q", "origin", "feature/x")
+    _git(repo, "config", "push.default", "matching")
+    assert rules._matching_branches(repo, "origin") == ["feature/x"]
+    for command in ("git push", "git push origin", "git push origin :"):
+        assert not _denied(omi, command, repo, monkeypatch), command
+
+
+def test_explicit_matching_refspec_is_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433: `git push origin :` is a matching push whatever push.default says."""
+    omi, repo = remote_has_main
+    assert _denied(omi, "git push origin :", repo, monkeypatch)
+    assert _denied(omi, "git push origin +:", repo, monkeypatch)
+    assert rules._pushed_branches("git push origin :") == ["(matching):origin"]
+    assert rules._pushed_branches("git push --mirror origin") == ["(all-branches)"]
+
+
+def test_all_branch_lookup_failure_stays_quiet(
+    head_repos: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md invariant 2: when git cannot list branches the lookup fails
+    open and the rule stays quiet, as for every other branch lookup."""
+    omi, _on_main, _on_feature = head_repos
+    not_a_repo = tmp_path / "plain-433"
+    not_a_repo.mkdir()
+    assert rules._local_branches(not_a_repo) == []
+    assert rules._matching_branches(not_a_repo, "origin") == []
+    for command in ("git push --all origin", "git push --mirror", "git push origin :"):
+        assert rules.evaluate(_action(command), omi, not_a_repo) is None, command

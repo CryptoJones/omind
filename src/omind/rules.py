@@ -448,15 +448,44 @@ def _default_push_branches(repo: Path, remote: str) -> list[str]:
                 or "origin"
             ).strip()
         if remote in remotes:
-            specs = _git_out(repo, "config", "--get-all", f"remote.{remote}.push") or ""
-            for spec in specs.split():
+            specs = (_git_out(repo, "config", "--get-all", f"remote.{remote}.push") or "").split()
+            for spec in specs:
                 src, _, dst = spec.lstrip("+").partition(":")
                 if src.upper() in _CURRENT_BRANCH_REFS:
                     dests.append(dst.removeprefix("refs/heads/") or current)
+            # `push.default=matching`, or a configured `:` refspec (which wins
+            # over push.default), pushes every local branch the remote also
+            # has, not just the checked-out one (#433).
+            default = (_git_out(repo, "config", "push.default") or "").strip()
+            if any(s.lstrip("+") == ":" for s in specs) or (not specs and default == "matching"):
+                dests += _matching_branches(repo, remote)
     except Exception as exc:  # noqa: BLE001 - enforcement fails open
         _breadcrumb(f"rules_push_dest({repo})", exc)
         dests = []
     return dests or [current]
+
+
+def _local_branches(repo: Path) -> list[str]:
+    """Every local branch of ``repo``: what ``git push --all`` / ``--mirror``
+    sends (#433). Empty when git cannot answer (fails open)."""
+    out = _git_out(repo, "for-each-ref", "--format=%(refname:short)", "refs/heads/")
+    return (out or "").split()
+
+
+def _matching_branches(repo: Path, remote: str) -> list[str]:
+    """Local branches of ``repo`` that ``remote`` also has: what a matching
+    push (``push.default=matching``, or the ``:`` refspec) sends (#433).
+
+    The remote's branches are read from its remote-tracking refs, not over the
+    network, so the guard never blocks on a slow remote. A clone tracks the
+    remote's ``main``, which is the case the rule exists for.
+    """
+    if not remote:
+        return []
+    prefix = f"refs/remotes/{remote}/"
+    out = _git_out(repo, "for-each-ref", "--format=%(refname)", prefix)
+    theirs = {ref.removeprefix(prefix) for ref in (out or "").split()}
+    return [b for b in _local_branches(repo) if b in theirs]
 
 
 # Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
@@ -527,6 +556,14 @@ _CURRENT_REF = "(current)"
 #: Marker prefix for a push with no refspec (`git push`, `git push origin`),
 #: judged by where it really lands, ``@{push}`` (#423). The remote follows.
 _DEFAULT_PUSH = "(default-push):"
+#: Marker for ``git push --all`` / ``--branches`` / ``--mirror``: every local
+#: branch of the target repo (#433).
+_ALL_BRANCHES = "(all-branches)"
+#: Marker prefix for the ``:`` refspec (``git push origin :``): every local
+#: branch the remote also has (#433). The remote follows.
+_MATCHING = "(matching):"
+#: Push options that send every local branch whatever the refspecs (#433).
+_ALL_BRANCH_OPTS = frozenset({"--all", "--branches", "--mirror"})
 
 
 def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
@@ -571,11 +608,17 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
         if token == "--tags":
             refs.append("(tags)")
             continue
+        if token in _ALL_BRANCH_OPTS:
+            refs.append(_ALL_BRANCHES)
+            continue
         if token.startswith("-"):
             continue
         positional.append(token)
     # First positional token is the remote; the rest are refspecs.
     for token in positional[1:]:
+        if token.lstrip("+") == ":":
+            refs.append(_MATCHING + positional[0])
+            continue
         if ":" not in token and token.lstrip("+").upper() in _CURRENT_BRANCH_REFS:
             refs.append(_CURRENT_REF)
             continue
@@ -656,6 +699,13 @@ def _judge(
                 remote = branch.removeprefix(_DEFAULT_PUSH)
                 branches += fact(
                     f"push:{remote}", functools.partial(_default_push_branches, remote=remote)
+                )
+            elif branch == _ALL_BRANCHES:
+                branches += fact("local_branches", _local_branches)
+            elif branch.startswith(_MATCHING):
+                remote = branch.removeprefix(_MATCHING)
+                branches += fact(
+                    f"matching:{remote}", functools.partial(_matching_branches, remote=remote)
                 )
             else:
                 branches.append(branch)
