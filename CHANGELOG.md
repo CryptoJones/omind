@@ -7,6 +7,38 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.6] - 2026-10-02
+
+### Fixed
+- **Name hints and name timelines offered `recall-note` names that resolved nowhere
+  ([#406](https://github.com/CryptoJones/omind/issues/406)).** Both cut a long title with
+  `…` and said recall-note resolves a title prefix; nothing does, so recalling exactly the
+  name a hint printed returned "note not found". A retitled note's title and the stem of a
+  note titled `X.md` (stored as `X.md.md`) failed the same way. Following #393, each
+  `[[…]]` in a PostToolUse name hint, a preflight timeline and a tool-output timeline now
+  carries the note's full stored filename (with `.md`), which `recall-note` opens as-is,
+  and each `name_timelines` entry in a `create-note`/`edit-note` response gains a `note`
+  field holding it (its `title` stays, cut, for display).
+  - **Timeline depth trade-off.** Filenames are not cut; the store bounds them at 200
+    bytes. A timeline still drops its oldest entries to stay under 900 chars, so with
+    six ~190-char filenames it now keeps the newest three (the superseded ones go
+    first), where six 90-char cut titles used to fit. The cap is unchanged: keeping
+    all six would take about 1,500 chars per timeline, out of the same push budget.
+  - **A timeline line is never sliced.** It used to fall back to `text[:900]` once one
+    entry was left, which could cut inside `[[…]]` and emit a half-name. A timeline
+    whose newest entry alone does not fit is now dropped (the plain hint is shown
+    instead), and `Timeline.line()` returns an empty line rather than a partial link.
+  - `omind bench`'s name-hint replay also counts a later `recall-note` of the stored
+    filename as a consult, not only a match on the first 60 chars of a title.
+- **`related_by_entity` entries and the preflight topic hint still named notes by title
+  ([#416](https://github.com/CryptoJones/omind/issues/416)).** A cut, retitled, colon or
+  `.md`-ending title in a `create-note`/`edit-note` response, or in the UserPromptSubmit
+  preflight hint, could resolve nowhere or to another note. Each `related_by_entity`
+  entry now carries a `note` field holding the stored filename next to its display
+  `title`. The preflight hint and its stale-note message name each candidate by its
+  stored filename, and the hint drops the runner-up rather than let its 500-char cap
+  slice a link. `retrieve.relevant_notes()` returns `(title, filename)` pairs for it.
+
 ## [10.2.5] - 2026-10-02
 
 ### Fixed

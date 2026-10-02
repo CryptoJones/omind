@@ -6,6 +6,7 @@ history, superseded and corrected notes marked instead of suppressed."""
 from __future__ import annotations
 
 import os
+import re
 from pathlib import Path
 
 import pytest
@@ -137,9 +138,10 @@ def test_as30p_timeline_lists_the_three_drives_in_order_with_superseded_marked(
     ]
     line = found.line()
     assert line.index(SEAGATE) < line.index(SAMSUNG) < line.index(WD_BLUE)
-    assert f"2026-09-25 [[{SAMSUNG}]] (superseded)" in line
-    assert f"2026-09-25 [[{SEAGATE}]] (has a correction)" in line
-    assert f"2026-09-27 [[{WD_BLUE}]] (replaces an older note, newest)" in line
+    # Each entry names the stored filename, which recall-note opens as-is (#406).
+    assert f"2026-09-25 [[{SAMSUNG}.md]] (superseded)" in line
+    assert f"2026-09-25 [[{SEAGATE}.md]] (has a correction)" in line
+    assert f"2026-09-27 [[{WD_BLUE}.md]] (replaces an older note, newest)" in line
     assert MUSIC not in line  # notes ABOUT the name only; the DJ note merely mentions it
 
 
@@ -247,7 +249,9 @@ def test_timeline_is_bounded(tmp_path: Path) -> None:
     line = found.line()
     assert len(line) <= timeline.MAX_CHARS
     assert "2026-09-09" in line  # the newest always survives the cut
-    assert all(len(e.render()) < timeline.TITLE_CHARS + 60 for e in found.entries)
+    # An entry carries the stored filename uncut (#406); the store bounds it at
+    # 200 bytes, so at most 200 characters. MAX_CHARS counts characters too.
+    assert all(len(e.render()) < 200 + 60 for e in found.entries)
 
 
 def test_as_of_hides_later_notes(omi: Path) -> None:
@@ -263,10 +267,12 @@ def test_no_index_is_no_timeline(tmp_path: Path) -> None:
 
 
 def test_line_drops_oldest_entries_to_fit(monkeypatch: pytest.MonkeyPatch) -> None:
-    # Six full-length entries fit the shipped cap (~830 chars), so tighten it.
+    # Six mid-length entries fit the shipped cap, so tighten it.
     monkeypatch.setattr(timeline, "MAX_CHARS", 500)
     entries = [
-        timeline.Entry(filename=f"{i}.md", title="t" * 200, date=f"2026-09-0{i}", mark="")
+        timeline.Entry(
+            filename=f"{i} {'t' * 80}.md", title="t" * 200, date=f"2026-09-0{i}", mark=""
+        )
         for i in range(1, 7)
     ]
     line = timeline.Timeline(name="Zq77x", key="zq77x", df=6, entries=entries).line()
@@ -317,3 +323,272 @@ def test_write_context_exclusion_survives_a_generator(omi: Path) -> None:
     (as30p,) = fields[writecontext.TIMELINE_FIELD]  # type: ignore[misc]
     assert WD_BLUE not in [n["title"] for n in as30p["notes"]]
     assert [r["title"] for r in fields[writecontext.FIELD]].count(WD_BLUE) == 0  # type: ignore[union-attr]
+
+
+# -- #406: every emitted name resolves through recall-note -------------------
+
+_LINK = re.compile(r"\[\[(.+?)\]\]")
+
+
+def _raw(omi: Path, filename: str, title: str, details: str, *, created: str) -> str:
+    (omi / filename).write_text(
+        f"# {title}\n\n## Metadata\n- Created: {created}\n- Tags:\n\n"
+        f"## Summary\n{title}\n\n## Details\n{details}\n",
+        encoding="utf-8",
+    )
+    return filename
+
+
+@pytest.fixture
+def awkward(tmp_path: Path) -> tuple[Path, set[str]]:
+    """Notes whose titles do not resolve: one longer than any cut, one
+    retitled after it was written, one whose title ends in ``.md``, one whose
+    title holds a colon."""
+    d = tmp_path / "OMI"
+    d.mkdir()
+    long_title = "Vx91k and Wq42m array rebuild runbook " + "with every step spelled out " * 8
+    files = {
+        _raw(
+            d,
+            "Vx91k and Wq42m array rebuild runbook with every step spelled out.md",
+            long_title.strip(),
+            "Vx91k Wq42m rebuild.\n\n**CORRECTION:** the spare was the wrong size.",
+            created="2026-09-01",
+        ),
+        _raw(
+            d,
+            "Vx91k first draft.md",
+            "Vx91k and Wq42m moved to the NAS shelf",
+            "Vx91k Wq42m live on the NAS now.",
+            created="2026-09-10",
+        ),
+        _raw(
+            d,
+            "Vx91k and Wq42m notes about README.md.md",
+            "Vx91k and Wq42m notes about README.md",
+            "Vx91k Wq42m README.\n\nSupersedes: [[Vx91k first draft]]",
+            created="2026-09-20",
+        ),
+    }
+    # #416: a colon title, stored without its colon.
+    files.add(
+        _raw(
+            d,
+            "Vx91k Wq42m spare log.md",
+            "Vx91k: Wq42m spare log",
+            "Vx91k Wq42m spare disks on the shelf.",
+            created="2026-09-15",
+        )
+    )
+    # The stem of the ``.md``-titled note names this unrelated one instead.
+    _raw(d, "Vx91k and Wq42m notes about README.md", "Unrelated readme", "x", created="2026-01-01")
+    _fillers(d)
+    _refresh(d)
+    return d, files
+
+
+def _resolves(omi: Path, names: list[str], files: set[str]) -> None:
+    from omind import recall
+
+    assert names
+    for name in names:
+        got = recall.compact_recall(omi, name, organic=False)
+        assert got["filename"] == name and name in files, name
+
+
+def test_every_emitted_hint_name_resolves_through_recall(
+    awkward: tuple[Path, set[str]], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi, files = awkward
+    (found,) = timeline.for_names(omi, ["Vx91k"])
+    linked = _LINK.findall(found.line())
+    assert len(linked) == 4
+    _resolves(omi, linked, files)
+    notes = found.to_dict()["notes"]
+    assert isinstance(notes, list)
+    _resolves(omi, [n["note"] for n in notes], files)
+
+    hints = namehints.pick_hints("Vx91k Wq42m", omi)
+    assert hints and hints[0].timeline is not None
+    _resolves(omi, [m for h in hints for m in _LINK.findall(h.line())], files)
+
+    # The plain titles-only hint (no timeline) names notes the same way.
+    monkeypatch.setenv(timeline.ENABLE_ENV, "0")
+    plain = namehints.pick_hints("Vx91k Wq42m", omi)
+    assert plain and all(h.timeline is None for h in plain)
+    names = [m for h in plain for m in _LINK.findall(h.line())]
+    assert len(names) >= 2
+    _resolves(omi, names, files)
+
+
+def test_write_context_timeline_carries_the_stored_filename(
+    awkward: tuple[Path, set[str]],
+) -> None:
+    omi, files = awkward
+    fields = writecontext.response_fields(omi, title="Vx91k check", exclude=["x.md"])
+    entries = fields[writecontext.TIMELINE_FIELD]
+    assert isinstance(entries, list) and entries
+    _resolves(omi, [n["note"] for e in entries for n in e["notes"]], files)
+
+
+def test_write_context_related_entries_carry_the_stored_filename(
+    awkward: tuple[Path, set[str]],
+) -> None:
+    # #416: related_by_entity named notes by a cut title only.
+    omi, files = awkward
+    fields = writecontext.response_fields(omi, title="Vx91k Wq42m check", exclude=["x.md"])
+    related = fields[writecontext.FIELD]
+    assert isinstance(related, list) and related
+    _resolves(omi, [r["note"] for r in related], files)
+
+
+@pytest.mark.parametrize(
+    ("prompt", "expected"),
+    [
+        ("Vx91k Wq42m moved to the NAS shelf", "Vx91k first draft.md"),
+        ("Vx91k Wq42m spare log", "Vx91k Wq42m spare log.md"),
+        ("Vx91k Wq42m notes about README", "Vx91k and Wq42m notes about README.md.md"),
+        # A body with a correction: the stale-note message names it instead.
+        (
+            "Vx91k Wq42m array rebuild runbook every step spelled out",
+            "Vx91k and Wq42m array rebuild runbook with every step spelled out.md",
+        ),
+    ],
+)
+def test_preflight_names_resolve_through_recall(
+    awkward: tuple[Path, set[str]],
+    monkeypatch: pytest.MonkeyPatch,
+    prompt: str,
+    expected: str,
+) -> None:
+    # #416: the preflight topic hint named its candidates by title.
+    from omind import recall
+
+    omi, _files = awkward
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
+    monkeypatch.setenv(timeline.ENABLE_ENV, "0")
+    context = guard.preflight_turn({"session_id": f"pf-416-{expected[:12]}", "prompt": prompt}, omi)
+    names = _LINK.findall(context)
+    assert names and names[0] == expected, context
+    for name in names:
+        assert recall.compact_recall(omi, name, organic=False)["filename"] == name
+
+
+def test_preflight_drops_the_runner_up_rather_than_cut_a_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from omind import recall
+    from omind.store import NoteFields, OmiStore
+
+    monkeypatch.setenv(retrieve.PREFLIGHT_MIN_TERMS_ENV, "0")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    store = OmiStore(omi)
+    for word in ("Alpha", "Beta"):
+        store.create_note(
+            NoteFields(
+                title=f"Token Budget {word} " + "with a very long descriptive tail " * 6,
+                summary="Keep OMI token usage bounded.",
+            )
+        )
+    context = guard.preflight_turn({"session_id": "pf-416-long", "prompt": "token budget"}, omi)
+    assert len(context) <= guard.PREFLIGHT_HINT_CHARS
+    assert context.count("[[") == context.count("]]") == 1
+    (name,) = _LINK.findall(context)
+    assert recall.compact_recall(omi, name, organic=False)["filename"] == name
+
+
+def test_a_line_is_never_cut_inside_a_link(monkeypatch: pytest.MonkeyPatch) -> None:
+    # One entry left and still over the cap: no half-name, no line.
+    monkeypatch.setattr(timeline, "MAX_CHARS", 250)
+    entries = [timeline.Entry(filename=f"{'n' * 190}.md", title="t", date="2026-09-01", mark="")]
+    found = timeline.Timeline(name="Zq77x", key="zq77x", df=1, entries=entries)
+    assert not found.fits()
+    assert found.line() == ""
+    assert "[[" not in timeline.lines([found])
+
+
+def test_build_drops_a_timeline_whose_newest_entry_cannot_fit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    monkeypatch.setattr(timeline, "MAX_CHARS", 250)
+    note = SimpleNamespace(
+        filename=f"Zq77x {'n' * 190}.md",
+        title="Zq77x drive",
+        last_seen="2026-09-01",
+        superseded_by="[[Zq77x newer]]",
+        supersedes="",
+    )
+    assert timeline.build("/nonexistent", "Zq77x", [note], read=lambda _f: "") is None
+    monkeypatch.setattr(timeline, "MAX_CHARS", 900)
+    assert timeline.build("/nonexistent", "Zq77x", [note], read=lambda _f: "") is not None
+
+
+def test_long_filenames_keep_the_newest_three_of_six() -> None:
+    # Uncut filenames (#406) cost depth: six ~190-char filenames fit three
+    # entries under the shipped 900-char cap; the oldest (superseded) go first.
+    entries = [
+        timeline.Entry(
+            filename=f"{i} {'f' * 184}.md",
+            title=f"t{i}",
+            date=f"2026-09-0{i}",
+            mark=timeline.SUPERSEDED if i < 6 else "",
+        )
+        for i in range(1, 7)
+    ]
+    line = timeline.Timeline(name="Zq77x", key="zq77x", df=6, entries=entries).line()
+    assert len(line) <= timeline.MAX_CHARS
+    assert [m.split(" ", 1)[0] for m in _LINK.findall(line)] == ["4", "5", "6"]
+    assert "(+3 older)" in line
+
+
+def test_bench_counts_a_recall_by_stored_filename_as_a_consult(tmp_path: Path) -> None:
+    # Hints name notes by filename (#406), so the bench must match a recall of it.
+    import json
+
+    d = tmp_path / "OMI"
+    d.mkdir()
+    _raw(
+        d,
+        "drive-notes-2026.md",
+        "Qp55z label history across three drives " + "x" * 40,
+        "Qp55z moved twice.",
+        created="2026-09-20",
+    )
+    _fillers(d)
+    _refresh(d)
+    call = {"name": "drive-notes-2026.md"}
+    rows = [
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [{"type": "tool_use", "id": "t1", "name": "Bash", "input": {}}],
+            },
+        },
+        {
+            "type": "user",
+            "timestamp": "2026-09-30T19:16:31Z",
+            "message": {
+                "role": "user",
+                "content": [{"type": "tool_result", "tool_use_id": "t1", "content": "sdb1 Qp55z"}],
+            },
+        },
+        {
+            "type": "assistant",
+            "message": {
+                "role": "assistant",
+                "content": [
+                    {"type": "tool_use", "id": "t2", "name": "mcp__omi__recall-note", "input": call}
+                ],
+            },
+        },
+    ]
+    path = tmp_path / "t.jsonl"
+    path.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    replay = namehints.replay_transcript(path, d)
+    (hint,) = replay.hints
+    assert hint.hint.filenames == ["drive-notes-2026.md"]
+    assert hint.consulted_later

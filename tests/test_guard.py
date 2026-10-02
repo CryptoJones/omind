@@ -488,7 +488,7 @@ def test_turn_preflight_names_the_match_without_injecting_it(tmp_path: Path) -> 
     _token_note(omi)
     event = {"session_id": "preflight-1", "prompt": "reduce OMI token usage"}
     context = guard.preflight_turn(event, omi)
-    assert "[[Token Usage Strategy]]" in context
+    assert "[[Token Usage Strategy.md]]" in context
     assert "compact recall" not in context  # body stayed in the vault
     assert "recall-note" in context
     assert "Silence is not an override" not in context  # framing softened
@@ -743,7 +743,7 @@ def test_turn_preflight_weak_match_filter_disabled_by_env(
         NoteFields(title="Ghidra decompiler retry budget", summary="Retry logic.")
     )
     context = guard.preflight_turn({"session_id": "preflight-weak-off", "prompt": "retry"}, omi)
-    assert "[[Ghidra decompiler retry budget]]" in context  # legacy behavior
+    assert "[[Ghidra decompiler retry budget.md]]" in context  # legacy behavior
 
 
 def test_preflight_cli_emits_user_prompt_additional_context(
@@ -1973,7 +1973,7 @@ def test_preflight_hint_names_both_candidates_without_bodies(tmp_path: Path) -> 
     context = guard.preflight_turn(
         {"session_id": "hint-2", "prompt": "token budget usage bounds"}, omi
     )
-    assert "[[Token Budget Alpha]]" in context and "[[Token Budget Beta]]" in context
+    assert "[[Token Budget Alpha.md]]" in context and "[[Token Budget Beta.md]]" in context
     assert "ALPHA-BODY" not in context and "BETA-BODY" not in context
 
 
@@ -2296,10 +2296,10 @@ def test_continuation_prompt_is_resolved_against_the_prior_turns_task(tmp_path: 
     )
     sid = "cont-1"
     first = guard.preflight_turn({"session_id": sid, "prompt": "reduce OMI token usage"}, omi)
-    assert "[[Token Usage Strategy]]" in first
+    assert "[[Token Usage Strategy.md]]" in first
     follow = guard.preflight_turn({"session_id": sid, "prompt": "go ahead"}, omi)
     assert "continuing the prior task" in follow
-    assert "[[Token Usage Strategy]]" in follow
+    assert "[[Token Usage Strategy.md]]" in follow
     assert guard.consulted_this_turn(sid)
     # The captured task the verifier scores against is the composite, and the
     # remembered substantive task survives a chain of continuations.
@@ -2340,7 +2340,7 @@ def test_identical_retry_inside_the_window_carries_the_gate_state(tmp_path: Path
     assert events[-1]["outcome"] == "carry"
     # A substantive prompt re-sent verbatim is a human re-asking, not a retry.
     again = guard.preflight_turn({"session_id": sid, "prompt": "reduce OMI token usage"}, omi)
-    assert "[[Token Usage Strategy]]" in again
+    assert "[[Token Usage Strategy.md]]" in again
     assert before  # (sentinel existed before the retries)
 
 
@@ -2409,7 +2409,7 @@ def test_action_budget_skips_notes_already_injected_this_session(
     sid = "budget-seen"
     # Injected at turn start (the preflight found it) — it is already in context.
     context = guard.preflight_turn({"session_id": sid, "prompt": "deploy telesto services"}, omi)
-    assert "[[telesto deploy runbook]]" in context
+    assert "[[telesto deploy runbook.md]]" in context
     action = {"tool": "Bash", "command": "systemctl restart telesto", "session": sid}
     for _ in range(4):
         assert guard.check_action(action, omi_dir=omi).allow

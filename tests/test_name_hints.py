@@ -96,7 +96,8 @@ def test_a_known_name_in_tool_output_is_hinted_once(omi: Path) -> None:
     first = namehints.tool_hints(_event("s1", DISKUTIL), omi)
     assert first.count("\n") == 0, first  # exactly one hint line
     assert first.startswith("OMI: As30p → 3 notes; about it: ")
-    assert f"[[{HISTORY}]]" in first  # newest note about the label leads
+    # Newest note about the label leads, named by its stored filename (#406).
+    assert f"[[{HISTORY}.md]]" in first
     assert "[[" + MUSIC not in first  # titles only, two at most
     assert "recall-note" in first
     # Same output again, and again in a later call: nothing.

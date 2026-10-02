@@ -112,6 +112,9 @@ class Related:
     def to_dict(self) -> dict[str, object]:
         return {
             "name": self.name,
+            # The stored filename: what recall-note opens as-is. ``title`` is
+            # for display and may be cut, retitled or end in ``.md`` (#416).
+            "note": self.filename,
             "title": self.title,
             "summary": self.summary,
             "updated": self.updated,
