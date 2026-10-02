@@ -52,8 +52,8 @@ jobs:
             echo "::error::release tag $TAG does not match pyproject version $version"
             exit 1
           fi
-      # uv build: the same build frontend the project uses everywhere else
-      # (uv.lock, `uv tool install`), isolated from any ambient environment.
+      # uv build: the same command test.yml's wheel job runs on every PR, so
+      # the build path that publishes is the one CI exercises.
       - run: uv build
       - name: Metadata renders on PyPI
         run: uvx twine check --strict dist/*

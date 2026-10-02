@@ -60,9 +60,10 @@ the exact order of operations._
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
   trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
-  stopped at `invalid-publisher`. What remains is two operator steps: (1) on pypi.org, open
-  *Publishing* and add a pending trusted publisher (owner `CryptoJones`, repo `omind`, workflow
-  `publish.yml`, environment `pypi`); (2) cut a GitHub release. See
+  stopped at `invalid-publisher`; 10.1.0 through 10.2.1 were never released. What remains is two
+  operator steps: (1) on pypi.org, open *Publishing* and add a pending trusted publisher (owner
+  `CryptoJones`, repo `omind`, workflow `publish.yml`, environment `pypi`); (2) publish a GitHub
+  release (`gh release create vX.Y.Z`); pushing a tag alone does not trigger the upload. See
   [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
 - [x] **doctor: search index always reads "corrupt or incompatible" when embeddings are on** ([#373](https://github.com/CryptoJones/omind/issues/373)) — **v9.7.5** — _bug_ —
   the index stores the encoder identity (`name:digest`), but `searchindex.health` compared it
@@ -657,7 +658,8 @@ Each issue below is written to be executable by any agent without further contex
   - [x] **The pipeline is proven up to PyPI:** the release runs for v9.7.3, v9.7.5, v10.0.0,
     v10.0.1 and v10.0.2 all built, minted an OIDC token, and were refused with
     `invalid-publisher` (no matching publisher). That is the expected fail-closed result:
-    nothing is uploaded.
+    nothing is uploaded. Versions 10.1.0 through 10.2.1 were never released (no GitHub
+    release was cut for them), so the workflow never ran for them.
 
   **What is left. The operator does both steps; there are no credentials anywhere, by design:**
   1. Log in to https://pypi.org/ with the account that will own the project. Go to
@@ -665,10 +667,10 @@ Each issue below is written to be executable by any agent without further contex
      `CryptoJones`, repository `omind`, workflow `publish.yml`, environment `pypi`.
      A pending publisher does not need the project to exist, but it does **not** reserve the
      name. The name is yours only after the first successful upload, so do step 2 promptly.
-  2. Push a tag or cut a release: publish a GitHub release whose tag is `v<pyproject
-     version>` (see CONTRIBUTING.md → *Releasing*). The workflow fires on
-     `release: published`. You can instead re-run the workflow by hand
-     (*Actions → publish → Run workflow*) with `dry_run` unchecked.
+  2. Publish a GitHub release (`gh release create vX.Y.Z`) whose tag is `v<pyproject
+     version>` (see CONTRIBUTING.md → *Releasing*). The workflow fires only on
+     `release: published`; pushing a tag on its own does nothing. You can instead run the
+     workflow by hand (*Actions → publish → Run workflow*) with `dry_run` unchecked.
      After the upload succeeds, tick #267 here and close the issue.
 
 *Proudly Made in Nebraska. Go Big Red! 🌽 <https://xkcd.com/2347/>*
