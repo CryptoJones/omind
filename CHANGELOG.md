@@ -7,6 +7,32 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.20] - 2026-10-02
+
+### Fixed
+- **Repo-work classifier: more write tools
+  ([#450](https://github.com/CryptoJones/omind/issues/450)).** `install`,
+  `dd of=`, `truncate`, `touch`, `ln` and `rsync` now count as repo work when
+  their target is inside the resolved repo, through the same
+  `_file_op_targets` path as `tee`/`cp`/`mv`/`rm` (#434).
+  - `install` writes its last operand or its `-t`/`--target-directory`;
+    `install -d` writes every operand. `ln` writes its last operand or `-t`
+    directory, and a single-operand `ln TARGET` writes into the cwd.
+  - `dd` writes only its `of=` operand; `truncate` and `touch` write every
+    file operand.
+  - `rsync` writes its last operand only when it is local: `host:path`,
+    `host::module` and `rsync://` destinations are remote and never count.
+  - Value-taking switches are read per tool, clustered or not (`-m 644`,
+    `-dm755`, `touch -d DATE`, `truncate -r REF`, `rsync -e ssh --exclude X`),
+    so a switch's value is never mistaken for a target. A target outside the
+    repo or a device path (`of=/dev/null`) does not count.
+  - `rsync --remove-source-files` counts its local sources as removed;
+    `--log-file` is always a local write, and `--backup-dir`, `--temp-dir`/`-T`
+    and `--partial-dir` are writes when the destination is local.
+  - Long options match by unique prefix, as GNU getopt does (`cp --target`,
+    `install --dir`), through one helper shared by every tool. A value switch
+    at the very end of a command has no value and is never a target.
+
 ## [10.2.19] - 2026-10-02
 
 ### Fixed

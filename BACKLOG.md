@@ -17,8 +17,6 @@ the exact order of operations._
 - [ ] **guard hard rules: bundled wrapper option clusters (`env -iC dir sudo …`) are not read getopt-style** ([#451](https://github.com/CryptoJones/omind/issues/451)) — _bug_ —
   found while fixing #432: the `policy.py` wrapper regex treats a bundled cluster as one opaque switch, so
   `env -iC /x sudo id` may not reach the program behind it. Read clusters the way `_program_stages` does.
-- [ ] **guard: more write tools for the repo-work classifier (`install`, `dd of=`, `truncate`, `touch`, `ln`, `rsync`)** ([#450](https://github.com/CryptoJones/omind/issues/450)) — _enhancement_ —
-  follow-up from the #434 review: each counts as repo work when its target is inside the repo, and not otherwise.
 - [ ] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — _bug_ —
   `bash -c '"$@"' _ git commit -m x` is opaque to the hard rules, but the consult and freshness
   classifiers never see the positional command.
@@ -91,6 +89,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.20)
+
+- [x] **guard: more write tools for the repo-work classifier (`install`, `dd of=`, `truncate`, `touch`, `ln`, `rsync`)** ([#450](https://github.com/CryptoJones/omind/issues/450)) — **v10.2.20** — _enhancement_ —
+  each counts as repo work when its target is inside the repo, and not otherwise.
+  Value-taking switches are read per tool; remote `rsync` destinations
+  (`host:path`, `rsync://`) and device paths never count.
 
 ### Shipped — 2026-10-02 (v10.2.19)
 
