@@ -6,9 +6,12 @@ from __future__ import annotations
 
 import io
 import json
+import ntpath
 import os
+import shutil
 import stat
 import subprocess
+import sys
 import tempfile
 from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
@@ -2734,3 +2737,269 @@ def test_doctor_fails_when_the_demanded_note_is_missing(tmp_path: Path) -> None:
     assert result.level == "fail" and "omind setup" in result.message
     OmiStore(config.omi_dir).create_note(NoteFields(title=guard.GIT_RULES_NOTE, summary="r"))
     assert provision._diagnose_demanded_notes(config).level == "ok"
+
+
+# --- #435: non-UTF-8 configs, UNC paths in the bash form, _scripts_dirs ------
+
+#: Bytes no UTF-8 decoder accepts (a Latin-1 / UTF-16 BOM settings file).
+_NOT_UTF8 = b'\xff\xfe{"hooks": "\xe9"}'
+
+
+def test_read_settings_refuses_non_utf8_with_a_provision_error(tmp_path: Path) -> None:
+    """Setup reports a non-UTF-8 settings.json as a ProvisionError, never a raw
+    UnicodeDecodeError traceback (#435)."""
+    path = tmp_path / "settings.json"
+    path.write_bytes(_NOT_UTF8)
+    prov = Provisioner(SetupConfig(vault=tmp_path / "vault"), log=lambda _m: None)
+    with pytest.raises(ProvisionError, match="could not be read .*utf-8"):
+        prov._read_settings(path)
+
+
+def test_setup_hooks_refuse_non_utf8_settings_json(tmp_path: Path) -> None:
+    provision.claude_settings_path().parent.mkdir(parents=True, exist_ok=True)
+    provision.claude_settings_path().write_bytes(_NOT_UTF8)
+    prov = Provisioner(SetupConfig(vault=tmp_path / "vault"), log=lambda _m: None)
+    with pytest.raises(ProvisionError):
+        prov.ensure_hooks_installed()
+    assert provision.claude_settings_path().read_bytes() == _NOT_UTF8  # untouched
+
+
+def test_doctor_never_raises_on_non_utf8_settings_json(tmp_path: Path) -> None:
+    """Doctor must never raise on a garbage config (#435): every Claude check
+    that reads settings.json reports instead."""
+    settings = provision.claude_settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_bytes(_NOT_UTF8)
+    config = SetupConfig(vault=tmp_path / "vault")
+    hooks = provision._diagnose_hooks(settings, config)
+    assert hooks.level == "fail" and "could not be read" in hooks.message
+    results = provision.diagnose(config)  # the whole Claude doctor run
+    assert any(r.key == "hooks" and r.level == "fail" for r in results)
+
+
+def test_scripts_dirs_skips_a_scheme_that_raises_value_error(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """A ``ValueError`` from ``sysconfig.get_path`` is skipped like a ``KeyError``,
+    so it cannot reach :func:`canonical_omind_exe` on Windows (#435)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    env_scripts = tmp_path / "Scripts"
+
+    def get_path(name: str, scheme: str | None = None) -> str:
+        if scheme is not None:
+            raise ValueError(scheme)
+        return str(env_scripts)
+
+    monkeypatch.setattr(provision.sysconfig, "get_path", get_path)
+    assert provision._scripts_dirs() == [env_scripts]
+
+
+_UNC_EXE = r"\\srv\share\py\python.exe"
+_UNC_VAULT = r"\\srv\share\Obsidian Vault"
+
+
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    [
+        (r"C:\Users\Jane Doe\v", r'"C:\Users\Jane Doe\v"'),  # unchanged bytes
+        # UNC goes forward-slashed: Git Bash halves every \\ (see bash_quote).
+        (_UNC_VAULT, '"//srv/share/Obsidian Vault"'),
+        (r"C:\Users\$admin\v", r"'C:\Users\$admin\v'"),
+        ("C:\\", "'C:\\'"),  # a trailing backslash would eat the closing quote
+        (r"\\srv\O'Brien", '"//srv/O' + "'" + 'Brien"'),
+        (r"\\srv\O'Brien $y", '"//srv/O' + "'" + r'Brien \$y"'),
+        (r"C:\O'Brien\$x", '"C:/O' + "'" + r'Brien/\$x"'),
+        ('/opt/a"b', "'/opt/a\"b'"),  # a bare " would end the double-quoted run
+        ("/opt/O'Br\"en", r'"/opt/O' + "'" + r'Br\"en"'),
+        ("/opt/O'Br$en", r'"/opt/O' + "'" + r'Br\$en"'),  # POSIX bytes unchanged
+    ],
+)
+def test_bash_quote(value: str, rendered: str) -> None:
+    assert provision.bash_quote(value) == rendered
+
+
+def _real_bash(monkeypatch: pytest.MonkeyPatch) -> str:
+    if sys.platform == "win32":
+        # The conftest pins a placeholder bash.exe; look for the real Git Bash.
+        monkeypatch.delenv("CLAUDE_CODE_GIT_BASH_PATH", raising=False)
+        bash = provision.git_bash_path()
+    else:
+        bash = shutil.which("bash")
+    if bash is None:
+        pytest.skip("no bash on this box")
+    return bash
+
+
+def _libuv_quote(arg: str) -> str:
+    """*arg* as libuv's ``quote_cmd_arg`` (``src/win/process.c``) writes it."""
+    if not arg:
+        return '""'
+    if not any(c in arg for c in ' \t"'):
+        return arg
+    if '"' not in arg and "\\" not in arg:
+        return f'"{arg}"'
+    out: list[str] = []
+    quote_hit = True
+    for ch in reversed(arg):
+        out.append(ch)
+        if quote_hit and ch == "\\":
+            out.append("\\")
+        elif ch == '"':
+            quote_hit = True
+            out.append("\\")
+        else:
+            quote_hit = False
+    return '"' + "".join(reversed(out)) + '"'
+
+
+#: A native program that prints the argv it was handed.
+_PRINT_ARGV = "-c 'import json, sys; print(json.dumps(sys.argv[1:]))'"
+
+
+def _bash_words(bash: str, line: str, *, pathconv: bool = True) -> list[str]:
+    """The argv a native program gets when Claude Code runs *line* in *bash*.
+
+    Claude Code 2.1.x spawns a hook as ``spawn(command, [], {shell: <bash>})``
+    with no ``windowsVerbatimArguments``; Bun turns that into ``[bash, "-c",
+    command]`` and on Windows hands it to libuv's ``uv_spawn``, which builds
+    the command line with ``quote_cmd_arg``. That exact command line is what
+    reaches Git Bash here, and the program bash starts is a native one, so
+    MSYS2's argument conversion runs as it does for the real interpreter.
+    ``pathconv=False`` turns that conversion off, for a POSIX-only value: MSYS2
+    rewrites a rooted ``/opt/...`` to ``C:/Program Files/Git/opt/...`` by
+    design, which has nothing to do with quoting.
+    """
+    script = f"{provision.bash_quote(sys.executable)} {_PRINT_ARGV} {line}"
+    argv: str | list[str] = [bash, "-c", script]
+    if sys.platform == "win32":
+        argv = " ".join(_libuv_quote(a) for a in argv)
+    env = dict(os.environ)
+    if not pathconv:
+        env["MSYS_NO_PATHCONV"] = "1"
+    result = subprocess.run(argv, capture_output=True, text=True, check=True, env=env)
+    words: list[str] = json.loads(result.stdout)
+    return words
+
+
+def _same_path(arrived: str, value: str) -> bool:
+    """*arrived* is *value*, or *value* forward-slashed (Windows reads both)."""
+    return arrived in (value, value.replace("\\", "/"))
+
+
+@pytest.mark.parametrize(
+    "value",
+    [
+        _UNC_VAULT,
+        r"C:\Users\$admin\v",
+        "C:\\",
+        r"\\srv\O'Brien `x` $y",
+        r"C:\Users\O'Brien\$x",
+        r"C:\Jane Doe\v",
+        '/opt/a"b',
+        "/opt/O'Br\"en",
+    ],
+)
+def test_bash_quote_reaches_the_program_intact(
+    monkeypatch: pytest.MonkeyPatch, value: str
+) -> None:
+    """Spawned the way Claude Code spawns Git Bash, the program gets the path
+    (#435). A Windows path may arrive forward-slashed; nothing else may change."""
+    posix_only = value.startswith("/") and not value.startswith("//")
+    words = _bash_words(
+        _real_bash(monkeypatch), provision.bash_quote(value), pathconv=not posix_only
+    )
+    assert len(words) == 1 and _same_path(words[0], value), words
+
+
+def test_bash_quote_keeps_a_unc_path_unc() -> None:
+    """The forward-slashed UNC form names the same share, never a rooted or
+    drive-relative path (#435)."""
+    rendered = provision.bash_quote(_UNC_VAULT)[1:-1]
+    assert ntpath.normpath(rendered) == _UNC_VAULT
+    assert ntpath.splitdrive(rendered)[0] == "//srv/share"
+
+
+def test_claude_git_bash_hook_keeps_a_unc_interpreter_and_vault(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Git Bash collapsed ``"\\\\srv\\..."`` to ``\\srv\\...`` in both the
+    interpreter token and ``--vault`` (#435). The rendered hook now reaches the
+    program intact, doctor reads the interpreter back, and the vault matches."""
+    bash = _real_bash(monkeypatch)
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: r"C:\Git\bin\bash.exe")
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_UNC_EXE, "-m", "omind"])
+    monkeypatch.setattr(provision, "_resolve_python", lambda: "python")
+    # Never probe the made-up UNC interpreter: on Windows that is an SMB lookup.
+    monkeypatch.setattr(provision, "_dead_pin", lambda *_a: None)
+    config = SetupConfig(vault=Path(_UNC_VAULT), folder="OMI")
+    prov = Provisioner(config, log=lambda _m: None)
+    command = prov._hook_command("SessionStart")
+    words = _bash_words(bash, command)
+    assert words == [
+        "//srv/share/py/python.exe", "-m", "omind", "hook", "SessionStart",
+        "--vault", "//srv/share/Obsidian Vault", "--folder", "OMI",
+    ], words
+    assert ntpath.normpath(words[0]) == _UNC_EXE
+    assert ntpath.normpath(words[6]) == _UNC_VAULT
+    assert provision._hook_omind_argv(command) == [_UNC_EXE, "-m", "omind"]
+    settings = provision.claude_settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": prov._omind_hook_entries()}), encoding="utf-8")
+    result = provision._diagnose_hooks(settings, config)
+    assert "different vault" not in result.message, result.message
+
+
+_UNC_OBRIEN_EXE = r"\\srv\O'Brien$\py\python.exe"
+
+
+@pytest.mark.parametrize("runs", [True, False])
+def test_doctor_reads_back_a_bash_escaped_unc_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, runs: bool
+) -> None:
+    """A UNC interpreter with a ``'`` and a ``$`` is written by :func:`bash_quote`
+    as a forward-slashed, escaped double-quoted token (#435 review). Doctor must
+    probe and compare the native path bash runs, not the escaped bytes or the
+    forward-slashed spelling: otherwise it warns about a
+    dead or stale pin that re-running setup can never clear. Only the probe is
+    stubbed (an SMB lookup on Windows); the hook parse is the real one."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: r"C:\Git\bin\bash.exe")
+    monkeypatch.setattr(
+        provision, "canonical_omind_argv", lambda: [_UNC_OBRIEN_EXE, "-m", "omind"]
+    )
+    monkeypatch.setattr(provision, "_resolve_python", lambda: "python")
+    probed: list[list[str]] = []
+
+    def argv_runs(argv: list[str]) -> bool:
+        probed.append(argv)
+        return runs
+
+    monkeypatch.setattr(provision, "_argv_runs", argv_runs)
+    config = SetupConfig(vault=tmp_path / "vault", folder="OMI")
+    prov = Provisioner(config, log=lambda _m: None)
+    command = prov._hook_command("SessionStart")
+    # The escaped, forward-slashed form: "//srv/O'Brien\$/py/python.exe".
+    assert command.startswith('"//srv/O' + "'" + r'Brien\$/py/python.exe" -m omind')
+    settings = provision.claude_settings_path()
+    settings.parent.mkdir(parents=True, exist_ok=True)
+    settings.write_text(json.dumps({"hooks": prov._omind_hook_entries()}), encoding="utf-8")
+
+    result = provision._diagnose_hooks(settings, config)
+
+    assert probed and all(a == [_UNC_OBRIEN_EXE, "-m", "omind"] for a in probed), probed
+    if runs:
+        assert "stale" not in result.message and "does not run" not in result.message, (
+            result.message
+        )
+    else:
+        assert result.level != "ok" and _UNC_OBRIEN_EXE in result.message, result.message
+
+
+@pytest.mark.parametrize("exe", ['/opt/a"b/bin/omind', "/opt/O'Br\"en/bin/omind"])
+def test_hook_omind_argv_reads_back_a_bash_quoted_double_quote(exe: str) -> None:
+    """A ``"`` in a POSIX path is a bash hazard too (#435 review): ``a"b`` went
+    out as ``"a"b"``. Single quotes, or escapes when a ``'`` is also present,
+    and the hook parser reads the same path back."""
+    command = f"{provision.bash_quote(exe)} hook SessionStart --vault /v --folder OMI"
+    assert provision._hook_omind_argv(command) == [exe]

@@ -112,6 +112,54 @@ def double_quote(exe: str) -> str:
     return f'"{exe}"'
 
 
+#: What bash rewrites inside double quotes: ``$`` and backtick expand, a bare
+#: ``"`` ends the quoted run (``a"b`` would render as ``"a"b"``), and a
+#: backslash before ``\``, ``"``, ``$`` or backtick (or before the closing quote)
+#: is an escape. A Windows UNC path is the common victim: ``"\\srv\share"``
+#: reaches the program as ``\srv\share`` (#435).
+_BASH_DQ_HAZARD = re.compile(r'[$`"]|\\(?=[\\"$`]|$)')
+
+#: A backslash escape bash removes inside double quotes: ``\\``, ``\"``, ``\$``
+#: and ``\``` (#435). Any other backslash is literal. :func:`bash_quote` writes
+#: these; doctor's hook parser strips them again.
+_BASH_DQ_ESCAPE = re.compile(r'\\([\\"$`])')
+
+#: A UNC path (``\\server\share\...``); not a ``\\?\`` or ``\\.\`` device path.
+_UNC_PATH = re.compile(r"\\\\[^\\/?.]")
+
+#: A Windows drive path (``C:\...``).
+_DRIVE_PATH = re.compile(r"[A-Za-z]:\\")
+
+
+def bash_quote(value: str) -> str:
+    """*value* for bash, as the program should see it (#435).
+
+    Plain double quotes whenever bash leaves them alone, so every existing hook
+    keeps its bytes. A value bash would rewrite inside double quotes (a ``$``,
+    a trailing backslash) goes in single quotes, which bash takes literally and
+    doctor's hook parser reads back; one that also holds a ``'`` stays
+    double-quoted with each special character escaped.
+
+    No ``\\\\`` pair may reach Git Bash. Claude Code spawns it from a native
+    Windows process as ``bash.exe -c "<command>"``, and the MSYS2 runtime's
+    ``globify`` (``winsup/cygwin/dcrt0.cc``) turns each ``\\\\`` inside that
+    quoted argument into one ``\\`` before bash parses a byte: even
+    ``'\\\\srv\\share'`` arrived as ``\\srv\\share``. So a UNC path is written
+    with forward slashes (``//srv/share``), which Windows reads as UNC and
+    MSYS2's argument conversion passes through unchanged; so is a drive path
+    that needs the escaped form, whose ``\\\\`` escapes would be halved too.
+    """
+    if _UNC_PATH.match(value):
+        value = value.replace("\\", "/")
+    if not _BASH_DQ_HAZARD.search(value):
+        return double_quote(value)
+    if "'" not in value:
+        return f"'{value}'"
+    if _DRIVE_PATH.match(value):
+        value = value.replace("\\", "/")
+    return '"' + re.sub(r'([\\"$`])', r"\\\1", value) + '"'
+
+
 def shell_quote(exe: str) -> str:
     """*exe* quoted for the platform's shell: double quotes on Windows (cmd and
     schtasks read no single quotes), :func:`shlex.quote` on POSIX."""
@@ -179,6 +227,11 @@ def windows_short_path(path: str) -> str | None:
         return None
 
 
+def cmd_needs_quotes(value: str) -> bool:
+    """Whether cmd.exe needs *value* quoted (it holds a :data:`_CMD_SPECIAL`)."""
+    return any(c in _CMD_SPECIAL for c in value)
+
+
 def cmd_quote(exe: str) -> str:
     """*exe* for a ``cmd /c`` command line: no quotes at all whenever possible.
 
@@ -200,10 +253,10 @@ def cmd_quote(exe: str) -> str:
     before #380. ``~`` no longer counts as special, so a short name (which
     always has one) is accepted; see :data:`_CMD_SPECIAL`.
     """
-    if not any(c in _CMD_SPECIAL for c in exe):
+    if not cmd_needs_quotes(exe):
         return exe
     short = windows_short_path(exe)
-    if short and not any(c in _CMD_SPECIAL for c in short):
+    if short and not cmd_needs_quotes(short):
         return short
     return f'"{exe}"'
 
@@ -214,9 +267,11 @@ _WINDOWS_HOOK_QUOTE: dict[str, Callable[[str], str]] = {
     "powershell": powershell_quote,
     # `cmd /c`: bare unless the path needs quotes.
     "cmd": cmd_quote,
-    # Bash (the Windows bash shipped with Git for Windows), and harnesses that
-    # split the string themselves in Windows mode: plain double quotes.
-    "bash": double_quote,
+    # Bash (the Windows bash shipped with Git for Windows): double quotes, or
+    # single quotes where bash would rewrite the path (a UNC path, #435).
+    "bash": bash_quote,
+    # Harnesses that split the string themselves in Windows mode: plain
+    # double quotes.
     "argv": double_quote,
 }
 
@@ -225,7 +280,7 @@ _WINDOWS_HOOK_QUOTE: dict[str, Callable[[str], str]] = {
 _WINDOWS_ARG_QUOTE: dict[str, Callable[[str], str]] = {
     "powershell": powershell_literal,
     "cmd": cmd_quote,
-    "bash": double_quote,
+    "bash": bash_quote,
     "argv": double_quote,
 }
 
@@ -411,7 +466,9 @@ def _scripts_dirs() -> list[Path]:
                 if scheme is None
                 else sysconfig.get_path("scripts", scheme)
             )
-        except KeyError:
+        except (KeyError, ValueError):
+            # #435: an unknown scheme is a KeyError, a malformed install config
+            # a ValueError; either just means "no scripts dir here".
             continue
         if path:
             dirs.append(Path(path))
@@ -769,9 +826,10 @@ def _entry_command_text(entry: object) -> str:
 #: form puts ``-m omind`` between the interpreter and ``hook`` (#380), and a
 #: quoted token may contain spaces (``C:\Users\Jane Doe\...``, #417): double
 #: quotes on Windows, ``shlex.quote``'s single quotes on POSIX, and PowerShell
-#: literals, where a ``'`` in the path is doubled (``O''Brien``, #425).
+#: literals, where a ``'`` in the path is doubled (``O''Brien``, #425). A
+#: double-quoted token may carry :func:`bash_quote`'s backslash escapes (#435).
 _HOOK_EXE_RE = re.compile(
-    r"""(?P<exe>"[^"]+"|'(?:[^']|'')+'|\S+)(?P<module>\s+-m\s+omind)?\s+hook\s+\S"""
+    r"""(?P<exe>"(?:[^"\\]|\\.)+"|'(?:[^']|'')+'|\S+)(?P<module>\s+-m\s+omind)?\s+hook\s+\S"""
 )
 
 
@@ -893,8 +951,18 @@ def _hook_omind_argv(command_text: str) -> list[str] | None:
         raw = match.group("exe")
         if len(raw) > 1 and raw[0] == raw[-1] == "'":
             token = raw[1:-1].replace("''", "'")
+        elif len(raw) > 1 and raw[0] == raw[-1] == '"':
+            # Bash removes the backslash from ``\\`` ``\"`` ``\$`` ``\``` inside
+            # double quotes, and :func:`bash_quote` writes them for a path that
+            # holds a ``'`` (``"\\\\srv\\O'Brien\\..."``): the path bash runs is
+            # the unescaped one (#435). Any other backslash stays.
+            token = _BASH_DQ_ESCAPE.sub(r"\1", raw[1:-1])
         else:
             token = raw.strip("\"'")
+        if _windows() and _UNC_PATH.match(token.replace("/", "\\")):
+            # :func:`bash_quote` writes a UNC pin as ``//srv/share/...`` (#435);
+            # report and probe the native path it names.
+            token = token.replace("/", "\\")
         if "/" in token or "\\" in token:
             return [token, *MODULE_ARGS] if match.group("module") else [token]
     return None
@@ -1025,7 +1093,7 @@ class Provisioner:
         if path.exists():
             try:
                 current: str | None = path.read_text(encoding="utf-8")
-            except OSError:
+            except (OSError, UnicodeDecodeError):
                 current = None
             if current == content:
                 self.log(f"  up to date: {path}")
@@ -1290,13 +1358,13 @@ class Provisioner:
         bash (POSIX bytes unchanged), ``& '<exe>'`` for PowerShell."""
         if self._claude_powershell():
             return canonical_omind_cmd(powershell_quote)
-        return canonical_omind_cmd(double_quote)
+        return canonical_omind_cmd(bash_quote)
 
     def _claude_arg(self, value: object) -> str:
         """*value* quoted as a Claude Code hook argument for its shell."""
         if self._claude_powershell():
             return powershell_literal(str(value))
-        return double_quote(str(value))
+        return bash_quote(str(value))
 
     def _claude_hook(self, command: str, **extra: Any) -> dict[str, Any]:
         """One ``{"type": "command"}`` hook. On a PowerShell box it also pins
@@ -1480,6 +1548,13 @@ class Provisioner:
         except json.JSONDecodeError as exc:
             raise ProvisionError(
                 f"{path} is not valid JSON ({exc}); refusing to overwrite. "
+                "Fix or remove it and re-run."
+            ) from exc
+        except (OSError, UnicodeDecodeError) as exc:
+            # A non-UTF-8 (or unreadable) file is as foreign as bad JSON (#435):
+            # refuse it with a message, never a raw traceback.
+            raise ProvisionError(
+                f"{path} could not be read ({exc}); refusing to overwrite. "
                 "Fix or remove it and re-run."
             ) from exc
         if not isinstance(data, dict):
@@ -1920,7 +1995,7 @@ def _read_mcp_servers() -> dict[str, Any]:
         return {}
     try:
         data = json.loads(path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return {}
     servers = data.get("mcpServers")
     return servers if isinstance(servers, dict) else {}
@@ -2199,6 +2274,9 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
     except json.JSONDecodeError:
         return CheckResult("hooks", "fail", f"{settings_path} is not valid JSON")
+    except (OSError, UnicodeDecodeError) as exc:
+        # Doctor never raises on a garbage config (#435).
+        return CheckResult("hooks", "fail", f"{settings_path} could not be read ({exc})")
     hooks_cfg = data.get("hooks") if isinstance(data, dict) else None
     if not isinstance(hooks_cfg, dict):
         return CheckResult(
@@ -2222,8 +2300,14 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         command_text = _entry_command_text(found)
         # A PowerShell-rendered hook (#425) carries the vault as a literal with
         # each ' doubled (C:\Users\O''Brien\...); that is the same vault.
+        # A bash hook escapes a vault bash would otherwise rewrite (#435).
         if not any(
-            form in command_text for form in (expected_vault, expected_vault.replace("'", "''"))
+            form in command_text
+            for form in (
+                expected_vault,
+                expected_vault.replace("'", "''"),
+                bash_quote(expected_vault)[1:-1],
+            )
         ):
             path_mismatch = True
         baked = _hook_omind_argv(command_text)
@@ -2355,7 +2439,7 @@ def _diagnose_omi_guard(settings_path: Path, config: SetupConfig) -> CheckResult
         )
     try:
         data = json.loads(settings_path.read_text(encoding="utf-8"))
-    except (OSError, json.JSONDecodeError):
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError):
         return CheckResult(
             "omi_guard",
             "fail",

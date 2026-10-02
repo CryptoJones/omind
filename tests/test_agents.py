@@ -5,6 +5,7 @@
 from __future__ import annotations
 
 import contextlib
+import inspect
 import json
 import re
 import shutil
@@ -2060,3 +2061,143 @@ def test_agy_antigravity_alias(tmp_path: Path, agy_home: Path) -> None:
     assert any("register MCP server 'omi'" in a for a in actions)
     assert agents.agy_mcp_config_path().is_file()
 
+
+
+# --- #435: non-UTF-8 configs never crash doctor; cmd-form folder names ------
+
+_NOT_UTF8 = b"\xff\xfe\x00garbage \xe9"
+
+
+def _agent_config_files(tmp_path: Path) -> set[Path]:
+    """Every config file path omind reads for any agent."""
+    found: set[Path] = set()
+    for module in (agents, provision):
+        for name, fn in vars(module).items():
+            if (
+                name.endswith("_path")
+                and name != "default_vault_path"
+                and callable(fn)
+                and getattr(fn, "__module__", "") == module.__name__
+                and not inspect.signature(fn).parameters
+            ):
+                with contextlib.suppress(Exception):
+                    value = fn()
+                    if isinstance(value, Path):
+                        found.add(value)
+    for agent, cls in agents.PROVISIONERS.items():
+        prov = cls(_config(tmp_path, agent), log=_quiet)
+        for method in ("config_path", "hooks_path", "agents_path"):
+            if hasattr(prov, method):
+                found.add(getattr(prov, method)())
+    return found
+
+
+@pytest.mark.parametrize("agent", sorted(agents.DIAGNOSERS))
+def test_doctor_never_raises_on_non_utf8_configs(tmp_path: Path, agent: str) -> None:
+    """Every agent's config files hold bytes that are not UTF-8: doctor reports,
+    it never raises (#435)."""
+    files = _agent_config_files(tmp_path)
+    assert provision.claude_settings_path() in files
+    assert agents.poolside_settings_path() in files
+    for path in files:
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_bytes(_NOT_UTF8)
+    results = agents.diagnose_for(_config(tmp_path, agent))
+    assert results and all(r.level in ("ok", "warn", "fail") for r in results)
+    if agent in _NAMES_THE_BAD_FILE:
+        # Not "not installed, run `omind setup`" (setup would then refuse the
+        # same file): a fail that names the unreadable file.
+        assert any(
+            r.level == "fail" and any(str(p) in r.message for p in files) for r in results
+        ), [(r.key, r.level, r.message) for r in results]
+
+
+#: Agents whose doctor must name the unreadable config in a ``fail`` (#435).
+_NAMES_THE_BAD_FILE = frozenset({"gemini", "codex", "agy", "poolside", "openclaw"})
+
+
+@pytest.mark.parametrize(
+    ("path_fn", "read"),
+    [
+        (agents.hermes_config_path, lambda c: HermesProvisioner(c, log=_quiet)._read_config()),
+        (
+            agents.poolside_settings_path,
+            lambda c: agents.PoolsideProvisioner(c, log=_quiet)._read_config(),
+        ),
+        (agents.goose_config_path, lambda c: agents.GooseProvisioner(c, log=_quiet)._read_config()),
+        (
+            agents.codex_config_path,
+            lambda c: agents.CodexProvisioner(c, log=_quiet)._read_toml_config(),
+        ),
+        (
+            agents.gemini_settings_path,
+            lambda c: agents.GeminiProvisioner(c, log=_quiet)._read_settings(
+                agents.gemini_settings_path()
+            ),
+        ),
+    ],
+)
+def test_setup_refuses_non_utf8_agent_configs(
+    tmp_path: Path, path_fn: Any, read: Any
+) -> None:
+    """Setup turns a non-UTF-8 YAML/TOML/JSON config into a ProvisionError, not a
+    UnicodeDecodeError traceback (#435)."""
+    path = path_fn()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_bytes(_NOT_UTF8)
+    with pytest.raises(ProvisionError, match="(?i)utf-8"):
+        read(_config(tmp_path, "claude"))
+
+
+@pytest.mark.parametrize("agent", ["agy", "poolside"])
+def test_doctor_names_a_spaced_folder_in_the_go_cmd_warning(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, agy_home: Path, agent: str
+) -> None:
+    """The interpreter and vault have 8.3 short names, so only ``--folder "My
+    Memory"`` carries a ``"``. A bare folder name has no short name, so doctor
+    names the folder rather than only "omind (and the vault)" (#435)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_WIN_SPACED, "-m", "omind"])
+    monkeypatch.setattr(
+        provision,
+        "windows_short_path",
+        lambda p: p.replace("Jane Doe", "JANEDO~1") if "Jane Doe" in p else None,
+    )
+    config = _config(tmp_path, agent, folder="My Memory")
+    if agent == "poolside":
+        _poolside_installed()
+        agents.PoolsideProvisioner(config, log=_quiet).install_hooks()
+        results = {r.key: r for r in diagnose_poolside(config)}
+        key = "poolside_cmd_quotes"
+    else:
+        agents.AgyProvisioner(config, log=_quiet).install_hooks()
+        results = {r.key: r for r in agents.diagnose_agy(config)}
+        key = "agy_cmd_quotes"
+    assert results[key].level == "warn"
+    assert "'My Memory'" in results[key].message and "--folder" in results[key].message
+    # Only the folder carries the quotes: the message leads with it, not with
+    # omind's path (#435 review).
+    assert "carry the OMI folder name 'My Memory'" in results[key].message
+    assert "Install omind" not in results[key].message
+
+    # The interpreter needs quotes too: the general advice, plus the folder.
+    monkeypatch.setattr(provision, "windows_short_path", lambda _p: None)
+    if agent == "poolside":
+        agents.PoolsideProvisioner(config, log=_quiet).install_hooks()
+        results = {r.key: r for r in diagnose_poolside(config)}
+    else:
+        agents.AgyProvisioner(config, log=_quiet).install_hooks()
+        results = {r.key: r for r in agents.diagnose_agy(config)}
+    assert "Install omind" in results[key].message
+    assert "The OMI folder name 'My Memory' needs quotes too" in results[key].message
+
+    # A plain folder name is not singled out.
+    plain = _config(tmp_path, agent, folder="OMI")
+    monkeypatch.setattr(provision, "windows_short_path", lambda _p: None)
+    if agent == "poolside":
+        agents.PoolsideProvisioner(plain, log=_quiet).install_hooks()
+        results = {r.key: r for r in diagnose_poolside(plain)}
+    else:
+        agents.AgyProvisioner(plain, log=_quiet).install_hooks()
+        results = {r.key: r for r in agents.diagnose_agy(plain)}
+    assert results[key].level == "warn" and "OMI folder" not in results[key].message
