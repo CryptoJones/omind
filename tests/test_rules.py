@@ -1123,7 +1123,7 @@ def test_explicit_matching_refspec_is_denied(
     assert _denied(omi, "git push origin :", repo, monkeypatch)
     assert _denied(omi, "git push origin +:", repo, monkeypatch)
     assert rules._pushed_branches("git push origin :") == ["(matching):origin"]
-    assert rules._pushed_branches("git push --mirror origin") == ["(all-branches)"]
+    assert rules._pushed_branches("git push --mirror origin") == ["(mirror):origin"]
 
 
 def test_all_branch_lookup_failure_stays_quiet(
@@ -1138,3 +1138,119 @@ def test_all_branch_lookup_failure_stays_quiet(
     assert rules._matching_branches(not_a_repo, "origin") == []
     for command in ("git push --all origin", "git push --mirror", "git push origin :"):
         assert rules.evaluate(_action(command), omi, not_a_repo) is None, command
+
+
+def test_all_branch_push_with_a_tag_named_main_is_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433 review: with a tag named `main`, `%(refname:short)` shortens the
+    branch to `heads/main`, so `--all` got through. Branch names come from the
+    full ref instead."""
+    omi, repo = remote_has_main
+    _git(repo, "tag", "main")
+    assert "main" in rules._local_branches(repo)
+    for command in ("git push --all origin", "git push --mirror origin"):
+        assert _denied(omi, command, repo, monkeypatch), command
+
+
+def test_matching_push_from_detached_head_is_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433 review: a detached HEAD has no branch to name a remote, but a bare
+    matching push still goes to the default remote and sends `main`."""
+    omi, repo = remote_has_main
+    _git(repo, "checkout", "-q", "--detach")
+    _git(repo, "config", "push.default", "matching")
+    for command in ("git push", "git push -u"):
+        assert _denied(omi, command, repo, monkeypatch), command
+    # Not `origin`: the single configured remote is the default.
+    _git(repo, "remote", "rename", "origin", "upstream")
+    assert _denied(omi, "git push", repo, monkeypatch)
+
+
+@pytest.fixture
+def remote_main_no_local_main(
+    head_repos: tuple[Path, Path, Path], tmp_path: Path
+) -> tuple[Path, Path]:
+    """(omi, repo): a repo on `feature/x` with NO local `main`, whose real bare
+    remote `origin` has `main` (tracked as `origin/main`)."""
+    omi, _on_main, _on_feature = head_repos
+    repo = _real_repo(tmp_path / "prune-433", "feature/x")
+    remote = tmp_path / "prune-433.git"
+    subprocess.run(["git", "init", "-q", "--bare", remote.as_posix()], check=True)
+    _git(repo, "remote", "add", "origin", remote.as_posix())
+    _git(repo, "push", "-q", "origin", "main")
+    _git(repo, "branch", "-q", "-D", "main")
+    assert rules._local_branches(repo) == ["feature/x"]
+    return omi, repo
+
+
+def test_mirror_push_that_deletes_remote_main_is_denied(
+    remote_main_no_local_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433 review: `--mirror` deletes remote refs missing locally, so with no
+    local `main` it deletes the remote `main`. It is judged against the local
+    branches and the remote's tracked ones."""
+    omi, repo = remote_main_no_local_main
+    for command in ("git push --mirror origin", "git push --mirror"):
+        assert _denied(omi, command, repo, monkeypatch), command
+    # `--all` sends local branches only and deletes nothing.
+    assert not _denied(omi, "git push --all origin", repo, monkeypatch)
+
+
+def test_remote_mirror_config_is_a_mirror_push(
+    remote_main_no_local_main: tuple[Path, Path],
+    remote_has_main: tuple[Path, Path],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#433 review: with `remote.<name>.mirror=true` a bare push acts as
+    `--mirror`."""
+    for omi, repo in (remote_main_no_local_main, remote_has_main):
+        for command in ("git push", "git push origin"):
+            assert not _denied(omi, command, repo, monkeypatch), (repo, command)
+        _git(repo, "config", "remote.origin.mirror", "true")
+        for command in ("git push", "git push origin"):
+            assert _denied(omi, command, repo, monkeypatch), (repo, command)
+
+
+def test_command_line_config_is_read(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433 review: `git -c k=v push` uses `k=v` over the stored config."""
+    omi, repo = remote_has_main
+    denied = (
+        "git -c push.default=matching push",
+        "git -c 'push.default=matching' push origin",
+        "git -c remote.origin.push=: push",
+        "git -c remote.origin.mirror=true push origin",
+        f"git -C {repo.as_posix()} -c push.default=matching push",
+    )
+    for command in denied:
+        assert _denied(omi, command, repo, monkeypatch), command
+    assert not _denied(omi, "git -c push.default=current push", repo, monkeypatch)
+    # The command line overrides a stored matching default.
+    _git(repo, "config", "push.default", "matching")
+    assert _denied(omi, "git push", repo, monkeypatch)
+    assert not _denied(omi, "git -c push.default=current push", repo, monkeypatch)
+    # Only push-related keys reach the guard's own git calls.
+    assert rules._cmdline_config("git -c core.fsmonitor=x -c push.default=matching ") == (
+        "push.default=matching",
+    )
+
+
+def test_matching_push_to_an_unfetched_remote_or_url_judges_every_branch(
+    head_repos: tuple[Path, Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#433 review: with no remote-tracking refs (never fetched, or a URL) the
+    remote's branches are unknown, so a matching push is judged against every
+    local branch rather than none."""
+    omi, _on_main, repo = head_repos
+    remote = tmp_path / "unfetched-433.git"
+    subprocess.run(["git", "init", "-q", "--bare", remote.as_posix()], check=True)
+    _git(repo, "remote", "add", "origin", remote.as_posix())
+    url = remote.as_posix()
+    assert _denied(omi, "git push origin :", repo, monkeypatch)
+    assert _denied(omi, f"git push {url} :", repo, monkeypatch)
+    _git(repo, "config", "push.default", "matching")
+    for command in ("git push", "git push origin", f"git push {url}"):
+        assert _denied(omi, command, repo, monkeypatch), command
