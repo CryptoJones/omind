@@ -607,3 +607,54 @@ def test_edit_is_guarded_against_the_notes_existing_scope(
     # An edit that never touches scope is still guarded against the note's scope.
     with pytest.raises(ToolError, match="scope interlock"):
         call(server, "edit-note", {"name": "Owned.md", "summary": "changed"})
+
+
+def test_git_rules_demand_returns_a_note_larger_than_the_recall_cap(
+    server: MCPServer, omi_dir: Path
+) -> None:
+    """#392: follow the gate message LITERALLY against a governing note bigger
+    than recall's 8000-char cap. The named call must return the whole note,
+    and the verifier must credit exactly that read."""
+    import io
+    import json
+    import re
+
+    from omind import guard, recall, verify
+
+    tail = "OVERRIDING EXCEPTION AT THE BOTTOM"
+    call(
+        server,
+        "create-note",
+        {
+            "title": guard.GIT_RULES_NOTE,
+            "summary": "git rules",
+            "details": "rule line\n" * 1_150 + tail,
+        },
+    )
+    raw_len = len((omi_dir / f"{guard.GIT_RULES_NOTE}.md").read_text(encoding="utf-8"))
+    assert raw_len > recall.MAX_RECALL_CHARS
+
+    match = re.search(r"`([a-z-]+)` with `(\{.*?\})`", guard.GIT_RULES_MESSAGE)
+    assert match is not None
+    tool, args = match.group(1), json.loads(match.group(2))
+    got = call(server, tool, args)
+    text = json.dumps(got)
+    assert tail in text and "[truncated" not in text
+
+    session = "s392"
+    guard.begin_turn(session, "commit and push the repo work")
+    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+    event = {
+        "session_id": session,
+        "tool_name": f"mcp__omi__{tool}",
+        "tool_input": args,
+        "tool_response": {"content": [{"type": "text", "text": text}]},
+    }
+    verify.verify_consult(event, omi_dir, require=True, out=io.StringIO())
+    assert guard._has_consulted_git_rules(session)
+
+    # And recall's own truncation marker no longer re-suggests the same capped
+    # call: past the cap it points at read-note instead.
+    recalled = call(server, "recall-note", {"name": guard.GIT_RULES_NOTE, "max_chars": 8000})
+    assert recalled["truncated"] is True
+    assert "read-note" in recalled["content"]

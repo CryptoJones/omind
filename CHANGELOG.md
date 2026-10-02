@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.1.2] - 2026-10-02
+
+### Fixed
+- **The git-rules gate's "read it in full" demand was unsatisfiable and unverified
+  ([#392](https://github.com/CryptoJones/omind/issues/392)).** The block told the agent
+  to call `recall-note` with `max_chars: 8000`, but recall stops at 8000 chars however
+  it is asked, so a governing note past that (the live one is ~11.5k) could never come
+  back whole. Meanwhile the verifier credited that truncated recall anyway, and also a
+  section-only recall and a 200-char `read-note` (whose truncation is a body marker, not
+  a `truncated` field) — so the check did not verify what the message claimed.
+  - The block now names `read-note` with `{"representation":"raw","max_chars":65536}`,
+    which returns the whole note (read-note only returns as much as the note holds).
+  - The verifier credits the demanded git-rules note only for a read that is neither
+    truncated (either marker) nor a `section` drill-down. The remaining un-wedge is a
+    `read-note` at its 65536 hard cap, for a note larger than any read can return. Once a
+    full read lands, a later partial read the same turn does not re-arm the gate; that
+    record is per turn (`omi-gate-reset.sh` now clears it as `begin_turn` does).
+  - `recall-note`'s truncation marker no longer re-suggests recall at the cap for a note
+    longer than the cap; it names the `read-note` call instead.
+  - The read-note bounds move to `recall.READ_NOTE_DEFAULT_CHARS` /
+    `recall.READ_NOTE_HARD_CAP` so the guard and verifier share them with the server.
+
 ## [10.1.1] - 2026-10-01
 
 ### Fixed

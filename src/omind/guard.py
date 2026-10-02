@@ -141,11 +141,18 @@ RETRY_WINDOW_SECS = 120.0
 _TRAIL_LEN = 8
 _TRAIL_ITEM_CAP = 160
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
+#: The demand names ``read-note`` (raw, at its hard cap) because recall-note
+#: stops at ``recall.MAX_RECALL_CHARS`` however it is asked: demanding recall at
+#: 8000 for a longer note was unsatisfiable, and the verifier then credited the
+#: truncated read anyway (#392). ``verify._update_demanded_completeness`` checks
+#: exactly what this says. Literal (not built from ``recall``) to keep the hook
+#: path's imports light; a test pins it to ``recall.full_read_args``.
 GIT_RULES_MESSAGE = (
-    "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
-    '`{"name":"Operational Rules - Git Repos and Secrets", "max_chars": 8000}`, '
-    "then retry. Repo work requires that specific memory this turn — read it "
-    "in full: a truncated read does not clear this gate."
+    "ACTION BLOCKED. Next call OMI MCP `read-note` with "
+    '`{"name":"Operational Rules - Git Repos and Secrets","representation":"raw",'
+    '"max_chars":65536}`, then retry. Repo work requires that specific memory this '
+    "turn — read it in full: a truncated or section-only read does not clear this "
+    "gate (recall-note stops at 8000 chars, so it cannot return a longer note whole)."
 )
 #: Value of the per-turn demanded-note marker once the git-rules note is known
 #: to be absent (#358). Never a substring of a real consult target, so the
@@ -332,12 +339,34 @@ def clear_incomplete_consult(session: str) -> None:
         _incomplete_path(session).unlink()
 
 
+#: Prefix in the same per-turn file once a FULL read of the demanded note has
+#: landed (#392), so a later section drill-down cannot re-arm the gate.
+_FULL_MARK = "full:"
+
+
+def record_full_consult(session: str, note: str) -> None:
+    """Mark the demanded note as read in full this turn. Best-effort."""
+    with contextlib.suppress(OSError):
+        path = _incomplete_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(_FULL_MARK + note.strip().lower(), encoding="utf-8")
+
+
+def has_full_consult(session: str, note: str) -> bool:
+    try:
+        text = _incomplete_path(session).read_text(encoding="utf-8").strip()
+    except OSError:
+        return False
+    return text == _FULL_MARK + note.strip().lower()
+
+
 def incomplete_consult(session: str) -> str:
     """The demanded note whose only read this turn was truncated, or ``""``."""
     try:
-        return _incomplete_path(session).read_text(encoding="utf-8").strip()
+        text = _incomplete_path(session).read_text(encoding="utf-8").strip()
     except OSError:
         return ""
+    return "" if text.startswith(_FULL_MARK) else text
 
 
 def _clear_demanded(session: str) -> None:

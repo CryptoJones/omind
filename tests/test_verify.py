@@ -748,7 +748,7 @@ def test_truncated_demanded_recall_records_incomplete_and_names_the_fix(
     )
     assert verdict == "relevant"  # obeying the guard is relevant by definition
     assert not guard._has_consulted_git_rules(session)  # ...but doesn't count yet
-    assert '"max_chars": 8000' in out.getvalue()  # the fix is named verbatim
+    assert '"max_chars":65536' in out.getvalue()  # the fix is named verbatim (#392)
     # A full re-read clears it.
     verify.verify_consult(
         _demanded_read_event(session, truncated=False), omi, require=True, out=io.StringIO()
@@ -756,22 +756,14 @@ def test_truncated_demanded_recall_records_incomplete_and_names_the_fix(
     assert guard._has_consulted_git_rules(session)
 
 
-def test_truncated_demanded_recall_at_max_chars_still_counts(tmp_path: Path) -> None:
+def test_git_rules_message_names_the_full_read_call() -> None:
+    """#392: the literal in GIT_RULES_MESSAGE must stay the call the verifier
+    credits as complete (recall.full_read_args)."""
     from omind import recall
 
-    omi = _omi(tmp_path)
-    session = "tr-max"
-    guard.begin_turn(session, "commit and push the repo work")
-    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
-    verify.verify_consult(
-        _demanded_read_event(session, truncated=True, max_chars=recall.MAX_RECALL_CHARS),
-        omi,
-        require=True,
-        out=io.StringIO(),
-    )
-    # The API's best possible ask counts as complete even if still truncated —
-    # the deterministic un-wedge (#239).
-    assert guard._has_consulted_git_rules(session)
+    call = json.dumps(recall.full_read_args(guard.GIT_RULES_NOTE), separators=(",", ":"))
+    assert f"`read-note` with `{call}`" in guard.GIT_RULES_MESSAGE
+    assert str(recall.MAX_RECALL_CHARS) in guard.GIT_RULES_MESSAGE
 
 
 def test_truncated_read_of_non_demanded_note_changes_no_gate_state(tmp_path: Path) -> None:
@@ -904,3 +896,120 @@ def test_successful_read_quoting_the_error_text_is_not_a_failure() -> None:
     }
     assert not verify._read_failed(event)
     assert verify._read_failed({"tool_name": "Read", "tool_response": {"is_error": True}})
+
+
+# -- #392: the "read it in full" demand is satisfiable AND verified ------------
+
+
+def _demanded_event(session: str, tool: str, tool_input: dict, result: dict) -> dict:
+    return {
+        "session_id": session,
+        "tool_name": f"mcp__omi__{tool}",
+        "tool_input": {"name": guard.GIT_RULES_NOTE, **tool_input},
+        "tool_response": {"content": [{"type": "text", "text": json.dumps(result)}]},
+    }
+
+
+def _armed(session: str) -> None:
+    guard.begin_turn(session, "commit and push the repo work")
+    guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+
+
+def test_recall_at_the_recall_cap_still_truncated_does_not_clear(tmp_path: Path) -> None:
+    """The message used to demand recall-note at 8000 and the verifier credited
+    it even with ``truncated: true`` — so the read the message called "not
+    enough" was exactly the one that cleared the gate (#392)."""
+    from omind import recall
+
+    omi = _omi(tmp_path)
+    session = "v392-cap"
+    _armed(session)
+    out = io.StringIO()
+    verify.verify_consult(
+        _demanded_read_event(session, truncated=True, max_chars=recall.MAX_RECALL_CHARS),
+        omi,
+        require=True,
+        out=out,
+    )
+    assert not guard._has_consulted_git_rules(session)
+    assert "read-note" in out.getvalue()  # names a call that CAN return it all
+
+
+def test_truncated_read_note_does_not_clear(tmp_path: Path) -> None:
+    """read-note's truncation is a body marker, not a ``truncated`` field, so a
+    200-char read-note used to clear the gate (#392)."""
+    omi = _omi(tmp_path)
+    session = "v392-rn"
+    _armed(session)
+    body = "x" * 200 + "\n\n[truncated: showing 200 of 13000 chars — raise max_chars]"
+    verify.verify_consult(
+        _demanded_event(session, "read-note", {"max_chars": 200}, {"raw": body}),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert not guard._has_consulted_git_rules(session)
+
+
+def test_section_only_read_does_not_clear(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    session = "v392-sec"
+    _armed(session)
+    verify.verify_consult(
+        _demanded_event(
+            session,
+            "recall-note",
+            {"section": "Secrets", "max_chars": 8000},
+            {"content": "one section", "section": "Secrets", "truncated": False},
+        ),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert not guard._has_consulted_git_rules(session)
+
+
+def test_partial_read_after_a_full_read_does_not_rearm(tmp_path: Path) -> None:
+    omi = _omi(tmp_path)
+    session = "v392-after"
+    _armed(session)
+    verify.verify_consult(
+        _demanded_event(session, "read-note", {"representation": "raw"}, {"raw": "all"}),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert guard._has_consulted_git_rules(session)
+    verify.verify_consult(
+        _demanded_event(
+            session,
+            "recall-note",
+            {"section": "Secrets"},
+            {"content": "one section", "section": "Secrets", "truncated": False},
+        ),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert guard._has_consulted_git_rules(session)  # a later drill-down keeps credit
+    guard.begin_turn(session, "next turn")
+    assert not guard.has_full_consult(session, guard.GIT_RULES_NOTE)  # per turn
+
+
+def test_read_note_at_the_hard_cap_is_the_best_possible_ask(tmp_path: Path) -> None:
+    """Fail-open un-wedge for a note bigger than read-note can ever return."""
+    from omind import recall
+
+    omi = _omi(tmp_path)
+    session = "v392-hard"
+    _armed(session)
+    body = "x[truncated: showing 65536 of 90000 chars — raise max_chars]"
+    verify.verify_consult(
+        _demanded_event(
+            session, "read-note", {"max_chars": recall.READ_NOTE_HARD_CAP}, {"raw": body}
+        ),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert guard._has_consulted_git_rules(session)

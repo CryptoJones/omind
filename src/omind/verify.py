@@ -47,6 +47,10 @@ _HIGH = 0.5
 _LOW = 0.1
 _NOTE_EXCERPT_CAP = 4000
 _DEFAULT_TIMEOUT = 15
+#: read-note's body truncation marker (``server._clamp_body``). It has no
+#: ``truncated`` field, so a short read-note of the demanded note used to clear
+#: the "read it in full" gate (#392).
+_READ_NOTE_TRUNCATED_RE = re.compile(r"\[truncated: showing \d+ of \d+ chars")
 _REQUIRE_ENV = "OMI_VERIFY_REQUIRE"
 _TIMEOUT_ENV = "OMI_VERIFY_TIMEOUT"
 #: REQUIRE mode re-closes the gate when an off-topic consult leaves the turn with
@@ -142,36 +146,58 @@ def _update_demanded_completeness(
     caused by the overriding exception living below the recall fold: the read
     "satisfied" the gate while the rule that mattered was cut off. A truncated
     read of the demanded note now records as incomplete, which
-    ``_has_consulted_git_rules`` refuses to credit. Deterministic un-wedge: a
-    read with ``truncated: false``, a ``section`` drill-down, or a request at
-    ``MAX_RECALL_CHARS`` (the API's best possible ask) always counts as
-    complete. Ordinary reads of non-demanded notes are never touched.
-    Best-effort: any parsing surprise counts the read as complete (fail open).
+    ``_has_consulted_git_rules`` refuses to credit.
+
+    #392: this now checks exactly what ``guard.GIT_RULES_MESSAGE`` claims —
+    "in full". A read counts only when it is not truncated (recall-note's
+    ``truncated: true`` OR read-note's ``[truncated: showing …]`` body marker,
+    which used to slip through) and is not a ``section`` drill-down. recall-note
+    at its 8000-char cap no longer counts when still truncated: read-note can
+    return the whole note, so that read is not the best possible ask. The one
+    un-wedge left is read-note at its hard cap, for a note larger than any
+    read can return. Once a full read lands, a later partial read this turn
+    does not re-arm the gate. Only the git-rules demand is checked (the only
+    gate that consumes this state). Best-effort: any parsing surprise counts
+    the read as complete (fail open).
     """
     try:
         from omind import recall
 
+        demanded = guard.demanded_note(session)
+        if guard.GIT_RULES_NOTE.lower() not in demanded.lower():
+            return
         blob = json.dumps(event.get("tool_response"), default=str)
-        truncated = '"truncated": true' in blob or '\\"truncated\\": true' in blob
+        truncated = (
+            '"truncated": true' in blob
+            or '\\"truncated\\": true' in blob
+            or _READ_NOTE_TRUNCATED_RE.search(blob) is not None
+        )
         ti = event.get("tool_input")
         ti = ti if isinstance(ti, dict) else {}
         section = str(ti.get("section") or "").strip()
+        is_read_note = str(event.get("tool_name") or "").endswith("read-note")
+        default = recall.READ_NOTE_DEFAULT_CHARS if is_read_note else recall.DEFAULT_RECALL_CHARS
         try:
-            asked = int(ti.get("max_chars") or recall.DEFAULT_RECALL_CHARS)
+            asked = int(ti.get("max_chars") or default)
         except (TypeError, ValueError):
-            asked = recall.DEFAULT_RECALL_CHARS
-        if truncated and not section and asked < recall.MAX_RECALL_CHARS:
-            guard.record_incomplete_consult(session, guard.demanded_note(session))
-            sink = out if out is not None else sys.stderr
+            asked = default
+        best_possible = is_read_note and asked >= recall.READ_NOTE_HARD_CAP
+        if (truncated or section) and not best_possible:
+            if guard.has_full_consult(session, demanded):
+                return  # already read in full this turn; a drill-down adds to it
+            guard.record_incomplete_consult(session, demanded)
+            why = f"was section-only ({section!r})" if section else "came back TRUNCATED"
+            call = json.dumps(
+                recall.full_read_args(demanded), ensure_ascii=False, separators=(",", ":")
+            )
             print(
-                f"The demanded note came back TRUNCATED at max_chars={asked}; "
-                "the consult gate stays armed. Re-call OMI MCP recall-note with "
-                f'{{"name": "{guard.demanded_note(session)}", '
-                f'"max_chars": {recall.MAX_RECALL_CHARS}}} before retrying.',
-                file=sink,
+                f"The demanded note {why}; the consult gate stays armed. Next call "
+                f"OMI MCP read-note with {call} (it returns the whole note; "
+                f"recall-note stops at {recall.MAX_RECALL_CHARS} chars) before retrying.",
+                file=out if out is not None else sys.stderr,
             )
         else:
-            guard.clear_incomplete_consult(session)
+            guard.record_full_consult(session, demanded)
     except Exception:
         guard.clear_incomplete_consult(session)
 

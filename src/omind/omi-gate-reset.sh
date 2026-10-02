@@ -38,6 +38,9 @@ rm -f "$STATE/reclose-$sid" 2>/dev/null
 # satisfied a 6pm commit (a fail-open of the freshness control) — and left
 # stale pending intent feeding the verifier.
 rm -f "$STATE/pending-$sid.txt" "$STATE/git-fresh-$sid.json" "$STATE/demanded-$sid.txt" 2>/dev/null
+# The demanded note's full/incomplete read record is per turn too (#392): a
+# stale "read in full" must not carry a partial read on the next turn.
+rm -f "$STATE/incomplete-$sid.txt" 2>/dev/null
 # Capture this turn's task so the verifier/retrieval can judge consult relevance
 # (guard.py reads turn-<sid>.txt). Best-effort; empty prompt is fine.
 mkdir -p "$STATE" 2>/dev/null
