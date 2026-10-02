@@ -11,6 +11,18 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
+- [ ] **guard: hard seed rules miss `bash -c` / `eval` / piped-shell bodies and `env`/`nice`/`timeout`-wrapped `sudo`** ([#430](https://github.com/CryptoJones/omind/issues/430)) — _bug (security)_ —
+  `bash -c 'sudo rm -rf /x'` and `timeout 5 sudo …` are not blocked. Found by the 2026-10-02 Fable audit.
+- [ ] **guard: `_GIT_OPT_VALUE` backtracks exponentially** ([#431](https://github.com/CryptoJones/omind/issues/431)) — _bug (DoS)_ —
+  16× `git -c` takes 6.5 s, so a PreToolUse hook timeout skips the soft gates. rules.py already has the fix; guard.py doesn't.
+- [ ] **rules: shell-site walker gaps from #413** ([#432](https://github.com/CryptoJones/omind/issues/432)) — _bug, includes a regression_ —
+  a heredoc piped to `bash` is no longer judged. Also: an interpreter heredoc can exec a push, `cd ~user` raises, `env -C` is ignored, and `find -exec {} +` chains are quadratic.
+- [ ] **rules: push `--all` / `--mirror` and `push.default=matching` reach main from a feature branch** ([#433](https://github.com/CryptoJones/omind/issues/433)) — _bug_
+- [ ] **guard: the repo-work classifier misses `bash -c` bodies, redirects/`tee`/`cp`/`mv`/`rm` into the repo, and `python3 -m pytest`** ([#434](https://github.com/CryptoJones/omind/issues/434)) — _bug_
+- [ ] **provision/doctor robustness** ([#435](https://github.com/CryptoJones/omind/issues/435)) — _bug (pre-existing)_ —
+  a non-UTF-8 config file makes doctor raise. Also: UNC paths in the Git Bash form, a folder name with a space in the cmd form, and a `_scripts_dirs` ValueError.
+- [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
+  prerequisites: #429 (merged) and #428. Also adds the Nebraska banner and drops the stale Codeberg badge.
 - [ ] **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428)) — _enhancement (infra)_ —
   deploy [samarmstrong/conveyor](https://github.com/samarmstrong/conveyor) as a fork with omind's
   `factory.config.json` and `principles.md`. Run it with the `claude-code` worker as a dedicated
