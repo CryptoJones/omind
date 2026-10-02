@@ -156,7 +156,7 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   exits 0) in every hook, MCP entry, guard script and service line, falling back to the #377
   launcher resolution. `doctor` reads, probes and compares the module form, and flags hooks
   still on `omind.exe`. macOS/Linux are unchanged.
-- [x] **doctor/setup: `_HOOK_EXE_RE` truncates a quoted omind path containing a space (Windows %USERPROFILE% with spaces)** ([#417](https://github.com/CryptoJones/omind/issues/417)) — **v10.2.6** — _bug (Windows)_ —
+- [x] **doctor/setup: `_HOOK_EXE_RE` truncates a quoted omind path containing a space (Windows %USERPROFILE% with spaces)** ([#417](https://github.com/CryptoJones/omind/issues/417)) — **v10.2.7** — _bug (Windows)_ —
   the hook parser takes a quoted path whole, so a pin under `C:\Users\Jane Doe\` round-trips
   setup → doctor as healthy instead of a false non-canonical / dead-pin fail.
 
