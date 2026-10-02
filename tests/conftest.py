@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import signal
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -207,3 +208,32 @@ def hard_time_limit(seconds: float = 5.0) -> Iterator[None]:
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         signal.signal(signal.SIGALRM, previous)
+
+
+#: How much slower pure-Python code runs under a line tracer. CI runs every
+#: test under coverage, which costs the guard's walk 2-3x on Python 3.10-3.12
+#: (#445: the 100,000-repeat judges take 0.15-0.33 s untraced, up to 1 s
+#: traced on a CI runner).
+TRACER_SLOWDOWN = 3.0
+
+
+def traced_bound(seconds: float) -> float:
+    """``seconds`` as a :func:`hard_time_limit` bound: as given on a plain
+    interpreter, :data:`TRACER_SLOWDOWN` times it under coverage or another
+    tracer (``sys.settrace`` or a ``sys.monitoring`` coverage tool)."""
+    monitoring = getattr(sys, "monitoring", None)
+    traced = sys.gettrace() is not None or (
+        monitoring is not None and monitoring.get_tool(monitoring.COVERAGE_ID) is not None
+    )
+    return seconds * TRACER_SLOWDOWN if traced else seconds
+
+
+def cold_shell_caches() -> None:
+    """Empty every memo the guard's shell walk reads through (#445), so a
+    timing test pays for the whole walk, as the hook's first call does."""
+    from omind import guard, policy
+
+    guard._shell_walk.cache_clear()
+    guard._split_words.cache_clear()
+    guard._program_stages_cached.cache_clear()
+    policy.shell_code_text.cache_clear()

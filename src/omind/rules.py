@@ -52,6 +52,7 @@ from __future__ import annotations
 import fnmatch
 import functools
 import json
+import os
 import re
 import shlex
 import subprocess
@@ -619,11 +620,32 @@ def _canonical_git(text: str) -> str:
     return _GIT_OPTS_RE.sub("git ", text)
 
 
+#: Characters that make a glob more than a literal.
+_GLOB_SPECIAL_RE = re.compile(r"[*?\[]")
+
+
+def _glob_matches(text: str, pattern: str) -> bool:
+    """``fnmatch.fnmatch(text, pattern)``. A ``*literal*`` pattern, the usual
+    rule shape, is a substring test: fnmatch's ``.*`` backtracks over the
+    whole text, which was slow on a long command (#445)."""
+    core = pattern[1:-1]
+    if len(pattern) >= 2 and pattern[0] == pattern[-1] == "*" and not _GLOB_SPECIAL_RE.search(core):
+        return os.path.normcase(core) in os.path.normcase(text)
+    return fnmatch.fnmatch(text, pattern)
+
+
 def _rule_matches(text: str, pattern: str) -> bool:
-    return fnmatch.fnmatch(text, pattern) or fnmatch.fnmatch(_canonical_git(text), pattern)
+    return _glob_matches(text, pattern) or _glob_matches(_canonical_git(text), pattern)
 
 
 _BLANKED_QUOTE_RE = re.compile(r"""'( *)'|"( *)\"""")
+#: Any blank ``str.isspace`` would find: one regex step per quoted word, not
+#: a Python generator per character (#445).
+_BLANK_RE = re.compile(r"\s")
+#: A quoted single word in the raw text: every quote :func:`_code_text`
+#: unquotes is one of these (a blanked quote's body is the raw body, so a
+#: blank-free one matches here at the same offset).
+_QUOTED_WORD_RE = re.compile(r"""'[^'\s]+'|"(?:[^"\s\\]|\\\S)+\"""")
 
 
 def _code_text(text: str) -> str:
@@ -635,9 +657,14 @@ def _code_text(text: str) -> str:
 
     def unquote(m: re.Match[str]) -> str:
         inner = text[m.start() + 1 : m.end() - 1]
-        return inner if inner and not any(ch.isspace() for ch in inner) else m.group()
+        return inner if inner and not _BLANK_RE.search(inner) else m.group()
 
-    return _BLANKED_QUOTE_RE.sub(unquote, policy.shell_code_text(text))
+    code = policy.shell_code_text(text)
+    if not _QUOTED_WORD_RE.search(text):
+        # No quoted single word anywhere: every blanked quote stays blank, so
+        # there is nothing to unquote one match at a time (#445).
+        return code
+    return _BLANKED_QUOTE_RE.sub(unquote, code)
 
 
 #: Refspecs that name the checked-out branch, resolved per target repo (#423).

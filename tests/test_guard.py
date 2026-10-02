@@ -16,6 +16,7 @@ from collections.abc import Callable
 from pathlib import Path
 
 import pytest
+from conftest import cold_shell_caches, traced_bound
 from conftest import hard_time_limit as _hard_time_limit
 
 from omind import compliance, guard, paths, policy
@@ -4462,3 +4463,127 @@ def test_target_repo_walk_is_memoised_per_command(
     action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
     assert guard._bash_write_repo(action) == repo.resolve()
     assert len(calls) == len(set(calls))  # every directory is checked once
+
+
+#: #445: the two shapes the issue measured. `x=1;` repeated was quadratic in
+#: the hard rules' command-position search (over ten seconds at 10,000); the
+#: `bash -c` run took 2.9 s at 100,000 in the walk's per-character passes.
+_LONG_REPEATS_445 = {"assignments": "x=1;", "bash-c": "bash -c 'echo hi; '"}
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+@pytest.mark.parametrize("shape", list(_LONG_REPEATS_445.values()), ids=list(_LONG_REPEATS_445))
+def test_long_repeats_are_judged_within_a_second(shape: str, count: int) -> None:
+    """Every judge of one long command, each from cold caches, under the
+    SIGALRM bound: the walk, the hard rules' subjects and verdict, and the
+    repo-work classifier."""
+    command = shape * count
+    judges: list[Callable[[], object]] = [
+        lambda: guard._shell_walk(command),
+        lambda: guard._hard_rule_subjects(command),
+        lambda: guard._hard_policy_verdict(command),
+        lambda: guard._is_repo_sensitive_action({"tool": "Bash", "command": command}),
+    ]
+    for judge in judges:
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(1.0)):
+            judge()
+
+
+def test_long_repeats_keep_their_verdicts() -> None:
+    """The fast paths judge as before: a long run with no `sudo` passes, one
+    that ends in a command-position `sudo` is denied."""
+    for shape in _LONG_REPEATS_445.values():
+        cold_shell_caches()
+        assert guard._hard_policy_verdict(shape * 10_000) is None
+        verdict = guard._hard_policy_verdict(shape * 10_000 + "; sudo id")
+        assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+def test_command_position_search_fails_closed_past_its_budget() -> None:
+    """#445: where the anchored search could run for seconds and the keyword
+    is present, the hard rule fires rather than time the hook out. Under the
+    budget the same shape is judged exactly (`grep sudo` is an argument)."""
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    small = "x=1;" * 100 + " ; grep sudo f"
+    assert policy._cmd_position_cost(policy.shell_code_text(small)) <= policy.CMD_SEARCH_BUDGET
+    assert not rule.matches(small)
+    large = "x=1;" * 5_000 + " ; grep sudo f"
+    assert policy._cmd_position_cost(policy.shell_code_text(large)) > policy.CMD_SEARCH_BUDGET
+    with _hard_time_limit(traced_bound(1.0)):
+        assert rule.matches(large)
+        verdict = guard._hard_policy_verdict(large)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+    # No `sudo` anywhere: nothing to search for, however costly a search.
+    assert not rule.matches("x=1;" * 5_000 + " ; grep x f")
+
+
+def test_command_position_cost_bounds_the_chain_shapes() -> None:
+    """The bound grows with every separator that restarts a chain the search
+    must rescan, and stays near the length for ordinary text and for chains a
+    newline ends (the assignment skip never crosses one)."""
+    for text in ("echo one; echo two && echo three | cat\n" * 2_000, "x=1 x=1\n" * 2_000):
+        assert policy._cmd_position_cost(text) < 4 * len(text), text[:8]
+    for chain in ("x=1;" * 2_000, "a=1 a=1;" * 2_000, "env -x;" * 2_000):
+        assert policy._cmd_position_cost(chain) > policy.CMD_SEARCH_BUDGET, chain[:8]
+
+
+def test_split_words_tokenizes_like_shlex() -> None:
+    """#445: the regex tokenizer gives shlex's tokens and raises where shlex
+    does, with and without an escape character, over a dense alphabet."""
+    import random
+    import shlex
+
+    def reference(text: str, escape: bool) -> list[str] | None:
+        try:
+            if escape:
+                return shlex.split(text)
+            lexer = shlex.shlex(text, posix=True)
+            lexer.whitespace_split = True
+            lexer.commenters = ""
+            lexer.escape = ""
+            return list(lexer)
+        except ValueError:
+            return None
+
+    def ours(text: str, escape: bool) -> list[str] | None:
+        try:
+            return list(guard._split_words(text, escape))
+        except ValueError:
+            return None
+
+    alphabet = list("ab '\"\\ \n\t\r#;$`\x0b\0")
+    rng = random.Random(445)
+    for _ in range(20_000):
+        text = "".join(rng.choice(alphabet) for _ in range(rng.randint(0, 12)))
+        for escape in (True, False):
+            assert ours(text, escape) == reference(text, escape), (text, escape)
+
+
+@pytest.mark.parametrize(
+    "shape",
+    [
+        "cat <<E\nx\nE\n",
+        "python3 - <<E\nx\nE\n",
+        "x<<<y ",
+        "2>&1 ",
+        "pushd x; popd; ",
+        "source /dev/stdin <<< x; ",
+    ],
+)
+def test_other_long_repeats_stay_linear(tmp_path: Path, shape: str) -> None:
+    """#445 sweep: heredoc owners, here-strings, redirections, `cd` sites and
+    a line of here-string shells each copied or rescanned the text before
+    them per site, so 20,000 repeats took seconds to minutes. Judged from
+    inside a repo, so the redirect check reads every target too."""
+    repo, _outside = _write_probe_repo(tmp_path)
+    command = shape * 20_000
+    action = {"tool": "Bash", "command": command, "cwd": repo.as_posix()}
+    judges: list[Callable[[], object]] = [
+        lambda: guard._hard_policy_verdict(command),
+        lambda: guard._is_repo_sensitive_action(action),
+    ]
+    for judge in judges:
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(2.0)):
+            judge()

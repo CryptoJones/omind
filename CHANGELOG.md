@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.22] - 2026-10-02
+
+### Fixed
+- **Guard: long commands are judged in linear time
+  ([#445](https://github.com/CryptoJones/omind/issues/445)).** `x=1;` repeated
+  10,000 times took over ten seconds in the hard rules, and `bash -c 'echo hi; '`
+  repeated 100,000 times took 2.9 s in the walk. A PreToolUse hook that times
+  out does not block. Both shapes now take under 0.35 s at 100,000 repeats,
+  through the walk, the hard rules, the note rules and the repo-work
+  classifier.
+  - Hard rules: the command-position anchor's `VAR=value` skip rescanned a
+    blank-free run from every separator inside it. A command where the rule's
+    pattern occurs nowhere is now answered at once. Where it occurs and the
+    anchored search could exceed a work budget, the rule **fails closed** and
+    denies rather than time the hook out (`policy.CMD_SEARCH_BUDGET`).
+  - Shell words are split by a regex tokenizer that gives `shlex`'s tokens and
+    errors, without its per-character Python loop. `shell_code_text`, the stage
+    splitter and the stage-end scan take runs of plain text in one step, and
+    each is memoised for the walk, the hard rules and the classifiers.
+  - Quadratic copies and rescans are gone from `cd`/`pushd` sites, redirection
+    targets, heredoc owners and here-string lines (a 20,000-repeat
+    `source /dev/stdin <<< x;` took over 17 s).
+  - The note rules match a `*literal*` glob as a substring, and skip unquoting
+    when a command has no quoted single word.
+
 ## [10.2.21] - 2026-10-02
 
 ### Fixed

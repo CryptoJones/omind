@@ -11,7 +11,7 @@ import time
 from pathlib import Path
 
 import pytest
-from conftest import hard_time_limit
+from conftest import cold_shell_caches, hard_time_limit, traced_bound
 
 from omind import guard, rules
 
@@ -1466,3 +1466,21 @@ def test_matching_push_to_an_unfetched_remote_or_url_judges_every_branch(
     _git(repo, "config", "push.default", "matching")
     for command in ("git push", "git push origin", f"git push {url}"):
         assert _denied(omi, command, repo, monkeypatch), command
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+@pytest.mark.parametrize("shape", ["x=1;", "bash -c 'echo hi; '"], ids=["assignments", "bash-c"])
+def test_long_repeats_are_judged_within_a_second(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, shape: str, count: int
+) -> None:
+    """#445: `x=1;` and `bash -c 'echo hi; '` repeated, then a push, through
+    the hard rules' subjects and the note rules, each from cold caches, under
+    the SIGALRM bound. The push is still denied."""
+    omi, public, _private = two_repos
+    command = shape * count + "; git push origin main"
+    cold_shell_caches()
+    with hard_time_limit(traced_bound(1.0)):
+        guard._hard_rule_subjects(command)
+    cold_shell_caches()
+    with hard_time_limit(traced_bound(1.0)):
+        assert _denied(omi, command, public, monkeypatch)
