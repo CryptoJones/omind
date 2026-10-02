@@ -68,12 +68,71 @@ def opt_in_satisfied(opt_in: str, command: str) -> bool:
     pattern = r"(?:^|[;&|\n])[ \t]*(?:env[ \t]+)?" + re.escape(opt_in) + r"(?=\s|$)"
     return re.search(pattern, command) is not None
 
+
+#: Tokens that transparently precede the real binary when deciding whether a
+#: heredoc's owner is a shell (``env FOO=1 bash <<EOF``).
+_HEREDOC_OWNER_SKIP = frozenset({"env", "command", "exec", "nohup", "time", "builtin"})
+
+#: Words in command position that are not the program a stage runs: wrappers
+#: that exec the next word (``xargs``, ``sudo``, ``env``, ``timeout`` …) and
+#: shell keywords that introduce a command (``do``, ``then``, ``{`` …). The
+#: value is the wrapper's switches that take a SEPARATE argument, so
+#: ``sudo -u bob sed -i`` and ``xargs -I {} sed -i`` still reach the editor.
+#: One table for the guard's stage parser and :data:`_CMD_WRAPPERS` (#430).
+STAGE_WRAPPERS: dict[str, frozenset[str]] = {
+    **{name: frozenset() for name in _HEREDOC_OWNER_SKIP},
+    **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
+    "xargs": frozenset({"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"}),
+    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
+    # Not `-S`: its value is itself a command (`env -S sudo id`), so the word
+    # after it stays in command position (#430 review).
+    "env": frozenset({"-u", "-C"}),
+    "nice": frozenset({"-n"}),
+    "timeout": frozenset({"-s", "-k"}),
+    "time": frozenset({"-f", "-o"}),
+}
+#: Wrappers that take one positional argument before the command (``timeout 5``).
+WRAPPER_POSITIONAL = frozenset({"timeout"})
+
+
+#: Wrappers whose ``-v``/``-V`` makes them a LOOKUP, not an exec:
+#: ``command -v sudo`` asks whether sudo is installed and runs nothing.
+_LOOKUP_WRAPPERS = frozenset({"command", "builtin"})
+
+
+def _wrapper_pattern(name: str, takes_arg: frozenset[str]) -> str:
+    """One :data:`STAGE_WRAPPERS` entry as a regex: an optional path
+    (``/usr/bin/env``), the name, its switches (a switch that takes a separate
+    argument consumes it, even a negative value such as ``nice -n -5``), and
+    ``timeout``'s positional duration, which more switches and ``--`` may
+    follow (``timeout 5s -k 2s``, ``timeout 5 --``). ``command``/``builtin``
+    with ``-v``/``-V`` is a lookup, so those switches end the match.
+
+    Each word can match only one way, so a run of wrapper words cannot make the
+    pattern backtrack exponentially: a value-taking switch is kept out of the
+    generic ``-…`` branch and always consumes the next word, and the duration
+    must start with a digit where every switch starts with ``-``."""
+    switch = r"-[^\svV]*" if name in _LOOKUP_WRAPPERS else r"-\S*"
+    if takes_arg:
+        names = "|".join(re.escape(opt) for opt in sorted(takes_arg))
+        switch = rf"(?:{names})[ \t]+\S+|(?!(?:{names})(?:\s|$)){switch}"
+    switches = rf"(?:[ \t]+(?:{switch}))*"
+    pattern = r"(?:[./][^\s;&|`()]*/)?" + re.escape(name) + switches
+    if name in WRAPPER_POSITIONAL:
+        pattern += r"[ \t]+\d[\d.]*[smhd]?" + switches
+    return pattern
+
+
 #: Shell wrapper/keyword tokens that transparently precede the real command, so
 #: the anchored token is still in command position after them:
 #: ``if/while … ; then sudo …``, ``exec sudo …``, ``nohup sudo …``,
-#: ``xargs sudo …``, ``time sudo …``. Without these, ``if true; then sudo rm``
-#: sailed past the sudo hard rule (a fail-open of a hard control).
-_CMD_WRAPPERS = r"then|do|else|elif|exec|nohup|command|time|builtin|xargs"
+#: ``xargs sudo …``, ``env sudo …``, ``timeout 5 sudo …``. Without these,
+#: ``if true; then sudo rm`` sailed past the sudo hard rule (a fail-open of a
+#: hard control). Derived from :data:`STAGE_WRAPPERS` so the two lists cannot
+#: drift (#430: ``env``, ``nice`` and ``timeout`` were missing here).
+_CMD_WRAPPERS = "|".join(
+    _wrapper_pattern(name, args) for name, args in sorted(STAGE_WRAPPERS.items())
+)
 
 #: Prefix that anchors a ``match="command"`` pattern to COMMAND POSITION: the
 #: command start, or immediately after a shell separator (``;`` ``&`` ``|``
@@ -98,10 +157,6 @@ _CMD_POSITION = (
 #: :func:`shell_code_text`. Anything else (``cat``, ``python``, ``gh issue
 #: create --body``) receives the body as DATA.
 _SHELL_HEREDOC_BINARIES = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"})
-
-#: Tokens that transparently precede the real binary when deciding whether a
-#: heredoc's owner is a shell (``env FOO=1 bash <<EOF``).
-_HEREDOC_OWNER_SKIP = frozenset({"env", "command", "exec", "nohup", "time", "builtin"})
 
 #: A heredoc redirection: ``<<EOF``, ``<<-EOF``, ``<<'EOF'``, ``<<"EOF"``.
 _HEREDOC_RE = re.compile(

@@ -7,6 +7,62 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.14] - 2026-10-02
+
+### Security
+- **Hard seed rules now see code run inside a local shell wrapper, and `env`,
+  `nice` and `timeout` in front of `sudo`
+  ([#430](https://github.com/CryptoJones/omind/issues/430)).** None of these were
+  denied: `bash -c 'sudo rm -rf /x'`, `sh -c "…"`, `eval '…'`, `echo '…' | bash`,
+  `bash -c 'gh repo delete o/r --yes'`, `env sudo …`, `nice sudo …`,
+  `timeout 5 sudo …` and `/usr/bin/env sudo …`.
+  - A `match="command"` rule is tested against `shell_code_text`, which blanks a
+    quoted body. `_hard_policy_verdict` now also tests each hard rule against every
+    `-c`/`eval` body the cached shell walk (`guard._shell_walk`, #413) unwraps.
+    A shell running a script file (`bash x.sh 'sudo'`) still treats its arguments
+    as data.
+  - A shell that reads code from stdin judges the stages of its own pipeline that
+    feed it, each shell word in command position: `echo sudo rm -rf /x | bash`,
+    `printf '%s %s' sudo id | sh`, `{ …; } | bash`, and a heredoc those stages
+    own. A quoted word stays one word, so `echo 'never use sudo here' | bash`
+    still runs `never`. Only those stages are judged that way, so
+    `curl … | sh && git commit -m 'sudo: drop'` is allowed. A here-string
+    (`bash <<< '…'`) is judged as code. A redirect target (`| bash > log`,
+    `2> err`) or a `-o`/`-O` value (`| bash -o pipefail`) is not a script file.
+  - A `-c` body that runs its positional words (`bash -c '"$@"' _ sudo …`,
+    `sh -c '"$0" "$@"' sudo id`) has those words judged as a command.
+  - An opaque site's quoted text (`su -c '…'`, `watch '…'`, `fish -c '…'`, a
+    python `-c` that calls `subprocess`) is judged as code, but only where the
+    command word ends at a blank or the end of the text. `tmux new -s
+    'sudo-test'` and `subprocess.run(['grep','sudo','.'])` stay data.
+  - An opt-in counts only where it takes effect: on the command, or inside the
+    body the rule matched. One body's opt-in never covers a match elsewhere.
+    `env OMI_SUDO_OK=1 bash -c 'sudo id'` is still opted in.
+  - The command-position wrapper list (`policy._CMD_WRAPPERS`) is now derived from
+    the stage parser's wrapper table, which moved to `policy.STAGE_WRAPPERS`
+    (`guard._STAGE_WRAPPERS` aliases it). That table includes each wrapper's
+    value-taking switches, `timeout`'s duration, and an optional binary path.
+    Switches and `--` may follow the duration (`timeout 5s -k 2s`, `timeout 5
+    --`), a switch value may be negative (`nice -n -5`), and `env -S` (or
+    `--split-string`) has its value judged as a command. The stage parser reads
+    the same shapes. `command -v`/`-V` is a lookup, so `command -v sudo` is
+    allowed. Each word can match only one way, so long runs of wrappers cannot
+    make the regex backtrack exponentially.
+  - `omind guard explain` now judges the same texts as `check`, so the two agree
+    on wrapped forms.
+  - The seed rules still apply when the state dir cannot resolve (#421). If the
+    walk raises, the command alone is judged, as before.
+  - On Windows, `bash <<<'sudo id'` and `env --split-string='sudo id'` ran. The
+    tokenizer used non-POSIX shlex there, which ignores a quote that opens
+    mid-word: it split each form at the blank and kept the quotes, so the code
+    in them was never judged. Windows tokenizing (and any part with a drive
+    path) now follows POSIX quote rules with backslashes kept, as Git Bash
+    reads them. Every bypass and benign test case also runs with the Windows
+    tokenizer forced (`guard._windows_shell`).
+  - The audit's hard-rule probe table, the roundtable's bypass list and its
+    false-positive list are parametrized tests in `tests/test_guard.py`, and the
+    bypass list runs through every adapter in `tests/test_adapters.py`.
+
 ## [10.2.13] - 2026-10-02
 
 ### Fixed

@@ -1766,9 +1766,11 @@ def _shell_sites(
     cwd: Path | None = Path("."),
     dirs: tuple[Path | None, ...] = (),
     depth: int = 0,
+    bodies: list[str] | None = None,
 ) -> tuple[list[_ShellSite], Path | None, tuple[Path | None, ...], str]:
     """Walk ``command`` as the local shell would and list every simple command
-    it runs, each with the directory it runs in (#394).
+    it runs, each with the directory it runs in (#394). Every ``-c``/``eval``
+    body the walk unwraps, at any depth, is appended to ``bodies`` when given.
 
     Returns ``(sites, cwd, dirs, local_text)``: the final ``cwd`` and
     ``pushd`` stack (an ``eval`` body shares them with its caller), and
@@ -1877,7 +1879,11 @@ def _shell_sites(
                 # run (`bash -c '"$@"' _ <cmd>`): code the walk does not
                 # follow, so the whole command fails closed.
                 sites.append(_ShellSite(program, text, cwd, True))
-            inner, inner_cwd, inner_dirs, inner_local = _shell_sites(body, cwd, dirs, depth + 1)
+            if bodies is not None:
+                bodies.append(body)
+            inner, inner_cwd, inner_dirs, inner_local = _shell_sites(
+                body, cwd, dirs, depth + 1, bodies
+            )
             sites.extend(inner)
             if program == "eval":
                 cwd, dirs = inner_cwd, inner_dirs
@@ -1921,7 +1927,7 @@ def _git_dash_c_path(command: str) -> Path | None:
     per command). Note rules judge every git separately, through
     :func:`_rules_command_view`."""
     try:
-        sites, cwd, _local = _shell_walk(command)
+        sites, cwd, _local, _bodies = _shell_walk(command)
     except Exception:
         return None
     for site in sites:
@@ -1931,31 +1937,42 @@ def _git_dash_c_path(command: str) -> Path | None:
 
 
 @functools.lru_cache(maxsize=8)
-def _shell_walk(command: str) -> tuple[tuple[_ShellSite, ...], Path | None, str]:
+def _shell_walk(
+    command: str,
+) -> tuple[tuple[_ShellSite, ...], Path | None, str, tuple[str, ...]]:
     """:func:`_shell_sites` from the start directory, memoised: the repo
-    resolver and the note-rule view walk the same command in one check (#413
-    review 3). Pure in ``command``: sites hold paths relative to the start."""
-    sites, cwd, _dirs, local = _shell_sites(command)
-    return tuple(sites), cwd, local
+    resolver, the note-rule view and the hard rules (#430) walk the same
+    command in one check (#413 review 3). Pure in ``command``: sites hold
+    paths relative to the start. The last item is every unwrapped
+    ``-c``/``eval`` body."""
+    bodies: list[str] = []
+    sites, cwd, _dirs, local = _shell_sites(command, bodies=bodies)
+    return tuple(sites), cwd, local, tuple(bodies)
+
+
+def _windows_shell() -> bool:
+    """Whether hooks run on Windows. A function so tests can drive
+    :func:`_shell_tokens` down its Windows branch on any platform."""
+    return os.name == "nt"
 
 
 def _shell_tokens(part: str) -> list[str]:
     """shlex tokens for one simple command. POSIX shlex treats every backslash
     as an escape and turns an unquoted Windows path such as ``C:\\repo`` into
     ``C:repo``. PowerShell/cmd do not use backslashes that way, so retain them
-    for a Windows shell or an explicit drive path. Non-POSIX shlex keeps
-    surrounding quotes; remove only a matching outer pair. Raises
-    ``ValueError`` on an unbalanced quote."""
-    windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", part)
-    tokens = shlex.split(part, posix=not windows_style)
-    if windows_style:
-        tokens = [
-            token[1:-1]
-            if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
-            else token
-            for token in tokens
-        ]
-    return tokens
+    for a Windows shell or an explicit drive path. Quotes still follow POSIX
+    rules there: Windows agents run hooks under Git Bash, where a quote opens
+    mid-word, so ``<<<'x y'`` and ``--split-string='x y'`` are one unquoted
+    word each. (Non-POSIX shlex split them at the blank and kept the quotes,
+    so the code in them was never judged; #430.) Raises ``ValueError`` on an
+    unbalanced quote."""
+    if not (_windows_shell() or re.search(r"(?<!\w)[A-Za-z]:\\", part)):
+        return shlex.split(part)
+    lexer = shlex.shlex(part, posix=True)
+    lexer.whitespace_split = True
+    lexer.commenters = ""
+    lexer.escape = ""  # keep backslashes: `C:\repo` stays `C:\repo`
+    return list(lexer)
 
 
 def _action_command(action: dict[str, Any]) -> str:
@@ -2034,7 +2051,7 @@ def _rules_command_view(action: dict[str, Any]) -> rules_mod.CommandView | None:
         from omind import rules as rules_mod
 
         base = _action_base_dir(action)
-        sites, _cwd, local_text = _shell_walk(command)
+        sites, _cwd, local_text, _bodies = _shell_walk(command)
         repos: dict[Path | None, Path | None] = {}  # 1,600 chained pushes share one cwd
         for site in sites:
             if site.cwd not in repos:
@@ -2160,23 +2177,12 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
     return bool(path)
 
 
-#: Words in command position that are not the program a stage runs: wrappers
-#: that exec the next word (``xargs``, ``sudo``, ``env``, ``timeout`` …) and
-#: shell keywords that introduce a command (``do``, ``then``, ``{`` …). The
-#: value is the wrapper's switches that take a SEPARATE argument, so
-#: ``sudo -u bob sed -i`` and ``xargs -I {} sed -i`` still reach the editor.
-_STAGE_WRAPPERS: dict[str, frozenset[str]] = {
-    **{name: frozenset() for name in policy._HEREDOC_OWNER_SKIP},
-    **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
-    "xargs": frozenset({"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"}),
-    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
-    "env": frozenset({"-u", "-C", "-S"}),
-    "nice": frozenset({"-n"}),
-    "timeout": frozenset({"-s", "-k"}),
-    "time": frozenset({"-f", "-o"}),
-}
+#: Wrappers and keywords a stage skips to reach its program, with their
+#: value-taking switches. The table lives in policy so the hard rules'
+#: command-position anchor is derived from the same list (#430).
+_STAGE_WRAPPERS = policy.STAGE_WRAPPERS
 #: Wrappers that take one positional argument before the command (``timeout 5``).
-_WRAPPER_POSITIONAL = frozenset({"timeout"})
+_WRAPPER_POSITIONAL = policy.WRAPPER_POSITIONAL
 #: Tools whose ``run`` subcommand execs the next word (``poetry run python …``,
 #: #419). The value is every switch that takes a SEPARATE argument, before
 #: ``run`` (``poetry -C sub run``, ``uv --directory . run``) or after it
@@ -2365,7 +2371,11 @@ def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int,
                 while j < ntok and toks[j][0].startswith("-"):
                     j += 2 if toks[j][0] in _STAGE_WRAPPERS[base] else 1
                 if base in _WRAPPER_POSITIONAL and j < ntok:
+                    # Switches and `--` may follow the duration too
+                    # (`timeout 5s -k 2s cmd`, `timeout 5 -- cmd`; #430 review).
                     j += 1
+                    while j < ntok and toks[j][0].startswith("-"):
+                        j += 2 if toks[j][0] in _STAGE_WRAPPERS[base] else 1
             if j >= ntok:
                 break
             cut = j + 1
@@ -2631,8 +2641,277 @@ def _is_unauthorized_capability_side_effect(action: dict[str, Any], session: str
     )
 
 
+#: A here-string attached to its operator: ``<<<'sudo id'``, ``0<<<x``.
+_HERE_STRING_RE = re.compile(r"\d*<<<(.*)", re.DOTALL)
+#: A body that runs its positional words: ``"$@"``, ``$*``, ``$0``, ``${1}``.
+_POSITIONAL_REF_RE = re.compile(r"\$\{?[@*0-9]")
+#: A redirection operator at the start of a word (``<<<``, ``2>``, ``>``).
+_LEADING_REDIRECT_RE = re.compile(r"^\d*&?[<>]+[&|]?")
+
+
+def _shell_code_source(words: list[str]) -> tuple[str, list[str]]:
+    """Where a local shell (``words[0]``) gets the code it runs, and any
+    here-string it is given: ``("arg", [])`` for a ``-c`` body, ``("file",
+    [])`` for a script operand or a ``<`` redirect (``bash x.sh 'arg'``: its
+    arguments are data), else ``("stdin", here_strings)`` (``… | bash``,
+    ``bash -s``, ``bash <<< '…'``).
+
+    A redirection's target is not a script operand (``| bash > log``, ``|
+    bash 2> err``), nor is a ``-o``/``-O`` value (``| bash -o pipefail``):
+    switches are read the way :func:`_shell_body_index` reads them."""
+    if _shell_body_index(words) is not None:
+        return "arg", []
+    here: list[str] = []
+    reads_stdin = False
+    i = 1
+    while i < len(words):
+        word = words[i]
+        attached = _HERE_STRING_RE.fullmatch(word)
+        if attached and attached.group(1):
+            here.append(attached.group(1))
+        elif _REDIRECT_OP_RE.fullmatch(word):
+            if word.endswith("<<<"):
+                here.extend(words[i + 1 : i + 2])
+            elif re.fullmatch(r"\d*<", word):
+                return "file", []  # `bash < x.sh` runs the file
+            i += 2
+            continue
+        elif _REDIRECT_RE.match(word):
+            if re.match(r"\d*<[^<&(]", word):
+                return "file", []  # `bash <x.sh`
+        elif word in ("-o", "+o", "-O", "+O"):
+            i += 2
+            continue
+        elif reads_stdin:
+            pass  # with `-s`, operands are positional words, not a script
+        elif word == "--":
+            if i + 1 < len(words):
+                return "file", []  # `bash -- x.sh`
+        elif len(word) > 1 and word[0] in "-+":
+            reads_stdin = word[0] == "-" and "s" in word[1:]
+        else:
+            return "file", []
+        i += 1
+    return "stdin", here
+
+
+def _pipeline_head(code: str, at: int, floor: int = 0) -> int:
+    """Where the pipeline whose last stage starts at offset ``at`` of ``code``
+    starts, so ``code[head:at]`` is the stages that write into it. Scans back
+    past ``|`` and ``|&`` to the previous ``;``/``&``/``&&``/``||``/newline,
+    or to the ``(``/``{`` that opens the enclosing group. A group or
+    subshell inside the pipeline (``{ …; } | bash``) is taken whole:
+    everything it prints is the shell's stdin. Never scans below ``floor``
+    (the end of an earlier shell, whose own producers are judged for it), so
+    a chain of ``… | bash | … | bash`` stays linear."""
+    depth = 0
+    i = at - 1
+    while i >= floor:
+        ch = code[i]
+        if ch in ")}":
+            depth += 1
+        elif ch in "({":
+            if depth == 0:
+                return i + 1
+            depth -= 1
+        elif depth == 0 and not _is_redirect_char(code, i):
+            if ch in ";\n":
+                return i + 1
+            if ch == "&" and not (i > 0 and code[i - 1] == "|"):
+                return i + 1
+            if ch == "|" and i > 0 and code[i - 1] == "|":
+                return i + 1
+        i -= 1
+    return floor
+
+
+def _words_in_command_position(text: str) -> str:
+    """``text`` (a pipeline's producer stages) with every shell word on its
+    own line, so each one is in command position: ``echo sudo id | bash``
+    runs ``sudo``. A quoted word stays one word, so ``echo 'never use sudo
+    here' | bash`` still runs ``never``; inside it, quotes and ``\\n``
+    escapes become newlines (``printf 'ls\\nsudo id' | sh``). A leading
+    redirection (``<<<'sudo id'``) is dropped. Unparseable text splits on
+    every blank and quote, which judges the most text."""
+    try:
+        words = shlex.split(text)
+    except ValueError:
+        words = re.split(r"[\s'\"]+", text)
+    lines = (_LEADING_REDIRECT_RE.sub("", word) for word in words)
+    return "\n".join(re.sub(r"['\"]|\\n", "\n", line) for line in lines)
+
+
+def _heredoc_bodies(text: str, newline: int, heredocs: list[re.Match[str]]) -> str:
+    """The bodies of ``heredocs`` (``policy._HEREDOC_RE`` matches), read from
+    the line after offset ``newline`` up to each one's delimiter line, in
+    order. Reads only those lines. Empty when there is no next line."""
+    body: list[str] = []
+    start = newline + 1 if newline >= 0 else len(text)
+    for match in heredocs:
+        delimiter = match.group(3) or match.group(4)
+        while start < len(text):
+            end = text.find("\n", start)
+            end = len(text) if end < 0 else end
+            line = text[start:end]
+            start = end + 1
+            if (line.lstrip("\t") if match.group(1) else line).strip() == delimiter:
+                break
+            body.append(line)
+    return "\n".join(body)
+
+
+@dataclass(frozen=True)
+class _HardSubjects:
+    """The texts a hard rule is tested against (#430), by how each is judged.
+
+    ``code``: shell code, judged by :meth:`policy.Rule.matches` as usual; an
+    opt-in inside one of them counts for a match there. ``words``: text whose
+    every line may be a command (the stages piped into a shell, the
+    positional words a ``bash -c '"$@"'`` body runs), searched as is.
+    ``quoted``: an opaque site's text with its quotes turned into newlines; a
+    command there must be followed by a blank or the end of the text
+    (``watch 'sudo id'``), so ``tmux new -s 'sudo-test'`` stays data."""
+
+    code: tuple[str, ...]
+    words: tuple[str, ...] = ()
+    quoted: tuple[str, ...] = ()
+
+
+def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
+    """Add to ``code``/``words`` what each local shell in ``text`` runs that
+    the walk does not unwrap (#430 review): a ``bash -c`` body's positional
+    words, a here-string, and the stages of the pipeline that feed a shell
+    reading code from stdin, with a heredoc they own. Only those stages, so
+    ``curl … | sh && git commit -m 'sudo: drop'`` judges the curl alone. Also
+    every ``env -S`` value, which env splits and runs as a command."""
+    masked = policy.shell_code_text(text)
+    floor = 0
+    for program, _args, pos, _end in _program_stages(masked, text):
+        if program not in _LOCAL_SHELLS:
+            continue
+        head = _pipeline_head(masked, pos, floor)
+        stop = next(
+            (
+                k
+                for k in range(pos, len(masked))
+                if masked[k] in ";&|\n()`" and not _is_redirect_char(masked, k)
+            ),
+            len(masked),
+        )
+        floor = stop
+        try:
+            tokens = _shell_tokens(text[pos:stop])
+        except ValueError:
+            tokens = [program]
+        at_body = _shell_body_index(tokens)
+        if at_body is not None:
+            if at_body + 1 < len(tokens) and _POSITIONAL_REF_RE.search(tokens[at_body]):
+                # `bash -c '"$@"' _ sudo id`: $0 is `_`, so judge from both.
+                words.append(" ".join(tokens[at_body + 1 :]))
+                words.append(" ".join(tokens[at_body + 2 :]))
+            continue
+        source, here = _shell_code_source(tokens)
+        if source != "stdin":
+            continue
+        code.extend(here)
+        if text[head:pos].strip():
+            words.append(_words_in_command_position(text[head:pos]))
+        # A producer's heredoc body starts on the next line (`cat <<EOF |
+        # bash`), past this stage: it is the code the shell reads.
+        heredocs = list(policy._HEREDOC_RE.finditer(masked, head, pos))
+        if heredocs:
+            code.append(_heredoc_bodies(text, text.find("\n", pos), heredocs))
+    for segment in re.finditer(r"(?:\\.|[^;&|\n(`)\\])+", masked):
+        if not re.search(r"(?:^|[\s/])env\s", segment.group() + " "):
+            continue
+        try:
+            tokens = _shell_tokens(text[segment.start() : segment.end()])
+        except ValueError:
+            continue
+        for k, token in enumerate(tokens):
+            if token in ("-S", "--split-string"):
+                code.append(" ".join(tokens[k + 1 :]))
+            elif token.startswith("--split-string="):
+                code.append(token.partition("=")[2])
+            elif token.startswith("-S") and len(token) > 2:
+                code.append(token[2:])
+
+
+def _hard_rule_subjects(command: str) -> _HardSubjects:
+    """The texts a hard rule is tested against (#430).
+
+    ``code`` is the command plus every ``bash -c``/``eval`` body the cached
+    shell walk unwrapped, the here-strings and ``env -S`` values in them, and
+    a heredoc a pipeline feeds to a shell. ``words`` is what a shell runs from
+    its positional words or from the pipeline feeding its stdin (see
+    :func:`_local_shell_subjects`). ``quoted`` is each opaque site the walk
+    could not follow (``su -c '…'``, ``watch '…'``, a too-deep ``bash -c``):
+    its quoted text is code, so it fails closed, like an opaque site for note
+    rules.
+
+    Pure and never raises: on any walk error only the command itself is
+    judged, which is the pre-#430 behaviour."""
+    try:
+        sites, _cwd, _local, bodies = _shell_walk(command)
+        code: list[str] = [command, *bodies]
+        words: list[str] = []
+        for text in (command, *bodies):
+            _local_shell_subjects(text, code, words)
+        quoted: list[str] = []
+        for site in sites:
+            if not site.opaque:
+                continue
+            if site.program in _LOCAL_SHELLS:
+                try:
+                    has_body = _shell_body_index(_shell_tokens(site.text)) is not None
+                except ValueError:
+                    has_body = True
+                if not has_body:
+                    continue  # it reads stdin or a file: judged above
+            quoted.append(re.sub(r"['\"]|\\n", "\n", site.text))
+        return _HardSubjects(tuple(code), tuple(words), tuple(quoted))
+    except Exception:
+        return _HardSubjects((command,))
+
+
+@functools.lru_cache(maxsize=64)
+def _quoted_code_re(pattern: str) -> re.Pattern[str]:
+    """A ``match="command"`` ``pattern`` whose command word must end at a
+    blank or at the end of the text (see :class:`_HardSubjects`)."""
+    return re.compile(policy._CMD_POSITION + r"(?=\S*(?:[ \t]|\Z))(?:" + pattern + r")")
+
+
+def _hard_rule_hits(rule: policy.Rule, command: str, subjects: _HardSubjects) -> list[str]:
+    """The subjects ``rule`` matches. A match in ``words``/``quoted`` is
+    reported as ``command``: only an opt-in on the command itself covers it.
+    May raise on a malformed rule; the callers skip that rule."""
+    hits = [text for text in subjects.code if rule.matches(text)]
+    if hits:
+        return hits
+    if any(rule.compiled().search(text) for text in subjects.words):
+        return [command]
+    quoted = _quoted_code_re(rule.pattern) if rule.match == "command" else rule.compiled()
+    if any(quoted.search(text) for text in subjects.quoted):
+        return [command]
+    return []
+
+
+def _hard_rule_opted_in(rule: policy.Rule, command: str, hits: list[str]) -> bool:
+    """The opt-in counts where it really takes effect: on the command, or
+    inside every body the rule matched (``bash -c 'OMI_…=1 git push …'``).
+    One body's opt-in never covers a match elsewhere."""
+    if not rule.opt_in:
+        return False
+    return _opt_in_satisfied(rule.opt_in, command) or all(
+        _opt_in_satisfied(rule.opt_in, text) for text in hits
+    )
+
+
 def _hard_policy_verdict(command: str) -> Verdict | None:
     """The deny for the first ``hard`` policy rule ``command`` matches, else None.
+
+    A rule is tested against every text :func:`_hard_rule_subjects` returns, so
+    a body run through ``bash -c``/``eval``/a piped shell is judged too (#430).
 
     The github_push tier is skipped when the command carries its opt-in token (a
     deliberate Codeberg mirror). Soft rules never block here (Layer E records
@@ -2647,6 +2926,7 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
         rules: list[policy.Rule] = list(policy.load_policy())
     except Exception:
         rules = list(policy.SEED_RULES)
+    subjects = _hard_rule_subjects(command)
     for rule in rules:
         if rule.severity != policy.SEVERITY_HARD:
             continue
@@ -2658,11 +2938,10 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
         # exception, not just ``re.error``: one rule raising must not disable
         # the rules after it.
         try:
-            if not rule.matches(command):
-                continue
+            hits = _hard_rule_hits(rule, command, subjects)
         except Exception:
             continue
-        if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
+        if not hits or _hard_rule_opted_in(rule, command, hits):
             continue
         return Verdict(
             allow=False,
@@ -3773,11 +4052,17 @@ def _run_explain(command: str) -> int:
     if not command:
         sys.stderr.write('guard explain: pass --command "<cmd>"\n')
         return 1
+    # The same subjects `check` judges (#430 review): a body run through
+    # `bash -c`, a piped shell or a wrapper is explained, not just the text.
+    subjects = _hard_rule_subjects(command)
     matched: list[tuple[policy.Rule, bool]] = []
     for rule in policy.load_policy():
-        if rule.matches(command):
-            opted_in = bool(rule.opt_in and _opt_in_satisfied(rule.opt_in, command))
-            matched.append((rule, opted_in))
+        try:
+            hits = _hard_rule_hits(rule, command, subjects)
+        except Exception:
+            continue
+        if hits:
+            matched.append((rule, _hard_rule_opted_in(rule, command, hits)))
     if not matched:
         sys.stdout.write(f"ALLOW (no policy rule matches): {command}\n")
         return 0
