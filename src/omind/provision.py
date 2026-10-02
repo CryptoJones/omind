@@ -15,15 +15,18 @@ scripts, the skill) are refreshed only when their content drifts.
 from __future__ import annotations
 
 import contextlib
+import functools
 import hashlib
 import importlib.resources
 import json
+import ntpath
 import os
 import re
 import shutil
 import stat
 import subprocess
 import sys
+import sysconfig
 import tempfile
 import time
 from collections.abc import Callable
@@ -67,10 +70,128 @@ def canonical_omind_exe() -> str:
 
     Falls back to which() only when the canonical path is absent (system or pipx
     installs, which genuinely have no stable path to pin; `doctor` warns there).
+
+    Windows resolves through :func:`_windows_omind_exe` instead (#377).
     """
+    if _windows():
+        return _windows_omind_exe()
     if CANONICAL_OMIND_EXE.exists():
         return str(CANONICAL_OMIND_EXE)
     return shutil.which("omind") or "omind"
+
+
+#: Seconds the launcher liveness probe may take before it counts as dead. Up to
+#: four candidates are probed serially, so this bounds setup/doctor at ~20 s.
+_LAUNCHER_PROBE_TIMEOUT = 5.0
+
+
+def _scripts_dirs() -> list[Path]:
+    """The running interpreter's console-script dirs (environment, then user scheme).
+
+    This interpreter is running omind, so a launcher here belongs to an install
+    that has the package. A scheme sysconfig does not know is skipped.
+    """
+    dirs: list[Path] = []
+    for scheme in (None, f"{os.name}_user"):
+        try:
+            path = (
+                sysconfig.get_path("scripts")
+                if scheme is None
+                else sysconfig.get_path("scripts", scheme)
+            )
+        except KeyError:
+            continue
+        if path:
+            dirs.append(Path(path))
+    return dirs
+
+
+@functools.cache
+def _launcher_runs(exe: str) -> bool:
+    """Whether the launcher at *exe* actually starts omind (``--version`` exits 0).
+
+    An orphaned pip shim whose interpreter no longer has the package exits
+    non-zero with ``ModuleNotFoundError`` (#377). Cached per path: setup resolves
+    the exe once per hook and MCP entry, and each probe spawns a process.
+
+    Never raises. Output is captured as bytes and never decoded (only the exit
+    code matters), and ``ValueError`` is caught as well, so a launcher writing
+    non-UTF-8 bytes, or a path the OS rejects outright, reads as dead.
+    """
+    try:
+        result = subprocess.run(
+            [exe, "--version"],
+            capture_output=True,
+            timeout=_LAUNCHER_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _exe_key(path: str) -> str:
+    """*path* normalized for comparing two launcher paths.
+
+    Windows paths are case-insensitive: setup used to bake which()'s
+    ``...\\omind.EXE`` while the resolver now returns ``...\\omind.exe``, and a
+    plain ``!=`` reads that as a different install (#377). ``ntpath`` is used
+    explicitly so the comparison is the same wherever it is tested.
+    """
+    if _windows():
+        return ntpath.normcase(ntpath.normpath(path))
+    return path
+
+
+def _same_exe(a: str, b: str) -> bool:
+    """Whether two launcher paths name the same file (case-insensitive on Windows)."""
+    return _exe_key(a) == _exe_key(b)
+
+
+def _windows_fallback_exe() -> str:
+    """What Windows pins when no candidate launcher runs.
+
+    Never a path the probe rejected: a bare ``omind`` re-resolves through PATH
+    each time the agent spawns it, so a later fix to PATH or the install takes
+    effect without re-running setup. #380 replaces this with ``python -m omind``.
+    """
+    return "omind"
+
+
+def _windows_omind_exe() -> str:
+    """Windows resolution for :func:`canonical_omind_exe` (#377).
+
+    The launcher is ``omind.exe``, so the bare ``~/.local/bin/omind`` never
+    exists there and the stable pin never engaged; every setup fell through to
+    which(), which froze whatever launcher was first on PATH, including an
+    orphaned shim whose interpreter had lost the package. That broke the ``omi``
+    MCP server with CONNECTION_CLOSED.
+
+    Candidates, in order: the running interpreter's script dirs (the install
+    known to hold this omind), the uv tool bin (``~/.local/bin/omind.exe``),
+    then which(). The first one that exists and runs wins. If none runs, this
+    returns :func:`_windows_fallback_exe`, never a launcher the probe rejected,
+    and it never raises.
+    """
+    candidates = [d / "omind.exe" for d in _scripts_dirs()]
+    candidates.append(CANONICAL_OMIND_EXE.with_name("omind.exe"))
+    found = shutil.which("omind")
+    if found:
+        candidates.append(Path(found))
+    seen: set[str] = set()
+    for candidate in candidates:
+        key = _exe_key(str(candidate))
+        if key in seen:
+            continue
+        seen.add(key)
+        if candidate.is_file() and _launcher_runs(str(candidate)):
+            return str(candidate)
+    return _windows_fallback_exe()
+
+
+def _is_pinned_path(exe: str) -> bool:
+    """Whether *exe* is an absolute path (a pin) rather than a bare PATH lookup."""
+    return "/" in exe or "\\" in exe
 
 
 def _enforce_hook_dest() -> Path:
@@ -779,8 +900,13 @@ class Provisioner:
 
     def _matches_desired(self, server: dict[str, object]) -> bool:
         desired = self.desired_server_entry()
-        return server.get("command") == desired["command"] and server.get("args") == list(
-            desired["args"]
+        command = server.get("command")
+        # Case-insensitive on Windows: an entry baked as which()'s `omind.EXE`
+        # is the same launcher as the resolver's `omind.exe` (#377).
+        return (
+            isinstance(command, str)
+            and _same_exe(command, desired["command"])
+            and server.get("args") == list(desired["args"])
         )
 
     def _legacy_server(self) -> dict[str, object] | None:
@@ -1618,6 +1744,14 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
                 f"MCP server '{name}' not registered at user scope (run `omind setup`)",
             )
         )
+    elif (dead := _dead_pin(server.get("command"))) is not None:
+        results.append(
+            CheckResult(
+                "mcp_registration",
+                "fail",
+                f"MCP server '{name}': pinned omind does not run ({dead}) — run `omind setup`",
+            )
+        )
     elif not prov._matches_desired(server):
         results.append(
             CheckResult(
@@ -1667,6 +1801,18 @@ def _diagnose_claude_skill() -> CheckResult:
     )
 
 
+def _dead_pin(command: object) -> str | None:
+    """*command* when it is an absolute omind path whose ``--version`` fails.
+
+    A bare ``omind`` resolves through PATH at spawn time and is not judged here.
+    A pin that does not run (an orphaned shim, a removed venv) is the #377
+    failure: the wiring looks right while every session's server dies on launch.
+    """
+    if isinstance(command, str) and _is_pinned_path(command) and not _launcher_runs(command):
+        return command
+    return None
+
+
 def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     """Inspect settings.json for omind's auto-memory hooks (pure read).
 
@@ -1694,6 +1840,7 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
     missing: list[str] = []
     path_mismatch = False
     stale_exes: set[str] = set()
+    dead_exes: set[str] = set()
     for event in HANDLED_EVENTS:
         entries = hooks_cfg.get(event)
         found = None
@@ -1709,7 +1856,9 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         # A hook pinned to some *other* omind install keeps running that build
         # forever: self-update moves the canonical path, never this one. The
         # wiring still looks correct, so only an explicit comparison catches it.
-        if baked and baked != canonical:
+        if baked and (dead := _dead_pin(baked)) is not None:
+            dead_exes.add(dead)
+        elif baked and not _same_exe(baked, canonical):
             stale_exes.add(baked)
 
     if missing:
@@ -1744,6 +1893,13 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         if locked
         else ""
     )
+    if dead_exes:
+        return CheckResult(
+            "hooks",
+            "fail",
+            "auto-memory hooks: pinned omind does not run "
+            f"({', '.join(sorted(dead_exes))}) — run `omind setup`.{lock_note}",
+        )
     if stale_exes:
         return CheckResult(
             "hooks",

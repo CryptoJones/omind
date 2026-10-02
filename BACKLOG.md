@@ -100,9 +100,6 @@ Follow-ups:
 
 ### Windows
 
-- [ ] **Windows: `canonical_omind_exe()` extension gap pins an orphaned shim, breaking the omi MCP server (CONNECTION_CLOSED)** ([#377](https://github.com/CryptoJones/omind/issues/377)) — _bug (Windows)_ —
-  the stable pin never engages, so it falls back to `shutil.which("omind")`. Setup and doctor can then
-  bake an orphaned pip shim into the MCP entry and every hook.
 - [ ] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — _bug (Windows)_ —
   with SAC enforcing, all hooks and the `omi` MCP server stop working, while `python -m omind` still runs.
 
@@ -159,6 +156,15 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.3)
+
+- [x] **Windows: `canonical_omind_exe()` extension gap pins an orphaned shim, breaking the omi MCP server (CONNECTION_CLOSED)** ([#377](https://github.com/CryptoJones/omind/issues/377)) — **v10.2.3** — _bug (Windows)_ —
+  the stable pin probed the extension-less `~/.local/bin/omind`, so it never engaged on Windows.
+  Resolution there now tries the running interpreter's script dirs, then
+  `~/.local/bin/omind.exe`, then `which()`, and pins the first launcher whose `--version`
+  exits 0 (bare `omind` when none runs, never a dead pin). `doctor` fails a dead hook or MCP
+  pin, and Windows path compares ignore case.
 
 ### Shipped — 2026-10-02 (v10.2.1)
 
