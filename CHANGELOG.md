@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.4] - 2026-10-02
+
+### Fixed
+- **Any `-i` flag in a command with sed/perl/python marked it as repo work
+  ([#391](https://github.com/CryptoJones/omind/issues/391)).** The classifier matched an
+  editor at command position and then the substring `" -i"` anywhere in the command, so
+  a read-only `… | sed 's/x//'; … | grep -iE "a|b"` drew the git-rules demand.
+  - The in-place flag is now read from the editor's own arguments, one pipeline stage at
+    a time: `-i`, `-i ''`, `-i.bak`, `--in-place[=SUF]`, and clusters such as `-Ei` /
+    `-pi`. A cluster stops at a switch that takes the rest as its argument
+    (`perl -MList::Util`, `sed -fscript`), and quoted scripts stay blank.
+  - Enforcement got tighter, not looser, on real edits: `sed -Ei`, `sed --in-place`,
+    `perl -pi`, `ruby -pi`, a path-qualified `/usr/bin/sed -i`, `VAR=x sed -i`, and a
+    python write inside a quoted `-c` or heredoc (blanked by the #317 mask) were all
+    previously missed and are now repo work.
+
 ## [10.2.3] - 2026-10-02
 
 ### Fixed

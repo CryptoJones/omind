@@ -1742,11 +1742,63 @@ def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
             return True
         if _REPO_TEST_RE.search(command):
             return True
-        if re.search(r"(?:^|[;&|\n(]\s*)(?:sed|perl|python|python3|node|ruby)\b", command) and (
-            " -i" in command or "write_text" in command or "Path(" in command
-        ):
+        if _runs_in_place_edit(command):
+            return True
+        # A script writing files. The marker lives inside the ``-c``/heredoc
+        # payload, which ``shell_code_text`` blanked, so it is read from the raw
+        # command; the interpreter itself must still sit in command position.
+        if re.search(
+            r"(?:^|[;&|\n(]\s*)(?:\S*/)?(?:python3?|node|ruby)\b", command
+        ) and _SCRIPT_WRITE_RE.search(str(action.get("command") or "")):
             return True
     return bool(path)
+
+
+# Switches after which the rest of a short-option cluster is that switch's
+# ARGUMENT, not more switches (``perl -MList::Util``, ``sed -fscript``), so an
+# ``i`` there is not the in-place flag.
+_EDITOR_ARG_SWITCHES = {
+    "sed": frozenset("ef"),
+    "perl": frozenset("dDeEIMmx"),
+    "ruby": frozenset("CeEFIrx"),
+}
+_SCRIPT_WRITE_RE = re.compile(
+    r"write_text|write_bytes|writeFile|appendFile|File\.write|"
+    r"open\([^)\n]*[\"'][wa]b?\+?[\"']"
+)
+
+
+def _runs_in_place_edit(code: str) -> bool:
+    """True when a ``sed``/``perl``/``ruby`` invocation carries ITS OWN in-place
+    flag (``-i``, ``-i ''``, ``-i.bak``, ``-pi``, ``-Ei``, ``--in-place[=SUF]``).
+
+    ``code`` is ``policy.shell_code_text`` output, so quoted scripts are already
+    blank. Each pipeline stage is tokenised on its own: a ``-i`` belonging to
+    another program in the same command (``grep -iE``, ``ls -i``) used to satisfy
+    a bare ``" -i" in command`` test and turned read-only listings into repo
+    work (#391)."""
+    for stage in re.split(r"[;&|\n(]", code):
+        tokens = stage.split()
+        while tokens and re.match(r"[A-Za-z_]\w*=", tokens[0]):
+            tokens.pop(0)  # FOO=bar sed -i …
+        if not tokens:
+            continue
+        stops = _EDITOR_ARG_SWITCHES.get(tokens[0].rsplit("/", 1)[-1])
+        if stops is None:
+            continue
+        for tok in tokens[1:]:
+            if tok == "--":
+                break
+            if tok == "--in-place" or tok.startswith("--in-place="):
+                return True
+            if not tok.startswith("-") or tok.startswith("--"):
+                continue
+            for ch in tok[1:]:
+                if ch == "i":
+                    return True
+                if ch in stops:
+                    break
+    return False
 
 
 def _is_global_config_mutation(action: dict[str, Any]) -> bool:
