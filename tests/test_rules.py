@@ -494,6 +494,9 @@ def test_seed_matches_push_after_git_global_options(
         f'git -C "{repo}" -c x=y push origin main',
         f"git --git-dir={repo}/.git --work-tree {repo} push origin main",
         "git --no-pager -P push",
+        # #431 review: an escaped quote outside quotes is not a quoted run.
+        "git -c user.name=O\\'Brien push origin main",
+        'git -c a=\\"b push origin main',
     ):
         hit = rules.evaluate(_action(command), omi, repo)
         assert hit is not None and hit.outcome == "deny", command

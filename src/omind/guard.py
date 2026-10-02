@@ -1322,9 +1322,17 @@ _REPO_TEST_RE = re.compile(
 # (#317), so the token after -C may be an empty/space-only quoted string. Accept it:
 # without this, `git -C "/abs/repo" commit` — the exact form GIT_FRESHNESS_MESSAGE
 # teaches — was never classified as repo work and sailed past the rules-note demand.
-# One global-option value: a bare token, a blanked quoted literal, or a token with a
-# blanked literal embedded (`-c user.name="…"`).
-_GIT_OPT_VALUE = r"""(?:"[ \t]*"|'[ \t]*'|\S+(?:"[ \t]*"|'[ \t]*')?\S*)"""
+# One global-option value: one shell word of unquoted runs and quoted runs in any
+# order — a bare token, a blanked quoted literal, or a token with a literal embedded
+# (`-c user.name="…"`). Same pattern as rules.py (#413/#414): each character has
+# exactly one way to match, so a run of options with no matching verb after fails
+# in linear time. The old `\S+(?:"…")?\S*` split each value several ways and
+# backtracked ~3^N (6.5 s at 16 `-c a=b`), past the hook timeout (#431).
+# shell_code_text leaves a backslash-escaped quote OUTSIDE quotes as-is, so `\\.`
+# takes `\'` / `\"` as one escaped character; read as an unclosed quoted run, it
+# hid `git -c user.name=O\'Brien commit` from every classifier (#431 review). Each
+# alternative starts with a different character, so the match stays linear.
+_GIT_OPT_VALUE = r"""(?:\\.|[^\s"'\\]|"[^"]*"|'[^']*')+"""
 _GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
 # One git subcommand that ESTABLISHES freshness (a fetch, or an ff-only/rebase
 # pull). ``[^|>&;\n]*`` keeps the whole subcommand free of pipes/redirects/chains
