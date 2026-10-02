@@ -14,9 +14,6 @@ the exact order of operations._
 - [ ] **guard hard rules: `find -exec sudo`, `$(…)`/`${…}` program names and `eval "$(…)"` are not judged** ([#455](https://github.com/CryptoJones/omind/issues/455)) — _bug_ —
   deferred from #444: each needs either `find -exec` unwrapping or the output of a command
   substitution, which the guard does not evaluate.
-- [ ] **guard hard rules: bundled wrapper option clusters (`env -iC dir sudo …`) are not read getopt-style** ([#451](https://github.com/CryptoJones/omind/issues/451)) — _bug_ —
-  found while fixing #432: the `policy.py` wrapper regex treats a bundled cluster as one opaque switch, so
-  `env -iC /x sudo id` may not reach the program behind it. Read clusters the way `_program_stages` does.
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
@@ -84,6 +81,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.25)
+
+- [x] **guard hard rules: bundled wrapper option clusters (`env -iC dir sudo …`) are not read getopt-style** ([#451](https://github.com/CryptoJones/omind/issues/451)) — **v10.2.25** — _bug_ —
+  the command-position wrapper regex reads a cluster the way `_switch_width` does, so a cluster
+  ending in a value-taking letter consumes the next word: `env -iC /x sudo id`, `xargs -0I {} sudo id`
+  and `time -po /x sudo id` are denied, and `env -iC sudo echo hi` is no longer a false positive.
 
 ### Shipped — 2026-10-02 (v10.2.24)
 

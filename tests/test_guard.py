@@ -3482,6 +3482,53 @@ def test_windows_tokenizing_leaves_benign_stdin_operands_alone(command: str) -> 
     assert guard._hard_policy_verdict(command) is None
 
 
+#: #451: a wrapper switch cluster whose last letter takes a value consumes the
+#: next word, as getopt (and `guard._switch_width`) reads it, so that word is
+#: not mistaken for the program.
+CLUSTERED_WRAPPER_HARD_COMMANDS = (
+    "env -iC /x sudo id",
+    "env -iu VAR sudo id",
+    "env -iu VAR -C /x sudo id",
+    "xargs -0I {} sudo id",
+    "xargs -0rI {} sudo id",
+    "time -po /x sudo id",
+    "caffeinate -it 5 sudo id",
+    "/usr/bin/env -iC /x sudo id",
+    "true && env -iC /x sudo id",
+    # Pinned: these already passed before #451.
+    "env -iC/x sudo id",
+    "nice -n5 sudo id",
+    "timeout -k5 10 sudo id",
+    "timeout -sKILL 5 sudo id",
+    "stdbuf -oL sudo id",
+    "ionice -c3 sudo id",
+    "sudo -Eu root id",
+)
+
+
+@pytest.mark.parametrize("command", CLUSTERED_WRAPPER_HARD_COMMANDS)
+def test_hard_rules_read_wrapper_clusters_getopt_style(command: str) -> None:
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The value-taking letter's word is a value, not the program.
+        "env -iC sudo echo hi",
+        "xargs -0I sudo echo hi",
+        "env -iC /x echo sudo",
+        "nice -n5 grep sudo f",
+        "timeout -k5 10 echo sudo",
+        "command -v sudo",
+        "tmux new -s sudo-test",
+    ],
+)
+def test_wrapper_clusters_leave_benign_commands_alone(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
 @pytest.mark.parametrize("tokenizing", ["posix", "windows"])
 def test_unclosed_process_substitution_is_still_judged(
     tokenizing: str, request: pytest.FixtureRequest

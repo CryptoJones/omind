@@ -7,6 +7,22 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.25] - 2026-10-02
+
+### Fixed
+- **The hard rules read wrapper switch clusters getopt-style
+  ([#451](https://github.com/CryptoJones/omind/issues/451)).** A bundled cluster
+  whose last letter takes a value was one opaque switch to the command-position
+  regex, so its value was taken for the program: `env -iC /x sudo id`, `env -iu
+  VAR sudo id`, `xargs -0I {} sudo id`, `time -po /x sudo id` and `caffeinate -it
+  5 sudo id` were allowed, and `env -iC sudo echo hi` was denied.
+  - `policy._wrapper_pattern` now reads a cluster the way `guard._switch_width`
+    does, from the same `STAGE_WRAPPERS` table: the first value-taking letter
+    takes the rest of the word, or the next word when it ends the cluster.
+  - Already denied before this fix, and pinned by tests: `env -iC/x sudo id`,
+    `nice -n5 sudo id`, `timeout -k5 10 sudo id`, `stdbuf -oL sudo id`, `ionice
+    -c3 sudo id` and `sudo -Eu root id`.
+
 ## [10.2.24] - 2026-10-02
 
 ### Fixed
