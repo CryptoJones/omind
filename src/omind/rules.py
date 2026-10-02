@@ -58,7 +58,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from omind import filelock, paths
+from omind import filelock, paths, policy
 
 ACTION_DENY = "deny"
 ACTION_WARN = "warn"
@@ -102,6 +102,8 @@ SEED_NOTE_RULES = (
     NoteRule(
         id="no-direct-push-public-main",
         tool="Bash",
+        # Also matches `git -C <dir> push` / `git -c k=v push`: rules are
+        # tested with git's global options dropped too (#414).
         match="*git push*",
         action=ACTION_DENY,
         message=(
@@ -404,13 +406,59 @@ def _repo_branch(repo: Path) -> str:
 
 
 # Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
-# literals (#317 / #333 / #345) after -C or -c.
-_GIT_OPT_VALUE = r"""(?:"[^"]*"|'[^']*'|\S+(?:"[^"]*"|'[^']*')?\S*)"""
-_GIT_GLOBAL_OPTS = rf"(?:-C[ \t]+{_GIT_OPT_VALUE}[ \t]+|-c[ \t]+{_GIT_OPT_VALUE}[ \t]+)*"
-_PUSH_ARGS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}push\b(?P<rest>[^;|&`\n]*)")
+# literals (#317 / #333 / #345) after -C or -c. One shell word: unquoted runs
+# and quoted runs in any order, so `user.name='A B'` is one value (#414).
+_GIT_OPT_VALUE = r"""(?:[^\s"']|"[^"]*"|'[^']*')+"""
+# git's global options between `git` and the subcommand (#414): `-C <dir>`,
+# `-c k=v`, `--git-dir[=]<p>` and its siblings, and flag-only options such as
+# `--no-pager` / `-P`. A subcommand never starts with `-`, so the run of options
+# stops there and `git log --grep push` still reads as `log`.
+#
+# The alternatives must not overlap: `--git-dir=X` once matched both the named
+# branch and the generic `--long[=v]` one, so a run of them with no push after
+# backtracked exponentially (8.6 s at 24 options, #413 review 3). The generic
+# branch excludes the named options by lookahead; possessive quantifiers and
+# atomic groups would also do it, but need Python 3.11 and we support 3.10.
+_GIT_NAMED_OPTS = r"(?:git-dir|work-tree|namespace|super-prefix|config-env)"
+_GIT_GLOBAL_OPTS = (
+    rf"(?:-[Cc][ \t]+{_GIT_OPT_VALUE}[ \t]+"
+    rf"|--{_GIT_NAMED_OPTS}(?:=|[ \t]+){_GIT_OPT_VALUE}[ \t]+"
+    rf"|--(?!{_GIT_NAMED_OPTS}(?![a-z-]))[a-z][a-z-]*(?:={_GIT_OPT_VALUE})?[ \t]+"
+    rf"|-[pP][ \t]+)*"
+)
+_PUSH_ARGS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}push\b(?P<rest>[^;|&`)\n]*)")
+_GIT_OPTS_RE = re.compile(rf"\bgit[ \t]+{_GIT_GLOBAL_OPTS}")
 
 
-def _pushed_branches(command: str) -> list[str] | None:
+def _canonical_git(text: str) -> str:
+    """``text`` with git's global options dropped (`git -C d -c k=v push` ->
+    `git push`), so a rule written as ``*git push*`` matches a push however its
+    options are spelled (#414)."""
+    return _GIT_OPTS_RE.sub("git ", text)
+
+
+def _rule_matches(text: str, pattern: str) -> bool:
+    return fnmatch.fnmatch(text, pattern) or fnmatch.fnmatch(_canonical_git(text), pattern)
+
+
+_BLANKED_QUOTE_RE = re.compile(r"""'( *)'|"( *)\"""")
+
+
+def _code_text(text: str) -> str:
+    """``text`` as the shell runs it, for matching a repo-scoped rule (#413
+    review 3): quoted data blanked (:func:`policy.shell_code_text`), so
+    ``grep 'git push' README.md`` and ``git commit -m "… git push …"`` do not
+    read as a push. A quoted SINGLE word is unquoted instead: ``git "push"``
+    and ``origin 'main'`` are arguments, not prose."""
+
+    def unquote(m: re.Match[str]) -> str:
+        inner = text[m.start() + 1 : m.end() - 1]
+        return inner if inner and not any(ch.isspace() for ch in inner) else m.group()
+
+    return _BLANKED_QUOTE_RE.sub(unquote, policy.shell_code_text(text))
+
+
+def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
     """Branch names a ``git push`` explicitly targets, or ``None`` for a bare
     push (no refspec — the checked-out branch is what gets pushed).
 
@@ -418,12 +466,30 @@ def _pushed_branches(command: str) -> list[str] | None:
     main matched the branch condition via HEAD and got denied (#240 v1 false
     positive): when the command names refspecs, judge those instead of HEAD.
     Refspecs like ``HEAD:main`` count as their destination.
+
+    The push is located in :func:`policy.shell_code_text` (#394), so a push
+    inside an ssh payload or quoted string is never the one judged; its
+    arguments are then read from the same span of the raw command. With
+    ``in_code=False`` the first push anywhere in the text counts, quoted or not:
+    for a body an opaque executor runs (``su -c '…'``) or a command the guard
+    could not parse, which is how every push was read before #394. There the
+    refspec also sheds a host language's ``,;)]}`` (``run('git push origin
+    main', …)``).
     """
-    match = _PUSH_ARGS_RE.search(command)
+    match = _PUSH_ARGS_RE.search(policy.shell_code_text(command) if in_code else command)
     if not match:
         return None
     refs: list[str] = []
-    tokens = [t for t in match.group("rest").split() if t]
+    # shell_code_text is length-preserving (it blanks quoted bodies to spaces,
+    # it never drops them), so the offsets of the match in the masked text are
+    # the same offsets in the raw command. That is what lets this slice read
+    # the real arguments, quotes included (`git push origin "main"`).
+    rest = command[match.start("rest") : match.end("rest")]
+    # Outside code (an executor's body, `subprocess.run('git push origin
+    # main', shell=True)`) a refspec may carry the host language's quote,
+    # comma or bracket: shed them too, so the body's real target is judged.
+    junk = "'\"" if in_code else "'\",;)]}"
+    tokens = [t.strip(junk) for t in rest.split() if t.strip(junk)]
     positional: list[str] = []
     for token in tokens:
         if token == "--tags":
@@ -455,28 +521,119 @@ class RuleHit:
     detail: str = ""
 
 
+@dataclass(frozen=True)
+class CommandSite:
+    """One simple command the local shell runs, and the repo it runs in."""
+
+    text: str
+    repo: Path | None
+    #: The program runs a quoted argument as code the guard did not unwrap
+    #: (``su -c``, a python ``-c`` calling ``os.system``): its text fails closed.
+    opaque: bool = False
+
+
+@dataclass(frozen=True)
+class CommandView:
+    """A Bash command as the guard parsed it (#394): ``local_text`` is the raw
+    command with ssh remote payloads blanked; ``sites`` lists each simple
+    command the local shell runs (``sh -c`` / ``eval`` bodies unwrapped)."""
+
+    local_text: str
+    sites: tuple[CommandSite, ...]
+
+
+def _judge(
+    rule: NoteRule,
+    repo: Path | None,
+    pushed: list[str] | None,
+    facts: dict[tuple[str, Path], Any] | None = None,
+) -> str | None:
+    """Whether ``rule``'s repo conditions hold for ``repo`` and the pushed
+    refspecs: ``"hit"``, ``"unknown"`` (visibility undeterminable) or None.
+    ``facts`` memoises per-repo lookups across one evaluation, so a long chain
+    of pushes in one repo asks git for its branch once."""
+    if repo is None:
+        return None
+    memo: dict[tuple[str, Path], Any] = {} if facts is None else facts
+
+    def fact(name: str, fn: Any) -> Any:
+        if (name, repo) not in memo:
+            memo[(name, repo)] = fn(repo)
+        return memo[(name, repo)]
+
+    if rule.except_repos and fact("name", _repo_name) in rule.except_repos:
+        return None
+    if rule.when_branch:
+        branches = pushed if pushed is not None else [fact("branch", _repo_branch)]
+        if not any(branch in rule.when_branch for branch in branches):
+            return None
+    if rule.conditioned_on_has_commits():
+        has_commits = fact("has_commits", _remote_has_commits)
+        # Fail SAFE: an undeterminable remote must never widen an
+        # exemption, so unknown is treated as satisfying the condition.
+        if has_commits is not None and has_commits != rule.when_has_commits:
+            return None
+    if rule.conditioned_on_visibility():
+        visibility = fact("visibility", _repo_visibility)
+        if visibility == _VISIBILITY_UNKNOWN:
+            return "unknown"
+        if visibility != rule.when_visibility:
+            return None
+    return "hit"
+
+
 def evaluate(
     action: dict[str, Any],
     omi_dir: Path | str,
     repo: Path | None,
     *,
     rules: list[NoteRule] | None = None,
+    view: CommandView | None = None,
 ) -> RuleHit | None:
     """First matching rule for ``action``, or ``None``. Deterministic, no model.
 
     ``repo`` is the enclosing git repo when the guard resolved one; rules with
     repo-scoped conditions (visibility/branch/except_repos) require it and do
     not fire without one.
+
+    ``view`` (#394) is the guard's parse of a Bash command. With it, a
+    repo-scoped rule judges EACH simple command the local shell runs that it
+    matches, against that command's own repo and refspec, and denies when any
+    of them hits (`git status && cd /public && git push origin main` is judged
+    at /public). A command matches on its code text (:func:`_code_text`):
+    quoted arguments of a program that does not run them are data, so
+    ``grep 'git push' README.md``, ``echo 'git push origin main'`` and
+    ``git commit -m "… git push …"`` judge nothing (#413 review 3). Quoted
+    text IS judged, against both the command's repo and ``repo``, when its
+    program runs it as code the guard did not unwrap (``su -c '…'``, a
+    python ``-c`` that calls ``os.system``): those fail closed. A glob only
+    the whole command's code text matches (one spanning two commands) is
+    judged against ``repo``. A match only inside an ssh remote payload is
+    skipped: that git runs on another host, so the local repo says nothing
+    about it. Rules WITHOUT repo conditions keep matching the raw command,
+    ssh payloads and quoted text included: a remote side effect is still a
+    side effect. Without ``view``, the raw command is judged against
+    ``repo``, as before #394.
+
+    A git global option between ``git`` and its subcommand never hides a
+    match (#414): ``*git push*`` matches ``git -C d push`` and
+    ``git -c k=v push``, but not ``git log --grep push``.
     """
     tool = str(action.get("tool") or "")
     command = str(action.get("command") or "")
     target = command or str(action.get("path") or "")
+    if not command:
+        view = None
+    code_texts: list[str] | None = None  # per site, computed on first need
+    facts: dict[tuple[str, Path], Any] = {}
     for rule in rules if rules is not None else load_rules(omi_dir):
         if rule.invalid:
             continue
         if rule.tool not in ("*", tool):
             continue
-        if not fnmatch.fnmatch(target, rule.match):
+        if not _rule_matches(target, rule.match) and not (
+            view and any(_rule_matches(s.text, rule.match) for s in view.sites)
+        ):
             continue
         repo_scoped = (
             rule.conditioned_on_visibility()
@@ -485,28 +642,36 @@ def evaluate(
             or rule.conditioned_on_has_commits()
         )
         if repo_scoped:
-            if repo is None:
-                continue
-            if rule.except_repos and _repo_name(repo) in rule.except_repos:
-                continue
-            if rule.when_branch:
-                pushed = _pushed_branches(command)
-                branches = pushed if pushed is not None else [_repo_branch(repo)]
-                if not any(branch in rule.when_branch for branch in branches):
-                    continue
-            if rule.conditioned_on_has_commits():
-                has_commits = _remote_has_commits(repo)
-                # Fail SAFE: an undeterminable remote must never widen an
-                # exemption, so unknown is treated as satisfying the condition.
-                if has_commits is not None and has_commits != rule.when_has_commits:
-                    continue
-            if rule.conditioned_on_visibility():
-                visibility = _repo_visibility(repo)
-                if visibility == _VISIBILITY_UNKNOWN:
+            judged: list[tuple[Path | None, list[str] | None]]
+            if view is None:
+                judged = [(repo, _pushed_branches(command, in_code=False))]
+            else:
+                if code_texts is None:
+                    code_texts = [_code_text(s.text) for s in view.sites]
+                judged = [
+                    (s.repo, _pushed_branches(s.text))
+                    for s, code in zip(view.sites, code_texts, strict=True)
+                    if _rule_matches(code, rule.match)
+                ]
+                # A body run by an executor the guard does not unwrap
+                # (`su -c '…'`) is code: judged as before #394, fail closed.
+                judged += [
+                    (r, _pushed_branches(s.text, in_code=False))
+                    for s in view.sites
+                    if s.opaque and _rule_matches(s.text, rule.match)
+                    for r in (s.repo, repo)
+                ]
+                if not judged:
+                    if not _rule_matches(_code_text(view.local_text), rule.match):
+                        continue  # quoted data, or only inside an ssh payload
+                    # A glob spanning simple commands: the command as a whole.
+                    judged = [(repo, _pushed_branches(view.local_text))]
+            outcomes = {_judge(rule, r, pushed, facts) for r, pushed in judged}
+            if "hit" not in outcomes:
+                if "unknown" in outcomes:
                     # Fail-open: never deny on a condition we could not check.
                     return RuleHit(rule, "unknown-visibility", "visibility unknown")
-                if visibility != rule.when_visibility:
-                    continue
+                continue
         return RuleHit(rule, rule.action)
     return None
 

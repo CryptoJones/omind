@@ -1360,6 +1360,138 @@ def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
     assert str(fetch_side) == str(commit_side) == str(repo_b)
 
 
+def test_repo_resolution_follows_cd_and_event_cwd(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#394: the repo a command acts on comes from `cd <dir> &&` / `(cd x; …)`
+    and the hook event's cwd — never from a `cd` inside an ssh payload, and
+    plain commands keep the cwd behaviour."""
+    repo_a = _mk_repo(tmp_path, "a")
+    repo_b = _mk_repo(tmp_path, "b")
+    monkeypatch.chdir(repo_a)
+    for command, expected in [
+        (f"cd {repo_b} && git commit -m x", repo_b),
+        ("cd ../b && git push origin main", repo_b),  # relative to cwd
+        (f"cd {tmp_path} && cd b && git push", repo_b),  # chained cd
+        (f"cd {tmp_path} && git -C b push", repo_b),  # cd then -C
+        (f"(cd {repo_b}; git commit -m x)", repo_b),  # subshell
+        (f"(cd {repo_b} && make) && git commit -m x", repo_a),  # subshell cd ends
+        (f'cd "{repo_b}" && git status', repo_b),  # quoted dir
+        (f"ssh host 'cd {repo_b} && git push origin main'", repo_a),  # remote payload
+        (f"echo 'cd {repo_b} && git push'", repo_a),  # quoted data
+        ("cd $HOME && git push", repo_a),  # unparseable -> cwd
+        ("cd - && git push", repo_a),
+        ("git push origin main", repo_a),  # plain command -> cwd
+    ]:
+        got = guard._repo_root_for_action({"tool": "Bash", "command": command})
+        assert got == expected, command
+    # The adapter-supplied event cwd wins over this process's cwd...
+    got = guard._repo_root_for_action(
+        {"tool": "Bash", "command": "git commit -m x", "cwd": str(repo_b)}
+    )
+    assert got == repo_b
+    got = guard._repo_root_for_action(
+        {"tool": "Bash", "command": "git -C ../a fetch", "cwd": str(repo_b)}
+    )
+    assert got == repo_a  # relative -C resolves against the event cwd
+    # ...and a missing / bogus one falls back to it (fail open).
+    for bogus in ("", str(tmp_path / "nope"), 42):
+        got = guard._repo_root_for_action({"tool": "Bash", "command": "git push", "cwd": bogus})
+        assert got == repo_a, bogus
+
+
+def test_normalize_action_carries_event_cwd() -> None:
+    """#394: the adapter passes the hook event's cwd through to the core."""
+    from omind import adapters
+
+    action = adapters.normalize_action(
+        {"tool_name": "Bash", "tool_input": {"command": "git push"}, "cwd": "/w/t"}
+    )
+    assert action["cwd"] == "/w/t"
+
+
+def _capturing_omind(tmp_path: Path) -> tuple[Path, Path]:
+    """A fake omind that saves the JSON it is piped and allows."""
+    capture = tmp_path / "captured.json"
+    fake = tmp_path / "capture-omind"
+    fake.write_text(f"#!/usr/bin/env bash\ncat > '{capture}'\nexit 0\n", encoding="utf-8")
+    fake.chmod(0o755)
+    return fake, capture
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_forwards_the_event_cwd_to_the_core(tmp_path: Path) -> None:
+    """#394 review: omi-guard.sh passes the event's `.cwd` (the agent's shell
+    cwd) on the Bash path, so the core resolves the repo from it."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {**_BASH_EVENT, "cwd": "/w/tree"}
+    assert _run_hook(hook, event) == 0
+    assert json.loads(capture.read_text(encoding="utf-8"))["cwd"] == "/w/tree"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard-hermes.sh is a POSIX bash+jq adapter")
+def test_hermes_hook_forwards_the_event_cwd_to_the_core(tmp_path: Path) -> None:
+    """Hermes' shell-hook payload carries `cwd`; its adapter forwards it too."""
+    fake, capture = _capturing_omind(tmp_path)
+    src = importlib.resources.files("omind").joinpath("omi-guard-hermes.sh")
+    text = src.read_text(encoding="utf-8").replace("__OMIND_BIN__", str(fake))
+    hook = tmp_path / "omi-guard-hermes.sh"
+    hook.write_text(text.replace("__OMI_DIR__", str(tmp_path / "OMI")), encoding="utf-8")
+    event = {
+        "hook_event_name": "pre_tool_call",
+        "tool_name": "terminal",
+        "tool_input": {"command": "git status"},
+        "session_id": "h",
+        "cwd": "/w/tree",
+    }
+    subprocess.run(["bash", str(hook)], input=json.dumps(event), text=True, check=True)
+    assert json.loads(capture.read_text(encoding="utf-8"))["cwd"] == "/w/tree"
+
+
+def test_shell_sites_track_cd_pushd_popd_and_subshells(tmp_path: Path) -> None:
+    """#394 review: each simple command carries the directory it runs in.
+    `popd` undoes `pushd`; a subshell's move ends with it; a cd piped or
+    backgrounded with a single `|`/`&` moves nothing; wrappers are skipped;
+    an ssh remote command (quoted or not) is blanked from the local text."""
+
+    # Real absolute directories: on Windows `/a` is drive-relative, not
+    # absolute, so after an unknown `cd $X` it correctly resolves to None.
+    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    a, b = a_dir.as_posix(), b_dir.as_posix()
+    here = Path(".")
+
+    def where(command: str) -> list[tuple[str, Path | None]]:
+        sites, _cwd, _dirs, _local = guard._shell_sites(command)
+        return [
+            (s.program, None if s.cwd is None else Path(s.cwd)) for s in sites if s.program == "git"
+        ]
+
+    assert where(f"pushd {a} && git status && popd && git push") == [("git", a_dir), ("git", here)]
+    assert where(f"pushd {a} && pushd {b} && popd && git push") == [("git", a_dir)]
+    assert where("popd && git push") == [("git", here)]  # empty stack: popd fails, no move
+    assert where(f"(cd {a} && git status) && git push") == [("git", a_dir), ("git", here)]
+    assert where(f"echo $(cd {a} && git rev-parse HEAD) && git push") == [
+        ("git", a_dir),
+        ("git", here),
+    ]
+    assert where(f"cd {a} | true; git push") == [("git", here)]
+    assert where(f"cd {a} & git push") == [("git", here)]
+    assert where(f"cd {a} || exit 1; git push") == [("git", a_dir)]  # `||` read as `&&`
+    assert where("cd $HOME && git push") == [("git", None)]
+    assert where(f"cd {a} && cd $X && cd {b} && git push") == [("git", b_dir)]
+    assert where(f"sudo -u bob git -C {a} push") == [("git", a_dir)]
+    assert where("env X=1 timeout 60 git push") == [("git", here)]
+    assert where(f"git --work-tree={a} --git-dir {b}/.git push") == [("git", a_dir)]
+    assert where(f"bash -c 'cd {a} && git push' && git status") == [("git", a_dir), ("git", here)]
+    assert where(f"eval 'cd {a}' && git push") == [("git", a_dir)]  # eval shares the shell
+    assert where("ssh -p 22 host git push && git status") == [("git", here)]
+    _sites, _cwd, _dirs, local = guard._shell_sites("ssh -i k h git push origin main; ls")
+    assert local == "ssh -i k h" + " " * len(" git push origin main") + "; ls"
+    _sites, _cwd, _dirs, local = guard._shell_sites("bash -c \"ssh h 'git push'\"")
+    assert "git push" not in local
+
+
 def test_dash_c_git_writes_are_classified_and_checked_against_the_target(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

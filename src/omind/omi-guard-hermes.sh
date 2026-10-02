@@ -84,7 +84,11 @@ fi
 # github-push opt-in, per-turn gate). A shell command may live in tool_input or
 # extra depending on the tool.
 cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // .extra.command // .command // empty' 2>/dev/null)"
-jq -nc --arg t "$tool" --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" \
-  '{tool:$t, command:$c, session:$s, prompt:$prompt, is_omi_consult:false}' 2>/dev/null \
+# Hermes' shell-hook payload carries `cwd` (#394). It is the Hermes process's
+# cwd at fire time, not the terminal tool's TERMINAL_CWD, but forwarding it
+# keeps the core's repo resolution explicit rather than inherited.
+cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
+jq -nc --arg t "$tool" --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" --arg cwd "$cwd" \
+  '{tool:$t, command:$c, session:$s, prompt:$prompt, cwd:$cwd, is_omi_consult:false}' 2>/dev/null \
   | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR"
 exit 0

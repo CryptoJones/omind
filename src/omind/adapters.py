@@ -117,6 +117,9 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
         "transcript_path": _first_str(event, ("transcript_path", "transcriptPath")),
         "consult_target": consult_target,
         "consult_kind": "read" if "read" in tool.lower() else "search",
+        # #394: the agent's shell cwd, so the target repo is resolved from where
+        # the command runs, not from wherever this hook process started.
+        "cwd": _first_str(event, ("cwd",)),
     }
 
 

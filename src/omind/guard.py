@@ -39,6 +39,7 @@ cannot be skipped by a broken adapter or a missing policy file.
 from __future__ import annotations
 
 import contextlib
+import functools
 import json
 import os
 import re
@@ -49,9 +50,12 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, TextIO
+from typing import TYPE_CHECKING, Any, TextIO
 
 from omind import compliance, filelock, paths, policy
+
+if TYPE_CHECKING:
+    from omind import rules as rules_mod
 
 GATE_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `search-vault` with a focused task query, "
@@ -1559,75 +1563,422 @@ def _action_path(action: dict[str, Any]) -> str:
     return ""
 
 
-def _git_dash_c_path(command: str) -> Path | None:
-    """The cumulative ``-C <dir>`` target of the command's first simple command,
-    when that command is ``git`` — the repo a ``git -C <dir> …`` actually acts
-    on. Scoped to a literal leading ``git`` token so ``make -C``/``tar -C`` are
-    never misread. Repeated ``-C`` chains relative to the previous one (git's
-    own semantics); a relative result resolves against cwd in the caller. Any
-    parse trouble returns ``None`` (fall back to cwd) — never raises."""
-    try:
-        parts = _split_simple_commands(command)
-        if not parts:
-            return None
-        # POSIX shlex treats every backslash as an escape and turns an unquoted
-        # Windows path such as ``C:\\repo`` into ``C:repo``.  PowerShell/cmd do
-        # not use backslashes that way, so retain them for a Windows shell or
-        # an explicit drive path. Non-POSIX shlex keeps surrounding quotes;
-        # remove only a matching outer pair.
-        windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", parts[0])
-        tokens = shlex.split(parts[0], posix=not windows_style)
-        if windows_style:
-            tokens = [
-                token[1:-1]
-                if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
-                else token
-                for token in tokens
-            ]
-    except ValueError:
+#: Programs whose operands after ``[options] host`` run on ANOTHER machine
+#: (#394), with the single-letter options that take a separate argument. Only
+#: ssh: its remote command is the documented case, and anything it runs acts on
+#: the remote host's repos, never the local one.
+_REMOTE_LAUNCHERS: dict[str, frozenset[str]] = {"ssh": frozenset("BbcDEeFIiJLlmOopQRSWw")}
+#: Shells whose ``-c`` body runs LOCALLY: their bodies are code, not data, so
+#: they are unwrapped and walked like the outer command (#394 review).
+_LOCAL_SHELLS = frozenset({"sh", "bash", "zsh", "dash", "ksh", "mksh", "ash"})
+#: git global options that take a separate argument (``git -C <dir> push``).
+_GIT_OPTS_WITH_ARG = frozenset(
+    {"-C", "-c", "--git-dir", "--work-tree", "--namespace", "--super-prefix", "--config-env"}
+)
+#: Nesting limit for ``bash -c '… eval "…"'`` unwrapping; a deeper body is
+#: left as one opaque site: its quoted text is judged as code (fails closed).
+_MAX_UNWRAP_DEPTH = 4
+#: Programs that run an ARGUMENT as shell code the guard does not unwrap
+#: (``su -c '…'``, ``fish -c``, ``watch '…'``, ``tmux new '…'``). Their quoted
+#: arguments are code, so a repo-scoped rule matching them fails closed
+#: (#413 review 3) instead of being read as data.
+_OPAQUE_EXECUTORS = frozenset(
+    {
+        "su",
+        "runuser",
+        "fish",
+        "csh",
+        "tcsh",
+        "nu",
+        "xonsh",
+        "elvish",
+        "pwsh",
+        "powershell",
+        "cmd",
+        "script",
+        "watch",
+        "flock",
+        "parallel",
+        "tmux",
+        "screen",
+        "expect",
+        "nix-shell",
+        "chroot",
+        "unshare",
+        "nsenter",
+        "doas",
+        "pkexec",
+    }
+)
+#: ssh options whose value runs locally, before or around the connection.
+_SSH_LOCAL_EXEC_RE = re.compile(r"(?i)(?:Local|Proxy|KnownHosts)Command|\bexec\b")
+#: Script interpreters whose ``-c``/``-e`` body is code: they fail closed only
+#: when that body visibly spawns a process (:data:`_EXEC_CALL_RE`). A
+#: ``python3 -c "print('git push')"`` is data.
+_SCRIPT_INTERPRETER_RE = re.compile(
+    r"python[\d.]*|pypy[\d.]*|node|nodejs|deno|bun|ruby|perl|php|lua"
+)
+_EXEC_CALL_RE = re.compile(
+    r"subprocess|os\.(?:system|popen|exec|spawn)|pty\.spawn|child_process|Open3|%x|`"
+    r"|\b(?:system|exec|execSync|spawn|spawnSync|popen|qx|shell_exec|passthru|proc_open)\b"
+)
+
+
+@dataclass(frozen=True)
+class _ShellSite:
+    """One simple command the LOCAL shell runs (#394).
+
+    ``text`` is its raw text from the program word on (wrappers such as
+    ``sudo``/``env``/``timeout 60`` skipped), with an ssh remote payload
+    blanked. ``cwd`` is the directory it runs in, relative to the shell's
+    starting directory unless absolute; ``None`` when a ``cd $VAR`` /
+    ``cd -`` made it unknowable (callers then fall back to the start).
+    ``opaque`` marks a program that runs a quoted argument as code the guard
+    did not unwrap (``su -c``, a too-deep ``bash -c``, a python ``-c`` that
+    calls ``os.system``): its quoted text is code, not data."""
+
+    program: str
+    text: str
+    cwd: Path | None
+    opaque: bool = False
+
+
+def _chdir(cwd: Path | None, step: str) -> Path | None:
+    """``cd step`` from ``cwd``: shell semantics, ``~`` expanded."""
+    target = Path(step).expanduser()
+    if target.is_absolute():
+        return target
+    return None if cwd is None else cwd / target
+
+
+#: A redirection operator alone (``>``, ``2>``, ``&>``, ``>&``): its target is
+#: the next word.
+_REDIRECT_OP_RE = re.compile(r"[0-9]*&?[<>]+[&|]?")
+#: A word that starts with a redirection (``>/dev/null``, ``2>&1``, ``<in``).
+_REDIRECT_RE = re.compile(r"[0-9]*&?[<>]")
+
+
+def _without_redirects(tokens: list[str]) -> list[str]:
+    """``tokens`` minus redirections and their targets: ``cd X >/dev/null``
+    and ``pushd X > /dev/null`` name the same directory as ``cd X``."""
+    words: list[str] = []
+    skip = False
+    for token in tokens:
+        if skip:
+            skip = False
+        elif _REDIRECT_OP_RE.fullmatch(token):
+            skip = True
+        elif not _REDIRECT_RE.match(token):
+            words.append(token)
+    return words
+
+
+def _cd_operand(tokens: list[str] | None) -> str | None:
+    """The literal directory a ``cd``/``pushd`` names, or ``None`` when it is
+    not statically knowable (``cd -``, ``cd $VAR``, ``pushd +1``,
+    unparseable). Redirections are dropped and ``-P``/``-L``/``-e``/``-@``
+    and ``--`` skipped first (#413 review 3: ``pushd X >/dev/null``)."""
+    if tokens is None:
         return None
-    if not tokens or tokens[0] != "git":
+    words = _without_redirects(tokens)
+    if not words:
         return None
-    target: Path | None = None
     i = 1
-    while i < len(tokens) - 1:
-        if tokens[i] == "-C":
-            step = Path(tokens[i + 1]).expanduser()
-            target = step if target is None or step.is_absolute() else target / step
-            i += 2
-        elif tokens[i] == "-c":
-            i += 2
-        else:
+    while i < len(words) and words[i].startswith("-") and words[i] != "-":
+        if words[i] == "--":
+            i += 1
             break
-    return target
+        if not re.fullmatch(r"-[LPe@]+", words[i]):
+            return None
+        i += 1
+    operands = words[i:]
+    if not operands:
+        return "~" if words[0] == "cd" else None  # bare `cd` goes home
+    step = operands[0]
+    if len(operands) != 1 or step == "-" or "$" in step or "`" in step:
+        return None
+    if words[0] == "pushd" and step[:1] == "+":
+        return None  # pushd +N rotates the stack
+    return step
 
 
-def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
-    candidates: list[Path] = []
-    raw_path = _action_path(action)
-    if raw_path:
-        p = Path(raw_path).expanduser()
-        candidates.append(p if p.is_dir() else p.parent)
-    else:
-        # A Bash action carries no file path, so the repo was previously always
-        # the shell's cwd — which misattributed `git -C <other-repo> fetch` (and
-        # `git -C <other-repo> commit`) to the cwd repo (#147). Honor `-C` for
-        # git commands; a `-C` that lands outside any repo falls through to cwd.
-        with contextlib.suppress(Exception):
-            cmd = str(action.get("command") or "")
-            if not cmd and isinstance(action.get("tool_input"), dict):
-                cmd = str(
-                    action["tool_input"].get("command")
-                    or action["tool_input"].get("cmd")
-                    or ""
-                )
-            dash_c = _git_dash_c_path(cmd)
-            if dash_c is not None:
-                candidates.append(dash_c)
-        candidates.append(Path.cwd())
+def _git_site_cwd(tokens: list[str], cwd: Path | None) -> Path | None:
+    """The directory a ``git`` invocation acts on: ``cwd`` moved by its own
+    cumulative ``-C`` options (git's semantics: each relative to the last),
+    then by ``--work-tree`` or ``--git-dir`` when given (the repo is found
+    upward from either)."""
+    i, tree = 1, ""
+    while i < len(tokens):
+        word = tokens[i]
+        if not word.startswith("-"):
+            break
+        name, eq, value = word.partition("=")
+        if name in _GIT_OPTS_WITH_ARG and not eq:
+            if i + 1 >= len(tokens):
+                break
+            value = tokens[i + 1]
+            i += 1
+        if name == "-C":
+            cwd = _chdir(cwd, value)
+        elif name == "--work-tree" or (name == "--git-dir" and not tree):
+            tree = value
+        i += 1
+    return _chdir(cwd, tree) if tree else cwd
+
+
+def _shell_body(tokens: list[str]) -> str | None:
+    """The ``-c`` body of ``sh/bash/zsh … -c '<body>'`` (``-lc``, ``-ec`` and
+    ``-o opt`` before it included), or ``None`` when there is no ``-c``."""
+    i = _shell_body_index(tokens)
+    return None if i is None else tokens[i]
+
+
+def _shell_body_index(tokens: list[str]) -> int | None:
+    """Where :func:`_shell_body` finds the body in ``tokens``."""
+    has_c = False
+    i = 1
+    while i < len(tokens):
+        word = tokens[i]
+        if word in ("-o", "+o", "-O", "+O"):
+            i += 2
+            continue
+        if word == "--":
+            i += 1
+            continue
+        if len(word) > 1 and word[0] in "-+":
+            has_c = has_c or (word[0] == "-" and "c" in word[1:])
+            i += 1
+            continue
+        return i if has_c else None
+    return None
+
+
+def _shell_sites(
+    command: str,
+    cwd: Path | None = Path("."),
+    dirs: tuple[Path | None, ...] = (),
+    depth: int = 0,
+) -> tuple[list[_ShellSite], Path | None, tuple[Path | None, ...], str]:
+    """Walk ``command`` as the local shell would and list every simple command
+    it runs, each with the directory it runs in (#394).
+
+    Returns ``(sites, cwd, dirs, local_text)``: the final ``cwd`` and
+    ``pushd`` stack (an ``eval`` body shares them with its caller), and
+    ``command`` with every ssh remote payload blanked (length-preserving).
+
+    Stages come from :func:`_program_stages`, so wrappers (``sudo``, ``env
+    X=1``, ``timeout 60``, ``xargs`` …) are already skipped. ``cd`` /
+    ``pushd`` / ``popd`` move the directory; ``( … )`` and ``$( … )`` scope a
+    move to the subshell; a ``cd`` piped or backgrounded with a single ``|`` /
+    ``&`` runs in its own subshell and moves nothing. ``sh/bash/zsh -c`` and
+    ``eval`` bodies are code this machine runs, so they are walked too (a
+    ``-c`` body in a child shell whose ``cd`` does not leak out; an ``eval`` in
+    this one). An ssh remote command, quoted or not, runs elsewhere and is
+    blanked. ``a || b`` is read like ``a && b``: a ``cd`` before ``||`` is
+    assumed to have run, which is wrong only when that ``cd`` failed.
+
+    A ``cd``/``pushd`` operand is read past redirections and ``-P``/``-L``/
+    ``--`` (``pushd X >/dev/null``). A site whose quoted arguments are code
+    the walk did not follow (``su -c``, a too-deep or positional-arg ``bash
+    -c``, ssh ``LocalCommand``) is marked ``opaque`` so rules fail closed on it.
+
+    Never raises on shell text: an unparseable word list keeps the site at the
+    current directory; an unknowable ``cd`` makes the directory ``None``.
+    """
+    raw = command.replace("\\\n", "  ")
+    code = policy.shell_code_text(command).replace("\\\n", "  ")
+    local = list(raw)
+    events: list[tuple[int, int, Any]] = [(i, 0, ch) for i, ch in enumerate(code) if ch in "()"]
+    events += [(stage[2], 1, stage) for stage in _program_stages(code)]
+    sites: list[_ShellSite] = []
+    scopes: list[tuple[Path | None, tuple[Path | None, ...]]] = []
+    for pos, _kind, item in sorted(events, key=lambda e: (e[0], e[1])):
+        if item == "(":
+            scopes.append((cwd, dirs))
+            continue
+        if item == ")":
+            if scopes:
+                cwd, dirs = scopes.pop()
+            continue
+        program = item[0]
+        end = next(
+            (
+                k
+                for k in range(pos, len(code))
+                if code[k] in ";&|\n()`" and not _is_redirect_char(code, k)
+            ),
+            len(code),
+        )
+        text = raw[pos:end].rstrip()
+        try:
+            tokens: list[str] | None = _shell_tokens(text)
+        except ValueError:
+            tokens = None
+        if program in ("cd", "pushd", "popd"):
+            before = code[:pos].rstrip()
+            after = code[end:]
+            in_subshell = (
+                (after.startswith("|") and not after.startswith("||"))
+                or (after.startswith("&") and not after.startswith("&&"))
+                or (before.endswith("|") and not before.endswith("||"))
+            )
+            if not in_subshell:
+                if program == "popd":
+                    if tokens is None or len(_without_redirects(tokens)) != 1:
+                        cwd = None
+                    elif dirs:
+                        cwd, dirs = dirs[0], dirs[1:]
+                else:
+                    operand = _cd_operand(tokens)
+                    moved = None if operand is None else _chdir(cwd, operand)
+                    if program == "pushd":
+                        dirs = (cwd, *dirs)
+                    cwd = moved
+            sites.append(_ShellSite(program, text, cwd))
+            continue
+        if program in _REMOTE_LAUNCHERS:
+            takes_arg = _REMOTE_LAUNCHERS[program]
+            words = list(re.finditer(r"\S+", code[pos:end]))
+            i = 1
+            while i < len(words):
+                word = words[i].group()
+                if word.startswith("-") and len(word) > 1:
+                    i += 2 if len(word) == 2 and word[1] in takes_arg else 1
+                    continue
+                cut = pos + words[i].end()  # everything after the host runs remotely
+                local[cut:end] = [" "] * (end - cut)
+                text = raw[pos:cut]
+                break
+            # `-o LocalCommand=…` / `ProxyCommand` / `KnownHostsCommand` /
+            # `Match exec` run on THIS machine: their quoted values are code.
+            sites.append(_ShellSite(program, text, cwd, bool(_SSH_LOCAL_EXEC_RE.search(text))))
+            continue
+        body: str | None = None
+        positional = False
+        if tokens and depth < _MAX_UNWRAP_DEPTH:
+            if program in _LOCAL_SHELLS:
+                at_body = _shell_body_index(tokens)
+                if at_body is not None:
+                    body = tokens[at_body]
+                    positional = at_body + 1 < len(tokens)
+            elif program == "eval" and len(tokens) > 1:
+                body = " ".join(tokens[1:])
+        if body is not None:
+            if positional:
+                # Words after the body become $0, $1 ..., which the body can
+                # run (`bash -c '"$@"' _ <cmd>`): code the walk does not
+                # follow, so the whole command fails closed.
+                sites.append(_ShellSite(program, text, cwd, True))
+            inner, inner_cwd, inner_dirs, inner_local = _shell_sites(body, cwd, dirs, depth + 1)
+            sites.extend(inner)
+            if program == "eval":
+                cwd, dirs = inner_cwd, inner_dirs
+            at = raw.find(body, pos, end)
+            if at >= 0:  # carry the body's blanked remote payloads outward
+                local[at : at + len(body)] = list(inner_local)
+            continue
+        site_cwd = _git_site_cwd(tokens, cwd) if program == "git" and tokens else cwd
+        opaque = (
+            program in _OPAQUE_EXECUTORS
+            or program in _LOCAL_SHELLS  # a shell body not unwrapped (too deep, unparseable)
+            or program == "eval"
+            or raw[pos] in "'\""  # the program word itself is quoted: `'git push' x`
+            or (
+                bool(_SCRIPT_INTERPRETER_RE.fullmatch(program)) and bool(_EXEC_CALL_RE.search(text))
+            )
+        )
+        sites.append(_ShellSite(program, text, site_cwd, opaque))
+    return sites, cwd, dirs, "".join(local)
+
+
+def _is_redirect_char(code: str, k: int) -> bool:
+    """Whether the ``&``/``|`` at ``code[k]`` belongs to a redirection
+    (``2>&1``, ``&>f``, ``>|f``), not a separator ending the simple command."""
+    ch = code[k]
+    if ch == "&":
+        return (k > 0 and code[k - 1] in "<>") or (k + 1 < len(code) and code[k + 1] == ">")
+    return ch == "|" and k > 0 and code[k - 1] == ">"
+
+
+def _git_dash_c_path(command: str) -> Path | None:
+    """The directory the command's first ``git`` invocation acts on: its
+    ``cd``/``pushd`` context (#394) plus its own ``-C``/``--work-tree``/
+    ``--git-dir`` options (#147). With no git, where the command's ``cd``
+    steps leave the shell. Only a literal ``git`` program honors ``-C``, so
+    ``make -C``/``tar -C`` are never misread. A relative result resolves
+    against the cwd in the caller; ``None`` (fall back to cwd) when the
+    directory is not statically knowable. Never raises.
+
+    Only the FIRST git is reported (freshness and classification want one repo
+    per command). Note rules judge every git separately, through
+    :func:`_rules_command_view`."""
+    try:
+        sites, cwd, _local = _shell_walk(command)
+    except Exception:
+        return None
+    for site in sites:
+        if site.program == "git":
+            return site.cwd
+    return cwd
+
+
+@functools.lru_cache(maxsize=8)
+def _shell_walk(command: str) -> tuple[tuple[_ShellSite, ...], Path | None, str]:
+    """:func:`_shell_sites` from the start directory, memoised: the repo
+    resolver and the note-rule view walk the same command in one check (#413
+    review 3). Pure in ``command``: sites hold paths relative to the start."""
+    sites, cwd, _dirs, local = _shell_sites(command)
+    return tuple(sites), cwd, local
+
+
+def _shell_tokens(part: str) -> list[str]:
+    """shlex tokens for one simple command. POSIX shlex treats every backslash
+    as an escape and turns an unquoted Windows path such as ``C:\\repo`` into
+    ``C:repo``. PowerShell/cmd do not use backslashes that way, so retain them
+    for a Windows shell or an explicit drive path. Non-POSIX shlex keeps
+    surrounding quotes; remove only a matching outer pair. Raises
+    ``ValueError`` on an unbalanced quote."""
+    windows_style = os.name == "nt" or re.search(r"(?<!\w)[A-Za-z]:\\", part)
+    tokens = shlex.split(part, posix=not windows_style)
+    if windows_style:
+        tokens = [
+            token[1:-1]
+            if len(token) >= 2 and token[0] == token[-1] and token[0] in {'"', "'"}
+            else token
+            for token in tokens
+        ]
+    return tokens
+
+
+def _action_command(action: dict[str, Any]) -> str:
+    cmd = str(action.get("command") or "")
+    if not cmd and isinstance(action.get("tool_input"), dict):
+        cmd = str(action["tool_input"].get("command") or action["tool_input"].get("cmd") or "")
+    return cmd
+
+
+def _action_base_dir(action: dict[str, Any]) -> Path:
+    """The adapter passes the hook event's cwd (the agent's shell cwd), which
+    can differ from this process's (#394: a worktree commit judged against the
+    main checkout). Fall back to the process cwd when absent or bogus."""
+    base = Path.cwd()
+    with contextlib.suppress(Exception):
+        event_cwd = action.get("cwd")
+        if isinstance(event_cwd, str) and event_cwd and Path(event_cwd).is_dir():
+            base = Path(event_cwd)
+    return base
+
+
+def _enclosing_repo(candidates: list[Path]) -> Path | None:
+    """The git worktree enclosing the first candidate that has one."""
     for candidate in candidates:
         try:
             cur = candidate.resolve()
+        except ValueError:
+            # An embedded NUL (`cd /tm\0p`) names no directory; it raised
+            # past every rule (#413 review 3). Fall back to the next candidate,
+            # which ends at the cwd.
+            continue
         except OSError:
             cur = candidate.absolute()
         for parent in (cur, *cur.parents):
@@ -1639,6 +1990,57 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
             if marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file()):
                 return parent
     return None
+
+
+def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
+    candidates: list[Path] = []
+    raw_path = _action_path(action)
+    if raw_path:
+        p = Path(raw_path).expanduser()
+        candidates.append(p if p.is_dir() else p.parent)
+    else:
+        base = _action_base_dir(action)
+        # A Bash action carries no file path, so the repo was previously always
+        # the shell's cwd, which misattributed `git -C <other-repo> fetch` (and
+        # `git -C <other-repo> commit`) to the cwd repo (#147). Honor `-C` and
+        # `cd` for git commands; a target outside any repo falls through to cwd.
+        with contextlib.suppress(Exception):
+            dash_c = _git_dash_c_path(_action_command(action))
+            if dash_c is not None:
+                candidates.append(base / dash_c)
+        candidates.append(base)
+    return _enclosing_repo(candidates)
+
+
+def _rules_command_view(action: dict[str, Any]) -> rules_mod.CommandView | None:
+    """The Bash command as note rules should see it (#394): ssh remote payloads
+    blanked, and every simple command the local shell runs paired with the
+    repo it runs in, so a repo-scoped rule judges EACH matching git invocation
+    against its own repo and refspec. ``None`` when there is no command or the
+    walk fails; rules then judge the raw command against the command-level
+    repo, as before #394, which is never more permissive."""
+    command = _action_command(action)
+    if not command or _action_path(action):
+        return None
+    try:
+        from omind import rules as rules_mod
+
+        base = _action_base_dir(action)
+        sites, _cwd, local_text = _shell_walk(command)
+        repos: dict[Path | None, Path | None] = {}  # 1,600 chained pushes share one cwd
+        for site in sites:
+            if site.cwd not in repos:
+                cands = [base] if site.cwd is None else [base / site.cwd, base]
+                repos[site.cwd] = _enclosing_repo(cands)
+        return rules_mod.CommandView(
+            local_text=local_text,
+            sites=tuple(
+                rules_mod.CommandSite(text=site.text, repo=repos[site.cwd], opaque=site.opaque)
+                for site in sites
+            ),
+        )
+    except Exception:
+        return None
 
 
 def _repo_has_remote(repo: Path) -> bool:
@@ -2228,7 +2630,9 @@ def _note_rules_verdict(action: dict[str, Any], omi_dir: Path | None) -> Verdict
     try:
         from omind import rules
 
-        hit = rules.evaluate(action, omi_dir, _repo_root_for_action(action))
+        hit = rules.evaluate(
+            action, omi_dir, _repo_root_for_action(action), view=_rules_command_view(action)
+        )
         if hit is None:
             return None
         session = str(action.get("session") or "")

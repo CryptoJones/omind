@@ -26,6 +26,7 @@ def test_normalize_claude_shape() -> None:
         "transcript_path": "",
         "consult_target": "",
         "consult_kind": "search",
+        "cwd": "",
     }
 
 
