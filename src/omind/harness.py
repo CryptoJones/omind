@@ -34,7 +34,7 @@ FMT_CLAUDE_JSON = "claude_json"  # Hermes pre_tool_call: {"decision":"block","re
 FMT_JSON_SIGNAL = "json_signal"  # OpenCode plugin reads {allow, reason} JSON and throws in JS
 FMT_CODEX_HOOK = "codex_hook"  # Codex PreToolUse/PermissionRequest: hookSpecificOutput deny JSON
 FMT_GEMINI = "gemini"  # Gemini CLI BeforeTool: {"decision":"deny","reason"} on stdout, exit 0
-FMT_OPENCLAW = "openclaw"  # OpenClaw gateway: {allow,reason,rule_id} JSON (detect-only, exit 0)
+FMT_OPENCLAW = "openclaw"  # RETIRED (#425): no OpenClaw gateway reads this; {allow,reason,rule_id}
 # Poolside pool hook: snake_case hook_specific_output deny JSON, exit 0
 FMT_POOLSIDE = "poolside"
 # Antigravity (agy) PreToolUse: {"decision":"deny","reason"} / {"decision":"allow"}, exit 0
@@ -83,10 +83,17 @@ HARNESSES: dict[str, HarnessSpec] = {
     "antigravity": HarnessSpec(
         "antigravity", CAP_HARD_BLOCK, FMT_AGY, "Antigravity CLI PreToolUse hook"
     ),
-    # Detect-only until a live gateway is confirmed to enforce a deny (issue #88):
-    # the verdict is rendered + sent, but we don't yet CLAIM hard-block capability.
+    # RETIRED (#425): the "POST /hooks/agent gateway" this described does not
+    # exist. OpenClaw has no shell-command hooks (tool gating is the in-process
+    # plugin hook before_tool_call) and rejects the hooks.agent entry omind used
+    # to write, so setup no longer wires it and nothing invokes this adapter.
+    # Kept only because `omind guard selftest` and the adapter's last-resort
+    # tables still list it; a real OpenClaw guard would be a plugin.
     "openclaw": HarnessSpec(
-        "openclaw", CAP_DETECT_ONLY, FMT_OPENCLAW, "OpenClaw POST /hooks/agent gateway"
+        "openclaw",
+        CAP_DETECT_ONLY,
+        FMT_OPENCLAW,
+        "retired: OpenClaw has no shell-command hooks; nothing invokes this (#425)",
     ),
 }
 
@@ -175,9 +182,9 @@ def render_decision(
         )
         return 0
     if fmt == FMT_OPENCLAW:
-        # OpenClaw's gateway reads a JSON verdict. DETECT-ONLY for now (issue #88):
-        # we can't live-verify the gateway enforces a deny, so always exit 0 and
-        # let the verdict be advisory until hard-block is proven against a gateway.
+        # RETIRED (#425): no OpenClaw gateway reads this; setup no longer wires
+        # it (see the "openclaw" HarnessSpec). Kept advisory (exit 0) so the
+        # selftest row stays stable.
         out.write(
             json.dumps(
                 {"allow": verdict.allow, "reason": verdict.reason, "rule_id": verdict.rule_id}

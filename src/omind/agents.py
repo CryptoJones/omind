@@ -27,7 +27,7 @@ import os
 import shlex
 import shutil
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Any, ClassVar
 
@@ -50,7 +50,9 @@ from omind.provision import (
     canonical_omind_cmd,
     diagnose,
     double_quote,
+    go_cmd_breaks,
     hook_arg_quote,
+    hook_line,
     hook_quote,
 )
 
@@ -294,7 +296,8 @@ def gemini_settings_path() -> Path:
 #: settings.json, so a re-run replaces only our entry and never duplicates it.
 GEMINI_GUARD_MARKER = "guard adapter --harness gemini"
 
-#: Substring identifying omind's own OpenClaw guard gateway hook in openclaw.json.
+#: Substring identifying the retired OpenClaw guard entry older omind wrote to
+#: openclaw.json's ``hooks.agent`` (OpenClaw rejects it; setup removes it, #425).
 OPENCLAW_GUARD_MARKER = "guard adapter --harness openclaw"
 #: Poolside hook entries omind owns carry this ``name`` prefix and/or run omind
 #: with ``--harness poolside``; re-runs replace exactly those and nothing else.
@@ -517,6 +520,12 @@ class AgentProvisioner(Provisioner):
         """*value* quoted as a hook argument for this harness's Windows hook
         shell; *posix* is the call site's POSIX quoting, kept byte-for-byte."""
         return hook_arg_quote(self.WINDOWS_HOOK_SHELL, str(value), posix)
+
+    def _hook_line(self, command: str) -> str:
+        """*command* finished for this harness's Windows hook shell: a
+        PowerShell hook hands its exit code back (#425 review); see
+        :func:`provision.hook_line`."""
+        return hook_line(self.WINDOWS_HOOK_SHELL, command)
 
     def _omind_hook_command(self, event: str) -> str:
         """The ``omind hook <event>`` invocation an agent runs for OMI priming.
@@ -803,9 +812,8 @@ class OpenClawProvisioner(AgentProvisioner):
     AGENT_LABEL = "OpenClaw"
     INSTALL_HINT = "Install OpenClaw (it creates ~/.openclaw on first run), then re-run."
     DONE_MESSAGE = "Done. Restart OpenClaw to load the OMI memory tools."
-    # Undetermined: current OpenClaw has no shell-command hook path to read a
-    # Windows shell from (its hooks are in-process JS). Kept on the default
-    # double quotes until that is settled (#425).
+    # No Windows hook shell to render for: OpenClaw has no shell-command hooks
+    # (its hooks are in-process JS plugins), so omind installs none (#425).
 
     def agent_root(self) -> Path:
         return openclaw_root()
@@ -827,6 +835,10 @@ class OpenClawProvisioner(AgentProvisioner):
         return server if isinstance(server, dict) else None
 
     def register_mcp(self) -> None:
+        with self._config_lock():
+            self._register_mcp_locked()
+
+    def _register_mcp_locked(self) -> None:
         path = openclaw_config_path()
         data = self._read_settings(path)
         desired = self.desired_server_entry()
@@ -875,6 +887,11 @@ class OpenClawProvisioner(AgentProvisioner):
         # so existing installs must pick up edits rather than keep a stale copy.
         self._write_managed(bootstrap, content)
 
+        with self._config_lock():
+            self._register_bootstrap(bootstrap)
+
+    def _register_bootstrap(self, bootstrap: Path) -> None:
+        """The ``bootstrap-extra-files`` read-modify-write, under the config lock."""
         path = openclaw_config_path()
         data = self._read_settings(path)
         hooks = data.get("hooks")
@@ -911,46 +928,75 @@ class OpenClawProvisioner(AgentProvisioner):
 
     def integrate(self) -> None:
         super().integrate()
-        self.install_guard()
+        self.remove_retired_guard()
 
-    def install_guard(self) -> None:
-        """Register the OMI guard as an OpenClaw gateway hook in ``openclaw.json``.
+    def remove_retired_guard(self) -> None:
+        """Strip the ``hooks.agent`` guard entry older omind wrote (#425).
 
-        OpenClaw's hook transport is an HTTP/WebSocket gateway (POST /hooks/agent
-        on :18789, loopback), not a stdout shell hook — so we register a command
-        entry the gateway invokes as ``omind guard adapter --harness openclaw``;
-        the adapter emits an ``{"allow","reason","rule_id"}`` verdict the gateway
-        reads. Until that gateway is confirmed to ENFORCE a deny against a live
-        instance, OpenClaw is wired DETECT-ONLY (issue #88) and the verdict is
-        advisory. Touches only our own entry (by :data:`OPENCLAW_GUARD_MARKER`),
-        preserving any user-authored hooks.
+        omind used to register ``{"event": "pre_tool", "command": "<omind>
+        guard adapter --harness openclaw"}`` under ``hooks.agent``. OpenClaw has
+        no such key: ``hooks`` is a strict object (enabled, path, token,
+        presets, mappings, gmail, internal, ...), its tool gating is the
+        in-process plugin hook ``before_tool_call``, and it has no shell-command
+        hook at all. OpenClaw 2026.9.7 ``openclaw config validate`` answers
+        ``hooks: Unrecognized key: "agent"`` for that entry, and its strict
+        validation makes the Gateway REFUSE TO START. So the entry never ran a
+        guard anywhere and broke the gateway it was added to; setup now removes
+        omind's own entry (by :data:`OPENCLAW_GUARD_MARKER`) and leaves any
+        other content alone. OpenClaw gets MCP memory, the skill and bootstrap
+        priming; the guard needs an OpenClaw plugin, not a config entry.
         """
         path = openclaw_config_path()
-        data = self._read_settings(path)
-        command = f"{self._omind_cmd()} guard adapter --harness openclaw"
-        desired = {"event": "pre_tool", "command": command, "enabled": True}
-        hooks = data.get("hooks")
-        if not isinstance(hooks, dict):
-            hooks = {}
-        agent_hooks = hooks.get("agent")
-        existing = agent_hooks if isinstance(agent_hooks, list) else []
-        kept = [
-            e
-            for e in existing
-            if not (isinstance(e, dict) and OPENCLAW_GUARD_MARKER in json.dumps(e))
-        ]
-        merged = kept + [desired]
-        if merged != existing or self.config.force:
-            hooks["agent"] = merged
-            data["hooks"] = hooks
-            self._record(f"register OMI guard gateway hook (detect-only) in {path}")
+        if not path.exists():
+            return
+        with self._config_lock():
+            data = self._read_settings(path)
+            hooks = data.get("hooks")
+            agent_hooks = hooks.get("agent") if isinstance(hooks, dict) else None
+            if not isinstance(hooks, dict) or not isinstance(agent_hooks, list):
+                return
+            kept = [e for e in agent_hooks if not self._is_retired_guard(e)]
+            if kept == agent_hooks:
+                return
+            if kept:
+                hooks["agent"] = kept
+            else:
+                del hooks["agent"]
+            if hooks:
+                data["hooks"] = hooks
+            else:
+                del data["hooks"]
+            self._record(
+                f"remove retired OMI guard entry (hooks.agent, rejected by OpenClaw) from {path}"
+            )
             if not self.config.dry_run:
-                path.parent.mkdir(parents=True, exist_ok=True)
                 paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
-        else:
-            self.log(f"  OMI guard gateway hook already installed in {path}")
 
-    def _guard_wired(self) -> bool:
+    @staticmethod
+    def _is_retired_guard(entry: object) -> bool:
+        """Whether *entry* is omind's own retired guard: matched on its
+        ``command`` only, so a user hook that merely mentions the adapter (in a
+        ``description``, say) is left alone."""
+        if not isinstance(entry, dict):
+            return False
+        command = entry.get("command")
+        return isinstance(command, str) and OPENCLAW_GUARD_MARKER in command
+
+    @contextlib.contextmanager
+    def _config_lock(self) -> Iterator[None]:
+        """Hold ``openclaw.json``'s sibling ``.lock`` across a read-modify-write
+        (AGENTS.md: harness settings files). A dry run whose directory does not
+        exist yet writes nothing, so it runs unlocked rather than create it."""
+        path = openclaw_config_path()
+        if not path.parent.is_dir():
+            if self.config.dry_run:
+                yield
+                return
+            path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            yield
+
+    def _retired_guard_present(self) -> bool:
         try:
             data = self._read_settings(openclaw_config_path())
         except ProvisionError:
@@ -958,8 +1004,8 @@ class OpenClawProvisioner(AgentProvisioner):
         hooks = data.get("hooks")
         agent_hooks = hooks.get("agent") if isinstance(hooks, dict) else None
         return any(
-            isinstance(e, dict) and OPENCLAW_GUARD_MARKER in json.dumps(e)
-            for e in (agent_hooks or [])
+            self._is_retired_guard(e)
+            for e in (agent_hooks if isinstance(agent_hooks, list) else [])
         )
 
 
@@ -986,6 +1032,11 @@ class GeminiProvisioner(AgentProvisioner):
     # getShellConfiguration(): on Windows `pwsh -NoProfile -Command <cmd>` (or
     # `powershell.exe -NoProfile -NonInteractive -Command`). PowerShell rejects
     # `"<path>" -m omind ...`; it needs the call operator.
+    # Exit code (#425 review): executeCommandHook itself appends
+    # `; if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }` when the shell is
+    # PowerShell, and omind's BeforeTool deny rides in stdout JSON on exit 0
+    # (FMT_GEMINI), so blocking never depended on it. The omind suffix is
+    # added anyway (one rule for every PowerShell hook); it exits first.
     WINDOWS_HOOK_SHELL = "powershell"
     DONE_MESSAGE = (
         "Done. Restart the Gemini CLI to load the OMI guard "
@@ -1008,7 +1059,7 @@ class GeminiProvisioner(AgentProvisioner):
             "hooks": [
                 {
                     "type": "command",
-                    "command": f"{omind} guard adapter --harness gemini",
+                    "command": self._hook_line(f"{omind} guard adapter --harness gemini"),
                     "name": "omind-omi-guard",
                     "timeout": 30000,
                 }
@@ -1667,6 +1718,12 @@ class CodexProvisioner(AgentProvisioner):
     # shell_detect.rs makes PowerShell (pwsh, else powershell.exe) the Windows
     # default -> `<pwsh> -NoProfile -Command <cmd>`. One convention for the
     # guard, SessionStart and PostToolUse hooks alike.
+    # Exit code (#425 review): Codex does NOT propagate it itself;
+    # hooks/src/engine/command_runner.rs build_command passes the command as
+    # the one -Command argument, unwrapped. PreToolUse blocks on exit 0 plus
+    # hookSpecificOutput JSON (what FMT_CODEX_HOOK emits) or on exit 2 plus
+    # stderr (hooks/src/events/pre_tool_use.rs); any other code is a
+    # non-blocking failure. So every Codex hook gets POWERSHELL_EXIT_SUFFIX.
     WINDOWS_HOOK_SHELL = "powershell"
     DONE_MESSAGE = (
         "Done. Restart Codex to load the OMI memory tools, /omind skill, trusted "
@@ -1693,7 +1750,7 @@ class CodexProvisioner(AgentProvisioner):
             "hooks": [
                 {
                     "type": "command",
-                    "command": (
+                    "command": self._hook_line(
                         f"{omind} guard adapter --harness codex "
                         f"--omi-dir {self._arg(self.config.omi_dir, shlex.quote)}"
                     ),
@@ -1766,7 +1823,7 @@ class CodexProvisioner(AgentProvisioner):
         replacing only omind's own prior entry and preserving user hooks."""
         path = codex_hooks_path()
         data, hooks_cfg = self._read_hooks_file()
-        command = self._omind_hook_command("SessionStart")
+        command = self._hook_line(self._omind_hook_command("SessionStart"))
         desired = {"hooks": [{"type": "command", "command": command, "timeout": 15}]}
 
         groups = hooks_cfg.get("SessionStart")
@@ -1797,7 +1854,7 @@ class CodexProvisioner(AgentProvisioner):
         """
         path = codex_hooks_path()
         data, hooks_cfg = self._read_hooks_file()
-        command = self._omind_hook_command("PostToolUse")
+        command = self._hook_line(self._omind_hook_command("PostToolUse"))
         desired = {"hooks": [{"type": "command", "command": command, "timeout": 15}]}
 
         groups = hooks_cfg.get("PostToolUse")
@@ -2784,20 +2841,23 @@ def diagnose_hermes(config: SetupConfig) -> list[CheckResult]:
 def diagnose_openclaw(config: SetupConfig) -> list[CheckResult]:
     prov = OpenClawProvisioner(config=config, log=lambda _msg: None)
     results = _diagnose_agent(prov)
-    if prov._guard_wired():
+    if prov._retired_guard_present():
         results.append(
             CheckResult(
                 "openclaw_guard",
-                "ok",
-                f"OMI guard (detect-only) wired into {openclaw_config_path()}",
+                "fail",
+                f"{openclaw_config_path()} still carries omind's retired hooks.agent "
+                "guard entry, which OpenClaw rejects (the gateway refuses to start); "
+                "run `omind setup --agent openclaw` to remove it",
             )
         )
     else:
         results.append(
             CheckResult(
                 "openclaw_guard",
-                "warn",
-                "OMI guard not in openclaw.json (run `omind setup --agent openclaw`)",
+                "ok",
+                "no OMI guard for OpenClaw: it has no shell-command hooks "
+                "(tool gating is an in-process plugin hook)",
             )
         )
     return results
@@ -3157,6 +3217,39 @@ def diagnose_goose(config: SetupConfig) -> list[CheckResult]:
 
 # -- dispatch -------------------------------------------------------------------
 
+def _hook_commands_in(node: object) -> list[str]:
+    """Every ``command`` string in a hook config subtree."""
+    if isinstance(node, dict):
+        found = [node["command"]] if isinstance(node.get("command"), str) else []
+        return found + [c for v in node.values() for c in _hook_commands_in(v)]
+    if isinstance(node, list):
+        return [c for v in node for c in _hook_commands_in(v)]
+    return []
+
+
+def _go_cmd_quote_check(key: str, agent: str, commands: list[str]) -> CheckResult | None:
+    """A warning when an installed agy/pool hook carries a double quote (#425).
+
+    Both run hooks through Go's ``exec.Command("cmd", "/c", command)``, which
+    escapes every inner ``"`` as ``\\"``; cmd.exe cannot read that, so the hook
+    fails on every call. Setup only writes one when a path needing quotes has
+    no 8.3 short name, so the fix is on the filesystem, not in omind.
+    """
+    broken = [c for c in commands if go_cmd_breaks(c)]
+    if not broken:
+        return None
+    return CheckResult(
+        key,
+        "warn",
+        f"{len(broken)} {agent} hook command(s) contain a double quote, which Go's "
+        "`cmd /c` escaping breaks, so those hooks fail: a path with a space or "
+        "other special character has no 8.3 short name. Install omind (and the "
+        "vault) under a path without spaces, or enable 8.3 names on that volume "
+        "(`fsutil 8dot3name set <drive>: 0`, then recreate the directory), and "
+        f"re-run `omind setup --agent {agent}`",
+    )
+
+
 def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
     """Doctor for Poolside: the ``mcp_servers`` entry for this vault AND the five
     OMI hook entries under ``hooks`` in the same settings.yaml (#311)."""
@@ -3204,6 +3297,15 @@ def diagnose_poolside(config: SetupConfig) -> list[CheckResult]:
                 "(run `omind setup --agent poolside`)",
             )
         )
+    try:
+        hooks = prov._read_config().get("hooks")
+    except ProvisionError:
+        hooks = None
+    groups = hooks.values() if isinstance(hooks, dict) else []
+    owned = [e for g in groups if isinstance(g, list) for e in g if prov._owned_hook(e)]
+    quoted = _go_cmd_quote_check("poolside_cmd_quotes", "poolside", _hook_commands_in(owned))
+    if quoted is not None:
+        results.append(quoted)
     return results
 
 
@@ -3257,6 +3359,13 @@ def diagnose_agy(config: SetupConfig) -> list[CheckResult]:
                 f"OMI hooks missing from {prov.hooks_path()} (run `omind setup --agent agy`)",
             )
         )
+    try:
+        agy_block = prov._read_hooks().get(AGY_HOOK_NAME)
+    except ProvisionError:
+        agy_block = None
+    quoted = _go_cmd_quote_check("agy_cmd_quotes", "agy", _hook_commands_in(agy_block))
+    if quoted is not None:
+        results.append(quoted)
     skill_file = prov.skill_dir() / paths.AGENT_SKILL_FILENAME
     if skill_file.is_file():
         results.append(CheckResult("agy_skill", "ok", f"omind skill found: {skill_file}"))
