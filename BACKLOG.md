@@ -92,7 +92,6 @@ into a new note. In dependency order; each child is flag-gated._
 Follow-ups:
 
 - [ ] **entities: dotted Python names like `asyncio.run` are read as hostnames** ([#402](https://github.com/CryptoJones/omind/issues/402)) — _bug, follow-up of #384_
-- [ ] **Name hints: names shown at write time are not marked as already hinted** ([#403](https://github.com/CryptoJones/omind/issues/403)) — _enhancement, follow-up of #384_
 - [ ] **namehints/timeline: `…`-truncated titles are documented as resolvable by recall-note, but nothing resolves a prefix** ([#406](https://github.com/CryptoJones/omind/issues/406)) — _bug, follow-up of #384 (raised in the #405 review)_
 
 ### Windows
@@ -156,6 +155,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.0)
+
+- [x] **Name hints: names shown at write time are not marked as already hinted** ([#403](https://github.com/CryptoJones/omind/issues/403)) — **v10.2.0** — _enhancement, follow-up of #384_ —
+  a name a `create-note`/`edit-note` response listed under `related_by_entity` or
+  `name_timelines` is recorded in the session's name-hint ledger by the PostToolUse hook,
+  so a later tool result naming it does not hint it again.
 
 ### Shipped — 2026-10-02 (v10.1.2)
 
