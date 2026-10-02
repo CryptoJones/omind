@@ -4027,6 +4027,115 @@ def test_windows_tokenizing_redirects_outside_the_repo_are_not_repo_work(
     assert not guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
 
 
+#: #450: more write tools whose target lands inside the repo.
+_MORE_WRITE_TOOLS_INTO_REPO = (
+    "install {outside}/a src/b",
+    "install -m 644 {outside}/a {repo}/src/b",
+    "install -m644 -o root {outside}/a src/b",
+    "install -t src {outside}/a {outside}/b",
+    "install --target-directory=src {outside}/a",
+    "install -d {outside}/d src/new",
+    "install -dm755 src/new",
+    "dd if={outside}/a of=src/b bs=1M",
+    "dd if=/dev/zero of={repo}/src/blob count=1",
+    "truncate -s 0 src/x.py",
+    "truncate --size 10 {outside}/a src/x.py",
+    "truncate -r {outside}/ref src/x.py",
+    "touch src/x.py",
+    "touch -d yesterday src/x.py",
+    "touch -t 202601010000 {outside}/a src/x.py",
+    "touch -r {outside}/ref src/x.py",
+    "ln -s {outside}/a src/link",
+    "ln -sf {outside}/a {repo}/src/link",
+    "ln -t src {outside}/a",
+    "ln -s {outside}/a",
+    "rsync -a {outside}/a src/",
+    "rsync -av -e ssh --exclude .git {outside}/d/ {repo}/src/",
+    "find {outside} -name '*.py' -exec touch {{}} src/stamp \\;",
+)
+
+#: #450: the same tools aimed outside the repo, or at a remote/device path.
+_MORE_WRITE_TOOLS_OUTSIDE_REPO = (
+    "install src/a {outside}/b",
+    "install -m 644 src/a {outside}/b",
+    "install -t {outside} src/a src/b",
+    "install -d {outside}/d",
+    "dd if=src/a of={outside}/b",
+    "dd if=src/a of=/dev/null",
+    "dd if=src/a",
+    "truncate -s 0 {outside}/a",
+    "truncate -r src/x.py {outside}/a",
+    "touch {outside}/a",
+    "touch -r src/x.py {outside}/a",
+    "touch -d src {outside}/a",
+    "ln -s src/a {outside}/link",
+    "ln -t {outside} src/a",
+    "cd {outside} && ln -s {repo}/src/a",
+    "rsync -a src/ {outside}/copy/",
+    "rsync -a --exclude src {outside}/a {outside}/b",
+    "rsync -a src/ host:backup/",
+    "rsync -a src/ user@host:{repo}/src/",
+    "rsync -a src/ rsync://host/module/",
+    "rsync -a src/ host::module",
+    "rsync src",
+    "find {outside} -exec touch {{}} +",
+)
+
+
+@pytest.mark.parametrize("command", _MORE_WRITE_TOOLS_INTO_REPO)
+def test_more_write_tools_into_the_repo_are_repo_work(tmp_path: Path, command: str) -> None:
+    """#450: `install`, `dd of=`, `truncate`, `touch`, `ln` and `rsync` aimed
+    inside the target repo write it as surely as `cp` does."""
+    repo, outside = _write_probe_repo(tmp_path)
+    assert guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.parametrize("command", _MORE_WRITE_TOOLS_OUTSIDE_REPO)
+def test_more_write_tools_outside_the_repo_are_not_repo_work(
+    tmp_path: Path, command: str
+) -> None:
+    """#450: a target outside the repo, a device, or a remote rsync
+    destination is not repo work."""
+    repo, outside = _write_probe_repo(tmp_path)
+    assert not guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", _MORE_WRITE_TOOLS_INTO_REPO)
+def test_windows_tokenizing_more_write_tools_into_the_repo_are_repo_work(
+    tmp_path: Path, command: str
+) -> None:
+    repo, outside = _write_probe_repo(tmp_path)
+    assert guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", _MORE_WRITE_TOOLS_OUTSIDE_REPO)
+def test_windows_tokenizing_more_write_tools_outside_the_repo_are_not_repo_work(
+    tmp_path: Path, command: str
+) -> None:
+    repo, outside = _write_probe_repo(tmp_path)
+    assert not guard._is_repo_sensitive_action(_repo_write_action(command, repo, outside))
+
+
+@pytest.mark.parametrize(
+    ("word", "remote"),
+    [
+        ("host:path", True),
+        ("user@host:/abs", True),
+        ("host::module", True),
+        ("rsync://host/module", True),
+        ("C:/repo/src", False),
+        ("C:\\repo\\src", False),
+        ("./a:b", False),
+        ("src/", False),
+    ],
+)
+def test_rsync_remote_destination(word: str, remote: bool) -> None:
+    """#450: a `host:path` or `rsync://` destination is remote, a drive is not."""
+    assert guard._rsync_remote(word) is remote
+
+
 def test_redirect_with_no_target_repo_is_not_repo_work(tmp_path: Path) -> None:
     """No target repo, nothing to protect: the redirect check fails open."""
     action = {"tool": "Bash", "command": "echo x > x.py", "cwd": tmp_path.as_posix()}

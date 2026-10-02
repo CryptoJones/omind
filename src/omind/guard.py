@@ -2583,12 +2583,52 @@ def _runs_repo_work(raw: str) -> bool:
 _OUT_REDIRECT_RE = re.compile(r"(?<![<>&\d\\])(?:\d+|&)?>>?\|?")
 #: One shell word: unquoted and quoted runs, ending at a blank or operator.
 _SHELL_WORD_RE = re.compile(r"""(?:\\.|[^\s"'\\;&|<>()`]|"[^"]*"|'[^']*')+""")
-#: File operations whose operands are written or removed (#434): ``tee`` and
-#: ``rm`` write/remove every operand, ``mv`` removes its sources and writes
-#: its destination, ``cp`` writes only its destination.
-_FILE_OPS = frozenset({"tee", "cp", "mv", "rm"})
-#: ``cp``/``mv`` switches that take a separate value (GNU).
-_FILE_OP_ARG_SWITCHES = frozenset({"-t", "-S", "--target-directory", "--suffix"})
+#: File operations whose operands are written or removed (#434, #450):
+#: ``tee``, ``rm``, ``truncate`` and ``touch`` write/remove every operand,
+#: ``mv`` removes its sources and writes its destination, ``cp``, ``install``
+#: and ``ln`` write only their destination (``install -d`` every operand),
+#: ``dd`` writes only its ``of=`` operand, and ``rsync`` writes its last
+#: operand when that is a local path.
+_FILE_OPS = frozenset(
+    {"tee", "cp", "mv", "rm", "install", "dd", "truncate", "touch", "ln", "rsync"}
+)
+#: Per program, the switches that take a SEPARATE value: short option letters
+#: (also valid at the end of a cluster, ``-dm755`` / ``-m 755``) and long
+#: options (``--opt=value`` is one word whatever the table says). GNU
+#: spellings; ``-t``/``--target-directory`` is read as the destination.
+_FILE_OP_VALUE_SWITCHES: dict[str, tuple[str, frozenset[str]]] = {
+    "cp": ("tS", frozenset({"--target-directory", "--suffix"})),
+    "mv": ("tS", frozenset({"--target-directory", "--suffix"})),
+    "install": (
+        "gmotS",
+        frozenset({"--group", "--mode", "--owner", "--target-directory", "--suffix"}),
+    ),
+    "ln": ("tS", frozenset({"--target-directory", "--suffix"})),
+    "truncate": ("sr", frozenset({"--size", "--reference"})),
+    "touch": ("dtr", frozenset({"--date", "--reference", "--time"})),
+    "rsync": (
+        "efBTM@",
+        frozenset(
+            {
+                "--rsh", "--rsync-path", "--filter", "--exclude", "--include",
+                "--exclude-from", "--include-from", "--files-from", "--temp-dir",
+                "--compare-dest", "--copy-dest", "--link-dest", "--backup-dir",
+                "--suffix", "--chmod", "--chown", "--usermap", "--groupmap",
+                "--timeout", "--contimeout", "--port", "--sockopts", "--log-file",
+                "--log-file-format", "--out-format", "--password-file", "--bwlimit",
+                "--max-size", "--min-size", "--max-delete", "--partial-dir",
+                "--block-size", "--compress-choice", "--compress-level",
+                "--checksum-choice", "--skip-compress", "--modify-window",
+                "--remote-option", "--iconv", "--info", "--debug", "--write-batch",
+                "--only-write-batch", "--read-batch", "--protocol", "--checksum-seed",
+                "--address", "--stop-after", "--stop-at", "--outbuf",
+            }
+        ),
+    ),
+}
+#: Programs whose ``-t DIR`` / ``--target-directory`` names the destination
+#: (``touch -t`` is a timestamp, not a directory).
+_TARGET_DIR_OPS = frozenset({"cp", "mv", "install", "ln"})
 #: ``find -exec`` placeholders and terminators: never a file operand (#434
 #: review). The walk leaves a lone ``\`` where ``\;`` ended the site.
 _EXEC_PLACEHOLDERS = frozenset({"{}", "+", ";", "\\;", "\\"})
@@ -2619,7 +2659,7 @@ def _redirect_targets(text: str) -> list[str]:
 
 
 def _file_op_targets(program: str, text: str) -> list[str]:
-    """The operands a ``tee``/``cp``/``mv``/``rm`` site writes or removes."""
+    """The operands a :data:`_FILE_OPS` site writes or removes (#434, #450)."""
     # A `find -exec … \;` site ends at the `\` of its terminator; a lone
     # trailing backslash would make shlex reject the whole site.
     text = text.rstrip()
@@ -2629,30 +2669,69 @@ def _file_op_targets(program: str, text: str) -> list[str]:
         words = _without_redirects(_shell_tokens(text))[1:]
     except ValueError:
         return []
+    short_values, long_values = _FILE_OP_VALUE_SWITCHES.get(program, ("", frozenset()))
     operands: list[str] = []
     target_dir: list[str] = []
+    flags: set[str] = set()
     i, options = 0, True
     while i < len(words):
         word = words[i]
         i += 1
         if options and word == "--":
             options = False
-        elif options and word.startswith("-") and len(word) > 1:
-            if program not in ("cp", "mv"):
-                continue
-            if word in _FILE_OP_ARG_SWITCHES:
-                if word in ("-t", "--target-directory") and i < len(words):
-                    target_dir.append(words[i])
+        elif options and word.startswith("--"):
+            name, eq, value = word.partition("=")
+            if name in long_values and not eq:
+                value = words[i] if i < len(words) else ""
                 i += 1
-            elif word.startswith("--target-directory="):
-                target_dir.append(word.split("=", 1)[1])
-            elif word.startswith("-t") and not word.startswith("--"):
-                target_dir.append(word[2:])
+            if name == "--target-directory" and program in _TARGET_DIR_OPS:
+                target_dir.append(value)
+            flags.add(name)
+        elif options and word.startswith("-") and len(word) > 1:
+            for j, letter in enumerate(word[1:], start=1):
+                if letter not in short_values:
+                    flags.add(letter)
+                    continue
+                value = word[j + 1 :]
+                if not value:
+                    value = words[i] if i < len(words) else ""
+                    i += 1
+                if letter == "t" and program in _TARGET_DIR_OPS:
+                    target_dir.append(value)
+                break
         elif word not in _EXEC_PLACEHOLDERS:
             operands.append(word)
+    if program == "dd":
+        return [w[3:] for w in operands if w.startswith("of=")]
+    if program == "install":
+        if "d" in flags or "--directory" in flags:
+            return operands
+        return target_dir or operands[-1:]
+    if program == "ln":
+        if target_dir:
+            return target_dir
+        if len(operands) == 1:  # `ln TARGET` links into the cwd
+            return [re.split(r"[/\\]", operands[0].rstrip("/\\"))[-1]]
+        return operands[-1:]
     if program == "cp":
         return target_dir or operands[-1:]
+    if program == "rsync":
+        if len(operands) < 2 or _rsync_remote(operands[-1]):
+            return []
+        return operands[-1:]
     return target_dir + operands
+
+
+def _rsync_remote(word: str) -> bool:
+    """Whether an rsync operand names a remote path: ``rsync://…``, or a colon
+    before any slash (``host:path``, ``user@host::module``). A Windows drive
+    (``C:/x``, ``C:\\x``) is local."""
+    if word.startswith("rsync://"):
+        return True
+    if re.match(r"[A-Za-z]:[/\\]", word):
+        return False
+    colon = word.find(":")
+    return colon > 0 and "/" not in word[:colon]
 
 
 def _path_in_repo(word: str, cwd: Path | None, repo: Path) -> bool:
@@ -2690,10 +2769,12 @@ def _without_comparisons(command: str) -> str:
 
 def _writes_into_repo(action: dict[str, Any], repo: Path | None = None) -> bool:
     """Whether a Bash command writes a file inside its target repo through an
-    output redirection, ``tee``, ``cp`` or ``mv``, or removes one with ``rm``
-    or ``mv`` (#434). Every simple command the local shell runs, ``-c``/``eval``
-    bodies included, is judged from the directory it runs in. A target outside
-    the repo (``>/dev/null``, ``2>&1``, ``> /tmp/log``) is not repo work.
+    output redirection, ``tee``, ``cp``, ``mv``, ``install``, ``dd of=``,
+    ``truncate``, ``touch``, ``ln`` or a local ``rsync`` destination, or
+    removes one with ``rm`` or ``mv`` (#434, #450). Every simple command the
+    local shell runs, ``-c``/``eval`` bodies included, is judged from the
+    directory it runs in. A target outside the repo (``>/dev/null``, ``2>&1``,
+    ``> /tmp/log``) is not repo work.
     ``repo`` is the already-resolved target repo, if the caller has it.
     ``False`` on any failure: classification fails open."""
     try:
