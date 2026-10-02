@@ -2098,20 +2098,33 @@ _BODY_READS_STDIN_RE = re.compile(
 _STDIN_OPERANDS = frozenset({"/dev/stdin", "/dev/fd/0", "-"})
 
 
+def _is_stdin_switch(word: str) -> bool:
+    """Whether the shell switch ``word`` is a short cluster holding ``-s``
+    (``-s``, ``-xs``): the shell reads its code from stdin. A long option
+    (``--posix``, ``--restricted``) is not one (#444 review)."""
+    return len(word) > 1 and word[0] == "-" and word[1] != "-" and "s" in word[1:]
+
+
 def _body_reads_stdin(tokens: list[str], at_body: int) -> bool:
     """Whether the local shell ``tokens`` (whose ``-c`` body is
     ``tokens[at_body]``) runs code from its stdin: an ``-s`` among its
     switches, or a body :data:`_BODY_READS_STDIN_RE` matches."""
-    switches = tokens[1:at_body]
-    if any(len(w) > 1 and w[0] == "-" and w[1] != "-" and "s" in w[1:] for w in switches):
+    if any(_is_stdin_switch(w) for w in tokens[1:at_body]):
         return True
     return bool(_BODY_READS_STDIN_RE.search(tokens[at_body]))
+
+
+def _source_words(tokens: list[str] | None) -> list[str]:
+    """``source``/``.`` ``tokens`` minus redirections and the ``--`` that
+    ends its options (``source -- <(…)``, #444 review)."""
+    words = _without_redirects(tokens or [])
+    return words[:1] + words[2:] if words[1:2] == ["--"] else words
 
 
 def _sources_stdin(tokens: list[str] | None) -> bool:
     """Whether ``source``/``.`` ``tokens`` reads its stdin as code: its file
     operand is ``/dev/stdin``, ``/dev/fd/0`` or ``-`` (#432 review)."""
-    words = _without_redirects(tokens or [])
+    words = _source_words(tokens)
     return len(words) > 1 and words[1] in _STDIN_OPERANDS
 
 
@@ -3230,7 +3243,7 @@ def _shell_code_source(words: list[str]) -> tuple[str, list[str]]:
             if i + 1 < len(words) and words[i + 1] not in _STDIN_OPERANDS:
                 return "file", []  # `bash -- x.sh`
         elif len(word) > 1 and word[0] in "-+":
-            reads_stdin = word[0] == "-" and "s" in word[1:]
+            reads_stdin = _is_stdin_switch(word)
         else:
             return "file", []
         i += 1
@@ -3339,6 +3352,56 @@ class _HardSubjects:
     quoted: tuple[str, ...] = ()
 
 
+def _without_substitution(masked: str, stop: int, tokens: list[str]) -> list[str] | None:
+    """The stage ``tokens`` (ending at offset ``stop`` of ``masked``) without
+    the ``<`` of the process substitution ``<(`` it ends in, and without the
+    ``<``/``0<`` that makes that substitution its stdin (``bash < <(…)``).
+    ``None`` when the stage does not end in a process substitution."""
+    if stop >= len(masked) or masked[stop] != "(" or tokens[-1:] != ["<"]:
+        return None
+    before = tokens[:-1]
+    if len(before) > 1 and re.fullmatch(r"0?<", before[-1]):
+        before = before[:-1]
+    return before
+
+
+def _process_substitution_code(
+    masked: str, text: str, stop: int, program: str, tokens: list[str]
+) -> str | None:
+    """The producer of a process substitution that the local shell or
+    ``source``/``.`` stage ``tokens`` (ending at offset ``stop`` of ``text``)
+    reads as code (#444): ``bash <(echo sudo id)`` and ``source <(…)`` run it
+    as their script, ``bash < <(…)`` as their stdin. ``None`` when the stage
+    does not end in one, or reads its code from elsewhere (``bash x.sh
+    <(…)``, ``bash -c '…' <(…)``, ``diff <(…)`` is not a shell at all).
+
+    ``masked`` is :func:`policy.shell_code_text` of ``text``, so a paren in a
+    quoted string never closes the substitution; an unclosed one runs to the
+    end of the text."""
+    before = _without_substitution(masked, stop, tokens)
+    if before is None:
+        return None
+    as_stdin = len(before) < len(tokens) - 1  # `bash < <(…)`, `bash 0< <(…)`
+    if program not in _LOCAL_SHELLS:
+        if not (_sources_stdin(before) if as_stdin else len(_source_words(before)) == 1):
+            return None
+    elif _shell_body_index(before) is not None or _shell_code_source(before)[0] != "stdin":
+        return None
+    elif not as_stdin and any(
+        word in _STDIN_OPERANDS or _is_stdin_switch(word) for word in before[1:]
+    ):
+        return None  # `bash -s <(…)`, `bash - <(…)`: the substitution is a positional word
+    depth = 0
+    for k in range(stop, len(masked)):
+        if masked[k] == "(":
+            depth += 1
+        elif masked[k] == ")":
+            depth -= 1
+            if depth == 0:
+                return text[stop + 1 : k]
+    return text[stop + 1 :]
+
+
 def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
     """Add to ``code``/``words`` what each local shell in ``text`` runs that
     the walk does not unwrap (#430 review): a ``bash -c`` body's positional
@@ -3360,13 +3423,25 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
             tokens = _shell_tokens(text[pos:stop])
         except ValueError:
             tokens = [program]
+        producer = _process_substitution_code(masked, text, stop, program, tokens)
+        if producer is not None:
+            # `bash <(echo sudo id)`, `source <(…)`, `bash < <(…)`: what the
+            # substitution prints is the code the shell runs (#444).
+            if producer.strip():
+                words.append(_words_in_command_position(producer))
+            continue
+        # The substitution is a positional word (`… | bash -s <(:)`), not a
+        # `<` redirect: drop it, so the pipeline producer is judged.
+        tokens = _without_substitution(masked, stop, tokens) or tokens
         if program not in _LOCAL_SHELLS and not _sources_stdin(tokens):
             continue
+        outer_floor = floor
         head = _pipeline_head(masked, pos, floor)
         floor = stop
         own = pos  # where a heredoc the shell reads may open (its own: masked)
         if program not in _LOCAL_SHELLS:
-            here: list[str] = []  # `… | source /dev/stdin`, `. /dev/stdin <<EOF`
+            # `… | source /dev/stdin`, `. /dev/stdin <<EOF`, `. /dev/stdin <<< '…'`
+            here: list[str] = _here_strings(tokens[1:])
             own = stop
         else:
             at_body = _shell_body_index(tokens)
@@ -3385,8 +3460,14 @@ def _local_shell_subjects(text: str, code: list[str], words: list[str]) -> None:
                 if source != "stdin":
                     continue
         code.extend(here)
-        if text[head:pos].strip():
-            words.append(_words_in_command_position(text[head:pos]))
+        producer_start, producer_end = head, pos
+        if not text[head:pos].strip() and head >= 2 and masked[head - 2 : head] == ">(":
+            # `echo sudo id > >(bash)`, `… | tee >(bash)`: the shell reads
+            # what the command writing into its output substitution prints.
+            producer_end = head - 2
+            producer_start = _pipeline_head(masked, producer_end, outer_floor)
+        if text[producer_start:producer_end].strip():
+            words.append(_words_in_command_position(text[producer_start:producer_end]))
         # A producer's heredoc body starts on the next line (`cat <<EOF |
         # bash`), past this stage: it is the code the shell reads.
         heredocs = list(policy._HEREDOC_RE.finditer(masked, head, own))

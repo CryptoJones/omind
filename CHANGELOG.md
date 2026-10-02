@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.19] - 2026-10-02
+
+### Fixed
+- **Hard rules: shells that read code from a stdin operand or a process
+  substitution ([#444](https://github.com/CryptoJones/omind/issues/444)).**
+  - A process substitution that a local shell or `source`/`.` runs as its
+    script now has its producer judged: `bash <(echo sudo id)`, `sh <(printf
+    'sudo id')`, `bash --posix <(…)`, `source <(…)`, `source -- <(…)`, `.
+    <(…)`. So does one it reads as stdin: `bash < <(…)`, `bash 0< <(…)`,
+    `source /dev/stdin < <(…)`. A substitution that is only a positional word
+    stays data (`bash x.sh <(…)`, `bash -s <(…)`, `bash -c '…' _ <(…)`), and
+    so does any command that is not a shell (`diff <(sort a) <(sort b)`). A
+    shell that takes one as a positional word still judges the pipeline that
+    feeds it (`echo sudo id | bash -s <(:)`).
+  - A shell inside an output process substitution judges the command writing
+    into it: `echo sudo id > >(bash)`, `echo sudo id | tee >(bash)`.
+  - Only a short switch cluster holding `s` reads stdin; a long option such
+    as `--posix` or `--restricted` does not.
+  - `. /dev/stdin <<< 'sudo id'` and `source /dev/stdin <<< '…'` judge the
+    here-string they run.
+  - `setsid` is in `policy.STAGE_WRAPPERS`, and `stdbuf`'s `--input`,
+    `--output` and `--error` take a separate value, so `setsid sudo id` and
+    `stdbuf --output L sudo id` are denied.
+  - A bare `-` stdin operand (`echo sudo id | bash -`, `bash - <<< 'sudo id'`)
+    was already judged since 10.2.16 (#446). It now has regression tests.
+  - **Deferred to [#455](https://github.com/CryptoJones/omind/issues/455):**
+    `find -exec sudo`, an expanded program name (`$(printf sudo) id`,
+    `${X:-sudo} id`) and `eval "$(echo sudo id)"`.
+
 ## [10.2.18] - 2026-10-02
 
 ### Security

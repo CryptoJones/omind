@@ -90,11 +90,14 @@ STAGE_WRAPPERS: dict[str, frozenset[str]] = {
     "nice": frozenset({"-n"}),
     "timeout": frozenset({"-s", "-k"}),
     "time": frozenset({"-f", "-o"}),
-    # #434: wrappers that also exec their trailing command.
-    "stdbuf": frozenset({"-i", "-o", "-e"}),
+    # #434: wrappers that also exec their trailing command; #444 review:
+    # `stdbuf --output L sudo id`.
+    "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
     "caffeinate": frozenset({"-t", "-w"}),
     "ionice": frozenset({"-c", "-n", "-p", "-P", "-u"}),
     "chronic": frozenset(),
+    # #444: execs the next word (`setsid sudo id`).
+    "setsid": frozenset(),
 }
 #: Wrappers that take one positional argument before the command (``timeout 5``).
 WRAPPER_POSITIONAL = frozenset({"timeout"})
