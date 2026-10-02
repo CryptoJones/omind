@@ -13,7 +13,6 @@ the exact order of operations._
 
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
-- [ ] **guard: the repo-work classifier misses `bash -c` bodies, redirects/`tee`/`cp`/`mv`/`rm` into the repo, and `python3 -m pytest`** ([#434](https://github.com/CryptoJones/omind/issues/434)) — _bug_
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428. Also adds the Nebraska banner and drops the stale Codeberg badge.
 - [ ] **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428)) — _enhancement (infra)_ —
@@ -79,6 +78,17 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.17)
+
+- [x] **guard: the repo-work classifier misses `bash -c` bodies, redirects/`tee`/`cp`/`mv`/`rm` into the repo, and `python3 -m pytest`** ([#434](https://github.com/CryptoJones/omind/issues/434)) — **v10.2.17** — _bug (pre-existing)_ —
+  `-c`/`eval` bodies go through the same stage classifier (and the commit
+  check), a redirect/`tee`/`cp`/`mv`/`rm` target inside the target repo is repo
+  work while `/dev/null`, `2>&1`, outside paths, comparisons and `find -exec`
+  placeholders are not, every python spelling follows one rule (a test module
+  or a script file counts; `-c`, other modules and stdin do not),
+  git/`gh`/test runners are matched behind wrappers, and
+  `stdbuf`/`caffeinate`/`ionice`/`chronic` are stage wrappers.
 
 ### Shipped — 2026-10-02 (v10.2.16)
 
