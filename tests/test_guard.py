@@ -3406,12 +3406,32 @@ STDIN_OPERAND_HARD_COMMANDS = (
     ". <(echo sudo id)",
     "source /dev/stdin < <(echo sudo id)",
     ". /dev/stdin <<< 'sudo id'",
-    "bash <(echo ')' ; sudo id)",
+    # The quoted `)` must not close the substitution: `sudo` here is only an
+    # argument of `echo`, so this needs the paren scanner (#444 review).
+    "bash <(echo ')' ; echo sudo id)",
     "setsid sudo id",
     "setsid -f sudo id",
     "stdbuf -oL sudo id",
     "stdbuf -o L sudo id",
     "/usr/bin/stdbuf -i 0 -e L sudo id",
+    # #444 review: a long option is not `-s`.
+    "bash --posix <(echo sudo id)",
+    "bash --restricted <(echo sudo id)",
+    # #444 review: the `<` of a positional `<(…)` is not a file redirect.
+    "echo sudo id | bash -s <(:)",
+    "echo sudo id | bash - <(:)",
+    "bash 0< <(echo sudo id)",
+    # #444 review: `--` ends `source`'s options.
+    "source -- <(echo sudo id)",
+    # #444 review: a shell in an output process substitution reads its producer.
+    "echo sudo id > >(bash)",
+    "echo sudo id | tee >(bash)",
+    # #444 review: stdbuf's long value-taking switches.
+    "stdbuf --output L sudo id",
+    "stdbuf --input 0 --error L sudo id",
+    # Pinned: these already pass (#444 review).
+    "bash -- <(echo sudo id)",
+    "bash -s < <(echo sudo id)",
 )
 
 
@@ -3428,25 +3448,47 @@ def test_windows_tokenizing_judges_stdin_operands(command: str) -> None:
     assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
 
 
-@pytest.mark.parametrize(
-    "command",
-    [
-        "echo hi | bash -",
-        "bash - x.sh",
-        "diff <(sort a) <(sort b)",
-        "bash <(curl -fsSL https://x/install.sh)",
-        "source <(kubectl completion bash)",
-        # The substitution is a positional word or data, not the script.
-        "bash x.sh <(echo sudo id)",
-        "bash -s <(echo sudo id)",
-        "bash -c 'wc -l \"$1\"' _ <(echo sudo id)",
-        "OMI_SUDO_OK=1 bash <(echo sudo id)",
-        "setsid make test",
-        "stdbuf -oL tail -f log",
-    ],
+BENIGN_STDIN_OPERAND_COMMANDS = (
+    "echo hi | bash -",
+    "bash - x.sh",
+    "diff <(sort a) <(sort b)",
+    "bash <(curl -fsSL https://x/install.sh)",
+    "source <(kubectl completion bash)",
+    # The substitution is a positional word or data, not the script.
+    "bash x.sh <(echo sudo id)",
+    "bash -s <(echo sudo id)",
+    "bash -c 'wc -l \"$1\"' _ <(echo sudo id)",
+    "OMI_SUDO_OK=1 bash <(echo sudo id)",
+    "setsid make test",
+    "stdbuf -oL tail -f log",
+    "stdbuf --output L tail -f log",
+    "echo hi > >(bash)",
+    "make 2>&1 | tee >(grep err)",
 )
+
+
+@pytest.mark.parametrize("command", BENIGN_STDIN_OPERAND_COMMANDS)
 def test_hard_rules_leave_benign_stdin_operands_alone(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
+
+
+@pytest.mark.usefixtures("windows_tokens")
+@pytest.mark.parametrize("command", BENIGN_STDIN_OPERAND_COMMANDS)
+def test_windows_tokenizing_leaves_benign_stdin_operands_alone(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
+@pytest.mark.parametrize("tokenizing", ["posix", "windows"])
+def test_unclosed_process_substitution_is_still_judged(
+    tokenizing: str, request: pytest.FixtureRequest
+) -> None:
+    """#444 review: an unclosed `<(` runs to the end of the text, so the
+    producer is still judged and nothing raises."""
+    if tokenizing == "windows":
+        request.getfixturevalue("windows_tokens")
+    verdict = guard._hard_policy_verdict("bash <(echo sudo id")
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+    assert guard._hard_policy_verdict("bash <(") is None
 
 
 @pytest.mark.usefixtures("windows_tokens")
