@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.18] - 2026-10-02
+
+### Security
+- **Transitive PyJWT and urllib3 bumped in `uv.lock`
+  ([#452](https://github.com/CryptoJones/omind/issues/452)).** PyJWT 2.13.0 →
+  2.15.1 (pulled in by `mcp[crypto]`; 13 Dependabot alerts, one critical) and
+  urllib3 2.7.0 → 2.8.0 (pulled in by `requests`, `botocore` and `sentry-sdk`
+  in the dev and e2e extras; 3 alerts). Lock-only change; no other package
+  moved. One moderate PyJWT alert has no patched release yet and stays open.
+
 ## [10.2.17] - 2026-10-02
 
 ### Fixed
