@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.1] - 2026-10-02
+
+### Fixed
+- **Name extraction read dotted code names such as `asyncio.run` as hostnames
+  ([#402](https://github.com/CryptoJones/omind/issues/402)).** `.run` is on the
+  hostname-ending allowlist, so `asyncio.run`, `logging.info` and `args.name` landed in
+  the name index as hosts and surfaced as false hits in the preflight, tool-output hints
+  and write-time context.
+  - `.name`, `.info`, `.test` and `.int`, the endings most common as attributes, now
+    need a hyphen (illegal in an identifier) or a `//` before the token (a URL).
+    `request.user.name`, `logging.root.info` and a bare `wiki.example.info` no longer
+    extract; `wiki-example.info` and `https://wiki.example.info/` do.
+  - `.run`, `.live`, `.page`, `.site` and `.home` accept the same evidence, or three or
+    more labels none of which is `self`, `cls`, `this` or `super`. `api.fly.run` still
+    extracts; `self.app.run` and `obj.self.run` do not.
+  - A dotted token under any of these endings that is followed by `(` (whitespace
+    allowed) anywhere in the note is a call and is never a host: `app.server.run()` no
+    longer extracts. A hyphenated or URL token cannot be a call, so
+    `my-app.run (staging)` still does.
+  - **Trade-off:** a bare two-label host under these endings, written without a scheme
+    or hyphen (`hello.run`, `notion.site`, `nas.home`), no longer extracts. Write it as a
+    URL (`https://hello.run/`) to have it indexed.
+  - `EXTRACTOR_VERSION` is bumped to `2`, so the next index refresh re-extracts every
+    note (no re-embedding).
+
 ## [10.2.0] - 2026-10-02
 
 ### Changed

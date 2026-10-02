@@ -77,6 +77,92 @@ def test_hostnames_domains_and_ipv4_but_not_files() -> None:
     assert "999.1.1.1" not in keys
 
 
+def test_dotted_code_names_are_not_hostnames() -> None:
+    """#402: ``asyncio.run`` is a call, not a host under the ``.run`` ending."""
+    text = (
+        "Call asyncio.run(main()) then logging.info and self.path.name; "
+        "args.name, page.live and x.test()."
+    )
+    keys = _keys(text)
+    for not_a_host in (
+        "asyncio.run",
+        "logging.info",
+        "self.path.name",
+        "path.name",
+        "args.name",
+        "page.live",
+        "x.test",
+    ):
+        assert not_a_host not in keys
+
+
+def test_dotted_calls_are_not_hostnames_even_with_three_labels() -> None:
+    """#402: the ``(`` after a token is in the original text, not the token."""
+    text = "Start app.server.run() or flask.app.run(main), then foo.bar.test (x)."
+    keys = _keys(text)
+    for call in ("app.server.run", "flask.app.run", "foo.bar.test"):
+        assert call not in keys
+
+
+def test_a_token_is_a_call_if_any_occurrence_is_called() -> None:
+    """Tokens are deduplicated, so one called occurrence marks them all (#402)."""
+    assert "app.server.run" not in _keys("See app.server.run, then app.server.run().")
+
+
+def test_attribute_chains_under_attribute_endings_are_not_hostnames() -> None:
+    """#402: ``.name``/``.info``/``.test``/``.int`` get no three-label pass."""
+    text = (
+        "Read request.user.name, this.props.name, logging.root.info, sys.stdin.name, "
+        "sub.self.info, wiki.example.info, ci.build.test and a.b.int."
+    )
+    keys = _keys(text)
+    for chain in (
+        "request.user.name",
+        "this.props.name",
+        "logging.root.info",
+        "sys.stdin.name",
+        "sub.self.info",
+        "wiki.example.info",
+        "ci.build.test",
+        "a.b.int",
+    ):
+        assert chain not in keys
+
+
+def test_receiver_names_anywhere_in_a_chain_block_the_three_label_pass() -> None:
+    """``self``/``cls``/``this``/``super`` as *any* label means attribute access."""
+    text = "Use obj.self.run, a.cls.page, this.app.site, x.super.home and self.app.run."
+    keys = _keys(text)
+    for chain in ("obj.self.run", "a.cls.page", "this.app.site", "x.super.home", "self.app.run"):
+        assert chain not in keys
+
+
+def test_bare_two_label_hosts_under_code_endings_no_longer_extract() -> None:
+    """The accepted #402 trade-off: a bare ``hello.run`` reads as code."""
+    keys = _keys("Hosted on hello.run, notion.site and nas.home.")
+    for host in ("hello.run", "notion.site", "nas.home"):
+        assert host not in keys
+
+
+def test_real_hostnames_under_code_colliding_endings_still_extract() -> None:
+    text = (
+        "Deployed to my-app.run (staging), api.fly.run and https://hello.run/; docs on "
+        "https://wiki.example.info/x and wiki-example.info, see status-page.live, "
+        "https://ci.build.test and https://notion.site/page."
+    )
+    keys = _keys(text)
+    assert {
+        "my-app.run",
+        "api.fly.run",
+        "hello.run",
+        "wiki.example.info",
+        "wiki-example.info",
+        "status-page.live",
+        "ci.build.test",
+        "notion.site",
+    } <= keys
+
+
 def test_repo_slugs_from_urls_and_bare() -> None:
     text = (
         "Clone https://github.com/CryptoJones/omind.git or git@gitlab.com:someone/tool, "
