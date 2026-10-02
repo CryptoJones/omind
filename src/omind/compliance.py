@@ -53,6 +53,8 @@ _EVENTS_MEMO: tuple[_MemoKey, list[dict[str, Any]]] | None = None
 KIND_DECISION = "decision"
 KIND_VIOLATION = "violation"
 KIND_GATE_RESET = "gate-reset"
+#: A hard rule denied a command too costly to judge, not a real match (#445).
+KIND_BUDGET_EXCEEDED = "budget-exceeded"
 
 
 def compliance_log_path() -> Path:

@@ -4,7 +4,11 @@ and the guard wiring (#240)."""
 
 from __future__ import annotations
 
+import fnmatch
 import functools
+import os
+import random
+import re
 import shlex
 import subprocess
 import time
@@ -13,7 +17,7 @@ from pathlib import Path
 import pytest
 from conftest import cold_shell_caches, hard_time_limit, traced_bound
 
-from omind import guard, rules
+from omind import guard, policy, rules
 
 
 def _note_with_rule(omi: Path, name: str = "Guard Rules.md", **overrides: str) -> Path:
@@ -1484,3 +1488,46 @@ def test_long_repeats_are_judged_within_a_second(
     cold_shell_caches()
     with hard_time_limit(traced_bound(1.0)):
         assert _denied(omi, command, public, monkeypatch)
+
+
+_GLOB_TEXT = ["git", " ", "push", "P", "*", "?", "[", "]", "/", "\n", "a", "A", "-"]
+_GLOB_CORE = ["git", " ", "push", "P", "*", "**", "?", "[a]", "]", "/", "a", "A", "!", "\n"]
+
+
+def _glob_cases(rng: random.Random) -> tuple[str, str]:
+    text = "".join(rng.choice(_GLOB_TEXT) for _ in range(rng.randint(0, 8)))
+    core = "".join(rng.choice(_GLOB_CORE) for _ in range(rng.randint(0, 4)))
+    return text, rng.choice([f"*{core}*", core, f"*{core}", f"{core}*", f"**{core}**"])
+
+
+@pytest.mark.parametrize("normcase", [os.path.normcase, str.lower], ids=["native", "folded"])
+def test_glob_matches_answers_as_fnmatch(monkeypatch: pytest.MonkeyPatch, normcase: object) -> None:
+    """#445 EM review: the `*literal*` fast path answers as `fnmatch.fnmatch`,
+    `**` and case folding included (`str.lower` stands in for Windows'
+    `normcase`, which both read through `os.path`)."""
+    monkeypatch.setattr(os.path, "normcase", normcase)
+    rng = random.Random(445)
+    for _ in range(20_000):
+        text, pattern = _glob_cases(rng)
+        assert rules._glob_matches(text, pattern) == fnmatch.fnmatch(text, pattern), (text, pattern)
+    assert rules._glob_matches("GIT PUSH x", "*git push*") == (normcase is str.lower)
+
+
+def _slow_code_text(text: str) -> str:
+    """`rules._code_text` without its fast path: every blanked quote tried."""
+
+    def unquote(m: re.Match[str]) -> str:
+        inner = text[m.start() + 1 : m.end() - 1]
+        return inner if inner and not any(ch.isspace() for ch in inner) else m.group()
+
+    return rules._BLANKED_QUOTE_RE.sub(unquote, policy.shell_code_text(text))
+
+
+def test_code_text_fast_path_answers_as_the_slow_path() -> None:
+    """#445 EM review: skipping the unquote pass when the raw text holds no
+    quoted single word changes nothing."""
+    pieces = ["git", " ", "push", "'", '"', "\\", "$(", ")", "`", "\n", "\t", "x", ";", "<<E", "E"]
+    rng = random.Random(445)
+    for _ in range(20_000):
+        text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 12)))
+        assert rules._code_text(text) == _slow_code_text(text), repr(text)

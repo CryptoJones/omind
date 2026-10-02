@@ -2193,10 +2193,11 @@ def _owned_heredocs(raw: str, code: str, start: int, stop: int) -> str:
 
 
 @functools.lru_cache(maxsize=8)
-def _line_breaks(text: str) -> list[int]:
+def _line_breaks(text: str) -> tuple[int, ...]:
     """Every newline offset in ``text``, in order: found once per text, so a
-    line holding thousands of stages is not rescanned per stage (#445)."""
-    return [m.start() for m in re.finditer("\n", text)]
+    line holding thousands of stages is not rescanned per stage (#445). A
+    tuple: the memo is shared, so no caller may change it."""
+    return tuple(m.start() for m in re.finditer("\n", text))
 
 
 def _next_line_break(text: str, at: int) -> int:
@@ -2329,40 +2330,33 @@ def _split_words(text: str, escape: bool = True) -> tuple[str, ...]:
     token for token, without its per-character Python loop (#445). Raises
     ``ValueError`` where shlex would: an unclosed quote, a trailing escape.
     Memoised: the walk and the hard rules split the same stage text."""
-    word_re, piece_re = (
-        (_SHLEX_WORD_RE, _SHLEX_PIECE_RE) if escape else (_SHLEX_RAW_WORD_RE, _SHLEX_RAW_PIECE_RE)
-    )
+    word_re = _SHLEX_WORD_RE if escape else _SHLEX_RAW_WORD_RE
     if word_re.sub("", text).strip(_SHLEX_BLANKS):
         raise ValueError("No closing quotation")  # a quote or escape no word took
-    unquote = _shlex_piece if escape else _shlex_raw_piece
     words = word_re.findall(text)
+    if not words:
+        return ()
+    # Unquote every word in one pass over them joined by a character none
+    # holds: a word's quotes pair up within it, so no piece spans two words.
+    # With no escapes, the pieces are bare quotes, which a template unquotes
+    # without a Python call per piece.
+    sep = _absent_char(text)
+    joined = sep.join(words)
+    if escape and "\\" in joined:
+        joined = _SHLEX_PIECE_RE.sub(_shlex_piece, joined)
+    else:
+        joined = _SHLEX_RAW_PIECE_RE.sub(r"\1\2", joined)
+    return tuple(joined.split(sep))
+
+
+def _absent_char(text: str) -> str:
+    """A character ``text`` does not hold, and not a quote or backslash (it
+    joins words that :func:`_split_words` then unquotes): NUL, unless the text
+    holds one."""
     if "\0" not in text:
-        # Unquote every word in one pass over them joined by a character no
-        # word holds: a word's quotes pair up within it, so no piece spans
-        # two words. With no escapes, the pieces are bare quotes, which a
-        # template unquotes without a Python call per piece.
-        joined = "\0".join(words)
-        if escape and "\\" in joined:
-            joined = piece_re.sub(unquote, joined)
-        else:
-            joined = _SHLEX_RAW_PIECE_RE.sub(r"\1\2", joined)
-        return tuple(joined.split("\0")) if words else ()
-    tokens: list[str] = []
-    for word in words:
-        single, double = "'" in word, '"' in word
-        if escape and "\\" in word or single and double:
-            word = piece_re.sub(unquote, word)
-        elif single or double:
-            # One kind of quote and no escape: its quotes pair up with
-            # nothing between them to keep, so dropping them unquotes it.
-            word = word.replace("'" if single else '"', "")
-        tokens.append(word)
-    return tuple(tokens)
-
-
-def _shlex_raw_piece(match: re.Match[str]) -> str:
-    """A quoted piece of a word, with no escape character."""
-    return match.group(1) if match.group(1) is not None else match.group(2)
+        return "\0"
+    present = set(text) | set("'\"\\")
+    return next(ch for ch in map(chr, range(1, 0x110000)) if ch not in present)
 
 
 def _action_command(action: dict[str, Any]) -> str:
@@ -3951,23 +3945,39 @@ def _quoted_code_re(pattern: str) -> re.Pattern[str]:
 def _hard_rule_hits(rule: policy.Rule, command: str, subjects: _HardSubjects) -> list[str]:
     """The subjects ``rule`` matches. A match in ``words``/``quoted`` is
     reported as ``command``: only an opt-in on the command itself covers it.
-    May raise on a malformed rule; the callers skip that rule."""
-    hits = [text for text in subjects.code if rule.matches(text)]
+
+    Raises :class:`policy.SearchBudgetExceededError` when nothing matched but a
+    subject was too costly to judge (#445): the hard-rule callers deny that
+    with its own reason. May raise on a malformed rule; the callers skip that
+    rule."""
+    over_budget = False
+
+    def found(regex: re.Pattern[str] | None, text: str) -> bool:
+        nonlocal over_budget
+        if regex is None:
+            judged = rule.judge(text)
+        elif rule.match == "command":
+            # A command-position search is bounded (#445).
+            try:
+                judged = policy.command_search(regex, rule.pattern, text)
+            except policy.SearchBudgetExceededError:
+                judged = None
+        else:
+            judged = regex.search(text) is not None
+        over_budget = over_budget or judged is None
+        return judged is True
+
+    hits = [text for text in subjects.code if found(None, text)]
     if hits:
         return hits
     compiled = rule.compiled()
     quoted = _quoted_code_re(rule.pattern) if rule.match == "command" else compiled
-
-    def found(regex: re.Pattern[str], text: str) -> bool:
-        # A command-position search is bounded and fails closed (#445).
-        if rule.match == "command":
-            return policy.command_search(regex, rule.pattern, text)
-        return regex.search(text) is not None
-
     if any(found(compiled, text) for text in subjects.words):
         return [command]
     if any(found(quoted, text) for text in subjects.quoted):
         return [command]
+    if over_budget:
+        raise policy.SearchBudgetExceededError(rule.pattern)
     return []
 
 
@@ -3982,7 +3992,26 @@ def _hard_rule_opted_in(rule: policy.Rule, command: str, hits: list[str]) -> boo
     )
 
 
-def _hard_policy_verdict(command: str) -> Verdict | None:
+#: The reason a hard rule denies a command too costly to judge (#445).
+BUDGET_EXCEEDED_MESSAGE = "command too large/complex to judge safely — split it or shorten it"
+
+
+def _log_budget_exceeded(rule: policy.Rule, command: str, session: str) -> None:
+    """Record a budget denial as its own compliance event, so the audit trail
+    tells it from a real match (#445). Never raises."""
+    with contextlib.suppress(Exception):
+        compliance.log_event(
+            compliance.KIND_BUDGET_EXCEEDED,
+            session=session,
+            tool="Bash",
+            command=command,
+            rule_id=rule.id,
+            severity=rule.severity,
+            outcome="deny",
+        )
+
+
+def _hard_policy_verdict(command: str, session: str = "") -> Verdict | None:
     """The deny for the first ``hard`` policy rule ``command`` matches, else None.
 
     A rule is tested against every text :func:`_hard_rule_subjects` returns, so
@@ -3996,6 +4025,12 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
     The SEED rules live in code and never depend on the state dir: if loading
     the full policy raises for any reason (e.g. no resolvable home directory),
     the seed rules are evaluated on their own rather than lost (#420).
+
+    A command whose command-position search could run past
+    :data:`policy.CMD_SEARCH_BUDGET`, and which holds a hard rule's keyword,
+    is denied with :data:`BUDGET_EXCEEDED_MESSAGE` and logged as a
+    ``budget-exceeded`` event under ``session`` (#445): the hard rules fail
+    CLOSED there, and only they do.
     """
     try:
         rules: list[policy.Rule] = list(policy.load_policy())
@@ -4014,6 +4049,17 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
         # the rules after it.
         try:
             hits = _hard_rule_hits(rule, command, subjects)
+        except policy.SearchBudgetExceededError:
+            # Too costly to judge, and the rule's keyword is in it: a hard
+            # rule fails CLOSED, with a reason that says why (#445).
+            if _hard_rule_opted_in(rule, command, [command]):
+                continue
+            _log_budget_exceeded(rule, command, session)
+            return Verdict(
+                allow=False,
+                reason=f"omi-guard ({rule.label()}): {BUDGET_EXCEEDED_MESSAGE}",
+                rule_id=rule.id,
+            )
         except Exception:
             continue
         if not hits or _hard_rule_opted_in(rule, command, hits):
@@ -4052,7 +4098,7 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
         return Verdict(allow=True)
 
     # 2) Hard blocks — every ``hard`` rule in the data-driven policy.
-    hard = _hard_policy_verdict(command)
+    hard = _hard_policy_verdict(command, session)
     if hard is not None:
         return hard
 
@@ -4271,7 +4317,9 @@ def _fail_open_verdict(
         verdict = decided
     else:
         with contextlib.suppress(Exception):
-            hard = _hard_policy_verdict(str(action.get("command") or ""))
+            hard = _hard_policy_verdict(
+                str(action.get("command") or ""), str(action.get("session") or "")
+            )
             if hard is not None:
                 verdict = hard
     session = ""
@@ -5145,6 +5193,12 @@ def _run_explain(command: str) -> int:
     for rule in policy.load_policy():
         try:
             hits = _hard_rule_hits(rule, command, subjects)
+        except policy.SearchBudgetExceededError:
+            if rule.severity == policy.SEVERITY_HARD:
+                sys.stdout.write(f"  [{rule.severity}] {rule.id}: {BUDGET_EXCEEDED_MESSAGE}\n")
+                hits = [command]
+            else:
+                continue  # not judged: no match
         except Exception:
             continue
         if hits:

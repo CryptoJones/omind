@@ -4476,7 +4476,10 @@ _LONG_REPEATS_445 = {"assignments": "x=1;", "bash-c": "bash -c 'echo hi; '"}
 def test_long_repeats_are_judged_within_a_second(shape: str, count: int) -> None:
     """Every judge of one long command, each from cold caches, under the
     SIGALRM bound: the walk, the hard rules' subjects and verdict, and the
-    repo-work classifier."""
+    repo-work classifier. The bound is 1 s on a plain interpreter and 3 s
+    under coverage (`conftest.traced_bound`): CI runs every test under
+    `--cov` on runners about 2.5x slower than a laptop, where a flat 1 s
+    would flake; untraced, every judge here takes at most about 0.35 s."""
     command = shape * count
     judges: list[Callable[[], object]] = [
         lambda: guard._shell_walk(command),
@@ -4511,11 +4514,124 @@ def test_command_position_search_fails_closed_past_its_budget() -> None:
     large = "x=1;" * 5_000 + " ; grep sudo f"
     assert policy._cmd_position_cost(policy.shell_code_text(large)) > policy.CMD_SEARCH_BUDGET
     with _hard_time_limit(traced_bound(1.0)):
-        assert rule.matches(large)
+        assert rule.judge(large) is None  # not judged
+        assert not rule.matches(large)  # which is no match outside the hard path
         verdict = guard._hard_policy_verdict(large)
     assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+    assert guard.BUDGET_EXCEEDED_MESSAGE in verdict.reason
     # No `sudo` anywhere: nothing to search for, however costly a search.
-    assert not rule.matches("x=1;" * 5_000 + " ; grep x f")
+    assert rule.judge("x=1;" * 5_000 + " ; grep x f") is False
+    assert guard._hard_policy_verdict("x=1;" * 5_000 + " ; grep x f") is None
+
+
+def test_budget_denial_has_its_own_reason_and_event() -> None:
+    """#445 EM review: past the budget a hard rule denies with a reason that
+    says the command was too costly to judge, not the rule's own message,
+    and logs a `budget-exceeded` event; a real match keeps the rule's
+    message."""
+    command = "a=1; " * 1000 + "grep -r sudo /etc"
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    verdict = guard._hard_policy_verdict(command, "budget-session")
+    assert verdict is not None and not verdict.allow
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
+    assert verdict.reason == f"omi-guard ({rule.label()}): {guard.BUDGET_EXCEEDED_MESSAGE}"
+    assert rule.message not in verdict.reason
+    events = compliance.read_events()
+    assert [(e["kind"], e["rule_id"], e["session"]) for e in events] == [
+        (compliance.KIND_BUDGET_EXCEEDED, "sudo-use-fleet-sudo", "budget-session")
+    ]
+    # Under the budget, a real match is still the rule's own deny.
+    real = guard._hard_policy_verdict("a=1; " * 10 + "sudo id")
+    assert real is not None and rule.message in real.reason
+    # The opt-in covers its own rule's budget denial too.
+    assert guard._hard_policy_verdict("OMI_SUDO_OK=1 " + command) is None
+
+
+def test_explain_reports_a_budget_denial(capsys: pytest.CaptureFixture[str]) -> None:
+    """`omind guard explain` says why an over-budget command is denied."""
+    guard._run_explain("a=1; " * 1000 + "grep -r sudo /etc")
+    out = capsys.readouterr().out
+    assert guard.BUDGET_EXCEEDED_MESSAGE in out
+    assert out.rstrip().splitlines()[-1].startswith("DENY")
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+def test_heredocs_after_assignments_are_judged_within_a_second(count: int) -> None:
+    """#445 EM review: `a=1 ` repeated, then `<<E ` repeated. Each heredoc's
+    owner lookup walked every assignment from the separator, so 12,000 of
+    each took 28 s in `shell_code_text` alone. Bounded as the other shapes
+    are (see `conftest.traced_bound`: 3x under coverage)."""
+    command = "a=1 " * count + "<<E " * count
+    judges: list[Callable[[], object]] = [
+        lambda: policy.shell_code_text(command),
+        lambda: guard._shell_walk(command),
+        lambda: guard._hard_policy_verdict(command),
+        lambda: guard._is_repo_sensitive_action({"tool": "Bash", "command": command}),
+    ]
+    for judge in judges:
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(1.0)):
+            judge()
+
+
+def _reference_owner_is_shell(command: str, start: int) -> bool:
+    """The heredoc owner lookup as it was before #445: a scan back per heredoc."""
+    segment = command[:start]
+    cut = max(segment.rfind(c) for c in "\n;&|(`")
+    for token in segment[cut + 1 :].split():
+        base = token.rsplit("/", 1)[-1]
+        if "=" in token and not token.startswith("-"):
+            continue
+        if base in policy._HEREDOC_OWNER_SKIP:
+            continue
+        return base in policy._SHELL_HEREDOC_BINARIES
+    return False
+
+
+def test_heredoc_owner_lookup_matches_the_scan_back() -> None:
+    """#445: the one-pass owner lookup answers as the per-heredoc scan back
+    did, at every `<<`, including one inside a word (`bash<<E`, `a=b<<E`)."""
+    import random
+
+    pieces = ["<<", "E", " ", "\t", "\n", ";", "|", "&", "(", "`", "a=1", "=", "-",
+              "/", "bin/", "bash", "sh", "env", "cat", "x", "exec", "time"]  # fmt: skip
+    rng = random.Random(445)
+    for _ in range(20_000):
+        command = "".join(rng.choice(pieces) for _ in range(rng.randint(1, 12)))
+        owners = policy._HeredocOwners(command)
+        for at in (m.start() for m in re.finditer("<<", command)):
+            assert owners.is_shell(at) == _reference_owner_is_shell(command, at), (command, at)
+
+
+def test_heredoc_ops_between_falls_back_where_a_heredoc_straddles() -> None:
+    """#445 EM review: the straddle fallback is reachable. A wrapper's switch
+    can take `<<` as its value, so the stage starts at `bash`, inside the
+    `<< bash` heredoc: a search bounded there finds no heredoc, while the
+    matches found once per text hold one. The fallback answers as the
+    bounded search does."""
+    command = "sudo -u << bash\ngit push\nbash\n"
+    code = policy.shell_code_text(command)
+    stop = command.index("bash")
+    _starts, found = guard._heredoc_ops(code)
+    assert found and found[0].start() < stop < found[0].end()  # it straddles
+    spans = [m.span() for m in guard._heredoc_ops_between(code, 0, stop)]
+    assert spans == [m.span() for m in policy._HEREDOC_RE.finditer(code, 0, stop)] == []
+    # Away from a straddle, the matches found once are the bounded search's.
+    for line, bound in ((0, len(code)), (0, stop - 3)):
+        assert [m.span() for m in guard._heredoc_ops_between(code, line, bound)] == [
+            m.span() for m in policy._HEREDOC_RE.finditer(code, line, bound)
+        ]
+
+
+def test_split_words_tokenizes_a_nul_text_like_shlex() -> None:
+    """#445 EM review: a text holding NUL joins its words on another absent
+    character, and still tokenizes as shlex does."""
+    import shlex
+
+    for text in ("a\0b 'c\0d' \"e f\"", '\0 \x01 \'\\x\' "\\"\0"', "x\\\0y"):
+        assert list(guard._split_words(text)) == shlex.split(text), repr(text)
+    assert guard._absent_char("a") == "\0"
+    assert guard._absent_char("\0\x01\x02") == "\x03"
 
 
 def test_command_position_cost_bounds_the_chain_shapes() -> None:

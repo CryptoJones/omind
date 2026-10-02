@@ -20,8 +20,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Hard rules: the command-position anchor's `VAR=value` skip rescanned a
     blank-free run from every separator inside it. A command where the rule's
     pattern occurs nowhere is now answered at once. Where it occurs and the
-    anchored search could exceed a work budget, the rule **fails closed** and
-    denies rather than time the hook out (`policy.CMD_SEARCH_BUDGET`).
+    anchored search could exceed a work budget (`policy.CMD_SEARCH_BUDGET`),
+    the hard rule **fails closed** rather than time the hook out: it denies
+    with its own reason (`command too large/complex to judge safely — split
+    it or shorten it`) and logs a `budget-exceeded` compliance event. Only the
+    hard-rule block path does this; Layer E and soft rules treat such a
+    command as not judged, so no false `escaped`/`observed` event is logged.
+  - Heredoc owners are found in one pass per segment: `a=1 ` repeated 12,000
+    times, then `<<E ` repeated as often, took 28 s in `shell_code_text`.
   - Shell words are split by a regex tokenizer that gives `shlex`'s tokens and
     errors, without its per-character Python loop. `shell_code_text`, the stage
     splitter and the stage-end scan take runs of plain text in one step, and
