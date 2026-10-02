@@ -1455,30 +1455,37 @@ def test_shell_sites_track_cd_pushd_popd_and_subshells(tmp_path: Path) -> None:
     backgrounded with a single `|`/`&` moves nothing; wrappers are skipped;
     an ssh remote command (quoted or not) is blanked from the local text."""
 
-    def where(command: str) -> list[tuple[str, str | None]]:
+    # Real absolute directories: on Windows `/a` is drive-relative, not
+    # absolute, so after an unknown `cd $X` it correctly resolves to None.
+    a_dir, b_dir = tmp_path / "a", tmp_path / "b"
+    a, b = a_dir.as_posix(), b_dir.as_posix()
+    here = Path(".")
+
+    def where(command: str) -> list[tuple[str, Path | None]]:
         sites, _cwd, _dirs, _local = guard._shell_sites(command)
         return [
-            (s.program, None if s.cwd is None else s.cwd.as_posix())
-            for s in sites
-            if s.program == "git"
+            (s.program, None if s.cwd is None else Path(s.cwd)) for s in sites if s.program == "git"
         ]
 
-    assert where("pushd /a && git status && popd && git push") == [("git", "/a"), ("git", ".")]
-    assert where("pushd /a && pushd /b && popd && git push") == [("git", "/a")]
-    assert where("popd && git push") == [("git", ".")]  # empty stack: popd fails, no move
-    assert where("(cd /a && git status) && git push") == [("git", "/a"), ("git", ".")]
-    assert where("echo $(cd /a && git rev-parse HEAD) && git push") == [("git", "/a"), ("git", ".")]
-    assert where("cd /a | true; git push") == [("git", ".")]
-    assert where("cd /a & git push") == [("git", ".")]
-    assert where("cd /a || exit 1; git push") == [("git", "/a")]  # `||` read as `&&`
+    assert where(f"pushd {a} && git status && popd && git push") == [("git", a_dir), ("git", here)]
+    assert where(f"pushd {a} && pushd {b} && popd && git push") == [("git", a_dir)]
+    assert where("popd && git push") == [("git", here)]  # empty stack: popd fails, no move
+    assert where(f"(cd {a} && git status) && git push") == [("git", a_dir), ("git", here)]
+    assert where(f"echo $(cd {a} && git rev-parse HEAD) && git push") == [
+        ("git", a_dir),
+        ("git", here),
+    ]
+    assert where(f"cd {a} | true; git push") == [("git", here)]
+    assert where(f"cd {a} & git push") == [("git", here)]
+    assert where(f"cd {a} || exit 1; git push") == [("git", a_dir)]  # `||` read as `&&`
     assert where("cd $HOME && git push") == [("git", None)]
-    assert where("cd /a && cd $X && cd /b && git push") == [("git", "/b")]
-    assert where("sudo -u bob git -C /a push") == [("git", "/a")]
-    assert where("env X=1 timeout 60 git push") == [("git", ".")]
-    assert where("git --work-tree=/a --git-dir /b/.git push") == [("git", "/a")]
-    assert where("bash -c 'cd /a && git push' && git status") == [("git", "/a"), ("git", ".")]
-    assert where("eval 'cd /a' && git push") == [("git", "/a")]  # eval shares the shell
-    assert where("ssh -p 22 host git push && git status") == [("git", ".")]
+    assert where(f"cd {a} && cd $X && cd {b} && git push") == [("git", b_dir)]
+    assert where(f"sudo -u bob git -C {a} push") == [("git", a_dir)]
+    assert where("env X=1 timeout 60 git push") == [("git", here)]
+    assert where(f"git --work-tree={a} --git-dir {b}/.git push") == [("git", a_dir)]
+    assert where(f"bash -c 'cd {a} && git push' && git status") == [("git", a_dir), ("git", here)]
+    assert where(f"eval 'cd {a}' && git push") == [("git", a_dir)]  # eval shares the shell
+    assert where("ssh -p 22 host git push && git status") == [("git", here)]
     _sites, _cwd, _dirs, local = guard._shell_sites("ssh -i k h git push origin main; ls")
     assert local == "ssh -i k h" + " " * len(" git push origin main") + "; ls"
     _sites, _cwd, _dirs, local = guard._shell_sites("bash -c \"ssh h 'git push'\"")
