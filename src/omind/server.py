@@ -33,7 +33,12 @@ from mcp.shared.message import SessionMessage
 
 from omind import graph, scope_guard, searchindex, writecontext
 from omind.help_system import render_help
-from omind.recall import DEFAULT_RECALL_CHARS, compact_recall
+from omind.recall import (
+    DEFAULT_RECALL_CHARS,
+    READ_NOTE_DEFAULT_CHARS,
+    READ_NOTE_HARD_CAP,
+    compact_recall,
+)
 from omind.store import (
     ActionItem,
     NoteConflictError,
@@ -282,8 +287,8 @@ def build_server(omi_dir: Path | str, node_id: str | None = None) -> MCPServer:
             graph_cache["graph"] = graph.build_graph(store.omi_dir)
         return graph_cache["graph"]  # type: ignore[return-value]
 
-    read_note_default_chars = 20000
-    read_note_hard_cap = 65536
+    read_note_default_chars = READ_NOTE_DEFAULT_CHARS
+    read_note_hard_cap = READ_NOTE_HARD_CAP
 
     def _clamp_body(text: str, max_chars: int) -> str:
         """Bound a note body so one huge note cannot become one unbounded

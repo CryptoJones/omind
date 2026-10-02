@@ -141,11 +141,18 @@ RETRY_WINDOW_SECS = 120.0
 _TRAIL_LEN = 8
 _TRAIL_ITEM_CAP = 160
 GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
+#: The demand names ``read-note`` (raw, at its hard cap) because recall-note
+#: stops at ``recall.MAX_RECALL_CHARS`` however it is asked: demanding recall at
+#: 8000 for a longer note was unsatisfiable, and the verifier then credited the
+#: truncated read anyway (#392). ``verify._update_demanded_completeness`` checks
+#: exactly what this says. Literal (not built from ``recall``) to keep the hook
+#: path's imports light; a test pins it to ``recall.full_read_args``.
 GIT_RULES_MESSAGE = (
-    "ACTION BLOCKED. Next call OMI MCP `recall-note` with "
-    '`{"name":"Operational Rules - Git Repos and Secrets", "max_chars": 8000}`, '
-    "then retry. Repo work requires that specific memory this turn — read it "
-    "in full: a truncated read does not clear this gate."
+    "ACTION BLOCKED. Next call OMI MCP `read-note` with "
+    '`{"name":"Operational Rules - Git Repos and Secrets","representation":"raw",'
+    '"max_chars":65536}`, then retry. Repo work requires that specific memory this '
+    "turn — read it in full: a truncated or section-only read does not clear this "
+    "gate (recall-note stops at 8000 chars, so it cannot return a longer note whole)."
 )
 #: Value of the per-turn demanded-note marker once the git-rules note is known
 #: to be absent (#358). Never a substring of a real consult target, so the
@@ -318,26 +325,96 @@ def _incomplete_path(session: str) -> Path:
     return paths.state_dir() / f"incomplete-{_safe_sid(session)}.txt"
 
 
-def record_incomplete_consult(session: str, note: str) -> None:
-    """Mark a demanded note as read-but-truncated; the gate stays armed until a
-    full read (or a best-possible one) lands. Best-effort, never raises."""
+def _read_incomplete_record(path: Path) -> str:
+    try:
+        return path.read_text(encoding="utf-8").strip()
+    except OSError:
+        return ""
+
+
+def _write_incomplete_record(session: str, value: str) -> None:
+    """Replace the per-turn read-completeness record under its sibling lock.
+    Best-effort, never raises."""
     with contextlib.suppress(OSError):
         path = _incomplete_path(session)
         path.parent.mkdir(parents=True, exist_ok=True)
-        path.write_text(note.strip().lower(), encoding="utf-8")
+        with filelock.exclusive(_sibling_lock(path)):
+            paths.atomic_write_text(path, value, mode=0o600)
+
+
+def record_incomplete_consult(session: str, note: str) -> None:
+    """Mark a demanded note as read-but-truncated; the gate stays armed until a
+    full read (or a best-possible one) lands. Best-effort, never raises."""
+    _write_incomplete_record(session, note.strip().lower())
 
 
 def clear_incomplete_consult(session: str) -> None:
     with contextlib.suppress(OSError):
-        _incomplete_path(session).unlink()
+        path = _incomplete_path(session)
+        with filelock.exclusive(_sibling_lock(path)):
+            path.unlink()
+
+
+#: Prefix in the same per-turn file once a FULL read of the demanded note has
+#: landed (#392), so a later section drill-down cannot re-arm the gate.
+_FULL_MARK = "full:"
+
+
+def record_full_consult(session: str, note: str) -> None:
+    """Mark the demanded note as read in full this turn. Best-effort."""
+    _write_incomplete_record(session, _FULL_MARK + note.strip().lower())
+
+
+def record_partial_consult(session: str, note: str) -> bool:
+    """Record a partial read of ``note`` unless a full read already landed this
+    turn (#392). The check and the write share one sibling-lock critical
+    section, so a concurrent full read cannot be overwritten by a stale
+    "incomplete" (AGENTS.md locking invariant). Returns ``True`` when the read
+    was recorded as incomplete. Fails open: on any I/O error nothing is
+    recorded and ``False`` is returned."""
+    key = note.strip().lower()
+    try:
+        path = _incomplete_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(_sibling_lock(path)):
+            if _read_incomplete_record(path) == _FULL_MARK + key:
+                return False  # already read in full this turn; a drill-down adds to it
+            paths.atomic_write_text(path, key, mode=0o600)
+            return True
+    except OSError:
+        return False
+
+
+def has_full_consult(session: str, note: str) -> bool:
+    return _read_incomplete_record(_incomplete_path(session)) == _FULL_MARK + note.strip().lower()
 
 
 def incomplete_consult(session: str) -> str:
     """The demanded note whose only read this turn was truncated, or ``""``."""
-    try:
-        return _incomplete_path(session).read_text(encoding="utf-8").strip()
-    except OSError:
-        return ""
+    text = _read_incomplete_record(_incomplete_path(session))
+    return "" if text.startswith(_FULL_MARK) else text
+
+
+#: Tool-name prefixes of the OMI MCP server across harness spellings (kept in
+#: sync with ``adapters._OMI_CONSULT_PREFIXES``; not imported, adapters imports
+#: this module).
+_OMI_TOOL_PREFIXES = ("mcp__omi__", "mcp__omi_", "mcp_omi_", "omi__", "omi_")
+_NOTE_READ_TOOLS = ("read-note", "recall-note")
+
+
+def is_note_read(tool: str, target: str) -> bool:
+    """True when a consult by ``tool`` of ``target`` actually READ the note's
+    text (#392): OMI ``read-note`` / ``recall-note``, or a native file read of
+    the note (any non-OMI tool whose consult target is a vault path — the
+    adapters only report those as consults). A search, ``backlinks`` or
+    ``graph-neighbors`` naming the note returns other text and reads none of
+    its rules."""
+    low = tool.strip().lower().replace("_", "-")
+    if low.endswith(_NOTE_READ_TOOLS):
+        return True
+    if tool.strip().lower().startswith(_OMI_TOOL_PREFIXES):
+        return False
+    return "/" in target or "\\" in target or target.lower().endswith(".md")
 
 
 def _clear_demanded(session: str) -> None:
@@ -529,15 +606,22 @@ def mark_consulted(session: str) -> None:
     _mutate_sentinel(session, _mark)
 
 
-def record_consult(session: str, *, kind: str, target: str, relevant: bool | None = None) -> None:
+def record_consult(
+    session: str, *, kind: str, target: str, relevant: bool | None = None, tool: str = ""
+) -> None:
     """Append one OMI consult (note read / search) to the turn's sentinel with
     its relevance verdict (``None`` = not yet judged), and mark the gate
-    consulted. Never raises."""
+    consulted. ``tool`` is the consulting tool's name, when known, so the
+    git-rules gate can tell a read of the note from a search naming it (#392).
+    Never raises."""
 
     def _record(data: dict[str, Any]) -> dict[str, Any]:
         existing = data.get("consults")
         consult_list = existing if isinstance(existing, list) else []
-        consult_list.append({"kind": kind, "target": target, "relevant": relevant})
+        record: dict[str, Any] = {"kind": kind, "target": target, "relevant": relevant}
+        if tool:
+            record["tool"] = tool
+        consult_list.append(record)
         data["consults"] = consult_list
         data["actions"] = 0
         return data
@@ -1594,12 +1678,19 @@ def _has_consulted_git_rules(session: str) -> bool:
             # The read errored (not-found, locked vault…): the agent has read
             # zero rules, so crediting it enforces nothing (#358).
             continue
-        target = str(consult.get("target") or "").lower()
-        if needle in target:
-            # A truncated read of the demanded note is not a consult of it —
-            # the overriding exceptions live below the fold (#239). The marker
-            # in the tool result names the exact re-read that clears this.
-            return incomplete_consult(session) != needle
+        target = str(consult.get("target") or "")
+        if needle not in target.lower():
+            continue
+        # Only an actual READ of the note counts (#392): a search-vault query,
+        # backlinks or graph-neighbors naming it returns none of its rules.
+        # Records without a tool (internal callers) fall back to their kind.
+        tool = str(consult.get("tool") or "")
+        if not (is_note_read(tool, target) if tool else consult.get("kind") == "read"):
+            continue
+        # A truncated read of the demanded note is not a consult of it — the
+        # overriding exceptions live below the fold (#239). The marker in the
+        # tool result names the exact re-read that clears this.
+        return incomplete_consult(session) != needle
     return False
 
 
@@ -1862,7 +1953,10 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
         target = str(action.get("consult_target") or "")
         if target:
             record_consult(
-                session, kind=str(action.get("consult_kind") or "consult"), target=target
+                session,
+                kind=str(action.get("consult_kind") or "consult"),
+                target=target,
+                tool=str(action.get("tool") or ""),
             )
         else:
             mark_consulted(session)

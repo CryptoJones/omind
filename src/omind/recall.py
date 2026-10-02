@@ -14,11 +14,25 @@ from omind.store import NoteFields, OmiStore, parse_note
 DEFAULT_RECALL_CHARS = 4_000
 MIN_RECALL_CHARS = 500
 MAX_RECALL_CHARS = 8_000
+#: ``read-note`` body bounds (invariant 8). Shared here so the guard can name a
+#: read that returns a whole note without importing the MCP server (#392).
+READ_NOTE_DEFAULT_CHARS = 20_000
+READ_NOTE_HARD_CAP = 65_536
 _HEADING_RE = re.compile(r"^(#{2,6})\s+(.+?)\s*$")
 
 
 def bounded_chars(value: int) -> int:
     return min(MAX_RECALL_CHARS, max(MIN_RECALL_CHARS, int(value)))
+
+
+def full_read_args(filename: str) -> dict[str, Any]:
+    """``read-note`` arguments that return the whole note, raw (#392).
+
+    recall-note stops at ``MAX_RECALL_CHARS`` however it is asked, so a note
+    past that cap can only be read in full through read-note. Asking at the
+    hard cap costs nothing: read-note returns only as much as the note holds.
+    """
+    return {"name": filename, "representation": "raw", "max_chars": READ_NOTE_HARD_CAP}
 
 
 def _section(raw: str, wanted: str) -> str:
@@ -92,14 +106,25 @@ def compact_recall(
         # the git-rules note's recurrence log records three real violations
         # caused by an overriding exception living below the fold (#239). Name
         # the note and the exact follow-up call instead.
-        wanted = min(len(content) + 500, MAX_RECALL_CHARS)
         # Name the stored filename, not the title: a retitled note's title
         # resolves nowhere, and a title holding ``:`` is not the filename (#393).
+        if len(content) > MAX_RECALL_CHARS:
+            # No recall can return this note whole; re-suggesting recall at the
+            # cap was a dead end that returned the same cut-off text (#392).
+            # No "or request a specific section" either: the git-rules gate
+            # refuses to credit a section read, so that advice bounced the agent.
+            follow_up = "read-note " + json.dumps(full_read_args(filename), ensure_ascii=False)
+            alternative = ""
+        else:
+            wanted = min(len(content) + 500, MAX_RECALL_CHARS)
+            follow_up = (
+                f'recall-note {{"name": {json.dumps(filename, ensure_ascii=False)}, '
+                f'"max_chars": {wanted}}}'
+            )
+            alternative = " or request a specific section"
         marker = (
             f"\n…[TRUNCATED at {limit} of {len(content)} chars. Before acting "
-            "on this topic, call OMI MCP recall-note "
-            f'{{"name": {json.dumps(filename, ensure_ascii=False)}, "max_chars": {wanted}}} '
-            "or request a specific section.]"
+            f"on this topic, call OMI MCP {follow_up}{alternative}.]"
         )
         content = content[: max(0, limit - len(marker))].rstrip() + marker
     payload: dict[str, Any] = {
