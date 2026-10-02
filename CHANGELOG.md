@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.21] - 2026-10-02
+
+### Fixed
+- **Bash writes into a repo other than the resolved one now hit the consult
+  gate ([#448](https://github.com/CryptoJones/omind/issues/448)).** The
+  repo-work write check (#434, #450) judged every write target against the one
+  repo resolved for the command, so `echo x > README.md && cd /other/repo`
+  (the write lands in the cwd repo, the `cd` moves the resolved repo away) and
+  `cat > ~/src/repo/x.py <<EOF` from `/tmp` (no repo resolved at all) were
+  not repo work, though the Write tool on the same path is gated.
+  - Each write target now resolves its own enclosing worktree, the way the
+    Write tool's path does. Any target inside a repo counts; a target in no
+    repo (`/tmp/y`, `/dev/null`, `$OUT`) still does not.
+  - The file operands of an in-place editor count too: `sed -i` /
+    `--in-place` (after the script, or after the `-e`/`-f` values) and
+    `perl -i` / `-pi` (after the `-e` code), so `sed -i 's/a/b/'
+    <repo>/README.md` run from `/tmp` is gated like the Edit tool on that path.
+  - The written repo only opens the consult gate. Commit freshness is judged
+    only when the command's own repo (its cwd, `cd` or `-C`) resolves, so it
+    stays keyed to the repo the commit lands in, and a write never makes a
+    freshness demand on another repo.
+  - Each target walks up to its repo without a bound, as the Write tool's
+    path does, sharing one memo per command. Any failure means "no repo
+    written" (fails open).
+  - Out of scope: an interpreter script that writes a file (`python - <<EOF
+    open(...)`) cannot be resolved to a path statically, so it still takes
+    only the command's own repo. `$VAR` and `$(…)` targets are not literal
+    paths and are not judged.
+
 ## [10.2.20] - 2026-10-02
 
 ### Fixed

@@ -20,8 +20,6 @@ the exact order of operations._
 - [ ] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — _bug_ —
   `bash -c '"$@"' _ git commit -m x` is opaque to the hard rules, but the consult and freshness
   classifiers never see the positional command.
-- [ ] **guard: Bash writes into a repo other than the resolved one skip the consult gate** ([#448](https://github.com/CryptoJones/omind/issues/448)) — _bug_ —
-  `_writes_into_repo` judges every target against one repo; each write target should resolve its own enclosing repo.
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
@@ -89,6 +87,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.21)
+
+- [x] **guard: Bash writes into a repo other than the resolved one skip the consult gate** ([#448](https://github.com/CryptoJones/omind/issues/448)) — **v10.2.21** — _bug_ —
+  each write target, in-place `sed -i`/`perl -pi` operands included, resolves its own enclosing repo, so
+  `echo x > README.md && cd /other/repo` and `cat > <repo>/src/x.py <<EOF` from
+  `/tmp` are repo work; a target in no repo is not.
 
 ### Shipped — 2026-10-02 (v10.2.20)
 
