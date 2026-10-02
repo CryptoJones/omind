@@ -2494,12 +2494,15 @@ def _hard_policy_verdict(command: str) -> Verdict | None:
             continue
         # A single malformed rule must never brick the guard on EVERY tool call:
         # a pattern that fails to compile / errors mid-match is skipped, not
-        # raised. (Learned rules are also validated at load; this is the belt to
-        # that suspenders, covering a bad seed rule or a catastrophic pattern.)
+        # raised, and skipping it leaves every other hard rule in force.
+        # (Learned rules are also validated at load; this is the belt to that
+        # suspenders, covering a bad seed rule or a catastrophic pattern.) Any
+        # exception, not just ``re.error``: one rule raising must not disable
+        # the rules after it.
         try:
             if not rule.matches(command):
                 continue
-        except re.error:
+        except Exception:
             continue
         if rule.opt_in and _opt_in_satisfied(rule.opt_in, command):
             continue
@@ -2694,6 +2697,21 @@ def _governing_excerpt(omi_dir: Path | str, note: str) -> str:
 GUARD_ERROR_RULE = "guard-internal-error"
 
 
+def _rule_severity(rule_id: str) -> str:
+    """The severity a deny under ``rule_id`` is logged with (#420).
+
+    A policy rule's own severity when it is one; the consult gate is soft
+    friction; any other deny is hard, as :func:`check_action` logs it.
+    """
+    if rule_id.startswith("omi-gate"):
+        return policy.SEVERITY_SOFT
+    with contextlib.suppress(Exception):
+        for rule in policy.load_policy():
+            if rule.id == rule_id:
+                return rule.severity
+    return policy.SEVERITY_HARD
+
+
 def _fail_open_verdict(action: dict[str, Any], exc: Exception, decided: Verdict | None) -> Verdict:
     """The verdict when :func:`check_action` hits an unexpected exception (#420).
 
@@ -2703,29 +2721,57 @@ def _fail_open_verdict(action: dict[str, Any], exc: Exception, decided: Verdict 
     own, so a crash in an unrelated classifier (repo detection, note rules)
     cannot wave through a command a hard rule plainly names. The error goes to
     stderr and the compliance log so the hole is visible, not silent.
+
+    Two compliance events are written: the internal error itself
+    (``guard-internal-error``, outcome ``fail-open`` when the action is allowed,
+    ``error`` when a deny still stands), and — for a deny — the deny under its
+    real rule id and severity, so it still counts in the recidivism ladder and
+    doctor's ``top_rules``. Both writes are best-effort: logging resolves the
+    state dir (``Path.home()``), which can itself raise, and the handler must
+    never raise the error it is handling back into the agent.
     """
-    if decided is not None and not decided.allow:
-        return decided
     verdict = Verdict(allow=True)
+    if decided is not None and not decided.allow:
+        verdict = decided
+    else:
+        with contextlib.suppress(Exception):
+            hard = _hard_policy_verdict(str(action.get("command") or ""))
+            if hard is not None:
+                verdict = hard
+    session = ""
+    tool = ""
+    command = ""
     with contextlib.suppress(Exception):
-        hard = _hard_policy_verdict(str(action.get("command") or ""))
-        if hard is not None:
-            verdict = hard
+        session = str(action.get("session") or "")
+        tool = str(action.get("tool") or "")
+        command = str(action.get("command") or "")
     with contextlib.suppress(Exception):
-        what = "allowing this action (fail-open)" if verdict.allow else "a hard rule still applies"
+        what = "allowing this action (fail-open)" if verdict.allow else "a deny still applies"
         sys.stderr.write(
             f"omi-guard: internal error in guard check ({type(exc).__name__}: {exc}); {what}\n"
         )
-    compliance.log_event(
-        compliance.KIND_DECISION,
-        session=str(action.get("session") or ""),
-        tool=str(action.get("tool") or ""),
-        command=str(action.get("command") or ""),
-        rule_id=GUARD_ERROR_RULE,
-        severity="soft",
-        outcome="fail-open" if verdict.allow else "deny",
-        detail=f"{type(exc).__name__}: {exc}",
-    )
+    with contextlib.suppress(Exception):
+        compliance.log_event(
+            compliance.KIND_DECISION,
+            session=session,
+            tool=tool,
+            command=command,
+            rule_id=GUARD_ERROR_RULE,
+            severity=policy.SEVERITY_SOFT,
+            outcome="fail-open" if verdict.allow else "error",
+            detail=f"{type(exc).__name__}: {exc}",
+        )
+    if not verdict.allow and verdict.rule_id:
+        with contextlib.suppress(Exception):
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=session,
+                tool=tool,
+                command=command,
+                rule_id=verdict.rule_id,
+                severity=_rule_severity(verdict.rule_id),
+                outcome="deny",
+            )
     return verdict
 
 
@@ -3394,15 +3440,18 @@ def _run_preflight(data: dict[str, Any], omi_dir: Path | None, *, harness: str =
                 f"omi-guard: internal error in guard preflight ({type(exc).__name__}: {exc}); "
                 "continuing without preflight memory (fail-open)\n"
             )
-        compliance.log_event(
-            compliance.KIND_DECISION,
-            session=str(data.get("session_id") or data.get("session") or ""),
-            tool="UserPromptSubmit",
-            rule_id=GUARD_ERROR_RULE,
-            severity="soft",
-            outcome="fail-open",
-            detail=f"{type(exc).__name__}: {exc}",
-        )
+        # Best-effort: logging resolves the state dir, which can raise the very
+        # error being handled (no home directory) — it must not escape.
+        with contextlib.suppress(Exception):
+            compliance.log_event(
+                compliance.KIND_DECISION,
+                session=str(data.get("session_id") or data.get("session") or ""),
+                tool="UserPromptSubmit",
+                rule_id=GUARD_ERROR_RULE,
+                severity=policy.SEVERITY_SOFT,
+                outcome="fail-open",
+                detail=f"{type(exc).__name__}: {exc}",
+            )
         return 0
     if context:
         sys.stdout.write(harness_mod.render_context(harness, "UserPromptSubmit", context))

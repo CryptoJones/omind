@@ -2805,7 +2805,18 @@ def test_check_fail_open_still_honours_hard_policy_rules(
     verdict = guard.check_action({"tool": "Bash", "command": "sudo rm x", "session": "s420h"})
     assert not verdict.allow
     assert verdict.rule_id == "sudo-use-fleet-sudo"
-    assert compliance.read_events()[-1]["outcome"] == "deny"
+    # The deny is logged under the hard rule's OWN id and severity (so it counts
+    # in recidivism and doctor's top_rules), plus a separate internal-error event.
+    events = [e for e in compliance.read_events() if e.get("session") == "s420h"]
+    error = [e for e in events if e["rule_id"] == guard.GUARD_ERROR_RULE]
+    deny = [e for e in events if e["rule_id"] == "sudo-use-fleet-sudo"]
+    assert len(error) == 1
+    assert error[0]["outcome"] == "error"
+    assert error[0]["severity"] == "soft"
+    assert len(deny) == 1
+    assert deny[0]["outcome"] == "deny"
+    assert deny[0]["severity"] == "hard"
+    assert compliance.recidivism_counts()["sudo-use-fleet-sudo"] == 1
 
 
 def test_check_keeps_a_decided_deny_when_a_later_step_raises(
@@ -2821,6 +2832,77 @@ def test_check_keeps_a_decided_deny_when_a_later_step_raises(
     verdict = guard.check_action({"tool": "Bash", "command": "ls", "session": "s420g"}, omi)
     assert not verdict.allow
     assert verdict.rule_id == "omi-gate"
+    # Both the internal error and the deny that stood are on the record.
+    events = [e for e in compliance.read_events() if e.get("session") == "s420g"]
+    error = [e for e in events if e["rule_id"] == guard.GUARD_ERROR_RULE]
+    deny = [e for e in events if e["rule_id"] == "omi-gate"]
+    assert len(error) == 1
+    assert error[0]["outcome"] == "error"
+    assert "RuntimeError: classifier exploded" in error[0]["detail"]
+    assert len(deny) == 1
+    assert deny[0]["outcome"] == "deny"
+
+
+def _no_home(*_args: object, **_kwargs: object) -> Path:
+    # What Path.home() raises with no resolvable home (e.g. `docker run --user
+    # 12345` with HOME / XDG_STATE_HOME unset).
+    raise RuntimeError("Could not determine home directory.")
+
+
+def test_check_fails_open_when_compliance_logging_also_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    # The fail-open handler's own compliance write resolves the state dir too;
+    # when that raises the same error, it must not escape (#420 review).
+    monkeypatch.setattr(guard, "_repo_root_for_action", _boom)
+    monkeypatch.setattr(paths, "state_dir", _no_home)
+    payload = {"tool": "Bash", "command": "ls", "session": "s420n"}
+    assert guard.run_guard("check", io.StringIO(json.dumps(payload))) == 0
+    assert "internal error in guard check" in capsys.readouterr().err
+
+
+def test_check_hard_deny_survives_compliance_logging_raising(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(guard, "_repo_root_for_action", _boom)
+    monkeypatch.setattr(compliance, "compliance_log_path", _no_home)
+    verdict = guard.check_action({"tool": "Bash", "command": "sudo rm x", "session": "s420m"})
+    assert not verdict.allow
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+def test_preflight_fails_open_when_compliance_logging_also_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    monkeypatch.setattr(guard, "preflight_turn", _boom)
+    monkeypatch.setattr(compliance, "compliance_log_path", _no_home)
+    payload = {"session_id": "s420q", "prompt": "do the thing"}
+    assert guard.run_guard("preflight", io.StringIO(json.dumps(payload))) == 0
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert "internal error in guard preflight" in captured.err
+
+
+def test_hard_policy_skips_a_raising_rule_and_keeps_the_rest(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # One hard rule raising mid-match (not re.error) must not disable the hard
+    # rules after it.
+    from omind import policy
+
+    class _Broken:
+        id = "broken-rule"
+        severity = policy.SEVERITY_HARD
+        opt_in = ""
+
+        def matches(self, _command: str) -> bool:
+            raise TypeError("rule exploded")
+
+    real = policy.load_policy()
+    monkeypatch.setattr(policy, "load_policy", lambda: [_Broken(), *real])
+    verdict = guard._hard_policy_verdict("sudo rm x")
+    assert verdict is not None
+    assert verdict.rule_id == "sudo-use-fleet-sudo"
 
 
 def test_preflight_fails_open_when_it_raises(

@@ -6,6 +6,8 @@ from __future__ import annotations
 
 import io
 import json
+from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -387,3 +389,92 @@ def test_run_adapter_fails_open_when_a_classifier_raises(
     guard.clear_gate("a420")
     event = io.StringIO(json.dumps({"tool": "shell", "command": "ls", "session": "a420"}))
     assert adapters.run_adapter(event) == 0
+
+
+def _adapter_error_events(session: str) -> list[dict[str, object]]:
+    from omind import compliance
+
+    return [
+        e
+        for e in compliance.read_events()
+        if e.get("rule_id") == guard.GUARD_ERROR_RULE and e.get("session") == session
+    ]
+
+
+def test_run_adapter_agy_fails_open_when_translation_raises(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#420 review: translate_event runs before check_action. A transcript line
+    that is valid JSON but not an object made agy_last_prompt raise
+    AttributeError; the agy adapter must render ALLOW in its own format and log."""
+    transcript = tmp_path / "agy.jsonl"
+    transcript.write_text('["USER_INPUT"]\n', encoding="utf-8")
+    payload = {
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "ls"}},
+        "conversationId": "agy-420",
+        "transcriptPath": str(transcript),
+    }
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="agy")
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out) == {"decision": "allow"}
+    assert "internal error in guard check" in captured.err
+    events = _adapter_error_events("agy-420")
+    assert len(events) == 1
+    assert events[0]["outcome"] == "fail-open"
+    assert "AttributeError" in str(events[0]["detail"])
+
+
+def test_run_adapter_agy_fail_open_still_honours_hard_rules(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    transcript = tmp_path / "agy.jsonl"
+    transcript.write_text('["USER_INPUT"]\n', encoding="utf-8")
+    payload = {
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "gh repo delete a/b"}},
+        "conversationId": "agy-420h",
+        "transcriptPath": str(transcript),
+    }
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="agy")
+    assert code == 0
+    assert json.loads(capsys.readouterr().out)["decision"] == "deny"
+
+
+def test_run_adapter_opencode_fails_open_when_normalize_raises(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A non-exit-code harness (OpenCode's JSON signal) gets an allow signal."""
+
+    def boom(*_args: object, **_kwargs: object) -> None:
+        raise RuntimeError("normalize exploded")
+
+    monkeypatch.setattr(adapters, "normalize_action", boom)
+    payload = {"tool": "bash", "command": "ls", "session": "oc-420"}
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="opencode")
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["allow"] is True
+    events = _adapter_error_events("oc-420")
+    assert len(events) == 1
+    assert "RuntimeError: normalize exploded" in str(events[0]["detail"])
+
+
+def test_run_adapter_fails_open_when_render_raises(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from omind import harness as harness_mod
+
+    real = harness_mod.render_decision
+    calls: list[bool] = []
+
+    def flaky(*args: Any, **kwargs: Any) -> int:
+        if not calls:
+            calls.append(True)
+            raise RuntimeError("render exploded")
+        return real(*args, **kwargs)
+
+    monkeypatch.setattr(harness_mod, "render_decision", flaky)
+    monkeypatch.setattr(guard, "check_action", lambda *_a, **_k: guard.Verdict(allow=True))
+    payload = {"tool": "shell", "command": "ls", "session": "r420"}
+    assert adapters.run_adapter(io.StringIO(json.dumps(payload))) == 0
+    assert len(_adapter_error_events("r420")) == 1

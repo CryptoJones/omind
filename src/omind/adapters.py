@@ -162,15 +162,77 @@ def run_adapter(
     # Poolside's event shape differs from Claude's in three places (tool naming,
     # ``cmd``, ``tool_output``); translate ONCE here so the guard, verifier, and
     # accounting all see the Claude-shaped event they were written against.
-    event = harness_mod.translate_event(harness, event)
-    action = normalize_action(event)
-    verdict = guard.check_action(action, omi_dir=omi_dir)
-    # Codex's deny shape depends on which hook fired (PreToolUse vs
-    # PermissionRequest); pass the event name through (ignored by other harnesses).
-    return harness_mod.render_decision(
-        verdict,
-        spec.block_format,
-        sys.stdout,
-        sys.stderr,
-        event=str(event.get("hook_event_name") or ""),
-    )
+    #
+    # For Codex, Gemini, Poolside, agy and Windows Claude this IS the check
+    # dispatch, so it fails OPEN the way ``guard.check_action`` does (#420): an
+    # exception translating, normalizing or rendering is reported and logged,
+    # and the action is allowed (static hard-policy rules still apply), rendered
+    # in the harness's own format.
+    action: dict[str, Any] | None = None
+    verdict: guard.Verdict | None = None
+    hook_event = ""
+    try:
+        event = harness_mod.translate_event(harness, event)
+        # Codex's deny shape depends on which hook fired (PreToolUse vs
+        # PermissionRequest); pass the event name through (ignored by others).
+        hook_event = str(event.get("hook_event_name") or "")
+        action = normalize_action(event)
+        verdict = guard.check_action(action, omi_dir=omi_dir)
+        return harness_mod.render_decision(
+            verdict, spec.block_format, sys.stdout, sys.stderr, event=hook_event
+        )
+    except Exception as exc:
+        fallback = _fail_open_verdict(event, action, exc, verdict)
+        try:
+            return harness_mod.render_decision(
+                fallback, spec.block_format, sys.stdout, sys.stderr, event=hook_event
+            )
+        except Exception:
+            # Rendering itself is broken: empty stdout + exit 0 reads as allow
+            # for every exit-code and JSON-decision harness; a deny that still
+            # stands falls back to the universal exit-2 block.
+            return 0 if fallback.allow else 2
+
+
+def _fail_open_verdict(
+    event: Any,
+    action: dict[str, Any] | None,
+    exc: Exception,
+    decided: guard.Verdict | None,
+) -> guard.Verdict:
+    """The adapter's fail-open verdict (#420), via :func:`guard._fail_open_verdict`.
+
+    When the event never normalized, the hard-policy re-check and the compliance
+    event get a best-effort action read straight off the raw event.
+    """
+    if action is None:
+        action = {}
+        try:
+            # Claude/Codex/Gemini ``tool_input``, Poolside's ``cmd``, agy's
+            # ``toolCall.args.CommandLine``, or a flat ``command``.
+            tool_input = event.get("tool_input")
+            tool_call = event.get("toolCall")
+            args = tool_call.get("args") if isinstance(tool_call, dict) else None
+            command = ""
+            for source, key in (
+                (tool_input, "command"),
+                (tool_input, "cmd"),
+                (args, "CommandLine"),
+                (event, "command"),
+            ):
+                if isinstance(source, dict) and source.get(key):
+                    command = str(source[key])
+                    break
+            action = {
+                "tool": str(event.get("tool_name") or event.get("tool") or ""),
+                "command": command,
+                "session": str(
+                    event.get("session_id")
+                    or event.get("conversationId")
+                    or event.get("session")
+                    or ""
+                ),
+            }
+        except Exception:
+            action = {}
+    return guard._fail_open_verdict(action, exc, decided)
