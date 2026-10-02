@@ -11,6 +11,16 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
+- [ ] **guard hard rules: bundled wrapper option clusters (`env -iC dir sudo …`) are not read getopt-style** ([#451](https://github.com/CryptoJones/omind/issues/451)) — _bug_ —
+  found while fixing #432: the `policy.py` wrapper regex treats a bundled cluster as one opaque switch, so
+  `env -iC /x sudo id` may not reach the program behind it. Read clusters the way `_program_stages` does.
+- [ ] **guard: more write tools for the repo-work classifier (`install`, `dd of=`, `truncate`, `touch`, `ln`, `rsync`)** ([#450](https://github.com/CryptoJones/omind/issues/450)) — _enhancement_ —
+  follow-up from the #434 review: each counts as repo work when its target is inside the repo, and not otherwise.
+- [ ] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — _bug_ —
+  `bash -c '"$@"' _ git commit -m x` is opaque to the hard rules, but the consult and freshness
+  classifiers never see the positional command.
+- [ ] **guard: Bash writes into a repo other than the resolved one skip the consult gate** ([#448](https://github.com/CryptoJones/omind/issues/448)) — _bug_ —
+  `_writes_into_repo` judges every target against one repo; each write target should resolve its own enclosing repo.
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
@@ -78,6 +88,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.18)
+
+- [x] **deps: bump transitive PyJWT (>=2.15.0) and urllib3 (>=2.8.0) in uv.lock** ([#452](https://github.com/CryptoJones/omind/issues/452)) — **v10.2.18** — _bug (dependency security)_ —
+  `uv lock --upgrade-package pyjwt --upgrade-package urllib3`: PyJWT 2.13.0 → 2.15.1 (via `mcp[crypto]`)
+  and urllib3 2.7.0 → 2.8.0 (via `requests`/`botocore`/`sentry-sdk`, dev and e2e extras only). Clears the
+  fixable Dependabot alerts; nothing else in the lock moved. One moderate PyJWT alert has no patched
+  release yet.
 
 ### Shipped — 2026-10-02 (v10.2.17)
 
