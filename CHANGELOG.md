@@ -14,14 +14,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   ([#391](https://github.com/CryptoJones/omind/issues/391)).** The classifier matched an
   editor at command position and then the substring `" -i"` anywhere in the command, so
   a read-only `… | sed 's/x//'; … | grep -iE "a|b"` drew the git-rules demand.
-  - The in-place flag is now read from the editor's own arguments, one pipeline stage at
-    a time: `-i`, `-i ''`, `-i.bak`, `--in-place[=SUF]`, and clusters such as `-Ei` /
-    `-pi`. A cluster stops at a switch that takes the rest as its argument
-    (`perl -MList::Util`, `sed -fscript`), and quoted scripts stay blank.
-  - Enforcement got tighter, not looser, on real edits: `sed -Ei`, `sed --in-place`,
-    `perl -pi`, `ruby -pi`, a path-qualified `/usr/bin/sed -i`, `VAR=x sed -i`, and a
-    python write inside a quoted `-c` or heredoc (blanked by the #317 mask) were all
-    previously missed and are now repo work.
+  - The in-place flag is now read from the editor's own arguments, one simple command at
+    a time: `-i`, `-i ''`, `-i.bak`, BSD `sed -I`, `--in-place[=SUF]`, and clusters such
+    as `-Ei` / `-pi`. A cluster stops at a switch that takes the rest as its argument
+    (`perl -MList::Util`, `sed -fscript`); when that switch ends the cluster it takes the
+    next word (`sed -e -i f`: that `-i` is the script). Quoted scripts stay blank.
+  - The editor is found behind wrappers and keywords (`xargs`, `env`, `sudo`, `command`,
+    `time`, `nice`, `nohup`, `timeout <n>`, `do`, `then`, `else`, `{`, a backtick) and
+    after `find -exec`; `\`-newline continuations are joined first; `sed.exe` counts.
+  - A python/node/ruby write is read only from that interpreter's own `-c`/`-e` payload
+    or heredoc body, and only as a call: `.write_text(`, `open(p, 'w'|'a'|'x'|'r+')`,
+    `writeFileSync(`, and deletes such as `.unlink(`, `os.remove(`, `os.replace(`,
+    `shutil.rmtree(`. A marker in a grep pattern or a printed string no longer counts.
+  - Real edits previously missed are now repo work: `sed -Ei`, `sed --in-place`,
+    `sed -I`, `perl -pi`, `ruby -pi`, `/usr/bin/sed -i`, `VAR=x sed -i`, the wrapped and
+    `-exec` forms above, and a script write inside a quoted `-c` or heredoc (blanked by
+    the #317 mask). Two forms intentionally no longer count: `python3 -i` and a python
+    script given `-i` (`python3 tools/fmt.py -i x`). Python has no in-place flag, so
+    `-i` there was never an edit signal.
 
 ## [10.2.3] - 2026-10-02
 

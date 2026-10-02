@@ -2040,6 +2040,77 @@ def test_real_in_place_edit_is_repo_work(command):
     assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The marker belongs to grep's pattern, not to the python stage.
+        'grep -rn "write_text" src | python3 -m json.tool',
+        "python3 --version; grep -n \"open(p, 'w')\" x.py",
+        # The bare word in a printed string is not a write call.
+        "python3 -c 'print(\"write_text\")'",
+        "python3 -c \"print(open('f').read())\"",
+        "python3 -c \"open('x')\"",
+        # A switch that takes the next word as its argument: `-i` is the script.
+        "sed -e -i f",
+        "sed -f -i.sed f",
+        "sed --expression -i f",
+        # A wrapper's own `-i` is not the editor's.
+        "env -i sed 's/a/b/' f",
+    ],
+)
+def test_script_write_marker_is_bound_to_the_interpreter_stage(command):
+    """#391 review: a write marker and an interpreter elsewhere in the command, or a
+    bare marker word, must not make a read-only command repo work."""
+    assert not guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # Line continuation used to put `-i` in its own stage.
+        "sed \\\n  -i 's/a/b/' f",
+        # Wrappers, keywords and find -exec in front of the editor.
+        "grep -l x *.py | xargs sed -i 's/a/b/'",
+        "grep -l x *.py | xargs -0 -I {} sed -i 's/a/b/' {}",
+        "find . -name '*.py' -exec sed -i 's/a/b/' {} +",
+        "find . -execdir perl -pi -e 's/a/b/' {} \\;",
+        "env X=1 sed -i 's/a/b/' f",
+        "sudo sed -i 's/a/b/' f",
+        "sudo -u bob sed -i 's/a/b/' f",
+        "command sed -i 's/a/b/' f",
+        "time sed -i 's/a/b/' f",
+        "nice -n 10 sed -i 's/a/b/' f",
+        "nohup sed -i 's/a/b/' f",
+        "timeout 5 sed -i 's/a/b/' f",
+        "for f in *.py; do sed -i 's/a/b/' \"$f\"; done",
+        "if true; then sed -i 's/a/b/' f; fi",
+        "if false; then :; else sed -i 's/a/b/' f; fi",
+        "{ sed -i 's/a/b/' f; }",
+        "echo `sed -i 's/a/b/' f`",
+        # BSD sed -I, a cluster after an arg-taking switch's argument, sed.exe.
+        "sed -I '' 's/a/b/' f",
+        "sed -e 's/a b/' -i f",
+        "sed.exe -i 's/a/b/' f",
+        "C:\\tools\\sed.exe -i s/a/b/ f",
+        # Write-mode and destructive script calls.
+        "python3 -c \"open('x', 'x').write('y')\"",
+        "python3 -c \"open('x', 'r+').write('y')\"",
+        "python3 -c \"open('x', mode='wb')\"",
+        "python3 -c \"from pathlib import Path; Path('x').open('w')\"",
+        "python3 -c \"from pathlib import Path; Path('x').unlink()\"",
+        "python3 -c \"import os; os.remove('x')\"",
+        "python3 -c \"import os; os.replace('a', 'b')\"",
+        "python3 -c \"import shutil; shutil.rmtree('d')\"",
+        "node -e \"require('fs').writeFileSync('x', 'y')\"",
+        "cd src && python3 - <<'EOF'\nfrom pathlib import Path\nPath('x').write_text('y')\nEOF",
+    ],
+)
+def test_wrapped_or_continued_in_place_edit_is_repo_work(command):
+    """#391 review: editors behind a wrapper, keyword, `find -exec` or a line
+    continuation, and script writes/deletes, stay in the repo-work gate."""
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
 def test_record_freshness_outcome_retracts_for_dash_c_repo(tmp_path: Path) -> None:
     # #346: record_freshness_outcome must resolve -C repo from hook event and retract it
     repo = _mk_repo(tmp_path, "subrepo")

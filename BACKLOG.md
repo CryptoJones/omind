@@ -161,8 +161,9 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - [x] **guard: any `-i` flag (e.g. `grep -iE`) next to sed/perl marks a command as repo work** ([#391](https://github.com/CryptoJones/omind/issues/391)) — **v10.2.4** — _bug_ —
   the in-place flag is now read from the `sed`/`perl`/`ruby` stage's own arguments, so
   `grep -iE` / `ls -i` elsewhere in the pipeline no longer count; `sed -i ''`,
-  `sed --in-place`, `-Ei`, `perl -pi` and python writes inside a quoted `-c`/heredoc are
-  caught (the last three were silently missed before).
+  `sed --in-place`, `-Ei`, BSD `-I`, `perl -pi`, editors behind `xargs`/`sudo`/`env`/
+  `find -exec`/`do`/`then`/`{`, and python writes inside a quoted `-c`/heredoc are caught.
+  A write marker counts only as a call inside the interpreter's own payload.
 
 ### Shipped — 2026-10-02 (v10.2.3)
 
