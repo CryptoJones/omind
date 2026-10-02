@@ -35,6 +35,11 @@ def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(
         provision, "CANONICAL_OMIND_EXE", Path("/nonexistent/.local/bin/omind")
     )
+    # Windows resolution (#377) probes the running interpreter's Scripts dir
+    # first, and on windows-latest that holds the test venv's real omind.exe,
+    # which would win over the faked which(). These tests cover harness wiring,
+    # not resolution, so pin the Windows result to the same fake.
+    monkeypatch.setattr(provision, "_windows_omind_exe", lambda: "/usr/bin/omind")
 
 
 @pytest.fixture(autouse=True)

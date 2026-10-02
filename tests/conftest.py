@@ -135,3 +135,17 @@ def _no_update_check(monkeypatch: pytest.MonkeyPatch) -> None:
     ``build_session_start_context`` now surfaces the update nudge, so without this
     every priming test would otherwise incur a (fail-open) network round-trip."""
     monkeypatch.setenv("OMIND_NO_UPDATE_CHECK", "1")
+
+
+@pytest.fixture
+def live_launchers(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Treat every pinned omind launcher as live (``--version`` exits 0).
+
+    Opt-in, never autouse: the probe (#377) is real behaviour, and a suite-wide
+    stub would hide it. Use it where a test bakes a fake absolute launcher such
+    as ``/usr/bin/omind`` and then runs ``doctor``, which probes pins and would
+    otherwise report the fake as dead.
+    """
+    from omind import provision
+
+    monkeypatch.setattr(provision, "_launcher_runs", lambda _exe: True)

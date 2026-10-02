@@ -10,7 +10,9 @@ import os
 import stat
 import subprocess
 import tempfile
+from collections.abc import Iterator
 from pathlib import Path, PurePosixPath
+from typing import Any
 
 import pytest
 
@@ -312,6 +314,7 @@ def test_idempotent_files_on_rerun(
     assert template.read_text() == seeds.MEMORY_TEMPLATE
 
 
+@pytest.mark.usefixtures("live_launchers")
 def test_doctor_healthy_when_provisioned(
     tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -388,6 +391,7 @@ def test_doctor_flags_missing_setup(
     assert provision.run_doctor(config, log=_quiet) == 1
 
 
+@pytest.mark.usefixtures("live_launchers")
 def test_doctor_warns_on_path_mismatch(
     tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -467,6 +471,7 @@ def test_claude_settings_path_default_and_claude_config_dir(
     assert _real_claude_settings_path() == config_dir / "settings.json"
 
 
+@pytest.mark.usefixtures("live_launchers")
 def test_doctor_finds_server_via_canonical_config_path(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fake_tools: None
 ) -> None:
@@ -766,6 +771,7 @@ def test_hooks_dry_run_writes_nothing(tmp_path: Path, isolate_settings: Path) ->
     assert not isolate_settings.exists()
 
 
+@pytest.mark.usefixtures("live_launchers")
 def test_doctor_ok_when_hooks_installed(
     tmp_path: Path, fake_tools: None, isolate_claude: Path
 ) -> None:
@@ -788,6 +794,7 @@ def test_doctor_fail_when_hooks_absent(
     assert provision.run_doctor(config, log=_quiet) == 1
 
 
+@pytest.mark.usefixtures("live_launchers")
 def test_doctor_warns_on_hook_path_mismatch(
     tmp_path: Path,
     fake_tools: None,
@@ -969,6 +976,7 @@ def test_provision_migrates_legacy_guard(
     )  # canonical installed
 
 
+@pytest.mark.usefixtures("live_launchers")
 def test_doctor_fails_when_guard_absent(
     tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1133,6 +1141,7 @@ def test_canonical_omind_exe_prefers_the_stable_user_path(
     canonical = tmp_path / ".local" / "bin" / "omind"
     canonical.parent.mkdir(parents=True)
     canonical.write_text("#!/bin/sh\n", encoding="utf-8")
+    monkeypatch.setattr(provision, "_windows", lambda: False)
     monkeypatch.setattr(provision, "CANONICAL_OMIND_EXE", canonical)
     monkeypatch.setattr(provision.shutil, "which", lambda _n: "/some/venv/bin/omind")
     assert provision.canonical_omind_exe() == str(canonical)
@@ -1142,9 +1151,285 @@ def test_canonical_omind_exe_falls_back_when_absent(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path
 ) -> None:
     """System/pipx installs have no stable path to pin."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
     monkeypatch.setattr(provision, "CANONICAL_OMIND_EXE", tmp_path / "nope")
     monkeypatch.setattr(provision.shutil, "which", lambda _n: "/usr/bin/omind")
     assert provision.canonical_omind_exe() == "/usr/bin/omind"
+
+
+#: The real liveness probe, captured before any test stubs it.
+_REAL_LAUNCHER_RUNS = provision._launcher_runs
+
+
+@pytest.fixture
+def real_probe() -> Iterator[Any]:
+    """The real (cached) ``_launcher_runs``, with its cache cleared around the test."""
+    _REAL_LAUNCHER_RUNS.cache_clear()
+    yield _REAL_LAUNCHER_RUNS
+    _REAL_LAUNCHER_RUNS.cache_clear()
+
+
+def _fake_windows_launchers(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    *,
+    live: set[Path],
+    which: str | None,
+    scripts_dirs: list[Path] | None = None,
+) -> Path:
+    """Simulate a Windows box: launchers are ``omind.exe`` and only *live* run (#377)."""
+    canonical = tmp_path / ".local" / "bin" / "omind"
+    canonical.parent.mkdir(parents=True, exist_ok=True)
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "CANONICAL_OMIND_EXE", canonical)
+    monkeypatch.setattr(provision, "_scripts_dirs", lambda: list(scripts_dirs or []))
+    monkeypatch.setattr(provision.shutil, "which", lambda _n: which)
+    monkeypatch.setattr(provision, "_launcher_runs", lambda exe: Path(exe) in live)
+    return canonical
+
+
+def test_canonical_omind_exe_windows_pins_the_exe_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """On Windows the launcher is ``omind.exe``; probing the bare ``omind`` name
+    never matched, so the stable pin never engaged (#377)."""
+    canonical = tmp_path / ".local" / "bin" / "omind"
+    exe = canonical.with_name("omind.exe")
+    _fake_windows_launchers(monkeypatch, tmp_path, live={exe}, which="C:/elsewhere/omind.EXE")
+    exe.write_text("MZ", encoding="utf-8")
+    assert provision.canonical_omind_exe() == str(exe)
+
+
+def test_canonical_omind_exe_windows_skips_an_orphaned_shim(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An orphaned launcher first on PATH (its interpreter no longer has omind)
+    must not be baked into the MCP entry and hooks; the running interpreter's
+    live Scripts launcher wins instead (#377)."""
+    orphan = tmp_path / ".local" / "bin" / "omind.exe"
+    scripts = tmp_path / "AppData" / "Python" / "Python314" / "Scripts"
+    scripts.mkdir(parents=True)
+    good = scripts / "omind.exe"
+    _fake_windows_launchers(
+        monkeypatch, tmp_path, live={good}, which=str(orphan), scripts_dirs=[scripts]
+    )
+    orphan.write_text("MZ", encoding="utf-8")
+    good.write_text("MZ", encoding="utf-8")
+    assert provision.canonical_omind_exe() == str(good)
+
+
+def test_canonical_omind_exe_windows_prefers_the_running_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The interpreter running setup is the install known to hold this omind, so
+    its Scripts launcher beats a stale-but-alive older one in ~/.local/bin."""
+    local = tmp_path / ".local" / "bin" / "omind.exe"
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir()
+    current = scripts / "omind.exe"
+    _fake_windows_launchers(
+        monkeypatch, tmp_path, live={local, current}, which=str(local), scripts_dirs=[scripts]
+    )
+    local.write_text("MZ", encoding="utf-8")
+    current.write_text("MZ", encoding="utf-8")
+    assert provision.canonical_omind_exe() == str(current)
+
+
+def test_canonical_omind_exe_windows_never_pins_a_dead_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, real_probe: Any
+) -> None:
+    """The #377 box: which() finds an existing launcher whose interpreter lost the
+    package. The real probe runs it, sees the non-zero exit, and resolution falls
+    back to bare ``omind`` (re-resolved through PATH at spawn time) instead of
+    pinning the very launcher it just rejected."""
+    orphan = tmp_path / "OldPython" / "Scripts" / "omind.EXE"
+    _fake_windows_launchers(monkeypatch, tmp_path, live=set(), which=str(orphan))
+    monkeypatch.setattr(provision, "_launcher_runs", real_probe)
+    orphan.parent.mkdir(parents=True)
+    orphan.write_text("MZ", encoding="utf-8")
+    probed: list[list[str]] = []
+
+    def fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess[bytes]:
+        probed.append(cmd)
+        return subprocess.CompletedProcess(cmd, 1, b"", b"ModuleNotFoundError: omind")
+
+    monkeypatch.setattr(provision.subprocess, "run", fake_run)
+    assert provision.canonical_omind_exe() == "omind"
+    assert probed == [[str(orphan), "--version"]]
+
+
+def test_canonical_omind_exe_windows_fails_open_with_nothing_on_path(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """With no launcher anywhere, resolution returns bare ``omind`` rather than raise."""
+    _fake_windows_launchers(monkeypatch, tmp_path, live=set(), which=None)
+    assert provision.canonical_omind_exe() == "omind"
+
+
+def test_launcher_runs_requires_a_clean_version_exit(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, real_probe: Any
+) -> None:
+    """The liveness probe is ``<exe> --version``: a non-zero exit (the orphan's
+    ``ModuleNotFoundError``), a missing file, or a hang all mean dead."""
+    exe = str(tmp_path / "omind.exe")
+    calls: list[list[str]] = []
+    exit_code = [0]
+
+    def fake_run(cmd: list[str], **_kw: Any) -> subprocess.CompletedProcess[bytes]:
+        calls.append(cmd)
+        return subprocess.CompletedProcess(cmd, exit_code[0], b"", b"")
+
+    monkeypatch.setattr(provision.subprocess, "run", fake_run)
+    for code, expected in ((0, True), (1, False)):
+        exit_code[0] = code
+        real_probe.cache_clear()
+        assert real_probe(exe) is expected
+    assert calls[0] == [exe, "--version"]
+
+    for exc in (OSError("gone"), subprocess.TimeoutExpired(exe, 1)):
+
+        def boom(*_a: Any, _exc: BaseException = exc, **_kw: Any) -> Any:
+            raise _exc
+
+        monkeypatch.setattr(provision.subprocess, "run", boom)
+        real_probe.cache_clear()
+        assert real_probe(exe) is False
+
+
+def test_launcher_runs_never_raises_on_undecodable_output(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, real_probe: Any
+) -> None:
+    """A launcher writing non-UTF-8 bytes must not raise out of the probe: output
+    is captured as bytes (never decoded), and a ``ValueError`` such as
+    ``UnicodeDecodeError`` reads as dead."""
+    exe = str(tmp_path / "omind.exe")
+    seen: dict[str, Any] = {}
+
+    def binary_ok(cmd: list[str], **kw: Any) -> subprocess.CompletedProcess[bytes]:
+        seen.update(kw)
+        return subprocess.CompletedProcess(cmd, 0, b"\xff\xfe omind", b"\x80")
+
+    monkeypatch.setattr(provision.subprocess, "run", binary_ok)
+    assert real_probe(exe) is True
+    assert not seen.get("text") and "encoding" not in seen
+
+    def undecodable(*_a: Any, **_kw: Any) -> Any:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "invalid start byte")
+
+    monkeypatch.setattr(provision.subprocess, "run", undecodable)
+    real_probe.cache_clear()
+    assert real_probe(exe) is False
+
+
+def test_scripts_dirs_skips_a_scheme_sysconfig_does_not_know(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """``sysconfig.get_path`` raises ``KeyError`` for an unknown scheme (the user
+    scheme on some builds); that dir is skipped, the environment dir is kept."""
+    env_scripts = tmp_path / "Scripts"
+
+    def get_path(name: str, scheme: str | None = None) -> str:
+        assert name == "scripts"
+        if scheme is not None:
+            raise KeyError(scheme)
+        return str(env_scripts)
+
+    monkeypatch.setattr(provision.sysconfig, "get_path", get_path)
+    assert provision._scripts_dirs() == [env_scripts]
+
+
+def test_same_exe_is_case_insensitive_only_on_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Pre-#377 setup baked which()'s ``omind.EXE``; the resolver now returns
+    ``omind.exe``. On Windows that is one file, so it must compare equal."""
+    upper, lower = r"C:\Users\u\Scripts\omind.EXE", "C:/Users/u/Scripts/omind.exe"
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    assert provision._same_exe(upper, lower)
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    assert not provision._same_exe("/opt/Omind", "/opt/omind")
+
+
+def test_matches_desired_ignores_exe_case_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An MCP entry baked as ``omind.EXE`` must not force a re-register when the
+    resolver now returns ``omind.exe`` (#377)."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: r"C:\Users\u\Scripts\omind.exe")
+    prov = Provisioner(_config(tmp_path), log=_quiet)
+    server = prov.desired_server_entry()
+    server["command"] = r"C:\Users\u\Scripts\omind.EXE"
+    assert prov._matches_desired(server)
+
+
+def _ready_enforce_hook() -> None:
+    enforce = provision._enforce_hook_dest()
+    enforce.parent.mkdir(parents=True, exist_ok=True)
+    enforce.write_text("#!/usr/bin/env python3\n", encoding="utf-8")
+
+
+def test_diagnose_hooks_ignores_exe_case_on_windows(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, live_launchers: None
+) -> None:
+    """Hooks baked with ``omind.EXE`` are the canonical ``omind.exe`` on Windows,
+    not a "non-canonical omind" fail on every healthy upgraded box (#377)."""
+    vault = tmp_path / "v"
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: r"C:\Py\Scripts\omind.EXE")
+    settings = _wired_settings(tmp_path, vault)
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: r"C:\Py\Scripts\omind.exe")
+    _ready_enforce_hook()
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+    assert result.level == "ok", result.message
+
+
+def test_diagnose_hooks_fails_a_pinned_omind_that_does_not_run(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hooks pinned to a dead launcher fail, even when that launcher is what
+    resolution returns, so the string compare alone would read green (#377)."""
+    vault = tmp_path / "v"
+    dead = str(tmp_path / "bin" / "omind")
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: dead)
+    monkeypatch.setattr(provision, "_launcher_runs", lambda exe: exe != dead)
+    settings = _wired_settings(tmp_path, vault)
+    _ready_enforce_hook()
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+    assert result.level == "fail"
+    assert "pinned omind does not run" in result.message and dead in result.message
+
+
+def test_doctor_fails_an_mcp_entry_pinned_to_a_dead_omind(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The MCP entry's absolute ``command`` is probed too: a dead pin is the
+    CONNECTION_CLOSED of #377 and fails doctor instead of reading as registered."""
+    config = _config(tmp_path)
+    _provision_files(config)
+    dead = str(tmp_path / "bin" / "omind")
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: dead)
+    monkeypatch.setattr(provision, "_launcher_runs", lambda exe: exe != dead)
+    _write_server_config(isolate_claude, config)
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["mcp_registration"].level == "fail"
+    assert "pinned omind does not run" in results["mcp_registration"].message
+    assert provision.run_doctor(config, log=_quiet) == 1
+
+
+def test_doctor_does_not_probe_a_bare_omind(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A bare ``omind`` resolves through PATH at spawn time; doctor does not judge it."""
+    config = _config(tmp_path)
+    _provision_files(config)
+    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: "omind")
+
+    def no_probe(exe: str) -> bool:
+        raise AssertionError(f"probed {exe}")
+
+    monkeypatch.setattr(provision, "_launcher_runs", no_probe)
+    _write_server_config(isolate_claude, config)
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["mcp_registration"].level == "ok"
 
 
 def test_hook_exe_path_reads_only_absolute_pins() -> None:

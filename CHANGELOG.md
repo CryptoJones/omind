@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.3] - 2026-10-02
+
+### Fixed
+- **Windows: `canonical_omind_exe()` pinned an orphaned launcher, breaking the `omi` MCP
+  server with CONNECTION_CLOSED ([#377](https://github.com/CryptoJones/omind/issues/377)).**
+  The stable pin probed the extension-less `~/.local/bin/omind`, which never exists on
+  Windows (the launcher is `omind.exe`), so every `omind setup` fell through to
+  `shutil.which("omind")` and froze whatever launcher was first on `PATH` into the MCP entry
+  and every hook, including an orphaned shim whose interpreter no longer had the package.
+  - On Windows the candidates are now the running interpreter's script dirs (environment,
+    then user scheme), then `~/.local/bin/omind.exe` (the uv tool bin), then `which()`. The
+    first one that exists and whose `--version` exits 0 is pinned. The probe has a 5 s
+    timeout, never decodes output, never raises, and is cached per path.
+  - If no candidate runs, resolution returns a bare `omind` (re-resolved through `PATH` each
+    time the agent spawns it), never a launcher the probe rejected. POSIX resolution is
+    unchanged.
+  - `omind doctor` probes an absolute omind pin in the hooks and in the MCP entry, and fails
+    with "pinned omind does not run — run `omind setup`" when it is dead. Before, it only
+    compared strings, so a dead pin that matched resolution read green.
+  - On Windows, launcher paths compare case-insensitively, so an entry baked as which()'s
+    `omind.EXE` is not reported as a non-canonical omind and does not force an MCP
+    re-register now that resolution returns `omind.exe`.
+
 ## [10.2.2] - 2026-10-02
 
 ### Changed
