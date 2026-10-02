@@ -96,8 +96,9 @@ into a new note. In dependency order; each child is flag-gated._
 
 ### Windows
 
-- [ ] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — _bug (Windows)_ —
-  with SAC enforcing, all hooks and the `omi` MCP server stop working, while `python -m omind` still runs.
+- [ ] **Windows hook shells: OpenClaw undetermined; verify `cmd /c` spaced paths (agy, pool) and Claude Code without Git Bash** ([#425](https://github.com/CryptoJones/omind/issues/425)) — _bug (Windows), follow-up of #418_ —
+  #418 renders each harness's hooks for its Windows shell; these three cases still need a
+  real Windows run, and OpenClaw's hook schema needs confirming.
 
 ## Not planned
 
@@ -147,6 +148,17 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.7)
+
+- [x] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — **v10.2.7** — _bug (Windows)_ —
+  Windows now pins `<python.exe> -m omind` (the running interpreter, once `-m omind --version`
+  exits 0) in every hook, MCP entry, guard script and service line, falling back to the #377
+  launcher resolution. `doctor` reads, probes and compares the module form, and flags hooks
+  still on `omind.exe`. macOS/Linux are unchanged.
+- [x] **doctor/setup: `_HOOK_EXE_RE` truncates a quoted omind path containing a space (Windows %USERPROFILE% with spaces)** ([#417](https://github.com/CryptoJones/omind/issues/417)) — **v10.2.7** — _bug (Windows)_ —
+  the hook parser takes a quoted path whole, so a pin under `C:\Users\Jane Doe\` round-trips
+  setup → doctor as healthy instead of a false non-canonical / dead-pin fail.
 
 ### Shipped — 2026-10-02 (v10.2.6)
 

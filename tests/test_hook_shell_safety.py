@@ -82,7 +82,7 @@ def _commands(settings: Path) -> list[str]:
 def _install_everything(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, exe: str) -> Path:
     settings = tmp_path / "settings.json"
     monkeypatch.setattr(provision, "claude_settings_path", lambda: settings)
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: exe)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [exe])
     monkeypatch.setattr(provision, "_resolve_python", lambda: "python")
     prov = Provisioner(SetupConfig(vault=tmp_path / "vault"), log=lambda _: None)
     prov.ensure_hooks_installed()

@@ -140,6 +140,18 @@ def test_checkpoint_install_and_uninstall_timer(tmp_path: Path) -> None:
     assert not (unit_dir / checkpoint.SERVICE_UNIT_NAME).exists()
 
 
+def test_checkpoint_timer_quotes_execstart(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """ExecStart quotes the omind path like the mesh and backup units, so a
+    spaced home (``/home/jane doe``) does not word-split (#418 review)."""
+    spaced = "/home/jane doe/.local/bin/omind"
+    monkeypatch.setattr(checkpoint.shutil, "which", lambda _name: spaced)
+    checkpoint.install_timer("15m", tmp_path / "vault", "OMI", log=lambda _m: None, reload=False)
+    service = (checkpoint.systemd_user_dir() / checkpoint.SERVICE_UNIT_NAME).read_text(
+        encoding="utf-8"
+    )
+    assert f'ExecStart="{spaced}" checkpoint run --since 15m' in service
+
+
 def test_checkpoint_cli_install_timer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(checkpoint, "_systemctl", lambda _args: None)  # don't touch real systemd
     rc = main(

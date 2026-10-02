@@ -9,9 +9,12 @@
 // such dependency. Fail-open on any adapter/parse error — a broken guard must
 // never break OpenCode.
 //
-// __OMIND_BIN__ and __OMI_DIR__ are substituted by omind at install.
+// __OMIND_BIN__, __OMIND_ARGS__ and __OMI_DIR__ are substituted by omind at
+// install. OMIND_ARGS is empty for a launcher and ["-m", "omind"] when OMIND is
+// a Windows python.exe (#380); Bun's $ spreads an array into separate args.
 
 const OMIND = "__OMIND_BIN__";
+const OMIND_ARGS = "__OMIND_ARGS__".split(" ").filter(Boolean);
 const OMI_DIR = "__OMI_DIR__";
 
 export const OmiGuard = async ({ $ }) => {
@@ -28,7 +31,7 @@ export const OmiGuard = async ({ $ }) => {
           session: session,
           is_omi_consult: false,
         });
-        const res = await $`printf '%s' ${payload} | ${OMIND} guard adapter --harness opencode --omi-dir ${OMI_DIR}`
+        const res = await $`printf '%s' ${payload} | ${OMIND} ${OMIND_ARGS} guard adapter --harness opencode --omi-dir ${OMI_DIR}`
           .quiet()
           .nothrow();
         const verdict = JSON.parse((res.stdout || "").toString().trim() || "{}");

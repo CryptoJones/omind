@@ -22,6 +22,7 @@ import json
 import ntpath
 import os
 import re
+import shlex
 import shutil
 import stat
 import subprocess
@@ -80,9 +81,186 @@ def canonical_omind_exe() -> str:
     return shutil.which("omind") or "omind"
 
 
+#: The argv tail that runs omind as a module under an interpreter (#380).
+MODULE_ARGS = ("-m", "omind")
+
+
+def canonical_omind_argv() -> list[str]:
+    """The argv prefix to bake into hook commands, MCP entries and services.
+
+    POSIX: ``[canonical_omind_exe()]``, unchanged. Windows: ``[<python.exe>,
+    "-m", "omind"]`` when the running interpreter can import omind (#380).
+    Smart App Control blocks the unsigned ``uv`` trampoline ``omind.exe`` at
+    spawn while the venv's ``python.exe`` is allowed, and pinning the
+    interpreter that holds the package also avoids the orphaned shim of #377.
+    Falls back to the launcher resolution when no interpreter qualifies.
+    Never raises.
+
+    Callers render the result for their own format: an MCP entry puts
+    ``argv[0]`` in ``command`` and the rest first in ``args``; a shell command
+    uses :func:`canonical_omind_cmd`.
+    """
+    if _windows():
+        module = _windows_module_argv()
+        if module is not None:
+            return module
+    return [canonical_omind_exe()]
+
+
+def double_quote(exe: str) -> str:
+    """*exe* in double quotes: cmd.exe, schtasks and systemd ``ExecStart`` form."""
+    return f'"{exe}"'
+
+
+def shell_quote(exe: str) -> str:
+    """*exe* quoted for the platform's shell: double quotes on Windows (cmd and
+    schtasks read no single quotes), :func:`shlex.quote` on POSIX."""
+    return double_quote(exe) if _windows() else shlex.quote(exe)
+
+
+def powershell_literal(value: str) -> str:
+    """*value* as a PowerShell single-quoted literal: no ``$`` or backtick
+    expansion; an embedded ``'`` is doubled."""
+    return "'" + value.replace("'", "''") + "'"
+
+
+def powershell_quote(exe: str) -> str:
+    """*exe* as a PowerShell command head: ``& '<exe>'``.
+
+    PowerShell parses a quoted string at the start of a statement as an
+    expression, so ``"<exe>" -m omind ...`` is a ParserError ("Unexpected token
+    '-m'"); the call operator ``&`` makes it a command.
+    """
+    return f"& {powershell_literal(exe)}"
+
+
+#: Characters that make cmd.exe need quotes around a path.
+_CMD_SPECIAL = frozenset(" \t&()[]{}^=;!'+,`~%")
+
+
+def cmd_quote(exe: str) -> str:
+    """*exe* for a ``cmd /c`` command line: double quotes only when needed.
+
+    ``cmd /c`` strips the first and last quote of a line that starts with a
+    quote and holds more than two, so a needlessly quoted head breaks a hook
+    whose arguments are quoted too. A plain path stays bare, the same bytes the
+    launcher pin wrote before #380.
+    """
+    return f'"{exe}"' if any(c in _CMD_SPECIAL for c in exe) else exe
+
+
+#: How each Windows hook shell wants the pinned path quoted (#418 review).
+_WINDOWS_HOOK_QUOTE: dict[str, Callable[[str], str]] = {
+    # `pwsh`/`powershell.exe -Command`: needs the call operator.
+    "powershell": powershell_quote,
+    # `cmd /c`: bare unless the path needs quotes.
+    "cmd": cmd_quote,
+    # Bash (the Windows bash shipped with Git for Windows), and harnesses that
+    # split the string themselves in Windows mode: plain double quotes.
+    "bash": double_quote,
+    "argv": double_quote,
+}
+
+
+#: How each Windows hook shell wants an ARGUMENT (a vault or OMI path) quoted.
+_WINDOWS_ARG_QUOTE: dict[str, Callable[[str], str]] = {
+    "powershell": powershell_literal,
+    "cmd": cmd_quote,
+    "bash": double_quote,
+    "argv": double_quote,
+}
+
+
+def hook_quote(windows_shell: str) -> Callable[[str], str]:
+    """The quoting for the pinned path of a harness whose hooks run under
+    *windows_shell* on Windows.
+
+    One harness, one convention: every hook a harness runs goes through the
+    same function. POSIX always uses :func:`shlex.quote`, unchanged.
+    """
+    windows = _WINDOWS_HOOK_QUOTE[windows_shell]
+
+    def quote(exe: str) -> str:
+        return windows(exe) if _windows() else shlex.quote(exe)
+
+    return quote
+
+
+def hook_arg_quote(windows_shell: str, value: str, posix: Callable[[str], str]) -> str:
+    """*value* quoted as a hook argument: the *windows_shell* form on Windows,
+    *posix* (the call site's existing quoting, so POSIX bytes do not churn)
+    elsewhere."""
+    return _WINDOWS_ARG_QUOTE[windows_shell](value) if _windows() else posix(value)
+
+
+def canonical_omind_cmd(quote: Callable[[str], str] = shell_quote) -> str:
+    """:func:`canonical_omind_argv` as a shell command prefix.
+
+    Only ``argv[0]`` is a path, so only it goes through *quote*; the module
+    tail (``-m omind``) needs no quoting in any shell. Quoted by default: on
+    Windows ``argv[0]`` is now the interpreter under the user's profile, so a
+    username like ``Jane Doe`` would otherwise word-split it. A caller that
+    needs the raw value opts out with ``quote=str``.
+    """
+    argv = canonical_omind_argv()
+    return " ".join([quote(argv[0]), *argv[1:]])
+
+
+def _windows_module_argv() -> list[str] | None:
+    """``[python.exe, "-m", "omind"]`` for the running interpreter, or None (#380).
+
+    This interpreter is running omind, so it has the package; the probe still
+    confirms ``-m omind --version`` exits 0 before it is pinned. ``pythonw.exe``
+    is swapped for its console sibling, because hooks talk over stdout.
+    """
+    try:
+        exe = sys.executable
+        if not exe:
+            return None
+        python = Path(exe)
+        if python.name.lower() == "pythonw.exe":
+            python = python.with_name("python.exe")
+        if python.is_file() and _module_runs(str(python)):
+            return [str(python), *MODULE_ARGS]
+    except (OSError, ValueError):
+        pass
+    return None
+
+
+@functools.cache
+def _module_runs(python: str) -> bool:
+    """Whether ``<python> -m omind --version`` exits 0. Never raises (#380)."""
+    try:
+        result = subprocess.run(
+            [python, *MODULE_ARGS, "--version"],
+            capture_output=True,
+            timeout=_MODULE_PROBE_TIMEOUT,
+            check=False,
+        )
+    except (OSError, ValueError, subprocess.SubprocessError):
+        return False
+    return result.returncode == 0
+
+
+def _argv_runs(argv: list[str]) -> bool:
+    """Probe an argv prefix: the module form or a single launcher."""
+    if len(argv) > 1 and tuple(argv[1:]) == MODULE_ARGS:
+        return _module_runs(argv[0])
+    return _launcher_runs(argv[0])
+
+
+def _same_argv(a: list[str], b: list[str]) -> bool:
+    """Whether two argv prefixes run the same omind (exe compared per :func:`_same_exe`)."""
+    return len(a) == len(b) and _same_exe(a[0], b[0]) and a[1:] == b[1:]
+
+
 #: Seconds the launcher liveness probe may take before it counts as dead. Up to
 #: four candidates are probed serially, so this bounds setup/doctor at ~20 s.
 _LAUNCHER_PROBE_TIMEOUT = 5.0
+#: Seconds the ``-m omind --version`` probe may take. Longer than the launcher
+#: probe: a cold interpreter start under antivirus can pass 5 s, and a timeout
+#: here silently falls back to the very launcher Smart App Control blocks (#380).
+_MODULE_PROBE_TIMEOUT = 20.0
 
 
 def _scripts_dirs() -> list[Path]:
@@ -153,7 +331,8 @@ def _windows_fallback_exe() -> str:
 
     Never a path the probe rejected: a bare ``omind`` re-resolves through PATH
     each time the agent spawns it, so a later fix to PATH or the install takes
-    effect without re-running setup. #380 replaces this with ``python -m omind``.
+    effect without re-running setup. :func:`canonical_omind_argv` prefers
+    ``python -m omind`` (#380) and only reaches this when no interpreter runs it.
     """
     return "omind"
 
@@ -452,8 +631,13 @@ def _entry_command_text(entry: object) -> str:
 
 
 #: The executable token immediately preceding ``hook <Event>`` in an installed
-#: hook command — the omind binary that entry actually runs.
-_HOOK_EXE_RE = re.compile(r"(?P<exe>\S+)\s+hook\s+\S")
+#: hook command — the omind binary that entry actually runs. The Windows module
+#: form puts ``-m omind`` between the interpreter and ``hook`` (#380), and a
+#: quoted token may contain spaces (``C:\Users\Jane Doe\...``, #417): double
+#: quotes on Windows, ``shlex.quote``'s single quotes on POSIX.
+_HOOK_EXE_RE = re.compile(
+    r"""(?P<exe>"[^"]+"|'[^']+'|\S+)(?P<module>\s+-m\s+omind)?\s+hook\s+\S"""
+)
 
 
 #: BSD/macOS immutable bits (``chflags uchg`` / ``schg``). Absent on Linux,
@@ -555,13 +739,14 @@ def _immutable_commands(path: Path) -> tuple[str, str, str]:
     return ("chattr +i", f"chattr -i {path}", f"chattr +i {path}")
 
 
-def _hook_exe_path(command_text: str) -> str | None:
-    """The omind executable an installed hook command actually runs, if absolute.
+def _hook_omind_argv(command_text: str) -> list[str] | None:
+    """The omind argv prefix an installed hook runs, if pinned to an absolute path.
 
-    Hook commands look like ``<exe> hook <Event> --vault "…" --folder "…"``; the
-    token before ``hook`` is the binary. A bare ``omind`` (no directory) resolves
-    through PATH at run time and so cannot go stale — only absolute paths pin a
-    specific install, so those are all we report on.
+    ``[exe]`` for a launcher, ``[python, "-m", "omind"]`` for the Windows module
+    form (#380). Hook commands look like ``<exe> hook <Event> --vault "…"
+    --folder "…"``; the token before ``hook`` is the binary. A bare ``omind``
+    (no directory) resolves through PATH at run time and so cannot go stale —
+    only absolute paths pin a specific install, so those are all we report on.
 
     Both separators are checked, not just ``os.sep``: settings.json is portable
     data, and a POSIX-style pin read on Windows (or the reverse) is precisely the
@@ -572,7 +757,7 @@ def _hook_exe_path(command_text: str) -> str | None:
     for match in _HOOK_EXE_RE.finditer(command_text):
         token = match.group("exe").strip("\"'")
         if "/" in token or "\\" in token:
-            return token
+            return [token, *MODULE_ARGS] if match.group("module") else [token]
     return None
 
 
@@ -881,13 +1066,12 @@ class Provisioner:
     def _server_command(self) -> list[str]:
         """The `omind node` invocation the agent runs as its MCP server.
 
-        Canonical omind path (see :func:`canonical_omind_exe`): the agent's spawn
+        Canonical omind argv (see :func:`canonical_omind_argv`): the agent's spawn
         environment may lack ~/.local/bin on PATH, and the entry must survive an
         update without re-registration.
         """
-        omind_exe = canonical_omind_exe()
         return [
-            omind_exe,
+            *canonical_omind_argv(),
             "node",
             "--vault", str(self.config.vault),
             "--folder", self.config.folder,
@@ -960,12 +1144,13 @@ class Provisioner:
     def _hook_command(self, event: str) -> str:
         """The shell command Claude Code runs for one hook event.
 
-        Uses :func:`canonical_omind_exe` so the hook fires even if the shell
+        Uses :func:`canonical_omind_argv` so the hook fires even if the shell
         Claude Code spawns lacks ``~/.local/bin`` on PATH, *and* keeps firing
         after an update.
         """
-        omind_exe = canonical_omind_exe()
+        omind = canonical_omind_cmd(lambda exe: f'"{exe}"')
         # The "<exe> hook" prefix always contains HOOK_MARKER ("omind hook"),
+        # and so does the Windows module form "<python> -m omind hook" (#380),
         # which provision uses to find/replace omind's own entries.
         # Both values are quoted: the hook string goes through a shell, and an
         # unquoted folder like "My Memory" word-splits into a stray positional.
@@ -974,7 +1159,7 @@ class Provisioner:
         # per harness on purpose: see hooks.INJECTING_HARNESSES.
         harness = " --harness claude" if event == "PostToolUse" else ""
         return (
-            f'"{omind_exe}" hook {event} --vault "{self.config.vault}" '
+            f'{omind} hook {event} --vault "{self.config.vault}" '
             f'--folder "{self.config.folder}"{harness}'
         )
 
@@ -1314,6 +1499,9 @@ class Provisioner:
                 write_provision_manifest()
                 policy.write_seed_policy()
             return
+        # canonical_omind_exe, not canonical_omind_argv, on purpose: these
+        # scripts are POSIX-only (Windows returned above), and the Windows
+        # module form (#380) is the only case where the two differ.
         omind_exe = canonical_omind_exe()
         omi_dir = str(self.config.omi_dir)
         for resource, dest in (
@@ -1358,13 +1546,15 @@ class Provisioner:
         if _windows():
             # No .sh adapters on native Windows: call omind directly — the same
             # pure-Python guard path the Codex harness uses (#259).
-            omind_exe = canonical_omind_exe()
+            # Module form (`python -m omind`) where it runs: Smart App Control
+            # blocks the unsigned omind.exe trampoline (#380).
+            omind = canonical_omind_cmd(lambda exe: f'"{exe}"')
             guard_command = (
-                f'"{omind_exe}" guard adapter --harness claude '
+                f'{omind} guard adapter --harness claude '
                 f'--omi-dir "{self.config.omi_dir}"'
             )
             reset_command = (
-                f'"{omind_exe}" guard preflight --omi-dir "{self.config.omi_dir}"'
+                f'{omind} guard preflight --omi-dir "{self.config.omi_dir}"'
             )
         else:
             guard_command = str(_omi_guard_dest())
@@ -1505,6 +1695,10 @@ class Provisioner:
 
     def run(self) -> list[str]:
         self.log(f"omind setup -> {self.config.omi_dir}")
+        if _windows():
+            # Which form got pinned (#380): the module form, or the launcher
+            # fallback when the `-m omind` probe failed or timed out.
+            self.log(f"  omind pinned as: {canonical_omind_cmd()}")
         self.check_prereqs()
         self.ensure_vault()
         self.ensure_obsidian_config()
@@ -1744,12 +1938,13 @@ def diagnose(config: SetupConfig) -> list[CheckResult]:
                 f"MCP server '{name}' not registered at user scope (run `omind setup`)",
             )
         )
-    elif (dead := _dead_pin(server.get("command"))) is not None:
+    elif (dead := _dead_pin(server.get("command"), server.get("args"))) is not None:
         results.append(
             CheckResult(
                 "mcp_registration",
                 "fail",
-                f"MCP server '{name}': pinned omind does not run ({dead}) — run `omind setup`",
+                f"MCP server '{name}': pinned omind does not run ({dead}) — run "
+                f"{_setup_invocation(canonical_omind_argv())}",
             )
         )
     elif not prov._matches_desired(server):
@@ -1801,16 +1996,35 @@ def _diagnose_claude_skill() -> CheckResult:
     )
 
 
-def _dead_pin(command: object) -> str | None:
+def _dead_pin(command: object, args: object = None) -> str | None:
     """*command* when it is an absolute omind path whose ``--version`` fails.
 
     A bare ``omind`` resolves through PATH at spawn time and is not judged here.
     A pin that does not run (an orphaned shim, a removed venv) is the #377
     failure: the wiring looks right while every session's server dies on launch.
+    When *args* starts with ``-m omind`` the pin is an interpreter (#380), probed
+    as ``<python> -m omind --version``: a bare ``python --version`` would pass
+    even with the package gone.
     """
-    if isinstance(command, str) and _is_pinned_path(command) and not _launcher_runs(command):
-        return command
-    return None
+    if not isinstance(command, str) or not _is_pinned_path(command):
+        return None
+    module = isinstance(args, list) and tuple(args[: len(MODULE_ARGS)]) == MODULE_ARGS
+    argv = [command, *MODULE_ARGS] if module else [command]
+    return None if _argv_runs(argv) else " ".join(argv)
+
+
+def _setup_invocation(canonical: list[str]) -> str:
+    """How to re-run setup, quoted for the doctor message.
+
+    Plain ``omind setup`` everywhere but the Windows module form (#380): where
+    Smart App Control blocks ``omind.exe``, launching setup through that same
+    launcher is blocked too, so the advice names the interpreter instead. Used
+    by the dead-pin messages as well: under SAC the blocked launcher probes as
+    dead, which is exactly when ``omind setup`` cannot run.
+    """
+    if len(canonical) > 1 and tuple(canonical[1:]) == MODULE_ARGS:
+        return f"`{double_quote(canonical[0])} -m omind setup`"
+    return "`omind setup`"
 
 
 def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
@@ -1836,7 +2050,7 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         )
 
     expected_vault = str(config.vault)
-    canonical = canonical_omind_exe()
+    canonical = canonical_omind_argv()
     missing: list[str] = []
     path_mismatch = False
     stale_exes: set[str] = set()
@@ -1852,14 +2066,16 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
         command_text = _entry_command_text(found)
         if expected_vault not in command_text:
             path_mismatch = True
-        baked = _hook_exe_path(command_text)
+        baked = _hook_omind_argv(command_text)
         # A hook pinned to some *other* omind install keeps running that build
         # forever: self-update moves the canonical path, never this one. The
         # wiring still looks correct, so only an explicit comparison catches it.
-        if baked and (dead := _dead_pin(baked)) is not None:
+        # A launcher pin where Windows now resolves `python -m omind` (#380) is
+        # stale too: re-running setup moves it off the Smart App Control block.
+        if baked and (dead := _dead_pin(baked[0], baked[1:])) is not None:
             dead_exes.add(dead)
-        elif baked and not _same_exe(baked, canonical):
-            stale_exes.add(baked)
+        elif baked and not _same_argv(baked, canonical):
+            stale_exes.add(" ".join(baked))
 
     if missing:
         return CheckResult(
@@ -1898,15 +2114,15 @@ def _diagnose_hooks(settings_path: Path, config: SetupConfig) -> CheckResult:
             "hooks",
             "fail",
             "auto-memory hooks: pinned omind does not run "
-            f"({', '.join(sorted(dead_exes))}) — run `omind setup`.{lock_note}",
+            f"({', '.join(sorted(dead_exes))}) — run {_setup_invocation(canonical)}.{lock_note}",
         )
     if stale_exes:
         return CheckResult(
             "hooks",
             "fail",
             "auto-memory hooks run a non-canonical omind "
-            f"({', '.join(sorted(stale_exes))}, not {canonical}) — self-update will "
-            f"never reach them; run `omind setup`.{lock_note}",
+            f"({', '.join(sorted(stale_exes))}, not {' '.join(canonical)}) — self-update will "
+            f"never reach them; run {_setup_invocation(canonical)}.{lock_note}",
         )
     # Check the enforcement hook is present and the script exists on disk.
     enforce_dest = _enforce_hook_dest()

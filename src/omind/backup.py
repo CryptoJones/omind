@@ -41,7 +41,13 @@ from omind import filelock, paths
 from omind.notes import upsert_note
 from omind.paths import INDEX_FILENAME
 from omind.proc import DEFAULT_TIMEOUT, run_command
-from omind.provision import CheckResult, Logger, SetupConfig, canonical_omind_exe
+from omind.provision import (
+    CheckResult,
+    Logger,
+    SetupConfig,
+    canonical_omind_cmd,
+    double_quote,
+)
 from omind.store import NoteError, NoteFields, NoteNotFoundError, OmiStore
 
 PASS_FILENAME = "backup.pass"
@@ -456,7 +462,8 @@ def install_timer(config: SetupConfig, log: Logger = print) -> None:
     _require_config()  # don't install a timer that can only ever fail
     unit_dir = systemd_user_dir()
     unit_dir.mkdir(parents=True, exist_ok=True)
-    omind_exe = canonical_omind_exe()
+    # systemd ExecStart takes double quotes; an unquoted path word-splits.
+    omind_exe = canonical_omind_cmd(double_quote)
     service = (
         "[Unit]\n"
         "Description=omind encrypted vault backup\n"
