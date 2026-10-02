@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.2] - 2026-10-02
+
+### Changed
+- **The PyPI publish workflow now builds with `uv build`
+  ([#267](https://github.com/CryptoJones/omind/issues/267)).** `publish.yml` installs uv
+  with `astral-sh/setup-uv`, pinned by SHA. It builds the sdist and wheel with `uv build`
+  instead of `pip install build` + `python -m build`, and runs `twine check --strict` via
+  `uvx`. The rest is unchanged: the tag-matches-version check, trusted publishing from the
+  `pypi` environment with `id-token: write` on the upload job only, and the default
+  dry-run for `workflow_dispatch`. No runtime change.
+- **CI's wheel job builds with `uv build --wheel`**, using the same SHA-pinned
+  `astral-sh/setup-uv`, instead of `python -m build --wheel`. Every PR now exercises the
+  build path that publishes.
+- **The release procedure is documented** in CONTRIBUTING.md → *Releasing*. BACKLOG.md →
+  *PyPI Publish Setup* now lists only what is left: register the pending trusted
+  publisher on pypi.org (owner `CryptoJones`, repo `omind`, workflow `publish.yml`,
+  environment `pypi`), then cut a release. Every release from v9.7.3 through v10.0.2
+  reached the upload step and was refused with `invalid-publisher`; 10.1.0 through 10.2.1
+  were never released. This release is meant to be the first one published.
+
 ## [10.2.1] - 2026-10-02
 
 ### Fixed

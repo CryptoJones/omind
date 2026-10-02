@@ -37,7 +37,7 @@ jobs:
       - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
         with:
           python-version: '3.12'
-      - run: python -m pip install -U pip build twine
+      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
       - name: A release tag must match the packaged version
         if: github.event_name == 'release'
         env:
@@ -52,9 +52,11 @@ jobs:
             echo "::error::release tag $TAG does not match pyproject version $version"
             exit 1
           fi
-      - run: python -m build
+      # uv build: the same command test.yml's wheel job runs on every PR, so
+      # the build path that publishes is the one CI exercises.
+      - run: uv build
       - name: Metadata renders on PyPI
-        run: python -m twine check --strict dist/*
+        run: uvx twine check --strict dist/*
       - name: Hand the artifacts to the publish job
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
         with:
