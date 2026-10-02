@@ -15,7 +15,8 @@ the exact order of operations._
   `bash -c 'sudo rm -rf /x'` and `timeout 5 sudo …` are not blocked. Found by the 2026-10-02 Fable audit.
 - [ ] **rules: shell-site walker gaps from #413** ([#432](https://github.com/CryptoJones/omind/issues/432)) — _bug, includes a regression_ —
   a heredoc piped to `bash` is no longer judged. Also: an interpreter heredoc can exec a push, `cd ~user` raises, `env -C` is ignored, and `find -exec {} +` chains are quadratic.
-- [ ] **rules: push `--all` / `--mirror` and `push.default=matching` reach main from a feature branch** ([#433](https://github.com/CryptoJones/omind/issues/433)) — _bug_
+- [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
+  follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **guard: the repo-work classifier misses `bash -c` bodies, redirects/`tee`/`cp`/`mv`/`rm` into the repo, and `python3 -m pytest`** ([#434](https://github.com/CryptoJones/omind/issues/434)) — _bug_
 - [ ] **provision/doctor robustness** ([#435](https://github.com/CryptoJones/omind/issues/435)) — _bug (pre-existing)_ —
   a non-UTF-8 config file makes doctor raise. Also: UNC paths in the Git Bash form, a folder name with a space in the cmd form, and a `_scripts_dirs` ValueError.
@@ -84,6 +85,16 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.13)
+
+- [x] **rules: push `--all` / `--mirror` and `push.default=matching` reach main from a feature branch** ([#433](https://github.com/CryptoJones/omind/issues/433)) — **v10.2.13** — _bug_ —
+  `--all` / `--branches` / `--mirror` are judged against every local branch, and a
+  matching push (`push.default=matching`, a configured `:` refspec, or
+  `git push origin :`) against every local branch the remote also has (every
+  local branch when that is unknown). `--mirror` adds the remote branches it
+  deletes, and `remote.<name>.mirror`, `git -c` settings, a detached HEAD and a
+  tag named `main` are handled too.
 
 ### Shipped — 2026-10-02 (v10.2.12)
 

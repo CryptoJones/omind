@@ -7,6 +7,43 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.13] - 2026-10-02
+
+### Fixed
+- **Pushes that send every branch are judged by every branch
+  ([#433](https://github.com/CryptoJones/omind/issues/433)).** The repo-scoped
+  rules judged a push by its refspecs, or by `@{push}` when it had none (#423).
+  Three pushes from a feature branch also send `main`, and all three were allowed
+  on a public repo:
+  - `git push --all`, `--branches` and `--mirror`. The options were dropped with
+    every other `-` token, so the push read as a bare push of the feature branch.
+    They are now judged against every local branch.
+  - A bare `git push` under `push.default=matching`, or with a configured `:`
+    push refspec. It is now judged against every local branch the remote also
+    has, read from the remote-tracking refs so the guard never waits on the
+    network.
+  - The explicit matching refspec, `git push origin :`, judged the same way.
+
+  The review closed five more gaps in the same class:
+  - Branch names come from the full ref, so a tag named `main` no longer hides
+    the branch as `heads/main`.
+  - `--mirror` also deletes remote branches that are missing locally, so it is
+    judged against the local branches plus the remote's tracked ones. With no
+    local `main`, it deletes the remote `main`.
+  - A bare push from a detached HEAD goes to the default remote
+    (`remote.pushDefault`, `origin`, or the single remote), so a matching push
+    there is judged too. `remote.<name>.mirror=true` makes a bare push a mirror.
+  - The push's own `git -c` settings (`push.default`, `remote.<name>.push` /
+    `.mirror`, and the branch remote keys) override the stored config. Only
+    those keys reach the guard's git calls.
+  - When the remote's branches are unknown (never fetched, or a URL), a matching
+    push is judged against every local branch, not none.
+
+  A repo with no local `main`/`master` can still push `--all`. Every lookup fails
+  open, as before. Tests run against real repos with a bare remote.
+  Unique-prefix options (`--al`) and glob refspecs are tracked in
+  [#443](https://github.com/CryptoJones/omind/issues/443).
+
 ## [10.2.12] - 2026-10-02
 
 ### Fixed

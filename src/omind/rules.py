@@ -53,6 +53,7 @@ import fnmatch
 import functools
 import json
 import re
+import shlex
 import subprocess
 from dataclasses import dataclass
 from datetime import datetime, timedelta
@@ -406,11 +407,14 @@ def _repo_branch(repo: Path) -> str:
         return ""
 
 
-def _git_out(repo: Path, *args: str) -> str | None:
-    """``git -C repo <args>`` stdout, or None on any failure (fails open)."""
+def _git_out(repo: Path, *args: str, config: tuple[str, ...] = ()) -> str | None:
+    """``git [-c k=v]... -C repo <args>`` stdout, or None on any failure (fails
+    open). ``config`` is the push site's own ``-c`` settings (#433 review),
+    filtered by :func:`_cmdline_config`, so a read sees what the push will."""
+    flags = [f for kv in config for f in ("-c", kv)]
     try:
         proc = subprocess.run(
-            ["git", "-C", str(repo), *args],
+            ["git", *flags, "-C", str(repo), *args],
             capture_output=True,
             text=True,
             timeout=5,
@@ -420,7 +424,28 @@ def _git_out(repo: Path, *args: str) -> str | None:
     return proc.stdout if proc.returncode == 0 else None
 
 
-def _default_push_branches(repo: Path, remote: str) -> list[str]:
+def _push_remote(repo: Path, current: str, remotes: list[str], config: tuple[str, ...]) -> str:
+    """The remote a ``git push`` that names none goes to. On a branch: its
+    ``pushRemote``, ``remote.pushDefault``, its ``remote``, else ``origin``.
+    On a detached HEAD (#433 review) there is no branch to ask, so
+    ``remote.pushDefault``, else ``origin``, else the single remote."""
+    if current and current != "HEAD":
+        found = (
+            _git_out(repo, "config", f"branch.{current}.pushRemote", config=config)
+            or _git_out(repo, "config", "remote.pushDefault", config=config)
+            or _git_out(repo, "config", f"branch.{current}.remote", config=config)
+            or "origin"
+        )
+        return found.strip()
+    found = _git_out(repo, "config", "remote.pushDefault", config=config) or ""
+    if found.strip():
+        return found.strip()
+    if "origin" in remotes or len(remotes) != 1:
+        return "origin"
+    return remotes[0]
+
+
+def _default_push_branches(repo: Path, remote: str, config: tuple[str, ...] = ()) -> list[str]:
     """Branches a refspec-less ``git push [<remote>]`` in ``repo`` lands on
     (#423): what ``@{push}`` resolves to, so ``feature/x`` tracking
     ``origin/main`` under ``push.default=upstream`` is judged as ``main``. A
@@ -428,35 +453,134 @@ def _default_push_branches(repo: Path, remote: str) -> list[str]:
     destination too, because ``@{push}`` does not resolve one (git 2.54 says
     "push refspecs for 'origin' do not include 'feature'").
 
+    ``config`` is the push's own ``git -c k=v`` settings, which win over the
+    stored ones (#433 review).
+
     Fails open: anything git cannot answer (detached HEAD, no upstream, not a
     repo, git missing) leaves the checked-out branch, judged as before.
     """
     current = _repo_branch(repo)
     dests: list[str] = []
     try:
-        push = _git_out(repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}")
+        push = _git_out(
+            repo, "rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{push}", config=config
+        )
         remotes = (_git_out(repo, "remote") or "").split()
         push = (push or "").strip()
         owner = max((r for r in remotes if push.startswith(r + "/")), key=len, default="")
         if owner and (not remote or remote == owner):
             dests.append(push.removeprefix(owner + "/"))
-        if not remote and current and current != "HEAD":
-            remote = (
-                _git_out(repo, "config", f"branch.{current}.pushRemote")
-                or _git_out(repo, "config", "remote.pushDefault")
-                or _git_out(repo, "config", f"branch.{current}.remote")
-                or "origin"
-            ).strip()
+        if not remote:
+            remote = _push_remote(repo, current, remotes, config)
+        specs: list[str] = []
         if remote in remotes:
-            specs = _git_out(repo, "config", "--get-all", f"remote.{remote}.push") or ""
-            for spec in specs.split():
+            # `remote.<name>.mirror` makes a bare push a `--mirror` (#433
+            # review); git refuses refspecs with it, so nothing else applies.
+            mirror = _git_out(repo, "config", "--bool", f"remote.{remote}.mirror", config=config)
+            if (mirror or "").strip() == "true":
+                return _mirror_branches(repo, remote) or [current]
+            specs = (
+                _git_out(repo, "config", "--get-all", f"remote.{remote}.push", config=config) or ""
+            ).split()
+            for spec in specs:
                 src, _, dst = spec.lstrip("+").partition(":")
                 if src.upper() in _CURRENT_BRANCH_REFS:
                     dests.append(dst.removeprefix("refs/heads/") or current)
+        # `push.default=matching`, or a configured `:` refspec (which wins
+        # over push.default), pushes every local branch the remote also has,
+        # not just the checked-out one (#433). A URL has no stored refspecs
+        # but still follows push.default.
+        default = (_git_out(repo, "config", "push.default", config=config) or "").strip()
+        if any(s.lstrip("+") == ":" for s in specs) or (not specs and default == "matching"):
+            dests += _matching_branches(repo, remote)
     except Exception as exc:  # noqa: BLE001 - enforcement fails open
         _breadcrumb(f"rules_push_dest({repo})", exc)
         dests = []
     return dests or [current]
+
+
+def _local_branches(repo: Path) -> list[str]:
+    """Every local branch of ``repo``: what ``git push --all`` sends (#433).
+    Empty when git cannot answer (fails open). Read from the full ref, because
+    ``%(refname:short)`` shortens ``main`` to ``heads/main`` when a tag is also
+    named ``main`` (#433 review)."""
+    out = _git_out(repo, "for-each-ref", "--format=%(refname)", "refs/heads/")
+    return [ref.removeprefix("refs/heads/") for ref in (out or "").split()]
+
+
+def _tracked_branches(repo: Path, remote: str) -> set[str]:
+    """Branches ``remote`` has, read from its remote-tracking refs, not over
+    the network, so the guard never blocks on a slow remote. Empty when the
+    remote was never fetched, is a URL, or git cannot answer."""
+    if not remote:
+        return set()
+    prefix = f"refs/remotes/{remote}/"
+    out = _git_out(repo, "for-each-ref", "--format=%(refname)", prefix)
+    return {ref.removeprefix(prefix) for ref in (out or "").split()} - {"HEAD"}
+
+
+def _matching_branches(repo: Path, remote: str) -> list[str]:
+    """Local branches of ``repo`` that ``remote`` also has: what a matching
+    push (``push.default=matching``, or the ``:`` refspec) sends (#433).
+
+    A clone tracks the remote's ``main``, which is the case the rule exists
+    for. When the remote's branches are unknown (never fetched, a URL, or none
+    tracked), every local branch is judged instead: an unknown must never
+    widen an exemption (#433 review).
+    """
+    local = _local_branches(repo)
+    theirs = _tracked_branches(repo, remote)
+    if not theirs:
+        return local
+    return [b for b in local if b in theirs]
+
+
+def _mirror_branches(repo: Path, remote: str) -> list[str]:
+    """What ``git push --mirror`` changes (#433 review): every local branch it
+    sends, and every branch of ``remote`` it deletes because ``repo`` lacks
+    it. A deletion of ``main`` is a push to ``main`` (#424)."""
+    local = _local_branches(repo)
+    return local + sorted(_tracked_branches(repo, remote) - set(local))
+
+
+def _mirror_target(repo: Path, remote: str) -> list[str]:
+    """:func:`_mirror_branches` for ``git push --mirror [<remote>]``, resolving
+    the default remote when none is named. Fails open to no branches."""
+    try:
+        if not remote:
+            remotes = (_git_out(repo, "remote") or "").split()
+            remote = _push_remote(repo, _repo_branch(repo), remotes, ())
+        return _mirror_branches(repo, remote)
+    except Exception as exc:  # noqa: BLE001 - enforcement fails open
+        _breadcrumb(f"rules_mirror({repo})", exc)
+        return []
+
+
+#: Config keys of a push site's own ``git -c k=v`` that the guard passes to its
+#: git reads (#433 review). Only the ones that decide where a push lands: an
+#: arbitrary key (``core.fsmonitor``) would let the command run code in the
+#: guard's own git calls.
+_PUSH_CONFIG_KEY_RE = re.compile(
+    r"push\.default|remote\.pushdefault|remote\..+\.(?:push|mirror)"
+    r"|branch\..+\.(?:pushremote|remote|merge)",
+    re.IGNORECASE,
+)
+
+
+def _cmdline_config(options: str) -> tuple[str, ...]:
+    """The push-related ``-c k=v`` settings in ``options``, git's global
+    options before ``push`` (#433 review), unquoted, in command order."""
+    found: list[str] = []
+    for m in re.finditer(rf"(?:^|[ \t])-c[ \t]+({_GIT_OPT_VALUE})", options):
+        try:
+            words = shlex.split(m.group(1))
+        except ValueError:
+            continue
+        value = "".join(words)
+        key = value.partition("=")[0]
+        if _PUSH_CONFIG_KEY_RE.fullmatch(key):
+            found.append(value)
+    return tuple(found)
 
 
 # Accept bare tokens, quoted paths (which may contain spaces), and blanked quoted
@@ -527,6 +651,20 @@ _CURRENT_REF = "(current)"
 #: Marker prefix for a push with no refspec (`git push`, `git push origin`),
 #: judged by where it really lands, ``@{push}`` (#423). The remote follows.
 _DEFAULT_PUSH = "(default-push):"
+#: Separates a ``(default-push):`` marker's remote from the push's own ``-c
+#: k=v`` settings (#433 review), which :func:`_judge` hands to git.
+_CONFIG_SEP = "\0"
+#: Marker for ``git push --all`` / ``--branches``: every local branch of the
+#: target repo (#433).
+_ALL_BRANCHES = "(all-branches)"
+#: Marker prefix for ``git push --mirror``: every local branch, and every
+#: remote branch it deletes (#433 review). The remote follows.
+_MIRROR = "(mirror):"
+#: Marker prefix for the ``:`` refspec (``git push origin :``): every local
+#: branch the remote also has (#433). The remote follows.
+_MATCHING = "(matching):"
+#: Push options that send every local branch whatever the refspecs (#433).
+_ALL_BRANCH_OPTS = frozenset({"--all", "--branches"})
 
 
 def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
@@ -567,15 +705,25 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
     junk = "'\"" if in_code else "'\",;)]}"
     tokens = [t.strip(junk) for t in rest.split() if t.strip(junk)]
     positional: list[str] = []
+    mirror = False
     for token in tokens:
         if token == "--tags":
             refs.append("(tags)")
+            continue
+        if token in _ALL_BRANCH_OPTS:
+            refs.append(_ALL_BRANCHES)
+            continue
+        if token == "--mirror":
+            mirror = True
             continue
         if token.startswith("-"):
             continue
         positional.append(token)
     # First positional token is the remote; the rest are refspecs.
     for token in positional[1:]:
+        if token.lstrip("+") == ":":
+            refs.append(_MATCHING + positional[0])
+            continue
         if ":" not in token and token.lstrip("+").upper() in _CURRENT_BRANCH_REFS:
             refs.append(_CURRENT_REF)
             continue
@@ -590,8 +738,13 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
             refs.append("(tags)")
         else:
             refs.append(dest)
+    remote = positional[0] if positional else ""
+    if mirror:
+        refs.append(_MIRROR + remote)
     if not refs:
-        return [_DEFAULT_PUSH + (positional[0] if positional else "")]
+        # The push's own `git -c k=v` settings decide where it lands too.
+        config = _cmdline_config(command[match.start() : match.start("rest")])
+        return [_CONFIG_SEP.join((_DEFAULT_PUSH + remote, *config))]
     return refs
 
 
@@ -653,9 +806,22 @@ def _judge(
             if branch == _CURRENT_REF:
                 branches.append(fact("branch", _repo_branch))
             elif branch.startswith(_DEFAULT_PUSH):
-                remote = branch.removeprefix(_DEFAULT_PUSH)
+                remote, *config = branch.removeprefix(_DEFAULT_PUSH).split(_CONFIG_SEP)
                 branches += fact(
-                    f"push:{remote}", functools.partial(_default_push_branches, remote=remote)
+                    f"push:{branch}",
+                    functools.partial(_default_push_branches, remote=remote, config=tuple(config)),
+                )
+            elif branch == _ALL_BRANCHES:
+                branches += fact("local_branches", _local_branches)
+            elif branch.startswith(_MIRROR):
+                remote = branch.removeprefix(_MIRROR)
+                branches += fact(
+                    f"mirror:{remote}", functools.partial(_mirror_target, remote=remote)
+                )
+            elif branch.startswith(_MATCHING):
+                remote = branch.removeprefix(_MATCHING)
+                branches += fact(
+                    f"matching:{remote}", functools.partial(_matching_branches, remote=remote)
                 )
             else:
                 branches.append(branch)
