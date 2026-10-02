@@ -2595,7 +2595,8 @@ _FILE_OPS = frozenset(
 #: Per program, the switches that take a SEPARATE value: short option letters
 #: (also valid at the end of a cluster, ``-dm755`` / ``-m 755``) and long
 #: options (``--opt=value`` is one word whatever the table says). GNU
-#: spellings; ``-t``/``--target-directory`` is read as the destination.
+#: spellings; ``-t``/``--target-directory`` is read as the destination. A long
+#: option may be any unambiguous prefix of its name (:func:`_long_option`).
 _FILE_OP_VALUE_SWITCHES: dict[str, tuple[str, frozenset[str]]] = {
     "cp": ("tS", frozenset({"--target-directory", "--suffix"})),
     "mv": ("tS", frozenset({"--target-directory", "--suffix"})),
@@ -2622,13 +2623,30 @@ _FILE_OP_VALUE_SWITCHES: dict[str, tuple[str, frozenset[str]]] = {
                 "--remote-option", "--iconv", "--info", "--debug", "--write-batch",
                 "--only-write-batch", "--read-batch", "--protocol", "--checksum-seed",
                 "--address", "--stop-after", "--stop-at", "--outbuf",
+                "--max-alloc", "--early-input", "--copy-as",
             }
         ),
     ),
 }
+#: Per program, the long FLAGS (no value) the classifier must recognise by
+#: prefix: the ones it acts on (``install --directory``, ``rsync
+#: --remove-source-files``), and the ones whose full name is a prefix of a
+#: value option above, so an exact ``--partial`` is never read as an
+#: abbreviated ``--partial-dir`` that swallows the next word (#450 review).
+_FILE_OP_LONG_FLAGS: dict[str, frozenset[str]] = {
+    "install": frozenset({"--directory"}),
+    "rsync": frozenset({"--remove-source-files", "--partial", "--backup", "--group"}),
+}
 #: Programs whose ``-t DIR`` / ``--target-directory`` names the destination
 #: (``touch -t`` is a timestamp, not a directory).
 _TARGET_DIR_OPS = frozenset({"cp", "mv", "install", "ln"})
+#: rsync options whose value is a path rsync writes on the RECEIVING side
+#: (#450 review): backups, temp files and partial transfers. A relative one is
+#: really resolved against the destination; reading it from the cwd can only
+#: over-gate, the safe direction.
+_RSYNC_RECEIVER_WRITES = frozenset({"--backup-dir", "--temp-dir", "--partial-dir"})
+#: rsync options whose value is a path written LOCALLY whatever the direction.
+_RSYNC_LOCAL_WRITES = frozenset({"--log-file"})
 #: ``find -exec`` placeholders and terminators: never a file operand (#434
 #: review). The walk leaves a lone ``\`` where ``\;`` ended the site.
 _EXEC_PLACEHOLDERS = frozenset({"{}", "+", ";", "\\;", "\\"})
@@ -2670,8 +2688,11 @@ def _file_op_targets(program: str, text: str) -> list[str]:
     except ValueError:
         return []
     short_values, long_values = _FILE_OP_VALUE_SWITCHES.get(program, ("", frozenset()))
+    long_known = long_values | _FILE_OP_LONG_FLAGS.get(program, frozenset())
     operands: list[str] = []
     target_dir: list[str] = []
+    #: Option name -> its values, for the options whose value is written.
+    values: dict[str, list[str]] = {}
     flags: set[str] = set()
     i, options = 0, True
     while i < len(words):
@@ -2680,12 +2701,14 @@ def _file_op_targets(program: str, text: str) -> list[str]:
         if options and word == "--":
             options = False
         elif options and word.startswith("--"):
-            name, eq, value = word.partition("=")
+            given, eq, value = word.partition("=")
+            name = _long_option(given, long_known)
             if name in long_values and not eq:
+                # A value switch at the very end has no value: nothing to add.
                 value = words[i] if i < len(words) else ""
                 i += 1
-            if name == "--target-directory" and program in _TARGET_DIR_OPS:
-                target_dir.append(value)
+            if value:
+                values.setdefault(name, []).append(value)
             flags.add(name)
         elif options and word.startswith("-") and len(word) > 1:
             for j, letter in enumerate(word[1:], start=1):
@@ -2696,11 +2719,13 @@ def _file_op_targets(program: str, text: str) -> list[str]:
                 if not value:
                     value = words[i] if i < len(words) else ""
                     i += 1
-                if letter == "t" and program in _TARGET_DIR_OPS:
-                    target_dir.append(value)
+                if value:
+                    values.setdefault("-" + letter, []).append(value)
                 break
         elif word not in _EXEC_PLACEHOLDERS:
             operands.append(word)
+    if program in _TARGET_DIR_OPS:
+        target_dir = values.get("-t", []) + values.get("--target-directory", [])
     if program == "dd":
         return [w[3:] for w in operands if w.startswith("of=")]
     if program == "install":
@@ -2716,10 +2741,37 @@ def _file_op_targets(program: str, text: str) -> list[str]:
     if program == "cp":
         return target_dir or operands[-1:]
     if program == "rsync":
-        if len(operands) < 2 or _rsync_remote(operands[-1]):
-            return []
-        return operands[-1:]
+        return _rsync_targets(operands, values, flags)
     return target_dir + operands
+
+
+def _rsync_targets(operands: list[str], values: dict[str, list[str]], flags: set[str]) -> list[str]:
+    """The local paths an ``rsync`` writes or removes (#450): its destination
+    when that is local, with the receiver-side ``--backup-dir``/``--temp-dir``/
+    ``--partial-dir``; its local sources under ``--remove-source-files``; and
+    a ``--log-file`` always."""
+    targets = [v for name in _RSYNC_LOCAL_WRITES for v in values.get(name, [])]
+    if len(operands) < 2:
+        return targets
+    *sources, dest = operands
+    if not _rsync_remote(dest):
+        targets.append(dest)
+        targets += values.get("-T", [])
+        targets += [v for name in _RSYNC_RECEIVER_WRITES for v in values.get(name, [])]
+    if "--remove-source-files" in flags:
+        targets += [s for s in sources if not _rsync_remote(s)]
+    return targets
+
+
+def _long_option(given: str, known: frozenset[str]) -> str:
+    """The long option ``given`` names among ``known``: itself on an exact
+    match, else the one option it is an unambiguous prefix of, as GNU getopt
+    accepts (``--target`` for ``--target-directory``, #450 review). An unknown
+    or ambiguous ``given`` comes back as is: a flag the classifier ignores."""
+    if given in known or len(given) < 3:
+        return given
+    matches = [name for name in known if name.startswith(given)]
+    return matches[0] if len(matches) == 1 else given
 
 
 def _rsync_remote(word: str) -> bool:

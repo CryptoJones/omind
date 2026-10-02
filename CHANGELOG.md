@@ -26,6 +26,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `-dm755`, `touch -d DATE`, `truncate -r REF`, `rsync -e ssh --exclude X`),
     so a switch's value is never mistaken for a target. A target outside the
     repo or a device path (`of=/dev/null`) does not count.
+  - `rsync --remove-source-files` counts its local sources as removed;
+    `--log-file` is always a local write, and `--backup-dir`, `--temp-dir`/`-T`
+    and `--partial-dir` are writes when the destination is local.
+  - Long options match by unique prefix, as GNU getopt does (`cp --target`,
+    `install --dir`), through one helper shared by every tool. A value switch
+    at the very end of a command has no value and is never a target.
 
 ## [10.2.19] - 2026-10-02
 

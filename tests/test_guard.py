@@ -4052,6 +4052,27 @@ _MORE_WRITE_TOOLS_INTO_REPO = (
     "rsync -a {outside}/a src/",
     "rsync -av -e ssh --exclude .git {outside}/d/ {repo}/src/",
     "find {outside} -name '*.py' -exec touch {{}} src/stamp \\;",
+    # #450 review: a trailing value switch has no value and adds nothing.
+    "touch src/x.py -d",
+    "install {outside}/a src/b -m",
+    # `--remove-source-files` deletes the sources, wherever they go.
+    "rsync -a --remove-source-files src/a {outside}/",
+    "rsync --remove-source-files src/a host:backup/",
+    "rsync -a --remove-sou src/a {outside}/",
+    # Out-of-band writes: their values are local write targets.
+    "rsync -a --backup-dir=src {outside}/a {outside}/b",
+    "rsync -a --backup-dir src {outside}/a {outside}/b",
+    "rsync -a --log-file=src/log.txt {outside}/a {outside}/b",
+    "rsync -a --log-file=src/log.txt {outside}/a host:b",
+    "rsync -a --temp-dir src {outside}/a {outside}/b",
+    "rsync -a -T src {outside}/a {outside}/b",
+    "rsync -a -Tsrc {outside}/a {outside}/b",
+    "rsync -a --partial-dir=src {outside}/a {outside}/b",
+    # GNU getopt takes any unambiguous prefix of a long option.
+    "cp --target src {outside}/a",
+    "install --target src {outside}/a",
+    "install --dir src/new {outside}/x",
+    "rsync -a --backup-d=src {outside}/a {outside}/b",
 )
 
 #: #450: the same tools aimed outside the repo, or at a remote/device path.
@@ -4079,6 +4100,24 @@ _MORE_WRITE_TOOLS_OUTSIDE_REPO = (
     "rsync -a src/ host::module",
     "rsync src",
     "find {outside} -exec touch {{}} +",
+    # #450 review: each case fails if its table entry is removed, because
+    # the trailing value would otherwise be read as a target in the cwd.
+    "rsync -a src/ {outside}/copy/ --exclude x",
+    "rsync -a src/ {outside}/copy/ -e ssh",
+    "install src/a {outside}/b -m 644",
+    "rsync -a src/ {outside}/copy/ --copy-as user",
+    "rsync -a src/ {outside}/copy/ --max-alloc 1G",
+    "rsync -a src/ {outside}/copy/ --early-input x",
+    # A value switch at the very end has no value: never a target.
+    "install src/a {outside}/b -t",
+    "touch {outside}/a -d",
+    "cp src/a {outside}/b --target",
+    # A long flag that is a prefix of a value option is not abbreviating it.
+    "rsync -a --partial {outside}/a src {outside}/b",
+    "rsync -a --backup {outside}/a src {outside}/b",
+    # Receiver-side writes of a remote destination happen remotely.
+    "rsync -a --backup-dir=src {outside}/a host:b",
+    "rsync -a --remove-source-files host:src/a {outside}/",
 )
 
 
@@ -4134,6 +4173,47 @@ def test_windows_tokenizing_more_write_tools_outside_the_repo_are_not_repo_work(
 def test_rsync_remote_destination(word: str, remote: bool) -> None:
     """#450: a `host:path` or `rsync://` destination is remote, a drive is not."""
     assert guard._rsync_remote(word) is remote
+
+
+def test_single_operand_ln_with_an_unknown_cwd_is_not_repo_work(tmp_path: Path) -> None:
+    """#450 review: `ln -s TARGET` links into the cwd; when the cwd is not
+    knowable, the link's location is not judged."""
+    repo, outside = _write_probe_repo(tmp_path)
+    action = _repo_write_action('cd "$X" && ln -s {outside}/a', repo, outside)
+    assert guard._writes_into_repo(action) is False
+    assert not guard._is_repo_sensitive_action(action)
+
+
+def test_unclosed_quote_in_a_file_op_degrades_and_the_next_stage_is_judged(
+    tmp_path: Path,
+) -> None:
+    """#450 review (AGENTS.md invariant 2): an unbalanced quote makes a
+    site's words unreadable; it yields no target instead of raising, and a
+    following valid stage is still judged."""
+    repo, outside = _write_probe_repo(tmp_path)
+    assert guard._file_op_targets("touch", "touch 'unclosed") == []
+    assert guard._writes_into_repo(_repo_write_action("touch 'unclosed", repo, outside)) is False
+    into = _repo_write_action('bash -c "touch \'unclosed" && touch src/x.py', repo, outside)
+    assert guard._writes_into_repo(into) is True
+    away = _repo_write_action('bash -c "touch \'unclosed" && touch {outside}/x', repo, outside)
+    assert guard._writes_into_repo(away) is False
+
+
+@pytest.mark.parametrize(
+    ("given", "expected"),
+    [
+        ("--target-directory", "--target-directory"),
+        ("--target", "--target-directory"),
+        ("--t", "--target-directory"),
+        ("--s", "--s"),  # ambiguous: --suffix, --sparse... left as a flag
+        ("--", "--"),
+        ("--nope", "--nope"),
+    ],
+)
+def test_long_option_unique_prefix(given: str, expected: str) -> None:
+    """#450 review: one helper resolves GNU unique-prefix long options."""
+    known = frozenset({"--target-directory", "--suffix", "--sparse"})
+    assert guard._long_option(given, known) == expected
 
 
 def test_redirect_with_no_target_repo_is_not_repo_work(tmp_path: Path) -> None:
