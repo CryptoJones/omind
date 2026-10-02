@@ -3379,16 +3379,6 @@ def test_wrapped_hard_rules_keep_benign_commands_allowed(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
 
 
-@pytest.fixture
-def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    """Drive `_shell_tokens` down its Windows branch on any runner (#430: the
-    windows-latest job found what the POSIX runners could not)."""
-    monkeypatch.setattr(guard, "_windows_shell", lambda: True)
-    guard._shell_walk.cache_clear()
-    yield
-    guard._shell_walk.cache_clear()
-
-
 @pytest.mark.usefixtures("windows_tokens")
 @pytest.mark.parametrize(("command", "rule_id"), WRAPPED_HARD_COMMANDS)
 def test_windows_tokenizing_denies_wrapped_hard_rule_commands(

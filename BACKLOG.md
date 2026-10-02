@@ -11,8 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **rules: shell-site walker gaps from #413** ([#432](https://github.com/CryptoJones/omind/issues/432)) — _bug, includes a regression_ —
-  a heredoc piped to `bash` is no longer judged. Also: an interpreter heredoc can exec a push, `cd ~user` raises, `env -C` is ignored, and `find -exec {} +` chains are quadratic.
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **guard: the repo-work classifier misses `bash -c` bodies, redirects/`tee`/`cp`/`mv`/`rm` into the repo, and `python3 -m pytest`** ([#434](https://github.com/CryptoJones/omind/issues/434)) — _bug_
@@ -81,6 +79,15 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.16)
+
+- [x] **rules: shell-site walker gaps from #413** ([#432](https://github.com/CryptoJones/omind/issues/432)) — **v10.2.16** — _bug, includes a regression_ —
+  A heredoc piped into a shell (`cat <<EOF | bash`, `echo … | sh`) is judged again,
+  and a heredoc fed that way is walked. An interpreter heredoc that execs a push is
+  opaque, like its `-c` twin. `cd ~nouser` no longer discards the walk. `env -C` /
+  `--chdir` move the directory. A 2000-clause `find -exec {} +` chain walks in
+  about 0.04 s instead of 17 s.
 
 ### Shipped — 2026-10-02 (v10.2.15)
 

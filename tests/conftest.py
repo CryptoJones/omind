@@ -164,3 +164,16 @@ def _git_bash_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     bash.parent.mkdir(parents=True, exist_ok=True)
     bash.write_text("", encoding="utf-8")
     monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
+
+
+@pytest.fixture
+def windows_tokens(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Drive `guard._shell_tokens` down its Windows branch on any runner (#430:
+    the windows-latest job found what the POSIX runners could not). Shared by
+    the guard and rules suites (#432)."""
+    from omind import guard
+
+    monkeypatch.setattr(guard, "_windows_shell", lambda: True)
+    guard._shell_walk.cache_clear()
+    yield
+    guard._shell_walk.cache_clear()

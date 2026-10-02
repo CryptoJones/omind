@@ -1649,11 +1649,19 @@ class _ShellSite:
     text: str
     cwd: Path | None
     opaque: bool = False
+    #: A shell with no ``-c`` body: ``text`` is the whole pipeline feeding
+    #: it, producers and their heredoc included (``cat <<EOF | bash``, #432).
+    piped: bool = False
 
 
 def _chdir(cwd: Path | None, step: str) -> Path | None:
-    """``cd step`` from ``cwd``: shell semantics, ``~`` expanded."""
-    target = Path(step).expanduser()
+    """``cd step`` from ``cwd``: shell semantics, ``~`` expanded. ``None``
+    (unknowable) when ``~user`` names no user: ``expanduser`` raises there,
+    and the raise used to discard the whole walk (#432)."""
+    try:
+        target = Path(step).expanduser()
+    except (RuntimeError, KeyError, OSError):
+        return None
     if target.is_absolute():
         return target
     return None if cwd is None else cwd / target
@@ -1734,6 +1742,44 @@ def _git_site_cwd(tokens: list[str], cwd: Path | None) -> Path | None:
     return _chdir(cwd, tree) if tree else cwd
 
 
+def _env_chdir(prefix: str, cwd: Path | None) -> Path | None:
+    """``cwd`` moved by every ``env -C <dir>`` / ``--chdir[=]<dir>`` among the
+    wrapper words ``prefix`` that precede a stage's program (#432): ``env
+    -C <public> git push`` pushes from ``<public>``. A ``$VAR`` or unparseable
+    value makes the directory unknowable (``None``)."""
+    try:
+        words = _shell_tokens(prefix)
+    except ValueError:
+        return None
+    for k in range(len(words) - 1, -1, -1):
+        if words[k] in _EXEC_ACTIONS:  # only this stage's own wrappers
+            words = words[k + 1 :]
+            break
+    takes_arg = _STAGE_WRAPPERS["env"]
+    i = 0
+    while i < len(words):
+        if _basename(words[i]) != "env":
+            i += 1
+            continue
+        i += 1
+        while i < len(words) and words[i].startswith("-") and words[i] != "--":
+            word, value = words[i], None
+            if word in ("-C", "--chdir"):
+                value = words[i + 1] if i + 1 < len(words) else ""
+                i += 1
+            elif word.startswith("--chdir="):
+                value = word.partition("=")[2]
+            elif word.startswith("-C"):
+                value = word[2:]
+            elif word in takes_arg:
+                i += 1
+            if value is not None:
+                literal = value and "$" not in value and "`" not in value
+                cwd = _chdir(cwd, value) if literal else None
+            i += 1
+    return cwd
+
+
 def _shell_body(tokens: list[str]) -> str | None:
     """The ``-c`` body of ``sh/bash/zsh … -c '<body>'`` (``-lc``, ``-ec`` and
     ``-o opt`` before it included), or ``None`` when there is no ``-c``."""
@@ -1791,6 +1837,10 @@ def _shell_sites(
     ``--`` (``pushd X >/dev/null``). A site whose quoted arguments are code
     the walk did not follow (``su -c``, a too-deep or positional-arg ``bash
     -c``, ssh ``LocalCommand``) is marked ``opaque`` so rules fail closed on it.
+    A shell with no ``-c`` body is opaque with the pipeline feeding it as its
+    text, and a heredoc that pipeline feeds it is walked as a child shell
+    (``cat <<EOF | bash``); an interpreter's own heredoc is part of its text;
+    ``env -C <dir>`` moves the directory of the command it runs (#432).
 
     Never raises on shell text: an unparseable word list keeps the site at the
     current directory; an unknowable ``cd`` makes the directory ``None``.
@@ -1798,8 +1848,14 @@ def _shell_sites(
     raw = command.replace("\\\n", "  ")
     code = policy.shell_code_text(command).replace("\\\n", "  ")
     local = list(raw)
+    stages = _program_stages(code, raw)
     events: list[tuple[int, int, Any]] = [(i, 0, ch) for i, ch in enumerate(code) if ch in "()"]
-    events += [(stage[2], 1, stage) for stage in _program_stages(code, raw)]
+    events += [(stage[2], 1, stage) for stage in stages]
+    # Each stage's text stops at the next stage's start, so a long `find
+    # -exec … {} +` chain (no separator) is not rescanned to the end for
+    # every stage: that was quadratic (#432).
+    starts = sorted(stage[2] for stage in stages) + [len(code)]
+    nth = floor = 0
     sites: list[_ShellSite] = []
     scopes: list[tuple[Path | None, tuple[Path | None, ...]]] = []
     for pos, _kind, item in sorted(events, key=lambda e: (e[0], e[1])):
@@ -1811,13 +1867,18 @@ def _shell_sites(
                 cwd, dirs = scopes.pop()
             continue
         program = item[0]
+        while starts[nth] <= pos:
+            nth += 1
+        bound = starts[nth]
+        if _SEPARATOR_CHAR_RE.search(code, pos, bound):
+            bound = len(code)  # `cd X &>/dev/null`: a redirect is no separator
         end = next(
             (
                 k
-                for k in range(pos, len(code))
+                for k in range(pos, bound)
                 if code[k] in ";&|\n()`" and not _is_redirect_char(code, k)
             ),
-            len(code),
+            bound,
         )
         text = raw[pos:end].rstrip()
         try:
@@ -1846,6 +1907,13 @@ def _shell_sites(
                     cwd = moved
             sites.append(_ShellSite(program, text, cwd))
             continue
+        here = cwd
+        # This stage's wrapper words: back to the previous stage's start or
+        # separator, whichever is nearer (bounded, so a chain stays linear).
+        lo = starts[nth - 2] if nth >= 2 else 0
+        lo = max([lo - 1] + [code.rfind(ch, lo, pos) for ch in ";&|\n()`"]) + 1
+        if re.search(r"(?:^|[\s/])env\s", raw[lo:pos]):
+            here = _env_chdir(raw[lo:pos], cwd)  # `env -C <dir> git push`
         if program in _REMOTE_LAUNCHERS:
             takes_arg = _REMOTE_LAUNCHERS[program]
             words = list(re.finditer(r"\S+", code[pos:end]))
@@ -1861,7 +1929,7 @@ def _shell_sites(
                 break
             # `-o LocalCommand=…` / `ProxyCommand` / `KnownHostsCommand` /
             # `Match exec` run on THIS machine: their quoted values are code.
-            sites.append(_ShellSite(program, text, cwd, bool(_SSH_LOCAL_EXEC_RE.search(text))))
+            sites.append(_ShellSite(program, text, here, bool(_SSH_LOCAL_EXEC_RE.search(text))))
             continue
         body: str | None = None
         positional = False
@@ -1878,11 +1946,11 @@ def _shell_sites(
                 # Words after the body become $0, $1 ..., which the body can
                 # run (`bash -c '"$@"' _ <cmd>`): code the walk does not
                 # follow, so the whole command fails closed.
-                sites.append(_ShellSite(program, text, cwd, True))
+                sites.append(_ShellSite(program, text, here, True))
             if bodies is not None:
                 bodies.append(body)
             inner, inner_cwd, inner_dirs, inner_local = _shell_sites(
-                body, cwd, dirs, depth + 1, bodies
+                body, here, dirs, depth + 1, bodies
             )
             sites.extend(inner)
             if program == "eval":
@@ -1891,7 +1959,25 @@ def _shell_sites(
             if at >= 0:  # carry the body's blanked remote payloads outward
                 local[at : at + len(body)] = list(inner_local)
             continue
-        site_cwd = _git_site_cwd(tokens, cwd) if program == "git" and tokens else cwd
+        site_cwd = _git_site_cwd(tokens, here) if program == "git" and tokens else here
+        piped = False
+        if program in _LOCAL_SHELLS and tokens is not None and depth < _MAX_UNWRAP_DEPTH:
+            # No `-c` body: it runs a script or reads code from stdin (`cat
+            # <<EOF | bash`, `echo … | sh`). The code is in the pipeline that
+            # feeds it, which is judged as this site's text (#432: the text
+            # was just `bash`, so a piped heredoc push passed). A heredoc that
+            # pipeline feeds it is shell code, walked in a child shell.
+            head = _pipeline_head(code, pos, floor)
+            floor = end
+            fed = _owned_heredocs(raw, code, head, pos)
+            text, piped = f"{raw[head:end].rstrip()}\n{fed}".rstrip(), True
+            if fed:
+                sites.extend(_shell_sites(fed, site_cwd, dirs, depth + 1, bodies)[0])
+        elif _SCRIPT_INTERPRETER_RE.fullmatch(program):
+            # The heredoc it owns (`python3 - <<EOF`) is its code, judged like
+            # its `-c` twin (#432); `end` stopped at the line break before it.
+            fed = _owned_heredocs(raw, code, pos, end)
+            text = f"{text}\n{fed}".rstrip()
         opaque = (
             program in _OPAQUE_EXECUTORS
             or program in _LOCAL_SHELLS  # a shell body not unwrapped (too deep, unparseable)
@@ -1901,8 +1987,25 @@ def _shell_sites(
                 bool(_SCRIPT_INTERPRETER_RE.fullmatch(program)) and bool(_EXEC_CALL_RE.search(text))
             )
         )
-        sites.append(_ShellSite(program, text, site_cwd, opaque))
+        sites.append(_ShellSite(program, text, site_cwd, opaque, piped))
     return sites, cwd, dirs, "".join(local)
+
+
+_SEPARATOR_CHAR_RE = re.compile(r"[;&|\n()`]")
+
+
+def _owned_heredocs(raw: str, code: str, start: int, stop: int) -> str:
+    """The bodies of the heredocs whose ``<<`` operator lies in
+    ``code[start:stop]`` (``code`` is ``raw`` masked), read from the lines
+    after ``stop``'s line. A heredoc opened earlier on that line, by another
+    command, is skipped: its body comes first and is not this one's (#432)."""
+    if "<<" not in code[start:stop]:
+        return ""
+    line = raw.rfind("\n", 0, start) + 1
+    heredocs = list(policy._HEREDOC_RE.finditer(code, line, stop))
+    if not any(m.start() >= start for m in heredocs):
+        return ""
+    return _heredoc_bodies(raw, raw.find("\n", stop), heredocs, start)
 
 
 def _is_redirect_char(code: str, k: int) -> bool:
@@ -2741,10 +2844,13 @@ def _words_in_command_position(text: str) -> str:
     return "\n".join(re.sub(r"['\"]|\\n", "\n", line) for line in lines)
 
 
-def _heredoc_bodies(text: str, newline: int, heredocs: list[re.Match[str]]) -> str:
+def _heredoc_bodies(
+    text: str, newline: int, heredocs: list[re.Match[str]], keep_from: int = 0
+) -> str:
     """The bodies of ``heredocs`` (``policy._HEREDOC_RE`` matches), read from
     the line after offset ``newline`` up to each one's delimiter line, in
-    order. Reads only those lines. Empty when there is no next line."""
+    order. Reads only those lines. Empty when there is no next line. Only
+    the bodies of heredocs opened at or after ``keep_from`` are returned."""
     body: list[str] = []
     start = newline + 1 if newline >= 0 else len(text)
     for match in heredocs:
@@ -2756,7 +2862,8 @@ def _heredoc_bodies(text: str, newline: int, heredocs: list[re.Match[str]]) -> s
             start = end + 1
             if (line.lstrip("\t") if match.group(1) else line).strip() == delimiter:
                 break
-            body.append(line)
+            if match.start() >= keep_from:
+                body.append(line)
     return "\n".join(body)
 
 
@@ -2861,6 +2968,8 @@ def _hard_rule_subjects(command: str) -> _HardSubjects:
         for site in sites:
             if not site.opaque:
                 continue
+            if site.piped:
+                continue  # it reads stdin or a file: judged above
             if site.program in _LOCAL_SHELLS:
                 try:
                     has_body = _shell_body_index(_shell_tokens(site.text)) is not None

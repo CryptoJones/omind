@@ -431,6 +431,109 @@ def test_nul_byte_in_cd_falls_back_to_the_cwd(
     assert guard._repo_root_for_action(action) == public
 
 
+#: #432: pushes the #413 shell-site walker lost, as (command, run from). The
+#: first group is a regression: before #413 the raw command was judged, so a
+#: heredoc piped into a shell was denied; after it the shell's site text was
+#: just `bash`, and the code it ran (in the blanked heredoc) was never seen.
+_WALKER_GAPS_432: tuple[tuple[str, str], ...] = (
+    ("cat <<'EOF' | bash\ngit push origin main\nEOF", "public"),
+    ("cat <<'EOF' | sh\ngit push origin main\nEOF", "public"),
+    ("cat <<EOF | bash -s\ngit push origin main\nEOF", "public"),
+    ("echo 'git push origin main' | bash", "public"),
+    ("cat <<'EOF' | bash\ncd {public}\ngit push origin main\nEOF", "private"),
+    # An interpreter heredoc that execs a push, like its `-c` twin:
+    (
+        "python3 - <<'EOF'\nimport subprocess\n"
+        "subprocess.run('git push origin main', shell=True)\nEOF",
+        "public",
+    ),
+    ("python3 <<'EOF'\nimport os\nos.system('git push origin main')\nEOF", "public"),
+    # `cd ~nouser` raised out of the walk, so the push was judged at the cwd:
+    ("cd ~nosuchuserzz432 2>/dev/null; cd {public} && git push origin main", "private"),
+    ("cd ~nosuchuserzz432; git push origin main", "public"),
+    # `env -C` changes directory:
+    ("env -C {public} git push origin main", "private"),
+    ("env --chdir={public} git push origin main", "private"),
+    ("env --chdir {public} git push origin main", "private"),
+    ("sudo env -C {public} git push origin main", "private"),
+    ("env -C {private} bash -c 'cd {public} && git push origin main'", "private"),
+)
+
+#: #432's fixes keep these allowed: judged at the right (private) repo, or the
+#: text the shell or interpreter gets carries no push.
+_WALKER_ALLOWED_432: tuple[tuple[str, str], ...] = (
+    ("env -C {private} git push origin main", "public"),
+    ("env --chdir={private} git push origin main", "public"),
+    ("cd ~nosuchuserzz432 2>/dev/null; cd {private} && git push origin main", "public"),
+    ("cat <<'EOF' > notes.txt && bash build.sh\ngit push origin main\nEOF", "public"),
+    ("python3 - <<'EOF'\nprint('git push origin main')\nEOF", "public"),
+    ("cat <<'EOF' | bash\ncd {private}\ngit status\nEOF", "public"),
+)
+
+
+def _repo_cases(
+    cases: tuple[tuple[str, str], ...], public: Path, private: Path
+) -> list[tuple[str, Path]]:
+    """``cases`` with ``{public}``/``{private}`` filled in (forward slashes, so
+    shlex reads a Windows path as one word) and the start repo resolved."""
+    where = {"public": public, "private": private}
+    return [
+        (cmd.format(public=public.as_posix(), private=private.as_posix()), where[cwd])
+        for cmd, cwd in cases
+    ]
+
+
+def test_walker_gaps_are_denied(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#432: each push reaches public main and is denied."""
+    omi, public, private = two_repos
+    for command, cwd in _repo_cases(_WALKER_GAPS_432, public, private):
+        assert _denied(omi, command, cwd, monkeypatch), command
+
+
+def test_walker_fixes_keep_private_and_data_allowed(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    omi, public, private = two_repos
+    for command, cwd in _repo_cases(_WALKER_ALLOWED_432, public, private):
+        assert not _denied(omi, command, cwd, monkeypatch), command
+
+
+@pytest.mark.usefixtures("windows_tokens")
+def test_walker_gaps_on_windows_tokenizing(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#432 under the Windows `_shell_tokens` branch (#430)."""
+    omi, public, private = two_repos
+    for command, cwd in _repo_cases(_WALKER_GAPS_432, public, private):
+        assert _denied(omi, command, cwd, monkeypatch), command
+    for command, cwd in _repo_cases(_WALKER_ALLOWED_432, public, private):
+        assert not _denied(omi, command, cwd, monkeypatch), command
+
+
+def test_unknown_user_home_makes_the_directory_unknowable() -> None:
+    """#432: `Path.expanduser` raises on a `~user` with no such user; the walk
+    must not lose every site to it."""
+    sites, _cwd, _local, _bodies = guard._shell_walk(
+        "cd ~nosuchuserzz432 && git status; cd /x && git push origin main"
+    )
+    assert [s.program for s in sites] == ["cd", "git", "cd", "git"]
+    assert sites[-1].cwd is not None and sites[-1].cwd.name == "x"
+
+
+def test_find_exec_chain_walk_is_linear() -> None:
+    """#432: every stage of a `find … -exec … {} +` chain (no separator)
+    scanned and tokenized to the end of the command: 2000 clauses took 18 s."""
+    command = "find . " + " ".join(["-exec sed s/a/b/ {} +"] * 2000)
+    guard._shell_walk.cache_clear()
+    start = time.perf_counter()
+    sites, _cwd, _local, _bodies = guard._shell_walk(command)
+    assert time.perf_counter() - start < 1.0
+    assert [s.program for s in sites].count("sed") == 2000
+    assert sites[1].text.startswith("sed s/a/b/ {} +") and len(sites[1].text) < 30
+
+
 def test_git_global_options_do_not_backtrack_exponentially(
     two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch
 ) -> None:

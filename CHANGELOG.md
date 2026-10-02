@@ -7,6 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.16] - 2026-10-02
+
+### Fixed
+- **Note rules: five gaps in the #413 shell-site walker
+  ([#432](https://github.com/CryptoJones/omind/issues/432)).** Each one let a push
+  to a public `main` through, or judged it at the wrong repo.
+  - **Regression:** a heredoc piped into a local shell (`cat <<'EOF' | bash`,
+    `| sh`, `| bash -s`) and `echo 'git push …' | bash` were allowed. Before #413
+    they were denied. The shell's site text was just `bash`, and the code it ran
+    sat in the producer's blanked heredoc. A shell with no `-c` body now takes the
+    whole pipeline that feeds it as its (opaque) text. A heredoc that pipeline
+    feeds it is walked as a child shell, so a `cd <public>` inside it counts.
+  - An interpreter heredoc that spawns a push (`python3 - <<'EOF'` running
+    `subprocess.run('git push origin main', shell=True)`) is now opaque, like its
+    `-c` twin. The heredoc it owns is part of its text.
+  - `cd ~nosuchuser` no longer raises out of the walk. `Path.expanduser`'s error
+    used to discard every site, so the push was judged at the cwd. The directory
+    is now unknowable instead.
+  - `env -C <dir>`, `env -C<dir>`, `env --chdir=<dir>` and `env --chdir <dir>`
+    move the directory of the command they run. `--chdir` and `--unset` take a
+    separate value in `policy.STAGE_WRAPPERS`.
+  - Each stage's text now stops at the next stage's start. Before, every stage
+    of a `find … -exec … {} +` chain was scanned and tokenized to the end of the
+    command: 2000 clauses took about 17 s, and now take about 0.04 s.
+
 ## [10.2.15] - 2026-10-02
 
 ### Fixed

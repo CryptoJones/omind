@@ -86,7 +86,7 @@ STAGE_WRAPPERS: dict[str, frozenset[str]] = {
     "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
     # Not `-S`: its value is itself a command (`env -S sudo id`), so the word
     # after it stays in command position (#430 review).
-    "env": frozenset({"-u", "-C"}),
+    "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
     "nice": frozenset({"-n"}),
     "timeout": frozenset({"-s", "-k"}),
     "time": frozenset({"-f", "-o"}),
