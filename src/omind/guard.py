@@ -2288,36 +2288,22 @@ def _is_worktree_root(path: Path) -> bool:
     return marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file())
 
 
-#: The most directories a write target's repo lookup checks, the target
-#: itself included (#448). Real paths are far shallower; a pathological one
-#: past the bound is simply not judged (fails open).
-_REPO_WALK_LIMIT = 64
-
-
-def _dir_repo(path: Path, cache: dict[Path, Path | None]) -> Path | None:
-    """The worktree enclosing the resolved ``path``, checking at most
-    :data:`_REPO_WALK_LIMIT` directories (#448). ``cache`` is shared by every
-    target of one command: each directory is checked once, so a thousand
-    targets in one tree cost one walk. A walk cut off by the bound caches
-    nothing, since a shallower start could still reach the repo."""
+def _dir_repo(path: Path, memo: dict[Path, Path | None]) -> Path | None:
+    """The worktree enclosing the resolved ``path``, walked without a bound as
+    :func:`_enclosing_repo` walks the Write tool's path (#448). ``memo`` is
+    shared by every target of one command, so each directory is checked once."""
     visited: list[Path] = []
     found: Path | None = None
-    complete = False
-    for depth, parent in enumerate((path, *path.parents)):
-        if depth >= _REPO_WALK_LIMIT:
-            break
-        if parent in cache:
-            found, complete = cache[parent], True
+    for parent in (path, *path.parents):
+        if parent in memo:
+            found = memo[parent]
             break
         visited.append(parent)
         if _is_worktree_root(parent):
-            found, complete = parent, True
+            found = parent
             break
-    else:
-        complete = True  # reached the filesystem root
-    if complete:
-        for directory in visited:
-            cache[directory] = found
+    for directory in visited:
+        memo[directory] = found
     return found
 
 
@@ -2555,9 +2541,9 @@ def _local_code_texts(command: str) -> list[str]:
         return [command]
 
 
-def _is_repo_sensitive_action(action: dict[str, Any], repo: Path | None = None) -> bool:
-    """Whether ``action`` is repo work. ``repo``, when the caller already
-    resolved it, spares :func:`_writes_into_repo` resolving it again."""
+def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:
+    """Whether ``action`` is repo work. A Bash file write counts when its
+    target lies in any repo, each target resolving its own (#448)."""
     tool = str(action.get("tool") or "")
     # Classify LOCAL repo work against code this shell actually runs (#317).
     # `ssh host 'cd /p && git commit …'` supplied the separator from inside its
@@ -2576,7 +2562,7 @@ def _is_repo_sensitive_action(action: dict[str, Any], repo: Path | None = None) 
         # command itself (#434).
         if any(_runs_repo_work(text) for text in _local_code_texts(raw)):
             return True
-        if _writes_into_repo(action, repo):
+        if _writes_into_repo(action):
             return True
     return bool(path)
 
@@ -2857,47 +2843,65 @@ def _without_comparisons(command: str) -> str:
     return _COMPARE_EXPR_RE.sub(lambda m: m.group().replace(">", " "), command)
 
 
-def _writes_into_repo(action: dict[str, Any], repo: Path | None = None) -> bool:
+def _writes_into_repo(action: dict[str, Any]) -> bool:
     """Whether a Bash command writes a file inside a repo through an output
     redirection, ``tee``, ``cp``, ``mv``, ``install``, ``dd of=``,
-    ``truncate``, ``touch``, ``ln`` or a local ``rsync`` destination, or
-    removes one with ``rm`` or ``mv`` (#434, #450). See
-    :func:`_bash_write_repo`. ``False`` on any failure: classification fails
-    open."""
-    return _bash_write_repo(action, repo) is not None
+    ``truncate``, ``touch``, ``ln``, a local ``rsync`` destination or an
+    in-place ``sed``/``perl``/``ruby``, or removes one with ``rm`` or ``mv``
+    (#434, #450, #448). See :func:`_bash_write_repo`. ``False`` on any
+    failure: classification fails open."""
+    return _bash_write_repo(action) is not None
 
 
-def _bash_write_repo(action: dict[str, Any], repo: Path | None = None) -> Path | None:
+def _bash_write_repo(action: dict[str, Any]) -> Path | None:
     """The repo a Bash command writes into (#434, #450, #448), or ``None``.
     Every simple command the local shell runs, ``-c``/``eval`` bodies
     included, is judged from the directory it runs in, and each write target
     resolves its OWN enclosing repo, as the Write tool's path does: the repo
     the command's ``cd``/``git -C`` lead to says nothing about where a
     redirect earlier in the line landed (#448). A target in no repo
-    (``>/dev/null``, ``2>&1``, ``> /tmp/log``) is not repo work. ``repo``, the
-    caller's already-resolved repo, also counts as one, and wins when a target
-    lies in it. ``None`` on any failure: classification fails open."""
+    (``>/dev/null``, ``2>&1``, ``> /tmp/log``) is not repo work. ``None`` on
+    any failure: classification fails open."""
     try:
-        own = None if repo is None else repo.resolve()
         base = _action_base_dir(action)
-        cache: dict[Path, Path | None] = {}
+        memo: dict[Path, Path | None] = {}
         for site in _shell_walk(_without_comparisons(_action_command(action)))[0]:
             cwd = None if site.cwd is None else base / site.cwd
             targets = _redirect_targets(site.text)
             if site.program in _FILE_OPS:
                 targets += _file_op_targets(site.program, site.text)
+            elif site.program in _EDITOR_SWITCHES:
+                targets += _in_place_edit_targets(site.program, site.text)
             for word in targets:
                 target = _write_target(word, cwd)
-                if target is None:
-                    continue
-                if own is not None and target.is_relative_to(own):
-                    return own
-                found = _dir_repo(target, cache)
+                found = None if target is None else _dir_repo(target, memo)
                 if found is not None:
                     return found
     except Exception:
         return None
     return None
+
+
+def _in_place_edit_targets(program: str, text: str) -> list[str]:
+    """The files one in-place ``sed``/``perl``/``ruby`` site rewrites, as raw
+    shell words (#448): the operands :func:`_in_place_edit_operands` finds
+    after the script. ``[]`` when it edits nothing in place or won't parse."""
+    # A `find -exec … \;` site ends at the `\` of its terminator.
+    text = text.rstrip()
+    if text.endswith("\\") and not text.endswith("\\\\"):
+        text = text[:-1]
+    try:
+        words = _without_redirects(_shell_tokens(text))[1:]
+    except ValueError:
+        return []
+    # A quoted `find -exec` terminator (`';'`, or `+` after `{}`) ends the
+    # editor's words: find's own expression follows (`-iname` is not `-i`).
+    for i, word in enumerate(words):
+        if word == ";" or (word == "+" and i and words[i - 1] == "{}"):
+            words = words[:i]
+            break
+    operands = _in_place_edit_operands(program, words) or []
+    return [word for word in operands if word not in _EXEC_PLACEHOLDERS]
 
 
 #: Wrappers and keywords a stage skips to reach its program, with their
@@ -3005,6 +3009,15 @@ _EDITOR_SWITCHES: dict[str, tuple[frozenset[str], frozenset[str], frozenset[str]
     "ruby": (frozenset("i"), frozenset("CeEFIrx"), frozenset("CeEIr")),
 }
 _EDITOR_LONG_ARG = frozenset({"--expression", "--file", "--line-length"})
+#: Per editor, the switches whose value IS the script, so that every
+#: positional word is a file operand (#448).
+_EDITOR_SCRIPT_SWITCHES: dict[str, frozenset[str]] = {
+    "sed": frozenset("ef"),
+    "gsed": frozenset("ef"),
+    "perl": frozenset("eE"),
+    "ruby": frozenset("e"),
+}
+_EDITOR_SCRIPT_LONG_ARG = frozenset({"--expression", "--file"})
 _INTERPRETER_RE = re.compile(r"python[\d.]*|node|nodejs|ruby")
 _WRITE_MODE = r"""\\?['"](?:[bt]*[wax][bt+]*|r[bt]*\+[bt]*)\\?['"]"""
 #: A script writing or deleting files. Call syntax only, so the bare word in a
@@ -3148,32 +3161,53 @@ def _runs_in_place_edit(stages: list[tuple[str, list[str], int, int]]) -> bool:
     its own: a ``-i`` belonging to another program in the same command
     (``grep -iE``, ``ls -i``) used to satisfy a bare ``" -i" in command`` test
     and turned read-only listings into repo work (#391)."""
-    for program, args, _start, _end in stages:
-        switches = _EDITOR_SWITCHES.get(program)
-        if switches is None:
+    return any(
+        _in_place_edit_operands(program, args) is not None for program, args, _start, _end in stages
+    )
+
+
+def _in_place_edit_operands(program: str, args: list[str]) -> list[str] | None:
+    """The file operands of one editor invocation that carries its own
+    in-place flag, else ``None`` (#391, #448). They are the positional words
+    after the script, or all of them when ``-e``/``-f`` (``--expression``,
+    ``--file``) supplied it. BSD ``sed -i ''`` takes the empty word as its
+    backup suffix, not as the script."""
+    switches = _EDITOR_SWITCHES.get(program)
+    if switches is None:
+        return None
+    inplace_chars, stops, takes_next = switches
+    script_chars = _EDITOR_SCRIPT_SWITCHES.get(program, frozenset())
+    inplace = script_given = options_done = False
+    skip = suffix_next = False
+    positional: list[str] = []
+    for tok in args:
+        if skip or (suffix_next and tok == ""):
+            skip = suffix_next = False
             continue
-        inplace, stops, takes_next = switches
-        skip = False
-        for tok in args:
-            if skip:
-                skip = False
-                continue
-            if tok == "--":
-                break
-            if tok == "--in-place" or tok.startswith("--in-place="):
-                return True
-            if tok in _EDITOR_LONG_ARG:
-                skip = True
-                continue
-            if not tok.startswith("-") or tok.startswith("--"):
-                continue
+        suffix_next = False
+        if options_done or tok == "-" or not tok.startswith("-"):
+            positional.append(tok)
+        elif tok == "--":
+            options_done = True
+        elif tok == "--in-place" or tok.startswith("--in-place="):
+            inplace = True
+        elif tok.startswith("--"):
+            script_given = script_given or tok.partition("=")[0] in _EDITOR_SCRIPT_LONG_ARG
+            skip = tok in _EDITOR_LONG_ARG
+        else:
             for pos, ch in enumerate(tok[1:], start=1):
-                if ch in inplace:
-                    return True
+                if ch in inplace_chars:
+                    # The rest of the cluster is the backup suffix (`-i.bak`).
+                    inplace = True
+                    suffix_next = pos == len(tok) - 1 and program in ("sed", "gsed")
+                    break
                 if ch in stops:
+                    script_given = script_given or ch in script_chars
                     skip = pos == len(tok) - 1 and ch in takes_next
                     break
-    return False
+    if not inplace:
+        return None
+    return positional if script_given else positional[1:]
 
 
 def _runs_script_write(stages: list[tuple[str, list[str], int, int]], raw: str) -> bool:
@@ -3863,10 +3897,13 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
     # (`cat > ~/src/x/y.py <<EOF` from /tmp). The Write tool takes its repo
     # from its path; such a write takes it from its target (#448). Only when
     # the command resolves no repo of its own: a commit's freshness stays
-    # keyed to the repo its `cd`/`git -C` lead to.
-    if repo is None and str(action.get("tool") or "") == "Bash":
-        repo = _bash_write_repo(action)
-    if repo is not None and _is_repo_sensitive_action(action, repo):
+    # keyed to the repo its `cd`/`git -C` lead to. The written repo only opens
+    # the consult gate: a commit lands where the command's own cwd says, so
+    # freshness is judged only when that repo resolves, as before #448.
+    gate_repo = repo
+    if gate_repo is None and str(action.get("tool") or "") == "Bash":
+        gate_repo = _bash_write_repo(action)
+    if gate_repo is not None and _is_repo_sensitive_action(action):
         if not git_rules_missing and not _has_consulted_git_rules(session):
             record_pending(session, command or _action_path(action))
             # Name the demanded note so the verifier credits the obeying read
@@ -3884,7 +3921,8 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
         # waive it rather than lock the agent out of a brand-new `git init` repo
         # (#149).
         if (
-            _is_commit_action(action)
+            repo is not None
+            and _is_commit_action(action)
             and not _git_fresh_for_repo(session, repo)
             and _repo_has_remote(repo)
         ):

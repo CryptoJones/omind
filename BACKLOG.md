@@ -91,7 +91,7 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 ### Shipped — 2026-10-02 (v10.2.21)
 
 - [x] **guard: Bash writes into a repo other than the resolved one skip the consult gate** ([#448](https://github.com/CryptoJones/omind/issues/448)) — **v10.2.21** — _bug_ —
-  each write target resolves its own enclosing repo (bounded, cached walk), so
+  each write target, in-place `sed -i`/`perl -pi` operands included, resolves its own enclosing repo, so
   `echo x > README.md && cd /other/repo` and `cat > <repo>/src/x.py <<EOF` from
   `/tmp` are repo work; a target in no repo is not.
 

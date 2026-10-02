@@ -20,13 +20,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - Each write target now resolves its own enclosing worktree, the way the
     Write tool's path does. Any target inside a repo counts; a target in no
     repo (`/tmp/y`, `/dev/null`, `$OUT`) still does not.
-  - When the command resolves no repo of its own, the written repo stands in
-    for the consult and freshness gates. A command that does resolve one
-    keeps it, so a commit's freshness stays keyed to the repo its `cd` or
-    `-C` lead to.
-  - The lookup is cheap: one cache per command (each directory is checked
-    once) and at most 64 directories per target. Any failure, or a path past
-    the bound, means "no repo written" (fails open).
+  - The file operands of an in-place editor count too: `sed -i` /
+    `--in-place` (after the script, or after the `-e`/`-f` values) and
+    `perl -i` / `-pi` (after the `-e` code), so `sed -i 's/a/b/'
+    <repo>/README.md` run from `/tmp` is gated like the Edit tool on that path.
+  - The written repo only opens the consult gate. Commit freshness is judged
+    only when the command's own repo (its cwd, `cd` or `-C`) resolves, so it
+    stays keyed to the repo the commit lands in, and a write never makes a
+    freshness demand on another repo.
+  - Each target walks up to its repo without a bound, as the Write tool's
+    path does, sharing one memo per command. Any failure means "no repo
+    written" (fails open).
+  - Out of scope: an interpreter script that writes a file (`python - <<EOF
+    open(...)`) cannot be resolved to a path statically, so it still takes
+    only the command's own repo. `$VAR` and `$(…)` targets are not literal
+    paths and are not judged.
 
 ## [10.2.20] - 2026-10-02
 

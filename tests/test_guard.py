@@ -3867,7 +3867,6 @@ def test_writes_into_repo_fails_open_when_the_walk_raises(
     monkeypatch.setattr(guard, "_shell_walk", _raise)
     action = _repo_write_action("echo x > src/x.py", repo, outside)
     assert guard._writes_into_repo(action) is False
-    assert guard._writes_into_repo(action, repo) is False
     assert guard._is_repo_sensitive_action(action) is False
 
 
@@ -3876,14 +3875,6 @@ def test_stage_code_texts_fails_open_when_the_stage_split_raises(
 ) -> None:
     monkeypatch.setattr(guard, "_program_stages", _raise)
     assert guard._stage_code_texts("chronic git commit -m x") == ["chronic git commit -m x"]
-
-
-def test_writes_into_repo_uses_the_repo_it_is_given(tmp_path: Path) -> None:
-    """#434 review (optional): the caller's resolved repo is used as-is."""
-    repo, outside = _write_probe_repo(tmp_path)
-    action = {"tool": "Bash", "command": f"echo x > {outside.as_posix()}/f", "cwd": "/"}
-    assert not guard._writes_into_repo(action, repo)
-    assert guard._writes_into_repo(action, outside)
 
 
 @pytest.mark.parametrize(
@@ -4242,9 +4233,146 @@ def test_write_into_the_cwd_repo_counts_after_cd_into_another_repo(tmp_path: Pat
     }
     assert guard._repo_root_for_action(action) == b
     assert guard._writes_into_repo(action)
-    assert guard._writes_into_repo(action, b)
     assert guard._bash_write_repo(action) == a.resolve()
-    assert guard._is_repo_sensitive_action(action, b)
+    assert guard._is_repo_sensitive_action(action)
+    session = "448-shape-a"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    verdict = guard.decide({**action, "session": session})
+    assert not verdict.allow
+    assert verdict.rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)
+
+
+def _consulted_git_rules(session: str) -> None:
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+
+
+def test_commit_freshness_stays_on_the_cd_repo_when_writing_another(tmp_path: Path) -> None:
+    """#448 review: `cd B && git commit && echo y > A/f` commits in B. With B
+    fresh and A stale, the command is judged against B's freshness only."""
+    a = _mk_repo(tmp_path, "a")
+    b = _mk_repo(tmp_path, "b")
+    session = "448-fresh-b"
+    _consulted_git_rules(session)
+    guard._record_git_freshness(session, b, f"git -C {b} fetch")
+    command = f"cd {b.as_posix()} && git commit -m x && echo y > {a.as_posix()}/f"
+    verdict = guard.decide(
+        {"tool": "Bash", "command": command, "cwd": a.as_posix(), "session": session}
+    )
+    assert verdict.allow, verdict.reason
+    guard.clear_gate(session)
+
+
+def test_written_repo_makes_no_freshness_demand(tmp_path: Path) -> None:
+    """#448 review item 2: from a cwd in no repo, a commit after a non-literal
+    `cd "$D"` resolves no repo of its own. The repo it also writes into opens
+    the consult gate, but the commit does not land there, so no freshness is
+    demanded of it (as on main)."""
+    a = _mk_repo(tmp_path, "a")
+    outside = tmp_path / "outside"
+    outside.mkdir()
+    command = f'cd "$D" && git commit -m x && echo y > {a.as_posix()}/f'
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
+    assert guard._repo_root_for_action(action) is None
+    assert guard._bash_write_repo(action) == a
+    session = "448-no-fresh-a"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    gated = guard.decide({**action, "session": session})
+    assert gated.rule_id == "repo-work-read-git-rules"
+    _consulted_git_rules(session)
+    verdict = guard.decide({**action, "session": session})
+    assert verdict.allow, verdict.reason
+    guard.clear_gate(session)
+
+
+def test_write_into_a_submodule_resolves_the_inner_repo(tmp_path: Path) -> None:
+    """#448 review: a target under a nested worktree (a submodule's `.git`
+    pointer file) resolves to the inner repo, even from the outer repo's cwd."""
+    outer = _mk_repo(tmp_path, "outer")
+    inner = outer / "sub"
+    inner.mkdir()
+    (inner / ".git").write_text("gitdir: ../.git/modules/sub\n", encoding="utf-8")
+    action = {"tool": "Bash", "command": "echo x > sub/x.py", "cwd": outer.as_posix()}
+    assert guard._repo_root_for_action(action) == outer
+    assert guard._bash_write_repo(action) == inner
+
+
+def test_mixed_targets_still_gate_on_the_repo_one(tmp_path: Path) -> None:
+    """#448 review (Dixie): a target in no repo before one in a repo does not
+    end the search."""
+    repo, _b, outside = _two_probe_repos(tmp_path)
+    command = f"echo x > {outside.as_posix()}/out && echo y > {repo.as_posix()}/README.md"
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
+    assert guard._bash_write_repo(action) == repo.resolve()
+    session = "448-mixed"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    verdict = guard.decide({**action, "session": session})
+    assert not verdict.allow
+    assert verdict.rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)
+
+
+@pytest.mark.parametrize(
+    ("command", "gated"),
+    [
+        ("sed -i 's/a/b/' {repo}/README.md", True),
+        ("sed -i.bak -e 's/a/b/' -e 's/c/d/' {repo}/README.md", True),
+        ("sed -i '' 's/a/b/' {repo}/README.md", True),
+        ("sed --in-place --expression='s/a/b/' {repo}/README.md", True),
+        ("sed -n -i 's/a/b/' {outside}/f {repo}/README.md", True),
+        ("perl -pi -e 's/a/b/' {repo}/x", True),
+        ("perl -i -pe 's/a/b/' {repo}/x", True),
+        ("sed -i 's/a/b/' {outside}/f", False),
+        ("perl -pi -e 's/a/b/' {outside}/f", False),
+        # No in-place flag: a stdout filter writes nothing.
+        ("sed 's/a/b/' {repo}/README.md", False),
+    ],
+)
+def test_in_place_editors_into_a_repo_from_outside_are_gated(
+    tmp_path: Path, command: str, gated: bool
+) -> None:
+    """#448 review item 1: `sed -i`/`perl -pi` on a file in a repo, run from a
+    cwd in no repo, is gated like the Edit tool on that path; on a file in no
+    repo it is not."""
+    repo, _b, outside = _two_probe_repos(tmp_path)
+    command = command.format(repo=repo.as_posix(), outside=outside.as_posix())
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
+    assert (guard._bash_write_repo(action) == repo.resolve()) is gated
+    session = "448-in-place"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    verdict = guard.decide({**action, "session": session})
+    assert verdict.allow is not gated
+    if gated:
+        assert verdict.rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)
+
+
+@pytest.mark.parametrize(
+    ("program", "args", "expected"),
+    [
+        ("sed", ["-i", "s/a/b/", "f"], ["f"]),
+        ("sed", ["-i", "", "s/a/b/", "f"], ["f"]),
+        ("sed", ["-i.bak", "s/a/b/", "f", "g"], ["f", "g"]),
+        ("sed", ["-e", "s/a/b/", "-i", "f"], ["f"]),
+        ("sed", ["-f", "script.sed", "-i", "f"], ["f"]),
+        ("sed", ["--expression=s/a/b/", "--in-place", "f"], ["f"]),
+        ("sed", ["-i", "--", "s/a/b/", "-f"], ["-f"]),
+        ("sed", ["s/a/b/", "f"], None),
+        ("perl", ["-pi", "-e", "s/a/b/", "f"], ["f"]),
+        ("perl", ["-i.orig", "-p", "script.pl", "f"], ["f"]),
+        ("ruby", ["-pi", "-e", "x", "f"], ["f"]),
+        ("grep", ["-i", "x", "f"], None),
+    ],
+)
+def test_in_place_edit_operands(program: str, args: list[str], expected: list[str] | None) -> None:
+    """#448 review item 1: the file operands come after the script, or are
+    every positional word when `-e`/`-f` supplied the script."""
+    assert guard._in_place_edit_operands(program, args) == expected
 
 
 def test_heredoc_write_into_a_repo_from_outside_any_repo_is_gated(tmp_path: Path) -> None:
@@ -4312,14 +4440,15 @@ def test_bash_write_repo_fails_open(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert guard._writes_into_repo(action) is False
 
 
-def test_target_repo_walk_is_bounded_and_cached(
+def test_target_repo_walk_is_memoised_per_command(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """#448: each target's repo lookup walks a bounded number of parents and
-    shares one cache per command, so many targets in one directory cost one
-    walk; a repo past the bound is not found (fails open)."""
+    """#448: every target of one command shares one memo, so many targets in
+    one tree check each directory once; the walk has no depth bound, like the
+    Write tool's."""
     repo, _b, outside = _two_probe_repos(tmp_path)
-    deep = repo / "src" / "a" / "b" / "c"
+    scratch = outside / "a" / "b" / "c"
+    deep = repo.joinpath(*(f"d{i}" for i in range(80)))
     calls: list[Path] = []
     real = guard._is_worktree_root
 
@@ -4328,9 +4457,8 @@ def test_target_repo_walk_is_bounded_and_cached(
         return real(path)
 
     monkeypatch.setattr(guard, "_is_worktree_root", counting)
-    targets = " ".join(f"{deep.as_posix()}/f{i}" for i in range(50))
-    action = {"tool": "Bash", "command": f"touch {targets}", "cwd": outside.as_posix()}
+    targets = " ".join(f"{scratch.as_posix()}/f{i}" for i in range(50))
+    command = f"touch {targets} {deep.as_posix()}/x"
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
     assert guard._bash_write_repo(action) == repo.resolve()
     assert len(calls) == len(set(calls))  # every directory is checked once
-    monkeypatch.setattr(guard, "_REPO_WALK_LIMIT", 2)
-    assert guard._bash_write_repo(action) is None
