@@ -313,7 +313,9 @@ def written_names(event: dict[str, Any]) -> set[str]:
     names: set[str] = set()
 
     def walk(value: Any, depth: int) -> None:
-        if depth > 6:
+        # Same depth cap as :func:`response_text`; decoding a JSON string
+        # costs a level, so no response nests deeper here than it does there.
+        if depth > 8:
             return
         if isinstance(value, str):
             if value.lstrip().startswith(("{", "[")):
@@ -668,6 +670,12 @@ def replay_transcript(path: Path | str, omi_dir: Path | str) -> Replay:
         event = {"tool_name": name, "tool_input": tool_input}
         if is_pull(event, omi_dir):
             replay.pull_skipped += 1
+            # #403, as the live hook does: names a create-note/edit-note
+            # response already showed are not hinted again later.
+            from omind import entities
+
+            written = written_names({"tool_name": name, "tool_response": content})
+            already.update({entities.normalize(n) for n in written} - {""})
             continue
         if skipped_tool(name):
             continue

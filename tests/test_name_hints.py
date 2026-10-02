@@ -219,7 +219,7 @@ def test_preflight_hint_counts_as_hinted(omi: Path) -> None:
 
 
 @pytest.mark.parametrize("tool", ["mcp__omi__create-note", "mcp__omi__edit-note"])
-@pytest.mark.parametrize("shape", ["blocks", "json", "dict"])
+@pytest.mark.parametrize("shape", ["content_blocks", "json", "dict"])
 def test_names_shown_at_write_time_count_as_hinted(omi: Path, tool: str, shape: str) -> None:
     """#403: a name the write response already listed under ``related_by_entity``
     or ``name_timelines`` is not hinted again by a later tool result."""
@@ -231,7 +231,8 @@ def test_names_shown_at_write_time_count_as_hinted(omi: Path, tool: str, shape: 
     assert any(r["name"] == "As30p" for r in fields[writecontext.FIELD])  # type: ignore[union-attr]
     body = json.dumps({"filename": "New As30p mount check.md", **fields})
     response: object = {
-        "blocks": [{"type": "text", "text": body}],
+        # Claude Code's actual MCP shape: a bare list of content blocks.
+        "content_blocks": [{"type": "text", "text": body}],
         "json": body,
         "dict": {"filename": "New As30p mount check.md", **fields},
     }[shape]
@@ -255,6 +256,55 @@ def test_only_write_tools_mark_names_hinted(omi: Path) -> None:
     assert namehints.tool_hints(read, omi) == ""
     assert namehints.hinted("rd") == set()
     assert "As30p" in namehints.tool_hints(_event("rd", DISKUTIL), omi)
+
+
+def test_a_name_only_in_name_timelines_counts_as_hinted(omi: Path) -> None:
+    """#403: ``name_timelines`` alone is enough; ``related_by_entity`` absent."""
+    body = json.dumps(
+        {
+            "filename": "New As30p mount check.md",
+            "name_timelines": [{"name": "As30p", "entries": []}],
+        }
+    )
+    write = {
+        "session_id": "tl",
+        "tool_name": "mcp__omi__edit-note",
+        "tool_input": {},
+        "tool_response": [{"type": "text", "text": body}],
+    }
+    assert namehints.written_names(write) == {"As30p"}
+    assert namehints.tool_hints(write, omi) == ""
+    assert "as30p" in namehints.hinted("tl")
+    assert namehints.tool_hints(_event("tl", DISKUTIL), omi) == ""
+
+
+@pytest.mark.parametrize(
+    "response",
+    [
+        [{"type": "text", "text": '{"related_by_entity": [{"name": "As3'}],  # truncated JSON
+        None,
+        [1, 2, 3],
+        {
+            "related_by_entity": [{"name": 5}, {"name": None}, "As30p"],
+            "name_timelines": [{"name": ["As30p"]}, {"name": {"x": 1}}],
+        },
+    ],
+    ids=["truncated-json", "none", "list-of-ints", "non-string-names"],
+)
+def test_an_unparseable_write_response_marks_nothing(omi: Path, response: object) -> None:
+    """#403 fails open (AGENTS.md invariant 2): a malformed write response
+    marks nothing and raises nothing, and a later result still hints."""
+    session = f"bad-{abs(hash(repr(response)))}"
+    write = {
+        "session_id": session,
+        "tool_name": "mcp__omi__create-note",
+        "tool_input": {},
+        "tool_response": response,
+    }
+    assert namehints.written_names(write) == set()
+    assert namehints.tool_hints(write, omi) == ""
+    assert namehints.hinted(session) == set()
+    assert "As30p" in namehints.tool_hints(_event(session, DISKUTIL), omi)
 
 
 # -- what counts as a name worth a hint --------------------------------------
@@ -382,6 +432,42 @@ def test_replay_surfaces_the_label_history_before_the_incorrect_claim(
     assert first.hint.titles[0] == HISTORY
     assert first.line == 3 < 4  # the diskutil result, before the edit-note on line 4
     assert first.used_later and first.consulted_later
+
+
+def test_replay_does_not_hint_a_name_the_write_response_showed(
+    omi: Path, tmp_path: Path
+) -> None:
+    """#403: the bench replay matches the live hook — a name a create-note
+    response listed is not hinted by a later tool result naming it."""
+    from omind import writecontext
+
+    fields = writecontext.response_fields(
+        omi, title="New As30p mount check", details="Mounted As30p again today."
+    )
+    body = json.dumps({"filename": "New As30p mount check.md", **fields})
+    rows = [
+        {"type": "assistant", "timestamp": "2026-09-30T19:10:00Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "w1", "name": "mcp__omi__create-note",
+              "input": {"title": "New As30p mount check"}}]}},
+        {"type": "user", "timestamp": "2026-09-30T19:10:01Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "w1",
+              "content": [{"type": "text", "text": body}]}]}},
+        {"type": "assistant", "timestamp": "2026-09-30T19:16:30Z",
+         "message": {"role": "assistant", "content": [
+             {"type": "tool_use", "id": "t1", "name": "Bash",
+              "input": {"command": "diskutil list external physical"}}]}},
+        {"type": "user", "timestamp": "2026-09-30T19:16:31Z",
+         "message": {"role": "user", "content": [
+             {"type": "tool_result", "tool_use_id": "t1", "content": DISKUTIL}]}},
+    ]
+    transcript = tmp_path / "write-then-read.jsonl"
+    transcript.write_text("\n".join(json.dumps(r) for r in rows) + "\n", encoding="utf-8")
+    replay = namehints.replay_transcript(transcript, omi)
+    assert replay.tool_results == 2
+    assert replay.pull_skipped == 1
+    assert "As30p" not in [h.hint.name for h in replay.hints]
 
 
 def test_replay_hides_notes_written_after_the_tool_result(omi: Path, tmp_path: Path) -> None:
