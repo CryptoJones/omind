@@ -642,10 +642,12 @@ CLI** gets guard, MCP-memory registration, compact SessionStart priming,
 PostToolUse accounting, the `omind` help/recall skill, and the global AGENTS
 bootstrap pointer (see above). **OpenCode** priming is likewise not wired yet (its MCP
 server and skill are). The cross-harness **guard** reaches Claude Code, Hermes,
-OpenCode, Codex, Gemini, and Poolside as hard-block; **OpenClaw** is wired
-**detect-only** — its POST `/hooks/agent` gateway receives the guard verdict but
-deny-enforcement is unverified against a live gateway, so the verdict is advisory
-until hard-block is proven.
+OpenCode, Codex, Gemini, and Poolside as hard-block. **OpenClaw** gets no
+guard: it has no shell-command hooks (tool gating is the in-process plugin hook
+`before_tool_call`), and the `hooks.agent` entry older omind wrote is rejected by
+OpenClaw's strict config schema, which stops its Gateway from starting. `omind
+setup --agent openclaw` removes that entry, and `omind doctor --agent openclaw`
+fails while it is still there (#425).
 
 **Poolside** (the `pool` CLI for the Laguna agent, >= 1.0.16) gets the full
 Claude Code treatment from one `omind setup --agent poolside`: the `omi` MCP

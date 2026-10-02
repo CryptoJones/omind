@@ -94,12 +94,6 @@ into a new note. In dependency order; each child is flag-gated._
   - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
   - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
 
-### Windows
-
-- [ ] **Windows hook shells: OpenClaw undetermined; verify `cmd /c` spaced paths (agy, pool) and Claude Code without Git Bash** ([#425](https://github.com/CryptoJones/omind/issues/425)) — _bug (Windows), follow-up of #418_ —
-  #418 renders each harness's hooks for its Windows shell; these three cases still need a
-  real Windows run, and OpenClaw's hook schema needs confirming.
-
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -148,6 +142,16 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.11)
+
+- [x] **Windows hook shells: OpenClaw undetermined; verify `cmd /c` spaced paths (agy, pool) and Claude Code without Git Bash** ([#425](https://github.com/CryptoJones/omind/issues/425)) — **v10.2.11** — _bug (Windows)_ —
+  Every rendered hook now runs through its harness's real shell on windows-latest
+  CI (`tests/test_windows_hook_shells.py`). agy/pool render spaced paths by 8.3
+  short name, because Go's `cmd /c` escaping breaks any inner quote. Claude Code
+  without Git Bash gets the PowerShell form and `"shell": "powershell"`. OpenClaw's
+  `hooks.agent` guard entry is removed, because OpenClaw rejects it and its
+  Gateway will not start.
 
 ### Shipped — 2026-10-02 (v10.2.10)
 

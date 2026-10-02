@@ -7,6 +7,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.11] - 2026-10-02
+
+### Fixed
+- **Windows hook shells, run for real on Windows
+  ([#425](https://github.com/CryptoJones/omind/issues/425)).** #418 rendered each
+  harness's hooks for its Windows shell, but three cases had never been run. A new
+  Windows-only suite (`tests/test_windows_hook_shells.py`) now spawns every rendered
+  hook command the way its harness does, against a real venv `python.exe` under a
+  directory with a space in its name, and checks the argv that reaches `-m omind`.
+  It runs on the windows-latest CI jobs.
+  - **agy and Poolside (`cmd /c`): a spaced path broke every hook.** Both are Go
+    programs that run `exec.Command("cmd", "/c", command)`. Go escapes that argument
+    by MSVC rules, turning each inner `"` into `\"`, which cmd.exe does not
+    understand. On the runner the old form failed with `'\"C:\...\J D\venv\Scripts\python.exe\"'
+    is not recognized`. A path that needs quoting is now rendered by its 8.3 short
+    name (`C:\Users\JANEDO~1\...`), with no quotes at all. Verified through a real
+    Go-built spawner, Go-style escaping, and a verbatim `cmd /d /s /c "..."`. Double
+    quotes stay only as the fallback when a volume has no short names (8.3
+    generation disabled, or the path does not exist yet). That case still breaks
+    under Go's `cmd /c` and is documented in `provision.cmd_quote`.
+  - **Claude Code without Git Bash: every hook was a PowerShell ParserError.**
+    Claude Code runs shell-form hooks in PowerShell on Windows when Git Bash is not
+    installed (hooks docs: `shell` "Defaults to "bash", or to "powershell" on Windows
+    when Git Bash isn't installed"). Setup now looks for Git Bash where Claude Code
+    does (`CLAUDE_CODE_GIT_BASH_PATH`, then next to `git` on PATH, then the standard
+    install roots). If it finds none, every omind hook gets the PowerShell form
+    (`& '<python.exe>' -m omind ...` with PowerShell literals) and an explicit
+    `"shell": "powershell"`. Boxes with Git Bash are unchanged. Verified under
+    `powershell.exe` and `pwsh`, and the bash form under real Git Bash.
+  - **OpenClaw: omind's guard entry stopped the Gateway from starting.** OpenClaw
+    has no shell-command hooks. `hooks` is a strict object, and tool gating is the
+    in-process plugin hook `before_tool_call`. Against OpenClaw 2026.9.7,
+    `openclaw config validate` rejects the `hooks.agent` entry omind wrote
+    (`hooks: Unrecognized key: "agent"`), and OpenClaw's strict validation refuses
+    to start the Gateway on an unknown key. So the "detect-only guard" never ran
+    anywhere, on any OS, and it broke the gateway it was added to. `omind setup
+    --agent openclaw` no longer writes it and removes omind's existing entry, leaving
+    user content alone. `omind doctor --agent openclaw` fails while the entry is
+    present. MCP memory, the skill and bootstrap priming are unchanged.
+
 ## [10.2.10] - 2026-10-02
 
 ### Fixed

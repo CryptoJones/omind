@@ -135,18 +135,56 @@ def powershell_quote(exe: str) -> str:
 
 
 #: Characters that make cmd.exe need quotes around a path.
-_CMD_SPECIAL = frozenset(" \t&()[]{}^=;!'+,`~%")
+_CMD_SPECIAL = frozenset(" \t&()[]{}^=;!'+,`%")
+
+
+def windows_short_path(path: str) -> str | None:
+    """*path*'s 8.3 short form (``C:\\Users\\JANEDO~1\\...``), or None.
+
+    None off Windows, for a path that does not exist, and on a volume with 8.3
+    name generation disabled (the API then hands back the long path, which
+    callers detect by its special characters). Never raises.
+    """
+    if sys.platform != "win32":
+        return None
+    try:
+        import ctypes
+
+        size = ctypes.windll.kernel32.GetShortPathNameW(path, None, 0)
+        if not size:
+            return None
+        buf = ctypes.create_unicode_buffer(size)
+        if not ctypes.windll.kernel32.GetShortPathNameW(path, buf, size):
+            return None
+        return buf.value or None
+    except (OSError, ValueError, AttributeError):
+        return None
 
 
 def cmd_quote(exe: str) -> str:
-    """*exe* for a ``cmd /c`` command line: double quotes only when needed.
+    """*exe* for a ``cmd /c`` command line: no quotes at all whenever possible.
 
-    ``cmd /c`` strips the first and last quote of a line that starts with a
-    quote and holds more than two, so a needlessly quoted head breaks a hook
-    whose arguments are quoted too. A plain path stays bare, the same bytes the
-    launcher pin wrote before #380.
+    agy and pool are Go programs that run a hook as
+    ``exec.Command("cmd", "/c", command)``. Go escapes that argument by the
+    MSVC rules: it wraps the whole command in quotes and turns every inner
+    ``"`` into ``\\"``. cmd.exe strips the outer pair but does not understand
+    ``\\"``, so ANY double quote inside the hook command reaches cmd and the
+    child as ``\\"`` and breaks the path it was meant to protect (#425,
+    verified on a windows-latest runner by tests/test_windows_hook_shells.py).
+
+    So a path that needs quoting is rendered by its 8.3 short name instead
+    (``C:\\Users\\JANEDO~1\\...``): no spaces, no quotes, and it names the same
+    file. Only when no short name exists (8.3 generation disabled on that
+    volume, or the path does not exist yet) does it fall back to double quotes,
+    which a verbatim ``cmd /d /s /c "<command>"`` spawner still handles. A
+    plain path stays bare, the same bytes the launcher pin wrote before #380.
     """
-    return f'"{exe}"' if any(c in _CMD_SPECIAL for c in exe) else exe
+    if not any(c in _CMD_SPECIAL for c in exe):
+        return exe
+    short = windows_short_path(exe)
+    if short and not any(c in _CMD_SPECIAL for c in short):
+        return short
+    return f'"{exe}"'
 
 
 #: How each Windows hook shell wants the pinned path quoted (#418 review).
@@ -191,6 +229,56 @@ def hook_arg_quote(windows_shell: str, value: str, posix: Callable[[str], str]) 
     *posix* (the call site's existing quoting, so POSIX bytes do not churn)
     elsewhere."""
     return _WINDOWS_ARG_QUOTE[windows_shell](value) if _windows() else posix(value)
+
+
+def git_bash_path() -> str | None:
+    """The Git Bash Claude Code would run hooks in on Windows, or None.
+
+    Mirrors where Claude Code looks: ``CLAUDE_CODE_GIT_BASH_PATH``, then the
+    ``bin\\bash.exe`` of the Git for Windows install that ``git`` on PATH
+    belongs to, then the standard install roots. Never raises.
+    """
+    try:
+        override = os.environ.get("CLAUDE_CODE_GIT_BASH_PATH")
+        if override and Path(override).is_file():
+            return override
+        candidates: list[Path] = []
+        git = shutil.which("git")
+        if git:
+            # <root>\cmd\git.exe, <root>\bin\git.exe or <root>\mingw64\bin\git.exe
+            here = Path(git).resolve().parent
+            candidates += [
+                here.parent / "bin" / "bash.exe",
+                here.parent.parent / "bin" / "bash.exe",
+            ]
+        for var, tail in (
+            ("ProgramFiles", ("Git",)),
+            ("ProgramFiles(x86)", ("Git",)),
+            ("LOCALAPPDATA", ("Programs", "Git")),
+        ):
+            base = os.environ.get(var)
+            if base:
+                candidates.append(Path(base, *tail, "bin", "bash.exe"))
+        for candidate in candidates:
+            if candidate.is_file():
+                return str(candidate)
+    except (OSError, ValueError, RuntimeError):
+        return None
+    return None
+
+
+def claude_hook_shell() -> str:
+    """The shell Claude Code runs a shell-form hook in, as a :func:`hook_quote` key.
+
+    Claude Code's hooks docs: ``shell`` "Defaults to ``"bash"``, or to
+    ``"powershell"`` on Windows when Git Bash isn't installed". The bash form
+    ``"<python.exe>" -m omind ...`` is a PowerShell ParserError, so a Windows box
+    without Git Bash gets the PowerShell form plus an explicit ``"shell":
+    "powershell"`` on each hook (#425). POSIX is always ``bash``.
+    """
+    if _windows() and git_bash_path() is None:
+        return "powershell"
+    return "bash"
 
 
 def canonical_omind_cmd(quote: Callable[[str], str] = shell_quote) -> str:
@@ -1141,6 +1229,33 @@ class Provisioner:
             + self._server_command()
         )
 
+    def _claude_powershell(self) -> bool:
+        """Whether Claude Code runs this box's shell-form hooks in PowerShell
+        (Windows without Git Bash, #425); see :func:`claude_hook_shell`."""
+        return claude_hook_shell() == "powershell"
+
+    def _claude_omind_cmd(self) -> str:
+        """The pinned omind prefix for a Claude Code hook: ``"<exe>"`` for
+        bash (POSIX bytes unchanged), ``& '<exe>'`` for PowerShell."""
+        if self._claude_powershell():
+            return canonical_omind_cmd(powershell_quote)
+        return canonical_omind_cmd(double_quote)
+
+    def _claude_arg(self, value: object) -> str:
+        """*value* quoted as a Claude Code hook argument for its shell."""
+        if self._claude_powershell():
+            return powershell_literal(str(value))
+        return double_quote(str(value))
+
+    def _claude_hook(self, command: str, **extra: Any) -> dict[str, Any]:
+        """One ``{"type": "command"}`` hook. On a PowerShell box it also pins
+        ``"shell": "powershell"``, so the rendering and the shell Claude Code
+        picks can never disagree (#425)."""
+        hook: dict[str, Any] = {"type": "command", "command": command, **extra}
+        if self._claude_powershell():
+            hook["shell"] = "powershell"
+        return hook
+
     def _hook_command(self, event: str) -> str:
         """The shell command Claude Code runs for one hook event.
 
@@ -1148,7 +1263,7 @@ class Provisioner:
         Claude Code spawns lacks ``~/.local/bin`` on PATH, *and* keeps firing
         after an update.
         """
-        omind = canonical_omind_cmd(lambda exe: f'"{exe}"')
+        omind = self._claude_omind_cmd()
         # The "<exe> hook" prefix always contains HOOK_MARKER ("omind hook"),
         # and so does the Windows module form "<python> -m omind hook" (#380),
         # which provision uses to find/replace omind's own entries.
@@ -1159,8 +1274,8 @@ class Provisioner:
         # per harness on purpose: see hooks.INJECTING_HARNESSES.
         harness = " --harness claude" if event == "PostToolUse" else ""
         return (
-            f'{omind} hook {event} --vault "{self.config.vault}" '
-            f'--folder "{self.config.folder}"{harness}'
+            f"{omind} hook {event} --vault {self._claude_arg(self.config.vault)} "
+            f"--folder {self._claude_arg(self.config.folder)}{harness}"
         )
 
     def _omind_hook_entries(self) -> dict[str, list[dict[str, Any]]]:
@@ -1171,9 +1286,7 @@ class Provisioner:
         """
         entries: dict[str, list[dict[str, Any]]] = {}
         for event in HANDLED_EVENTS:
-            hooks_list: list[dict[str, Any]] = [
-                {"type": "command", "command": self._hook_command(event)}
-            ]
+            hooks_list: list[dict[str, Any]] = [self._claude_hook(self._hook_command(event))]
             if event == "PostToolUse":
                 # Enforcement hook runs immediately after the omind journal hook so
                 # any built-in memory file written this turn is migrated to OMI
@@ -1185,13 +1298,12 @@ class Provisioner:
                     # check_prereqs should have caught this before we get here on
                     # a real run; fall back to `python3` on dry-run / edge cases.
                     python_cmd = "python3"
-                hooks_list.append({
-                    "type": "command",
-                    # Quoted: Claude Code may run the string through Git Bash on
-                    # Windows, which eats the backslashes of an unquoted path
-                    # (C:\Users\x -> C:Usersx) and the hook fails every tool call.
-                    "command": f'{python_cmd} "{_enforce_hook_dest()}"',
-                })
+                # Quoted: Claude Code may run the string through Git Bash on
+                # Windows, which eats the backslashes of an unquoted path
+                # (C:\Users\x -> C:Usersx) and the hook fails every tool call.
+                hooks_list.append(
+                    self._claude_hook(f"{python_cmd} {self._claude_arg(_enforce_hook_dest())}")
+                )
                 entry: dict[str, Any] = {"matcher": "*", "hooks": hooks_list}
             else:
                 entry = {"hooks": hooks_list}
@@ -1420,21 +1532,18 @@ class Provisioner:
             # A bare .sh path is not executable by the Windows shell; run it
             # through the sh found on PATH (Git for Windows). The script
             # filename stays in the command, so the markers still match.
-            return f'sh "{dest}"' if _windows() else str(dest)
+            return f"sh {self._claude_arg(dest)}" if _windows() else str(dest)
 
         desired: dict[str, Any] = {
             "matcher": "Bash",
             "hooks": [
-                {
-                    "type": "command",
-                    "command": _script_command(_secret_output_guard_dest()),
-                    "timeout": SECRET_OUTPUT_GUARD_TIMEOUT,
-                },
-                {
-                    "type": "command",
-                    "command": _script_command(_guard_hook_dest()),
-                    "timeout": GUARD_HOOK_TIMEOUT,
-                },
+                self._claude_hook(
+                    _script_command(_secret_output_guard_dest()),
+                    timeout=SECRET_OUTPUT_GUARD_TIMEOUT,
+                ),
+                self._claude_hook(
+                    _script_command(_guard_hook_dest()), timeout=GUARD_HOOK_TIMEOUT
+                ),
             ],
         }
         existing = hooks_cfg.get("PreToolUse")
@@ -1548,31 +1657,19 @@ class Provisioner:
             # pure-Python guard path the Codex harness uses (#259).
             # Module form (`python -m omind`) where it runs: Smart App Control
             # blocks the unsigned omind.exe trampoline (#380).
-            omind = canonical_omind_cmd(lambda exe: f'"{exe}"')
-            guard_command = (
-                f'{omind} guard adapter --harness claude '
-                f'--omi-dir "{self.config.omi_dir}"'
-            )
-            reset_command = (
-                f'{omind} guard preflight --omi-dir "{self.config.omi_dir}"'
-            )
+            omind = self._claude_omind_cmd()
+            omi_dir = self._claude_arg(self.config.omi_dir)
+            guard_command = f"{omind} guard adapter --harness claude --omi-dir {omi_dir}"
+            reset_command = f"{omind} guard preflight --omi-dir {omi_dir}"
         else:
             guard_command = str(_omi_guard_dest())
             reset_command = str(_omi_gate_reset_dest())
         desired: dict[str, dict[str, Any]] = {
             "PreToolUse": {
                 "matcher": "*",
-                "hooks": [
-                    {
-                        "type": "command",
-                        "command": guard_command,
-                        "timeout": OMI_GUARD_TIMEOUT,
-                    }
-                ],
+                "hooks": [self._claude_hook(guard_command, timeout=OMI_GUARD_TIMEOUT)],
             },
-            "UserPromptSubmit": {
-                "hooks": [{"type": "command", "command": reset_command}]
-            },
+            "UserPromptSubmit": {"hooks": [self._claude_hook(reset_command)]},
         }
         # Both platform forms are strippable so a checkout moved between
         # platforms converges instead of accumulating one entry per form.

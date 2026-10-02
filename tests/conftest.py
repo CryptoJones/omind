@@ -149,3 +149,18 @@ def live_launchers(monkeypatch: pytest.MonkeyPatch) -> None:
     from omind import provision
 
     monkeypatch.setattr(provision, "_launcher_runs", lambda _exe: True)
+
+
+@pytest.fixture(autouse=True)
+def _git_bash_present(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    """Pin "Git Bash is installed" for every test (#425).
+
+    On Windows, Claude Code hooks render for PowerShell when no Git Bash is
+    found, so a test that pins ``_windows`` True would otherwise depend on
+    whether the machine running it has Git for Windows. Tests of the
+    no-Git-Bash form patch ``provision.git_bash_path`` or drop this variable.
+    """
+    bash = tmp_path / "git-bash" / "bash.exe"
+    bash.parent.mkdir(parents=True, exist_ok=True)
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))

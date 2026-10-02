@@ -294,7 +294,8 @@ def gemini_settings_path() -> Path:
 #: settings.json, so a re-run replaces only our entry and never duplicates it.
 GEMINI_GUARD_MARKER = "guard adapter --harness gemini"
 
-#: Substring identifying omind's own OpenClaw guard gateway hook in openclaw.json.
+#: Substring identifying the retired OpenClaw guard entry older omind wrote to
+#: openclaw.json's ``hooks.agent`` (OpenClaw rejects it; setup removes it, #425).
 OPENCLAW_GUARD_MARKER = "guard adapter --harness openclaw"
 #: Poolside hook entries omind owns carry this ``name`` prefix and/or run omind
 #: with ``--harness poolside``; re-runs replace exactly those and nothing else.
@@ -803,9 +804,8 @@ class OpenClawProvisioner(AgentProvisioner):
     AGENT_LABEL = "OpenClaw"
     INSTALL_HINT = "Install OpenClaw (it creates ~/.openclaw on first run), then re-run."
     DONE_MESSAGE = "Done. Restart OpenClaw to load the OMI memory tools."
-    # Undetermined: current OpenClaw has no shell-command hook path to read a
-    # Windows shell from (its hooks are in-process JS). Kept on the default
-    # double quotes until that is settled (#425).
+    # No Windows hook shell to render for: OpenClaw has no shell-command hooks
+    # (its hooks are in-process JS plugins), so omind installs none (#425).
 
     def agent_root(self) -> Path:
         return openclaw_root()
@@ -911,46 +911,54 @@ class OpenClawProvisioner(AgentProvisioner):
 
     def integrate(self) -> None:
         super().integrate()
-        self.install_guard()
+        self.remove_retired_guard()
 
-    def install_guard(self) -> None:
-        """Register the OMI guard as an OpenClaw gateway hook in ``openclaw.json``.
+    def remove_retired_guard(self) -> None:
+        """Strip the ``hooks.agent`` guard entry older omind wrote (#425).
 
-        OpenClaw's hook transport is an HTTP/WebSocket gateway (POST /hooks/agent
-        on :18789, loopback), not a stdout shell hook — so we register a command
-        entry the gateway invokes as ``omind guard adapter --harness openclaw``;
-        the adapter emits an ``{"allow","reason","rule_id"}`` verdict the gateway
-        reads. Until that gateway is confirmed to ENFORCE a deny against a live
-        instance, OpenClaw is wired DETECT-ONLY (issue #88) and the verdict is
-        advisory. Touches only our own entry (by :data:`OPENCLAW_GUARD_MARKER`),
-        preserving any user-authored hooks.
+        omind used to register ``{"event": "pre_tool", "command": "<omind>
+        guard adapter --harness openclaw"}`` under ``hooks.agent``. OpenClaw has
+        no such key: ``hooks`` is a strict object (enabled, path, token,
+        presets, mappings, gmail, internal, ...), its tool gating is the
+        in-process plugin hook ``before_tool_call``, and it has no shell-command
+        hook at all. OpenClaw 2026.9.7 ``openclaw config validate`` answers
+        ``hooks: Unrecognized key: "agent"`` for that entry, and its strict
+        validation makes the Gateway REFUSE TO START. So the entry never ran a
+        guard anywhere and broke the gateway it was added to; setup now removes
+        omind's own entry (by :data:`OPENCLAW_GUARD_MARKER`) and leaves any
+        other content alone. OpenClaw gets MCP memory, the skill and bootstrap
+        priming; the guard needs an OpenClaw plugin, not a config entry.
         """
         path = openclaw_config_path()
+        if not path.exists():
+            return
         data = self._read_settings(path)
-        command = f"{self._omind_cmd()} guard adapter --harness openclaw"
-        desired = {"event": "pre_tool", "command": command, "enabled": True}
         hooks = data.get("hooks")
-        if not isinstance(hooks, dict):
-            hooks = {}
-        agent_hooks = hooks.get("agent")
-        existing = agent_hooks if isinstance(agent_hooks, list) else []
+        agent_hooks = hooks.get("agent") if isinstance(hooks, dict) else None
+        if not isinstance(hooks, dict) or not isinstance(agent_hooks, list):
+            return
         kept = [
             e
-            for e in existing
+            for e in agent_hooks
             if not (isinstance(e, dict) and OPENCLAW_GUARD_MARKER in json.dumps(e))
         ]
-        merged = kept + [desired]
-        if merged != existing or self.config.force:
-            hooks["agent"] = merged
-            data["hooks"] = hooks
-            self._record(f"register OMI guard gateway hook (detect-only) in {path}")
-            if not self.config.dry_run:
-                path.parent.mkdir(parents=True, exist_ok=True)
-                paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
+        if kept == agent_hooks:
+            return
+        if kept:
+            hooks["agent"] = kept
         else:
-            self.log(f"  OMI guard gateway hook already installed in {path}")
+            del hooks["agent"]
+        if hooks:
+            data["hooks"] = hooks
+        else:
+            del data["hooks"]
+        self._record(
+            f"remove retired OMI guard entry (hooks.agent, rejected by OpenClaw) from {path}"
+        )
+        if not self.config.dry_run:
+            paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
-    def _guard_wired(self) -> bool:
+    def _retired_guard_present(self) -> bool:
         try:
             data = self._read_settings(openclaw_config_path())
         except ProvisionError:
@@ -959,7 +967,7 @@ class OpenClawProvisioner(AgentProvisioner):
         agent_hooks = hooks.get("agent") if isinstance(hooks, dict) else None
         return any(
             isinstance(e, dict) and OPENCLAW_GUARD_MARKER in json.dumps(e)
-            for e in (agent_hooks or [])
+            for e in (agent_hooks if isinstance(agent_hooks, list) else [])
         )
 
 
@@ -2784,20 +2792,23 @@ def diagnose_hermes(config: SetupConfig) -> list[CheckResult]:
 def diagnose_openclaw(config: SetupConfig) -> list[CheckResult]:
     prov = OpenClawProvisioner(config=config, log=lambda _msg: None)
     results = _diagnose_agent(prov)
-    if prov._guard_wired():
+    if prov._retired_guard_present():
         results.append(
             CheckResult(
                 "openclaw_guard",
-                "ok",
-                f"OMI guard (detect-only) wired into {openclaw_config_path()}",
+                "fail",
+                f"{openclaw_config_path()} still carries omind's retired hooks.agent "
+                "guard entry, which OpenClaw rejects (the gateway refuses to start); "
+                "run `omind setup --agent openclaw` to remove it",
             )
         )
     else:
         results.append(
             CheckResult(
                 "openclaw_guard",
-                "warn",
-                "OMI guard not in openclaw.json (run `omind setup --agent openclaw`)",
+                "ok",
+                "no OMI guard for OpenClaw: it has no shell-command hooks "
+                "(tool gating is an in-process plugin hook)",
             )
         )
     return results

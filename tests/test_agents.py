@@ -7,6 +7,7 @@ from __future__ import annotations
 import json
 import re
 import shutil
+import sys
 from pathlib import Path
 
 import pytest
@@ -584,14 +585,8 @@ def test_hermes_hook_command_quotes_a_spaced_pin(
     assert any(a["command"] == cmd for a in allow["approvals"])
 
 
-def test_openclaw_gemini_poolside_quote_a_spaced_pin(tmp_path: Path, spaced_pin: list[str]) -> None:
+def test_gemini_poolside_quote_a_spaced_pin(tmp_path: Path, spaced_pin: list[str]) -> None:
     prefix = _quoted_prefix(spaced_pin)
-
-    agents.openclaw_config_path().parent.mkdir(parents=True, exist_ok=True)
-    OpenClawProvisioner(_config(tmp_path, "openclaw"), log=_quiet).install_guard()
-    data = json.loads(agents.openclaw_config_path().read_text(encoding="utf-8"))
-    commands = [h["command"] for h in data["hooks"]["agent"]]
-    assert f"{prefix} guard adapter --harness openclaw" in commands
 
     # Gemini runs hooks in PowerShell on Windows: the call operator form.
     gemini_prefix = (
@@ -621,7 +616,6 @@ def _hook_commands_by_harness(vault: Path) -> dict[str, list[str]]:
     pool = agents.PoolsideProvisioner(cfg, log=_quiet)
     claude = provision.Provisioner(cfg, log=_quiet)
     gemini = agents.GeminiProvisioner(cfg, log=_quiet)
-    openclaw = OpenClawProvisioner(cfg, log=_quiet)
     return {
         "gemini": [gemini._guard_hook_group()["hooks"][0]["command"]],
         "codex": [
@@ -637,7 +631,6 @@ def _hook_commands_by_harness(vault: Path) -> dict[str, list[str]]:
         ],
         "poolside": [pool._hook_command(e) for e in pool.HOOK_EVENTS],
         "hermes": [HermesProvisioner(cfg, log=_quiet)._omind_hook_command("pre_llm_call")],
-        "openclaw": [f"{openclaw._omind_cmd()} guard adapter --harness openclaw"],
         "claude": [claude._hook_command(e) for e in provision.HANDLED_EVENTS],
     }
 
@@ -654,10 +647,11 @@ def test_windows_hooks_use_each_harness_shell_syntax(
     - agy, Poolside: ``cmd /c``. Quoted only when needed, so a plain path keeps
       the line from starting with a quote (cmd's quote-stripping rule).
     - Hermes: no shell, a Windows-mode argv split: double quotes.
-    - Claude Code: bash, its Windows default: double quotes. OpenClaw:
-      undetermined, unchanged double quotes.
+    - Claude Code: bash (Git Bash, found here), its Windows default: double
+      quotes. OpenClaw: no shell hooks at all (#425).
     """
     monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: r"C:\Program Files\Git\bin\bash.exe")
     monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [exe, "-m", "omind"])
     vault = Path(r"C:\Users\Jane Doe\Obsidian Vault")
     omi_dir = str(vault / "OMI")
@@ -668,7 +662,6 @@ def test_windows_hooks_use_each_harness_shell_syntax(
         "agy": cmd_head,
         "poolside": cmd_head,
         "hermes": f'"{exe}" -m omind ',
-        "openclaw": f'"{exe}" -m omind ',
         "claude": f'"{exe}" -m omind ',
     }
     commands = _hook_commands_by_harness(vault)
@@ -686,6 +679,102 @@ def test_windows_hooks_use_each_harness_shell_syntax(
     assert f"--vault '{vault}' --folder 'OMI'" in commands["codex"][1]
     assert all(f'--omi-dir "{omi_dir}"' in c for c in commands["agy"])
     assert f'--vault "{vault}" --folder OMI' in commands["poolside"][-1]
+
+
+@pytest.mark.parametrize("exe", [_WIN_PLAIN, _WIN_SPACED], ids=["plain", "spaced"])
+def test_claude_hooks_without_git_bash_render_for_powershell(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, exe: str
+) -> None:
+    """Claude Code runs shell-form hooks in PowerShell on Windows when Git Bash
+    is missing (hooks docs: ``shell`` "Defaults to "bash", or to "powershell"
+    on Windows when Git Bash isn't installed"). The bash form ``"<exe>" -m
+    omind`` is a PowerShell ParserError there, so every omind hook gets the call
+    operator, PowerShell literals and an explicit ``"shell": "powershell"`` (#425).
+    """
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: None)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [exe, "-m", "omind"])
+    monkeypatch.setattr(provision, "_resolve_python", lambda: "python")
+    vault = Path(r"C:\Users\Jane Doe\Obsidian Vault")
+    cfg = SetupConfig(vault=vault, folder="OMI", agent="claude")  # type: ignore[arg-type]
+    claude = provision.Provisioner(cfg, log=_quiet)
+    entries = claude._omind_hook_entries()
+    hooks = [h for event in entries.values() for e in event for h in e["hooks"]]
+    assert hooks and all(h.get("shell") == "powershell" for h in hooks)
+    for event in provision.HANDLED_EVENTS:
+        command = claude._hook_command(event)
+        assert command.startswith(f"& '{exe}' -m omind hook {event} "), command
+        assert f"--vault '{vault}' --folder 'OMI'" in command
+        assert provision._hook_omind_argv(command) == [exe, "-m", "omind"]
+
+
+def test_claude_hooks_with_git_bash_keep_the_bash_form(monkeypatch: pytest.MonkeyPatch) -> None:
+    """With Git Bash present nothing changes: no ``shell`` key, double quotes."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: r"C:\Git\bin\bash.exe")
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [_WIN_SPACED, "-m", "omind"])
+    monkeypatch.setattr(provision, "_resolve_python", lambda: "python")
+    cfg = SetupConfig(vault=Path(r"C:\v"), folder="OMI", agent="claude")  # type: ignore[arg-type]
+    entries = provision.Provisioner(cfg, log=_quiet)._omind_hook_entries()
+    hooks = [h for event in entries.values() for e in event for h in e["hooks"]]
+    assert hooks and all("shell" not in h for h in hooks)
+    assert hooks[0]["command"].startswith(f'"{_WIN_SPACED}" -m omind hook ')
+
+
+def test_claude_hook_shell_is_bash_off_windows(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision, "git_bash_path", lambda: None)
+    assert provision.claude_hook_shell() == "bash"
+
+
+def test_git_bash_path_honours_the_claude_code_override(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    bash = tmp_path / "bash.exe"
+    bash.write_text("", encoding="utf-8")
+    monkeypatch.setenv("CLAUDE_CODE_GIT_BASH_PATH", str(bash))
+    assert provision.git_bash_path() == str(bash)
+
+
+def test_git_bash_path_finds_bash_beside_git(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    root = tmp_path / "Git"
+    (root / "cmd").mkdir(parents=True)
+    (root / "bin").mkdir()
+    (root / "cmd" / "git.exe").write_text("", encoding="utf-8")
+    (root / "bin" / "bash.exe").write_text("", encoding="utf-8")
+    monkeypatch.delenv("CLAUDE_CODE_GIT_BASH_PATH", raising=False)
+    monkeypatch.setattr(provision.shutil, "which", lambda name: str(root / "cmd" / "git.exe"))
+    assert provision.git_bash_path() == str((root / "bin" / "bash.exe").resolve())
+
+
+def test_git_bash_path_none_when_absent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    monkeypatch.delenv("CLAUDE_CODE_GIT_BASH_PATH", raising=False)
+    for var in ("ProgramFiles", "ProgramFiles(x86)", "LOCALAPPDATA"):
+        monkeypatch.setenv(var, str(tmp_path / "none"))
+    monkeypatch.setattr(provision.shutil, "which", lambda name: None)
+    assert provision.git_bash_path() is None
+
+
+def test_cmd_quote_prefers_a_quote_free_short_path(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Go's ``exec.Command("cmd", "/c", command)`` (agy, pool) turns every inner
+    ``"`` into ``\\"``, which cmd.exe does not understand, so a spaced path is
+    rendered by its 8.3 short name; quotes only when there is none (#425)."""
+    monkeypatch.setattr(
+        provision, "windows_short_path", lambda p: p.replace("Jane Doe", "JANEDO~1")
+    )
+    assert provision.cmd_quote(r"C:\Users\Jane Doe\py.exe") == r"C:\Users\JANEDO~1\py.exe"
+    monkeypatch.setattr(provision, "windows_short_path", lambda p: p)  # 8.3 disabled
+    assert provision.cmd_quote(r"C:\Users\Jane Doe\py.exe") == r'"C:\Users\Jane Doe\py.exe"'
+    monkeypatch.setattr(provision, "windows_short_path", lambda p: None)
+    assert provision.cmd_quote(r"C:\Users\Jane Doe\py.exe") == r'"C:\Users\Jane Doe\py.exe"'
+
+
+def test_windows_short_path_is_none_off_windows() -> None:
+    if sys.platform == "win32":
+        pytest.skip("POSIX-only expectation")
+    assert provision.windows_short_path("/tmp") is None
 
 
 def test_windows_quoting_helpers() -> None:
@@ -1058,49 +1147,59 @@ def test_diagnose_codex_reports_mcp_registration_state(tmp_path: Path) -> None:
     assert after["codex_hook_trust"].level == "ok"
 
 
-# -- #88: OpenClaw detect-only guard ------------------------------------------
+# -- #425: OpenClaw has no shell-command hooks; the old guard entry is removed --
+
+#: The entry omind <= 10.2.8 wrote, which OpenClaw 2026.9.7 rejects with
+#: ``hooks: Unrecognized key: "agent"`` (and then refuses to start the gateway).
+_RETIRED_OPENCLAW_GUARD = {
+    "event": "pre_tool",
+    "command": "/usr/bin/omind guard adapter --harness openclaw",
+    "enabled": True,
+}
 
 
-def test_openclaw_setup_installs_detect_only_guard(
-    tmp_path: Path, openclaw_home: Path
-) -> None:
+def test_openclaw_setup_writes_no_hooks_agent(tmp_path: Path, openclaw_home: Path) -> None:
     config = _config(tmp_path, "openclaw")
     run_setup_for(config, log=_quiet)
     data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
-    entries = data["hooks"]["agent"]
-    omind_entries = [e for e in entries if "--harness openclaw" in e["command"]]
-    assert len(omind_entries) == 1
-    assert omind_entries[0]["event"] == "pre_tool"
-    assert omind_entries[0]["command"].startswith("/usr/bin/omind ")
+    assert "agent" not in data.get("hooks", {})
+    # The schema-valid bootstrap priming entry is still there.
+    assert "bootstrap-extra-files" in data["hooks"]["internal"]["entries"]
 
 
-def test_openclaw_guard_preserves_user_hooks_and_is_idempotent(
+def test_openclaw_setup_removes_the_retired_guard_entry(
     tmp_path: Path, openclaw_home: Path
 ) -> None:
     (openclaw_home / "openclaw.json").write_text(
-        json.dumps({"hooks": {"agent": [{"event": "pre_tool", "command": "my-own-hook"}]}}),
+        json.dumps(
+            {
+                "hooks": {
+                    "agent": [
+                        {"event": "pre_tool", "command": "my-own-hook"},
+                        _RETIRED_OPENCLAW_GUARD,
+                    ]
+                }
+            }
+        ),
         encoding="utf-8",
     )
     config = _config(tmp_path, "openclaw")
+    assert {r.key: r for r in diagnose_openclaw(config)}["openclaw_guard"].level == "fail"
     run_setup_for(config, log=_quiet)
-    cmds = [
-        e["command"]
-        for e in json.loads(
-            (openclaw_home / "openclaw.json").read_text(encoding="utf-8")
-        )["hooks"]["agent"]
-    ]
-    assert "my-own-hook" in cmds  # user hook preserved
-    assert any("--harness openclaw" in c for c in cmds)  # omind appended
+    data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
+    # omind's own entry is gone; anything else is the user's and left alone.
+    assert data["hooks"]["agent"] == [{"event": "pre_tool", "command": "my-own-hook"}]
 
-    run_setup_for(config, log=_quiet)  # second run must not duplicate
-    omind_cmds = [
-        e["command"]
-        for e in json.loads(
-            (openclaw_home / "openclaw.json").read_text(encoding="utf-8")
-        )["hooks"]["agent"]
-        if "--harness openclaw" in e["command"]
-    ]
-    assert len(omind_cmds) == 1
+
+def test_openclaw_setup_drops_an_emptied_hooks_agent(tmp_path: Path, openclaw_home: Path) -> None:
+    (openclaw_home / "openclaw.json").write_text(
+        json.dumps({"hooks": {"agent": [_RETIRED_OPENCLAW_GUARD]}}), encoding="utf-8"
+    )
+    config = _config(tmp_path, "openclaw")
+    run_setup_for(config, log=_quiet)
+    data = json.loads((openclaw_home / "openclaw.json").read_text(encoding="utf-8"))
+    assert "agent" not in data["hooks"]
+    assert {r.key: r for r in diagnose_openclaw(config)}["openclaw_guard"].level == "ok"
 
 
 # -- #90: Gemini CLI guard ----------------------------------------------------
@@ -1376,7 +1475,7 @@ def test_diagnose_openclaw_all_ok_after_setup(tmp_path: Path, openclaw_home: Pat
     assert results["openclaw_root"].level == "ok"
     assert results["openclaw_mcp_registration"].level == "ok"
     assert results["openclaw_skill"].level == "ok"
-    assert results["openclaw_guard"].level == "ok"  # detect-only guard wired (#88)
+    assert results["openclaw_guard"].level == "ok"  # nothing to wire, nothing stale (#425)
 
 
 def test_diagnose_for_dispatches_on_agent(tmp_path: Path, hermes_home: Path) -> None:
