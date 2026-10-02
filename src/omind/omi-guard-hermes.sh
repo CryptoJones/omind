@@ -9,8 +9,9 @@
 # a Read under the OMI folder) clears the per-turn gate in pure bash; the per-turn
 # RESET is the existing `omind hook pre_llm_call` (Hermes' turn boundary).
 #
-# __OMIND_BIN__ / __OMI_DIR__ are substituted at install. Fail-open on any error
-# (no decision emitted = Hermes allows), so a broken hook never wedges the agent.
+# __OMIND_BIN__ / __OMIND_ARGS__ / __OMI_DIR__ are substituted at install.
+# Fail-open on any error (no decision emitted = Hermes allows), so a broken hook
+# never wedges the agent.
 
 set -u
 # An unset HOME would trip `set -u` at the STATE expansion below and crash the
@@ -19,6 +20,9 @@ set -u
 # omi-guard.sh).
 HOME="${HOME:-/tmp}"
 OMIND='__OMIND_BIN__'
+# Empty for a launcher; "-m omind" when OMIND is a Windows python.exe (#380).
+# Deliberately unquoted at each use so it splits into separate arguments.
+OMIND_ARGS='__OMIND_ARGS__'
 OMI_DIR='__OMI_DIR__'
 STATE="${XDG_STATE_HOME:-$HOME/.local/state}/omind"
 
@@ -48,7 +52,7 @@ case "$tool" in
     target="$(printf '%s' "$input" | jq -r '.tool_input.name // .tool_input.query // .tool_input.q // .tool_input.file_path // .tool_input.path // empty' 2>/dev/null)"
     jq -nc --arg t "$tool" --arg s "$sid" --arg target "$target" \
       '{tool:$t, command:"", session:$s, is_omi_consult:true, consult_target:$target}' 2>/dev/null \
-      | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR" >/dev/null 2>&1
+      | "$OMIND" $OMIND_ARGS guard adapter --harness hermes --omi-dir "$OMI_DIR" >/dev/null 2>&1
     exit 0
     ;;
   # Tool-schema loading is never gated: deferred OMI MCP tools become callable
@@ -72,7 +76,7 @@ if [ "$tool" = "Read" ] || [ "$tool" = "read_file" ]; then
         *)
           jq -nc --arg s "$sid" --arg target "$fp" \
             '{tool:"Read", command:"", session:$s, is_omi_consult:true, consult_target:$target, consult_kind:"read", file_path:$target}' 2>/dev/null \
-            | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR" >/dev/null 2>&1
+            | "$OMIND" $OMIND_ARGS guard adapter --harness hermes --omi-dir "$OMI_DIR" >/dev/null 2>&1
           exit 0
           ;;
       esac
@@ -90,5 +94,5 @@ cmd="$(printf '%s' "$input" | jq -r '.tool_input.command // .extra.command // .c
 cwd="$(printf '%s' "$input" | jq -r '.cwd // empty' 2>/dev/null)"
 jq -nc --arg t "$tool" --arg c "$cmd" --arg s "$sid" --arg prompt "$prompt" --arg cwd "$cwd" \
   '{tool:$t, command:$c, session:$s, prompt:$prompt, cwd:$cwd, is_omi_consult:false}' 2>/dev/null \
-  | "$OMIND" guard adapter --harness hermes --omi-dir "$OMI_DIR"
+  | "$OMIND" $OMIND_ARGS guard adapter --harness hermes --omi-dir "$OMI_DIR"
 exit 0

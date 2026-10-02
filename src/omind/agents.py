@@ -45,9 +45,24 @@ from omind.provision import (
     SetupConfig,
     _diagnose_omi_folder,
     _diagnose_tools,
-    canonical_omind_exe,
+    canonical_omind_argv,
+    canonical_omind_cmd,
     diagnose,
 )
+
+
+def _substitute_omind(content: str) -> str:
+    """Fill a guard template's omind placeholders from :func:`canonical_omind_argv`.
+
+    ``__OMIND_BIN__`` is the executable and ``__OMIND_ARGS__`` the space-joined
+    tail: empty for a launcher, ``-m omind`` for the Windows module form (#380).
+    Templates invoke ``$OMIND $OMIND_ARGS ...`` so both forms run unchanged.
+    """
+    argv = canonical_omind_argv()
+    return content.replace("__OMIND_BIN__", argv[0]).replace(
+        "__OMIND_ARGS__", " ".join(argv[1:])
+    )
+
 
 # -- agent locations ---------------------------------------------------------
 
@@ -473,9 +488,9 @@ class AgentProvisioner(Provisioner):
         Both folder values are quoted so a path like ``My Vault`` cannot
         word-split into a stray positional.
         """
-        omind_exe = canonical_omind_exe()
+        omind = canonical_omind_cmd()
         return (
-            f'{omind_exe} hook {event} --vault "{self.config.vault}" '
+            f'{omind} hook {event} --vault "{self.config.vault}" '
             f'--folder "{self.config.folder}"'
         )
 
@@ -640,8 +655,7 @@ class HermesProvisioner(AgentProvisioner):
         except Exception as exc:
             self.log(f"  WARNING: could not read omi-guard-hermes.sh from package data: {exc}")
             return
-        omind_exe = canonical_omind_exe()
-        content = content.replace("__OMIND_BIN__", omind_exe).replace(
+        content = _substitute_omind(content).replace(
             "__OMI_DIR__", str(self.config.omi_dir)
         )
         self._write_managed(dest, content)
@@ -869,7 +883,7 @@ class OpenClawProvisioner(AgentProvisioner):
         """
         path = openclaw_config_path()
         data = self._read_settings(path)
-        command = f"{canonical_omind_exe()} guard adapter --harness openclaw"
+        command = f"{canonical_omind_cmd()} guard adapter --harness openclaw"
         desired = {"event": "pre_tool", "command": command, "enabled": True}
         hooks = data.get("hooks")
         if not isinstance(hooks, dict):
@@ -939,7 +953,7 @@ class GeminiProvisioner(AgentProvisioner):
     def _guard_hook_group(self) -> dict[str, Any]:
         """One ``BeforeTool`` matcher group running the omind gemini adapter on
         every tool. Gemini pipes the event JSON on stdin; the adapter reads it."""
-        omind = canonical_omind_exe()
+        omind = canonical_omind_cmd()
         return {
             "matcher": ".*",
             "hooks": [
@@ -1072,7 +1086,7 @@ class PoolsideProvisioner(AgentProvisioner):
     def _hook_command(self, event: str) -> str:
         """The shell command pool runs for one hook event; absolute ``omind``
         path, quoted folder values (see :meth:`_omind_hook_command`)."""
-        omind = canonical_omind_exe()
+        omind = canonical_omind_cmd()
         if event == "PreToolUse":
             return f"{omind} guard adapter {POOLSIDE_HARNESS_FLAG}"
         if event == "UserPromptSubmit":
@@ -1180,9 +1194,11 @@ class PoolsideProvisioner(AgentProvisioner):
 
     def desired_server_entry(self) -> dict[str, Any]:
         """The exact shape ``pool mcp add`` writes: flat command + args list."""
+        argv = canonical_omind_argv()
         return {
-            "command": canonical_omind_exe(),
+            "command": argv[0],
             "args": [
+                *argv[1:],
                 "node",
                 "--vault",
                 str(self.config.vault),
@@ -1258,11 +1274,10 @@ class OpenCodeProvisioner(AgentProvisioner):
 
     def desired_server_entry(self) -> dict[str, Any]:
         # OpenCode local MCP server: a `type: local` + command array.
-        omind = canonical_omind_exe()
         return {
             "type": "local",
             "command": [
-                omind,
+                *canonical_omind_argv(),
                 "node",
                 "--vault",
                 str(self.config.vault),
@@ -1311,8 +1326,7 @@ class OpenCodeProvisioner(AgentProvisioner):
         except Exception as exc:
             self.log(f"  WARNING: could not read omi-guard.opencode.js from package data: {exc}")
             return
-        omind_exe = canonical_omind_exe()
-        content = content.replace("__OMIND_BIN__", omind_exe).replace(
+        content = _substitute_omind(content).replace(
             "__OMI_DIR__", str(self.config.omi_dir)
         )
         self._write_managed(dest, content)
@@ -1357,15 +1371,16 @@ class DeepseekProvisioner(AgentProvisioner):
 
     def desired_mcp_entry(self) -> dict[str, Any]:
         """The ``@deepseek-ai/dsh-mcp-client`` entry for the OMI server."""
-        omind = canonical_omind_exe()
+        argv = canonical_omind_argv()
         return {
             "id": "mcp-omi",
             "name": "@deepseek-ai/dsh-mcp-client",
             "config": {
                 "serverName": self.config.server_name,
                 "transport": "stdio",
-                "command": omind,
+                "command": argv[0],
                 "args": [
+                    *argv[1:],
                     "node",
                     "--vault", str(self.config.vault),
                     "--folder", self.config.folder,
@@ -1509,10 +1524,8 @@ class DeepseekProvisioner(AgentProvisioner):
                 f"  WARNING: could not read omi-guard.dsh.js from package data: {exc}"
             )
             return
-        omind_exe = canonical_omind_exe()
         content = (
-            content
-            .replace("__OMIND_BIN__", omind_exe)
+            _substitute_omind(content)
             .replace("__OMI_DIR__", str(self.config.omi_dir))
             .replace("__OMI_VAULT__", str(self.config.vault))
             .replace("__OMI_FOLDER__", self.config.folder)
@@ -1615,13 +1628,13 @@ class CodexProvisioner(AgentProvisioner):
     def _guard_hook_group(self) -> dict[str, Any]:
         """One Claude-schema matcher group running the omind codex adapter on all
         tools. Codex pipes the event JSON on stdin; the adapter reads it directly."""
-        omind = canonical_omind_exe()
+        omind = canonical_omind_cmd(shlex.quote)
         return {
             "hooks": [
                 {
                     "type": "command",
                     "command": (
-                        f"{shlex.quote(omind)} guard adapter --harness codex "
+                        f"{omind} guard adapter --harness codex "
                         f"--omi-dir {shlex.quote(str(self.config.omi_dir))}"
                     ),
                     "timeout": 30,
@@ -2013,10 +2026,17 @@ class CodexProvisioner(AgentProvisioner):
             ) from exc
 
     def desired_mcp_entry(self) -> dict[str, Any]:
-        omind = canonical_omind_exe()
+        argv = canonical_omind_argv()
         return {
-            "command": omind,
-            "args": ["node", "--vault", str(self.config.vault), "--folder", self.config.folder],
+            "command": argv[0],
+            "args": [
+                *argv[1:],
+                "node",
+                "--vault",
+                str(self.config.vault),
+                "--folder",
+                self.config.folder,
+            ],
         }
 
     def registered_mcp_entry(self) -> dict[str, Any] | None:
@@ -2308,10 +2328,11 @@ class AgyProvisioner(AgentProvisioner):
         return entry if isinstance(entry, dict) else None
 
     def desired_server_entry(self) -> dict[str, Any]:
-        omind = canonical_omind_exe()
+        argv = canonical_omind_argv()
         return {
-            "command": omind,
+            "command": argv[0],
             "args": [
+                *argv[1:],
                 "node",
                 "--vault",
                 str(self.config.vault),
@@ -2346,7 +2367,7 @@ class AgyProvisioner(AgentProvisioner):
                 paths.atomic_write_text(path, json.dumps(data, indent=2) + "\n")
 
     def desired_hook_block(self) -> dict[str, Any]:
-        omind = shlex.quote(canonical_omind_exe())
+        omind = canonical_omind_cmd(shlex.quote)
         omi_dir = shlex.quote(str(self.config.omi_dir))
         return {
             "PreToolUse": [
@@ -2528,12 +2549,13 @@ class McpOnlyProvisioner(AgentProvisioner):
         return server if isinstance(server, dict) else None
 
     def desired_server_entry(self) -> dict[str, Any]:
-        omind = canonical_omind_exe()
+        argv = canonical_omind_argv()
         entry: dict[str, Any] = {}
         if self.STDIO_TYPE:
             entry["type"] = "stdio"
-        entry["command"] = omind
+        entry["command"] = argv[0]
         entry["args"] = [
+            *argv[1:],
             "node",
             "--vault",
             str(self.config.vault),

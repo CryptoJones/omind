@@ -28,7 +28,7 @@ from omind.provision import ProvisionError, SetupConfig
 @pytest.fixture(autouse=True)
 def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(provision.shutil, "which", lambda name: f"/usr/bin/{name}")
-    # Every harness now resolves omind through provision.canonical_omind_exe(),
+    # Every harness now resolves omind through provision.canonical_omind_argv(),
     # which prefers ~/.local/bin/omind and only falls back to which(). Point the
     # canonical path at a location that cannot exist so these tests keep
     # exercising the which() fallback instead of the test host's real install.
@@ -40,6 +40,9 @@ def fake_tools(monkeypatch: pytest.MonkeyPatch) -> None:
     # which would win over the faked which(). These tests cover harness wiring,
     # not resolution, so pin the Windows result to the same fake.
     monkeypatch.setattr(provision, "_windows_omind_exe", lambda: "/usr/bin/omind")
+    # ...and skip the `python -m omind` form (#380), which would otherwise win
+    # on windows-latest with the test interpreter.
+    monkeypatch.setattr(provision, "_windows_module_argv", lambda: None)
 
 
 @pytest.fixture(autouse=True)
@@ -381,6 +384,66 @@ def test_hermes_guard_hook_installed(tmp_path: Path, hermes_home: Path) -> None:
     # ...and the guard hook is pre-approved in the allowlist.
     allow = json.loads((hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8"))
     assert any(a["event"] == "pre_tool_call" for a in allow["approvals"])
+
+
+_WIN_PY = r"C:\Users\u\AppData\Roaming\uv\tools\omind\Scripts\python.exe"
+
+
+@pytest.fixture
+def module_form(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Resolve omind to the Windows ``python.exe -m omind`` form (#380)."""
+    argv = [_WIN_PY, "-m", "omind"]
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(argv))
+    monkeypatch.setattr(agents, "canonical_omind_argv", lambda: list(argv))
+    return argv
+
+
+def test_hermes_wiring_uses_the_python_module_form(
+    tmp_path: Path, hermes_home: Path, module_form: list[str]
+) -> None:
+    """Smart App Control blocks omind.exe; every Hermes surface the issue lists
+    (MCP entry, pre_llm_call hook, allowlist, guard script) runs the
+    interpreter instead (#380), and a re-run does not duplicate the hook."""
+    config = _config(tmp_path, "hermes")
+    run_setup_for(config, log=_quiet)
+    run_setup_for(config, log=_quiet)
+
+    data = yaml.safe_load((hermes_home / "config.yaml").read_text(encoding="utf-8"))
+    server = data["mcp_servers"]["omi"]
+    assert server["command"] == _WIN_PY
+    assert server["args"][:3] == ["-m", "omind", "node"]
+    priming = [e for e in data["hooks"]["pre_llm_call"] if "omind hook" in e["command"]]
+    assert len(priming) == 1
+    assert priming[0]["command"].startswith(f"{_WIN_PY} -m omind hook pre_llm_call ")
+
+    allow = json.loads((hermes_home / "shell-hooks-allowlist.json").read_text(encoding="utf-8"))
+    assert any(a["command"] == priming[0]["command"] for a in allow["approvals"])
+
+    body = agents.hermes_guard_script_path().read_text(encoding="utf-8")
+    assert f"OMIND='{_WIN_PY}'" in body and "OMIND_ARGS='-m omind'" in body
+    assert '"$OMIND" $OMIND_ARGS guard adapter' in body
+    assert "__OMIND" not in body
+
+
+def test_guard_templates_substitute_the_module_tail(module_form: list[str]) -> None:
+    """Each guard template that invokes omind takes the ``-m omind`` tail (#380)."""
+    from importlib.resources import files
+
+    for name in ("omi-guard-hermes.sh", "omi-guard.opencode.js", "omi-guard.dsh.js"):
+        template = files("omind").joinpath(name).read_text(encoding="utf-8")
+        assert "__OMIND_ARGS__" in template, name
+        body = agents._substitute_omind(template)
+        assert "__OMIND_BIN__" not in body and "__OMIND_ARGS__" not in body, name
+        assert "-m omind" in body, name
+
+
+def test_guard_templates_keep_posix_launcher_unchanged(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(agents, "canonical_omind_argv", lambda: ["/usr/bin/omind"])
+    from importlib.resources import files
+
+    template = files("omind").joinpath("omi-guard-hermes.sh").read_text(encoding="utf-8")
+    body = agents._substitute_omind(template)
+    assert "OMIND='/usr/bin/omind'" in body and "OMIND_ARGS=''" in body
 
 
 # -- MCP-only targets: Claude Desktop, Kiro, VS Code, Amazon Q -----------------

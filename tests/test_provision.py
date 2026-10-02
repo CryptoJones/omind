@@ -503,7 +503,7 @@ def test_hook_commands_quote_the_windows_exe_path(
 ) -> None:
     """Git Bash strips the backslashes of an unquoted path (C:\\Users\\x -> C:Usersx)."""
     exe = "C:\\Users\\ci\\.local\\bin\\omind.EXE"
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: exe)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [exe])
 
     for event in provision.HANDLED_EVENTS:
         cmd = Provisioner(_config(tmp_path), log=_quiet)._hook_command(event)
@@ -1354,7 +1354,9 @@ def test_matches_desired_ignores_exe_case_on_windows(
     """An MCP entry baked as ``omind.EXE`` must not force a re-register when the
     resolver now returns ``omind.exe`` (#377)."""
     monkeypatch.setattr(provision, "_windows", lambda: True)
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: r"C:\Users\u\Scripts\omind.exe")
+    monkeypatch.setattr(
+        provision, "canonical_omind_argv", lambda: [r"C:\Users\u\Scripts\omind.exe"]
+    )
     prov = Provisioner(_config(tmp_path), log=_quiet)
     server = prov.desired_server_entry()
     server["command"] = r"C:\Users\u\Scripts\omind.EXE"
@@ -1374,9 +1376,9 @@ def test_diagnose_hooks_ignores_exe_case_on_windows(
     not a "non-canonical omind" fail on every healthy upgraded box (#377)."""
     vault = tmp_path / "v"
     monkeypatch.setattr(provision, "_windows", lambda: True)
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: r"C:\Py\Scripts\omind.EXE")
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [r"C:\Py\Scripts\omind.EXE"])
     settings = _wired_settings(tmp_path, vault)
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: r"C:\Py\Scripts\omind.exe")
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [r"C:\Py\Scripts\omind.exe"])
     _ready_enforce_hook()
     result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
     assert result.level == "ok", result.message
@@ -1389,7 +1391,7 @@ def test_diagnose_hooks_fails_a_pinned_omind_that_does_not_run(
     resolution returns, so the string compare alone would read green (#377)."""
     vault = tmp_path / "v"
     dead = str(tmp_path / "bin" / "omind")
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: dead)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [dead])
     monkeypatch.setattr(provision, "_launcher_runs", lambda exe: exe != dead)
     settings = _wired_settings(tmp_path, vault)
     _ready_enforce_hook()
@@ -1406,7 +1408,7 @@ def test_doctor_fails_an_mcp_entry_pinned_to_a_dead_omind(
     config = _config(tmp_path)
     _provision_files(config)
     dead = str(tmp_path / "bin" / "omind")
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: dead)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [dead])
     monkeypatch.setattr(provision, "_launcher_runs", lambda exe: exe != dead)
     _write_server_config(isolate_claude, config)
     results = {r.key: r for r in provision.diagnose(config)}
@@ -1421,7 +1423,7 @@ def test_doctor_does_not_probe_a_bare_omind(
     """A bare ``omind`` resolves through PATH at spawn time; doctor does not judge it."""
     config = _config(tmp_path)
     _provision_files(config)
-    monkeypatch.setattr(provision, "canonical_omind_exe", lambda: "omind")
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: ["omind"])
 
     def no_probe(exe: str) -> bool:
         raise AssertionError(f"probed {exe}")
@@ -1449,6 +1451,179 @@ def test_hook_exe_path_reads_only_absolute_pins() -> None:
     assert provision._hook_exe_path('omind hook Stop --vault "/v" --folder "OMI"') is None
     assert provision._hook_exe_path("python3 /home/x/.claude/hooks/omi-enforce.py") is None
     assert provision._hook_exe_path('unbalanced "quote') is None
+
+
+# -- #380: Windows pins `python -m omind`, not the unsigned omind.exe ----------
+
+_WIN_PY = r"C:\Users\u\AppData\Roaming\uv\tools\omind\Scripts\python.exe"
+_WIN_MODULE = [_WIN_PY, "-m", "omind"]
+
+
+def _fake_windows_interpreter(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, *, runs: bool, name: str = "python.exe"
+) -> Path:
+    """Simulate Windows with *name* as the running interpreter (#380)."""
+    scripts = tmp_path / "Scripts"
+    scripts.mkdir(parents=True, exist_ok=True)
+    for exe in ("python.exe", "pythonw.exe"):
+        (scripts / exe).write_text("MZ", encoding="utf-8")
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision.sys, "executable", str(scripts / name))
+    monkeypatch.setattr(provision, "_module_runs", lambda _py: runs)
+    monkeypatch.setattr(provision, "_windows_omind_exe", lambda: r"C:\x\omind.exe")
+    return scripts / "python.exe"
+
+
+def test_canonical_omind_argv_windows_pins_python_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Smart App Control blocks the unsigned uv trampoline omind.exe, but not the
+    venv interpreter, so Windows pins ``python.exe -m omind`` (#380)."""
+    python = _fake_windows_interpreter(monkeypatch, tmp_path, runs=True)
+    assert provision.canonical_omind_argv() == [str(python), "-m", "omind"]
+    assert provision.canonical_omind_cmd(lambda e: f'"{e}"') == f'"{python}" -m omind'
+
+
+def test_canonical_omind_argv_windows_swaps_pythonw_for_console_python(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """Hooks answer on stdout, which pythonw.exe does not have."""
+    python = _fake_windows_interpreter(monkeypatch, tmp_path, runs=True, name="pythonw.exe")
+    assert provision.canonical_omind_argv()[0] == str(python)
+
+
+def test_canonical_omind_argv_windows_falls_back_to_the_launcher(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An interpreter that cannot run omind is never pinned; the #377 launcher
+    resolution takes over (fail open)."""
+    _fake_windows_interpreter(monkeypatch, tmp_path, runs=False)
+    assert provision.canonical_omind_argv() == [r"C:\x\omind.exe"]
+    monkeypatch.setattr(provision.sys, "executable", "")
+    assert provision.canonical_omind_argv() == [r"C:\x\omind.exe"]
+
+
+def test_canonical_omind_argv_posix_is_unchanged(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """macOS/Linux keep the single stable launcher and never probe the module."""
+    monkeypatch.setattr(provision, "_windows", lambda: False)
+    monkeypatch.setattr(provision, "CANONICAL_OMIND_EXE", tmp_path / "nope")
+    monkeypatch.setattr(provision.shutil, "which", lambda _n: "/usr/bin/omind")
+
+    def no_probe(_py: str) -> bool:
+        raise AssertionError("module probed on POSIX")
+
+    monkeypatch.setattr(provision, "_module_runs", no_probe)
+    assert provision.canonical_omind_argv() == ["/usr/bin/omind"]
+    assert provision.canonical_omind_cmd() == "/usr/bin/omind"
+
+
+def test_module_runs_never_raises(tmp_path: Path) -> None:
+    provision._module_runs.cache_clear()
+    try:
+        assert provision._module_runs(str(tmp_path / "missing" / "python.exe")) is False
+        assert provision._module_runs("bad\0path") is False
+    finally:
+        provision._module_runs.cache_clear()
+
+
+def test_windows_hook_command_uses_the_module_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The hook line is ``"<python>" -m omind hook ...``: still found as ours, and
+    doctor reads the interpreter plus module tail back out of it (#380)."""
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    for event in provision.HANDLED_EVENTS:
+        cmd = Provisioner(_config(tmp_path), log=_quiet)._hook_command(event)
+        assert cmd.startswith(f'"{_WIN_PY}" -m omind hook {event} ')
+        assert provision._command_is_omind_hook(cmd)
+        assert provision._hook_omind_argv(cmd) == _WIN_MODULE
+        assert provision._hook_exe_path(cmd) == _WIN_PY
+
+
+def test_hook_omind_argv_reads_quoted_paths_with_spaces() -> None:
+    spaced = r"C:\Users\Jane Doe\Scripts\python.exe"
+    cmd = f'"{spaced}" -m omind hook Stop --vault "C:\\v" --folder "OMI"'
+    assert provision._hook_omind_argv(cmd) == [spaced, "-m", "omind"]
+    launcher = r"C:\Users\Jane Doe\.local\bin\omind.exe"
+    assert provision._hook_omind_argv(f'"{launcher}" hook Stop --vault "v"') == [launcher]
+
+
+def test_windows_mcp_entry_runs_python_module(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """The MCP entry is ``command=<python.exe>``, ``args=[-m, omind, node, ...]``."""
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    prov = Provisioner(_config(tmp_path), log=_quiet)
+    entry = prov.desired_server_entry()
+    assert entry["command"] == _WIN_PY
+    assert entry["args"][:3] == ["-m", "omind", "node"]
+    assert prov._matches_desired(entry)
+    old = {"command": r"C:\Users\u\.local\bin\omind.exe", "args": entry["args"][2:]}
+    assert not prov._matches_desired(old)  # setup rewrites the blocked launcher
+
+
+def test_dead_pin_probes_the_module_not_bare_python(monkeypatch: pytest.MonkeyPatch) -> None:
+    """``python --version`` passes even with omind gone, so a module pin is probed
+    as ``-m omind --version`` (#380)."""
+    probed: list[str] = []
+
+    def module_runs(py: str) -> bool:
+        probed.append(py)
+        return False
+
+    def no_launcher(exe: str) -> bool:
+        raise AssertionError(f"launcher-probed {exe}")
+
+    monkeypatch.setattr(provision, "_module_runs", module_runs)
+    monkeypatch.setattr(provision, "_launcher_runs", no_launcher)
+    dead = provision._dead_pin(_WIN_PY, ["-m", "omind", "node"])
+    assert dead == f"{_WIN_PY} -m omind" and probed == [_WIN_PY]
+
+
+def test_diagnose_hooks_accepts_the_windows_module_form(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    vault = tmp_path / "v"
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    monkeypatch.setattr(provision, "_module_runs", lambda _py: True)
+    settings = _wired_settings(tmp_path, vault)
+    _ready_enforce_hook()
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+    assert result.level == "ok", result.message
+
+
+def test_diagnose_hooks_flags_launcher_hooks_once_module_form_resolves(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, live_launchers: None
+) -> None:
+    """Hooks still on omind.exe after the upgrade are reported, so `omind setup`
+    moves them off the Smart App Control block (#380)."""
+    vault = tmp_path / "v"
+    monkeypatch.setattr(provision, "_windows", lambda: True)
+    launcher = r"C:\Users\u\.local\bin\omind.exe"
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: [launcher])
+    settings = _wired_settings(tmp_path, vault)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    _ready_enforce_hook()
+    result = provision._diagnose_hooks(settings, SetupConfig(vault=vault))
+    assert result.level == "fail"
+    assert launcher in result.message and f"{_WIN_PY} -m omind" in result.message
+
+
+def test_doctor_fails_a_module_mcp_pin_that_does_not_run(
+    tmp_path: Path, fake_tools: None, isolate_claude: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = _config(tmp_path)
+    _provision_files(config)
+    monkeypatch.setattr(provision, "canonical_omind_argv", lambda: list(_WIN_MODULE))
+    monkeypatch.setattr(provision, "_module_runs", lambda _py: False)
+    _write_server_config(isolate_claude, config)
+    results = {r.key: r for r in provision.diagnose(config)}
+    assert results["mcp_registration"].level == "fail"
+    assert f"{_WIN_PY} -m omind" in results["mcp_registration"].message
 
 
 def test_immutable_hint_explains_how_to_unlock(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1652,7 +1827,7 @@ def _wired_settings(tmp_path: Path, vault: Path) -> Path:
     ``omind setup`` would bake in, so the doctor stub check sees a clean state.
     """
     python_cmd = provision._resolve_python() or "python3"
-    cmd = f'{provision.canonical_omind_exe()} hook %s --vault "{vault}" --folder "OMI"'
+    cmd = f'{provision.canonical_omind_cmd()} hook %s --vault "{vault}" --folder "OMI"'
     settings = tmp_path / "settings.json"
     settings.write_text(
         json.dumps(
@@ -2172,7 +2347,7 @@ def test_diagnose_hooks_flags_stale_enforcement_hook_python(
     )
     vault = tmp_path / "v"
     # Build settings.json with a STALE enforcement hook using `python3`.
-    cmd = f'{provision.canonical_omind_exe()} hook %s --vault "{vault}" --folder "OMI"'
+    cmd = f'{provision.canonical_omind_cmd()} hook %s --vault "{vault}" --folder "OMI"'
     settings = tmp_path / "settings.json"
     settings.write_text(
         json.dumps(

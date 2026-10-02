@@ -966,12 +966,15 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
     if load_node_config(omi_dir) is None:
         raise MeshError(f"not a mesh node yet — run `omind mesh init` first ({omi_dir})")
     # Imported lazily: provision imports mesh, so a module-level import cycles.
-    from omind.provision import canonical_omind_exe
+    from omind.provision import canonical_omind_argv
 
-    omind_exe = canonical_omind_exe()
+    # `python -m omind` on Windows, where Smart App Control blocks omind.exe (#380).
+    omind_argv = canonical_omind_argv()
     # Quoted like the hook command: systemd ExecStart and schtasks both
     # word-split an unquoted folder name containing a space.
-    daemon_cmd = f'{omind_exe} mesh daemon --vault "{vault}" --folder "{folder}"'
+    daemon_cmd = (
+        f'{" ".join(omind_argv)} mesh daemon --vault "{vault}" --folder "{folder}"'
+    )
 
     if sys.platform == "linux":
         from omind.backup import systemd_user_dir
@@ -1005,7 +1008,7 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
         agents = Path.home() / "Library" / "LaunchAgents"
         agents.mkdir(parents=True, exist_ok=True)
         plist_path = agents / f"{MESH_LAUNCHD_LABEL}.plist"
-        args = [omind_exe, "mesh", "daemon", "--vault", str(vault), "--folder", folder]
+        args = [*omind_argv, "mesh", "daemon", "--vault", str(vault), "--folder", folder]
         # XML-escape: a vault path containing & or < would yield an invalid plist.
         args_xml = "\n".join(f"      <string>{xml_escape(a)}</string>" for a in args)
         plist = (

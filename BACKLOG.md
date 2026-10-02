@@ -94,11 +94,6 @@ into a new note. In dependency order; each child is flag-gated._
   - [x] **create-note / edit-note: return existing notes about the same names** ([#389](https://github.com/CryptoJones/omind/issues/389)) — _enhancement_ — **shipped** in [#400](https://github.com/CryptoJones/omind/pull/400)
   - [x] **Name timelines: dated history instead of suppressed CORRECTION notes** ([#390](https://github.com/CryptoJones/omind/issues/390)) — _enhancement_ — **shipped** in [#401](https://github.com/CryptoJones/omind/pull/401)
 
-### Windows
-
-- [ ] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — _bug (Windows)_ —
-  with SAC enforcing, all hooks and the `omi` MCP server stop working, while `python -m omind` still runs.
-
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -147,6 +142,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.7)
+
+- [x] **Windows: Smart App Control blocks the unsigned `omind.exe` uv trampoline in every hook and MCP entry; pin `python -m omind` instead** ([#380](https://github.com/CryptoJones/omind/issues/380)) — **v10.2.7** — _bug (Windows)_ —
+  Windows now pins `<python.exe> -m omind` (the running interpreter, once `-m omind --version`
+  exits 0) in every hook, MCP entry, guard script and service line, falling back to the #377
+  launcher resolution. `doctor` reads, probes and compares the module form, and flags hooks
+  still on `omind.exe`. macOS/Linux are unchanged.
 
 ### Shipped — 2026-10-02 (v10.2.6)
 

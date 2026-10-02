@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.7] - 2026-10-02
+
+### Fixed
+- **Windows: Smart App Control blocked the unsigned `omind.exe` uv trampoline in every hook
+  and MCP entry ([#380](https://github.com/CryptoJones/omind/issues/380)).** With SAC
+  enforcing, Code Integrity refused to load `~/.local/bin/omind.exe` on every spawn, so the
+  hooks, the guard and the `omi` MCP server all stopped working, while the venv's
+  `python.exe` was still allowed.
+  - On Windows, setup now pins `<python.exe> -m omind` in place of the launcher. The
+    interpreter is the one running omind (`pythonw.exe` is swapped for `python.exe`), and it
+    is pinned only after `-m omind --version` exits 0. Otherwise resolution falls back to the
+    #377 launcher. The probe has a 5 s timeout, is cached, and never raises.
+  - Every surface takes the new shape: the MCP entries (`command` is the interpreter, `args`
+    starts `-m omind`), the Claude Code, Hermes, Codex, Gemini, pool, OpenClaw and agy hook
+    commands, the Hermes, OpenCode and DSH guard scripts (a new `__OMIND_ARGS__`
+    placeholder), and the mesh/backup service lines.
+  - `omind doctor` reads the module form back out of hook commands, probes a module pin as
+    `-m omind --version` (a bare `python --version` would pass with the package gone), and
+    reports hooks still on `omind.exe` as non-canonical, so re-running `omind setup` moves
+    them off the blocked launcher. A quoted pin path containing spaces is now parsed whole.
+  - macOS and Linux are unchanged.
+
 ## [10.2.6] - 2026-10-02
 
 ### Fixed

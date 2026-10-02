@@ -594,7 +594,7 @@ def _fake_service_env(
     monkeypatch.setattr(mesh, "run_command", fake_run)
     monkeypatch.setattr(mesh.sys, "platform", platform)
     monkeypatch.setattr(omind.backup, "systemd_user_dir", lambda: tmp_path / "systemd-user")
-    monkeypatch.setattr(omind.provision, "canonical_omind_exe", lambda: "/opt/bin/omind")
+    monkeypatch.setattr(omind.provision, "canonical_omind_argv", lambda: ["/opt/bin/omind"])
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: tmp_path / "home"))
     return calls
 
