@@ -1510,7 +1510,10 @@ def test_glob_matches_answers_as_fnmatch(monkeypatch: pytest.MonkeyPatch, normca
     for _ in range(20_000):
         text, pattern = _glob_cases(rng)
         assert rules._glob_matches(text, pattern) == fnmatch.fnmatch(text, pattern), (text, pattern)
-    assert rules._glob_matches("GIT PUSH x", "*git push*") == (normcase is str.lower)
+    # Windows' native normcase folds case too, so ask fnmatch, not the stand-in.
+    assert rules._glob_matches("GIT PUSH x", "*git push*") == fnmatch.fnmatch(
+        "GIT PUSH x", "*git push*"
+    )
 
 
 def _slow_code_text(text: str) -> str:
