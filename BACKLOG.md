@@ -11,6 +11,12 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
+- [ ] **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428)) — _enhancement (infra)_ —
+  deploy [samarmstrong/conveyor](https://github.com/samarmstrong/conveyor) as a fork with omind's
+  `factory.config.json` and `principles.md`. Run it with the `claude-code` worker as a dedicated
+  unprivileged user on dl380, isolated from the RAG corpus, on a systemd timer. It grooms issues and
+  keeps one PR in flight; merging stays human. The issue lists the plan, the definition of done and
+  the rollback.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
   trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
