@@ -37,6 +37,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `source /dev/stdin <<< x;` took over 17 s).
   - The note rules match a `*literal*` glob as a substring, and skip unquoting
     when a command has no quoted single word.
+- **Positional shell bodies and code fed to a shell on stdin are repo work
+  ([#449](https://github.com/CryptoJones/omind/issues/449)).** The consult and
+  freshness classifiers saw only the command and its unwrapped `-c`/`eval`
+  bodies, so `bash -c '"$@"' _ git commit -m x`, `echo 'sed -i s/a/b/ f' |
+  bash` and `cat <<'EOF' | bash` with a `git commit` body were not repo work,
+  though the hard rules (#440, #446) already judged them.
+  - The classifiers now reuse the hard rules' `_local_shell_subjects`: the
+    words a positional body runs, the producer text and heredoc piped into a
+    shell reading stdin, and a here-string given to one are classified as
+    code.
+  - A commit reached either way is a commit action, so it hits the freshness
+    gate.
+  - `echo hi | bash`, `curl … | sh` and `bash -c '"$@"' _ ls` stay out. A
+    failure finding these subjects degrades to the command and its bodies.
 
 ## [10.2.21] - 2026-10-02
 

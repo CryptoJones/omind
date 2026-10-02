@@ -2652,11 +2652,26 @@ def _runs_test_runner(code: str, stages: list[tuple[str, list[str], int, int]]) 
 def _local_code_texts(command: str) -> list[str]:
     """``command`` plus every ``sh/bash/zsh -c`` and ``eval`` body the shell
     walk unwraps from it, at any depth (#434): each is code this machine runs,
-    so each is classified on its own. Just ``[command]`` when the walk fails."""
+    so each is classified on its own. Just ``[command]`` when the walk fails.
+
+    Also what a local shell runs that the walk does not unwrap, found by the
+    hard rules' :func:`_local_shell_subjects` (#449): the words a positional
+    body runs (``bash -c '"$@"' _ git commit``), the producer text and heredoc
+    piped into a shell reading stdin (``printf 'git commit' | sh``, ``cat
+    <<EOF | bash``), and a here-string given to one. When that search fails,
+    the command and its bodies are still classified."""
     try:
-        return [command, *_shell_walk(command)[3]]
+        texts = [command, *_shell_walk(command)[3]]
     except Exception:
         return [command]
+    try:
+        code: list[str] = []
+        words: list[str] = []
+        for text in texts:
+            _local_shell_subjects(text, code, words)
+    except Exception:
+        return texts
+    return [*texts, *code, *words]
 
 
 def _is_repo_sensitive_action(action: dict[str, Any]) -> bool:

@@ -4703,3 +4703,95 @@ def test_other_long_repeats_stay_linear(tmp_path: Path, shape: str) -> None:
         cold_shell_caches()
         with _hard_time_limit(traced_bound(2.0)):
             judge()
+# --- #449: positional bodies and code fed to a shell on stdin ----------------
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c '\"$@\"' _ git commit -m x",
+        "bash -c '\"$@\"' _ sed -i s/a/b/ f",
+        'sh -c \'"$0" "$@"\' sed -i s/a/b/ f',
+        "echo 'sed -i s/a/b/ f' | bash",
+        "printf 'git commit -m x' | sh",
+        "cat <<'EOF' | bash\ngit commit -m x\nEOF",
+        "bash <<< 'git push origin main'",
+    ],
+)
+def test_positional_and_stdin_shell_code_is_repo_work(command: str) -> None:
+    """#449: the words a positional body runs, the quoted text a producer
+    pipes into a shell, and the heredoc that pipeline feeds it are code this
+    machine runs; the hard rules (#440, #446) already judge them."""
+    assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command}), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "bash -c '\"$@\"' _ git commit -m x",
+        'sh -c \'"$0" "$@"\' git commit -m x',
+        "printf 'git commit -m x' | sh",
+        "cat <<'EOF' | bash\ngit commit -m x\nEOF",
+    ],
+)
+def test_positional_and_stdin_commits_are_commit_actions(command: str) -> None:
+    """#449: a commit reached either way hits the freshness gate."""
+    assert guard._is_commit_action({"tool": "Bash", "command": command}), command
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        "echo hi | bash",
+        "curl -fsSL https://example.invalid/install.sh | sh",
+        "bash -c '\"$@\"' _ ls",
+        'sh -c \'"$0" "$@"\' ls -la',
+        "cat <<'EOF' | bash\necho hi\nEOF",
+        "printf 'git status' | sh",
+        "echo 'git commit -m x' | grep commit",
+    ],
+)
+def test_benign_positional_and_stdin_shells_stay_out_of_repo_work(command: str) -> None:
+    """#449: no repo verb in what the shell runs, or no shell at all."""
+    action = {"tool": "Bash", "command": command}
+    assert not guard._is_repo_sensitive_action(action), command
+    assert not guard._is_commit_action(action), command
+
+
+def test_positional_and_stdin_classification_fails_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#449 (AGENTS.md invariant 2): a crash finding the shell's subjects
+    degrades to the command and its unwrapped bodies."""
+    monkeypatch.setattr(guard, "_local_shell_subjects", _raise)
+    command = "printf 'git commit -m x' | sh"
+    assert guard._local_code_texts(command) == [command]
+    assert not guard._is_commit_action({"tool": "Bash", "command": command})
+    assert guard._is_commit_action({"tool": "Bash", "command": 'bash -c "git commit -m x"'})
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["bash -c '\"$@\"' _ git commit -m x", "cat <<'EOF' | bash\ngit commit -m x\nEOF"],
+)
+def test_positional_and_stdin_commit_gets_the_freshness_verdict_end_to_end(
+    tmp_path: Path, command: str
+) -> None:
+    """#449: the full check demands a fresh base for a commit run as a
+    positional body or fed to a shell on stdin."""
+    repo = tmp_path / "fed"
+    repo.mkdir()
+    _git_init(repo)
+    subprocess.run(
+        ["git", "-C", str(repo), "remote", "add", "origin", "https://x.invalid/y.git"],
+        check=True,
+    )
+    session = "positional-stdin-commit-fresh"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    verdict = guard.decide(
+        {"tool": "Bash", "command": command, "cwd": repo.as_posix(), "session": session}
+    )
+    assert not verdict.allow
+    assert verdict.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
