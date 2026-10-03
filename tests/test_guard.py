@@ -3507,6 +3507,20 @@ CLUSTERED_WRAPPER_HARD_COMMANDS = (
     "stdbuf -oL sudo id",
     "ionice -c3 sudo id",
     "sudo -Eu root id",
+    # #464: a switch value with a blank in it, quoted, is one word.
+    'env -iC "/a b" sudo id',
+    "xargs -0I '{} x' sudo id",
+    'env -C "/a b" sudo id',
+    'env -C"/a b" sudo id',
+    'env --chdir="/a b" sudo id',
+    'sudo -u "a b" id',
+    'X="a b" env -C "/a b" sudo id',
+    'timeout "5" sudo id',
+    # #464: a long value-taking switch by unique prefix takes the next word.
+    "env --chd /x sudo id",
+    'env --chd "/a b" sudo id',
+    "env --u VAR sudo id",
+    "stdbuf --out L sudo id",
 )
 
 
@@ -3527,6 +3541,9 @@ def test_hard_rules_read_wrapper_clusters_getopt_style(command: str) -> None:
         "timeout -k5 10 echo sudo",
         "command -v sudo",
         "tmux new -s sudo-test",
+        # #464: the prefix takes `sudo` as its value; a quoted value hides it.
+        "env --chd sudo echo hi",
+        'env -C "sudo x" echo hi',
     ],
 )
 def test_wrapper_clusters_leave_benign_commands_alone(command: str) -> None:
@@ -3787,6 +3804,13 @@ def test_windows_shell_tokens_join_mid_word_quotes_and_keep_backslashes(
         # #451 review: runs of value-taking clusters stay linear too.
         "env -iC /x " * 400 + "x",
         "xargs -0I {} " * 400 + "x",
+        # #464: quoted values and long-option prefixes stay linear too.
+        'env -iC "/a b" ' * 400 + "x",
+        "xargs -0I '{} x' " * 400 + "x",
+        'env -C "-a -b" ' * 400 + "x",
+        "env --chd /x " * 400 + "x",
+        'X="a b" ' * 400 + "x",
+        'timeout "5" ' * 400 + "x",
     ],
 )
 def test_wrapper_runs_cannot_backtrack_the_hard_rules(command: str) -> None:
@@ -4462,6 +4486,57 @@ def test_long_option_unique_prefix(given: str, expected: str) -> None:
     """#450 review: one helper resolves GNU unique-prefix long options."""
     known = frozenset({"--target-directory", "--suffix", "--sparse"})
     assert guard._long_option(given, known) == expected
+
+
+@pytest.mark.parametrize(
+    ("word", "width"),
+    [
+        ("--chdir", 2),
+        ("--chd", 2),
+        ("--c", 2),
+        ("--chd=/x", 1),
+        ("--u", 2),
+        ("--", 1),
+        ("--debug", 1),
+    ],
+)
+def test_switch_width_reads_long_options_by_unique_prefix(word: str, width: int) -> None:
+    """#464: a long value-taking wrapper switch may be any unambiguous prefix."""
+    assert guard._switch_width(word, policy.STAGE_WRAPPERS["env"]) == width
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'env -iC "/a b" sudo id',
+        "xargs -0I '{} x' sudo id",
+        'env --chdir="/a b" sudo id',
+        'timeout "5" sudo id',
+        "env -C a\\ b sudo id",
+    ],
+)
+def test_command_position_reads_a_quoted_wrapper_value_as_one_word(command: str) -> None:
+    """#464: the hard-rule regex itself reaches ``sudo`` past a quoted value,
+    rather than relying on the walk's opaque-site fallback."""
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    assert rule.judge(command) is True
+
+
+def test_ambiguous_long_prefix_is_a_plain_flag() -> None:
+    """#464: a prefix two value-taking switches share takes no value, in the
+    stage parser and in the hard rules alike."""
+    takes_arg = frozenset({"--output", "--outfile"})
+    assert guard._switch_width("--out", takes_arg) == 1
+    assert guard._switch_width("--outp", takes_arg) == 2
+    spellings = policy._long_prefixes(sorted(takes_arg))
+    assert "--outp" in spellings and "--outf" in spellings
+    assert not {"--o", "--ou", "--out"} & set(spellings)
+
+
+def test_env_chdir_value_reads_a_long_prefix() -> None:
+    assert guard._env_chdir_value("--chd", "/x") == "/x"
+    assert guard._env_chdir_value("--chd=/y", "/x") == "/y"
+    assert guard._env_chdir_value("--debug", "/x") is None
 
 
 def test_redirect_with_no_target_repo_is_not_repo_work(tmp_path: Path) -> None:

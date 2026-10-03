@@ -112,6 +112,35 @@ WRAPPER_POSITIONAL = frozenset({"timeout"})
 _LOOKUP_WRAPPERS = frozenset({"command", "builtin"})
 
 
+def _word_piece(excluded: str = "") -> str:
+    """One piece of a shell word for the hard rules (#464): a quoted run
+    (``"/a b"``, ``'{} x'``), a backslash with the character it escapes (``a\\
+    b``), or a character that is none of blank, quote, backslash or
+    ``excluded``. Each piece starts with a different character, so a word
+    splits into pieces one way only and cannot make a search backtrack. No
+    piece crosses a newline, as ``_cmd_position_cost`` assumes."""
+    return r"""(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|\\.|[^\s"'\\""" + excluded + "])"
+
+
+#: A shell word's piece, and a whole word (a switch's or assignment's value).
+_WORD_PIECE = _word_piece()
+_WORD = _WORD_PIECE + "+"
+
+
+def _long_prefixes(names: list[str]) -> list[str]:
+    """Every spelling of the long options ``names`` that GNU getopt_long reads
+    as one of them (#464): the name, or a prefix of at least ``--`` and one
+    letter that no other name in ``names`` shares, as ``guard._long_option``
+    resolves it. An ambiguous prefix is left out, so it stays a plain flag."""
+    spellings = set(names)
+    for name in names:
+        for k in range(3, len(name)):
+            prefix = name[:k]
+            if sum(other.startswith(prefix) for other in names) == 1:
+                spellings.add(prefix)
+    return sorted(spellings, key=lambda spelling: (-len(spelling), spelling))
+
+
 def _wrapper_pattern(name: str, takes_arg: frozenset[str]) -> str:
     """One :data:`STAGE_WRAPPERS` entry as a regex: an optional path
     (``/usr/bin/env``), the name, its switches (a switch that takes a separate
@@ -130,21 +159,28 @@ def _wrapper_pattern(name: str, takes_arg: frozenset[str]) -> str:
     next word when it ends the cluster, so ``env -iC /x sudo id`` and
     ``xargs -0I {} sudo id`` still reach the program. A cluster ending in a
     value-taking letter holds no other one before it, so it matches only the
-    value branch."""
-    switch = r"-[^\svV]*" if name in _LOOKUP_WRAPPERS else r"-\S*"
+    value branch.
+
+    A switch or its value may hold a quoted run with blanks in it (``env -iC
+    "/a b" sudo id``, #464), and a long value-taking switch matches by any
+    unambiguous prefix (``env --chd /x sudo id``), as ``guard._switch_width``
+    reads it."""
+    switch = "-" + _word_piece("vV" if name in _LOOKUP_WRAPPERS else "") + "*"
     if takes_arg:
-        long_names = sorted(opt for opt in takes_arg if len(opt) != 2)
+        long_names = _long_prefixes(sorted(opt for opt in takes_arg if len(opt) != 2))
         letters = "".join(sorted(opt[1] for opt in takes_arg if len(opt) == 2))
         valued = [re.escape(opt) for opt in long_names]
         if letters:
             letter_class = re.escape(letters)
             valued.append(rf"-(?!-)[^\s{letter_class}]*[{letter_class}]")
         names = "|".join(valued)
-        switch = rf"(?:{names})[ \t]+\S+|(?!(?:{names})(?:\s|$)){switch}"
+        switch = rf"(?:{names})[ \t]+{_WORD}|(?!(?:{names})(?:\s|$)){switch}"
     switches = rf"(?:[ \t]+(?:{switch}))*"
     pattern = r"(?:[./][^\s;&|`()]*/)?" + re.escape(name) + switches
     if name in WRAPPER_POSITIONAL:
-        pattern += r"[ \t]+\d[\d.]*[smhd]?" + switches
+        # The duration may be quoted (`timeout "5" sudo id`, #464); the
+        # search reads ``shell_code_text``, which blanks a quote's content.
+        pattern += r"""[ \t]+(?:\d[\d.]*[smhd]?|"[^"\n]*"|'[^'\n]*')""" + switches
     return pattern
 
 
@@ -173,7 +209,7 @@ _CMD_WRAPPERS = "|".join(
 #: assignment-skip never crosses a newline into another command.
 _CMD_POSITION = (
     r"(?:^|[\n;&|`(])[ \t]*"
-    r"(?:(?:\w+=\S*|" + _CMD_WRAPPERS + r")[ \t]+)*"
+    r"(?:(?:\w+=" + _WORD_PIECE + "*|" + _CMD_WRAPPERS + r")[ \t]+)*"
     r"(?:[./][^\s;&|`()]*/)?"
 )
 
@@ -194,6 +230,7 @@ _CHAIN_LINK_RE = re.compile(
 )
 _CHAIN_GAP_RE = re.compile(r"[ \t]+")
 _WORD_SPAN_RE = re.compile(r"\S+")
+_QUOTE_RE = re.compile(r"[\"'\\]")
 
 
 @functools.lru_cache(maxsize=256)
@@ -213,7 +250,12 @@ def _cmd_position_cost(text: str) -> int:
     joined by blanks; so the bound sums, over the starts, the extent of the
     chain each could skip. A word counts as a link unless it cannot be an
     assignment, a wrapper, a switch or a switch's value, so the bound only
-    overestimates. Linear; a short text returns its trivial bound unscanned."""
+    overestimates. A word holding a quote or a backslash may open a quoted
+    run or escape a blank that a link reads past (``env -C "/a b"``, #464),
+    so a chain that enters it, or an assignment after a separator inside it,
+    is bounded by the end of its line instead: no word piece crosses a
+    newline. Linear; a short text
+    returns its trivial bound unscanned."""
     n = len(text)
     if n * n <= CMD_SEARCH_BUDGET:
         return n * n
@@ -223,14 +265,27 @@ def _cmd_position_cost(text: str) -> int:
     joined = [
         bool(_CHAIN_GAP_RE.fullmatch(text, spans[i][1], spans[i + 1][0])) for i in range(count - 1)
     ] + [False]
+    newlines = [m.start() for m in re.finditer("\n", text)]
+
+    def line_end(pos: int) -> int:
+        k = bisect.bisect_left(newlines, pos)
+        return newlines[k] if k < len(newlines) else n
+
+    quoted = [bool(_QUOTE_RE.search(text, start, end)) for start, end in spans]
     # reach[i]: how far a chain that enters word i can run.
     reach = [n] * (count + 1)
     for i in range(count - 1, -1, -1):
         start, end = spans[i]
         link = bool(_CHAIN_LINK_RE.match(text, start)) or (
-            i > 0 and text[spans[i - 1][0]] == "-"  # a switch's value
+            i > 0
+            and (
+                text[spans[i - 1][0]] == "-"  # a switch's value
+                or (quoted[i] and text.endswith("timeout", *spans[i - 1]))  # a duration
+            )
         )
         reach[i] = reach[i + 1] if link and joined[i] else end
+        if link and quoted[i]:
+            reach[i] = max(reach[i], line_end(end))
     cost = n
     previous_end = 0
     for i, (start, end) in enumerate(spans):
@@ -239,7 +294,10 @@ def _cmd_position_cost(text: str) -> int:
         # A separator inside it starts a chain at the rest of it.
         seps = sum(text.count(ch, start, end) for ch in _SEPARATOR_CHARS if ch != "\n")
         if seps:
-            cost += seps * ((reach[i + 1] if joined[i] else end) - start)
+            rest = reach[i + 1] if joined[i] else end
+            if quoted[i] and "=" in text[start:end]:
+                rest = max(rest, line_end(end))  # `;X="a b"`: an assignment
+            cost += seps * (rest - start)
         previous_end = end
     return cost
 

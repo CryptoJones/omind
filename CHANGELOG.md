@@ -7,6 +7,33 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.27] - 2026-10-02
+
+### Fixed
+- **The hard rules read a quoted wrapper switch value as one word, and a long
+  value-taking wrapper switch by unique prefix
+  ([#464](https://github.com/CryptoJones/omind/issues/464)).** `env --chd /x
+  sudo id` and `stdbuf --out L sudo id` were allowed: the command-position
+  regex and `guard._switch_width` treated any `--…` they did not know exactly
+  as a flag with no value, so the value was read as the program. `env -iC "/a
+  b" sudo id` and `xargs -0I '{} x' sudo id` were denied only through the
+  shell walk's opaque-site fallback; the regex itself took a value as `\S+`,
+  and the stage parser split the quoted value in two.
+  - A wrapper switch, its value and a leading `VAR=value` assignment may hold
+    a quoted run with blanks (`"…"`, `'…'`) or an escaped character (`a\ b`).
+    Every piece of a word starts with a different character, so a word still
+    matches one way only and long runs cannot backtrack. `timeout`'s duration
+    may be quoted too.
+  - A long value-taking switch matches by any prefix that no other
+    value-taking switch of that wrapper shares, as GNU getopt_long reads it,
+    in the regex, in `_switch_width` and in `env --chdir` tracking. An
+    ambiguous prefix stays a plain flag. `env --chd sudo echo hi` is no longer
+    a false positive.
+  - The stage parser keeps a quoted run as one word, so it lands on the same
+    program as the hard rules; the parity test covers the new shapes.
+  - `_cmd_position_cost` bounds a chain through a quoted or escaped word by
+    the end of its line, since no word piece crosses a newline.
+
 ## [10.2.26] - 2026-10-02
 
 ### Fixed

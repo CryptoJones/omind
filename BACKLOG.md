@@ -79,6 +79,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.27)
+
+- [x] **guard hard rules: quoted wrapper switch values and unique-prefix long options hide sudo** ([#464](https://github.com/CryptoJones/omind/issues/464)) — **v10.2.27** — _bug_ —
+  a quoted switch value with blanks (`env -iC "/a b" sudo id`, `xargs -0I '{} x' sudo id`) is one word
+  to the command-position regex and the stage parser, and a long value-taking switch matches by unique
+  prefix (`env --chd /x sudo id`) in the regex and `_switch_width`. An ambiguous prefix stays a flag.
+
 ### Shipped — 2026-10-02 (v10.2.26)
 
 - [x] **guard hard rules: `find -exec sudo`, `$(…)`/`${…}` program names and `eval "$(…)"` are not judged** ([#455](https://github.com/CryptoJones/omind/issues/455)) — **v10.2.26** — _bug_ —
