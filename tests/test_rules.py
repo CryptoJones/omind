@@ -1717,7 +1717,9 @@ def test_write_repo_lookup_failure_fails_open(
     def boom(*_a: object, **_k: object) -> None:
         raise RuntimeError("boom")
 
-    monkeypatch.setattr(guard, "_dir_repo", boom)
+    # `_write_target`, not `_dir_repo`: since #460 the cwd lookup shares the
+    # memoised parent walk, and this crash is in the write targets alone.
+    monkeypatch.setattr(guard, "_write_target", boom)
     command = f"echo x > {x.as_posix()}/f"
     action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
     view = guard._rules_command_view(action)

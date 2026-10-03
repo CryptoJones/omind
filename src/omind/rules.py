@@ -244,6 +244,21 @@ def _visibility_cache_path() -> Path:
     return paths.state_dir() / "repo-visibility.json"
 
 
+def _lookup(
+    args: list[str], cap: float, cwd: Path | None = None
+) -> subprocess.CompletedProcess[str]:
+    """``subprocess.run`` for one fact lookup, under its own timeout (#460):
+    ``cap`` outside the guard, cut by :func:`deadline.lookup_timeout` while it
+    judges, so a slow ``gh``/``git`` leaves that fact unknown instead of
+    spending the judging budget. Raises :class:`subprocess.TimeoutExpired`
+    without starting the process when no lookup time is left; every caller
+    already treats that as an unknown fact."""
+    timeout = deadline.lookup_timeout(cap)
+    if timeout <= 0:
+        raise subprocess.TimeoutExpired(args, 0)
+    return subprocess.run(args, cwd=cwd, capture_output=True, text=True, timeout=timeout)
+
+
 def _has_github_remote(repo: Path) -> bool:
     """True if ``repo`` has any git remote pointing at github.com.
 
@@ -252,12 +267,7 @@ def _has_github_remote(repo: Path) -> bool:
     over SSH). The latter must not be logged as a failure — it is expected.
     """
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "remote", "-v"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        proc = _lookup(["git", "-C", str(repo), "remote", "-v"], 5)
     except (OSError, subprocess.SubprocessError):
         return False
     if proc.returncode != 0:
@@ -310,12 +320,8 @@ def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
     except (OSError, ValueError, TypeError):
         cache = cache if isinstance(cache, dict) else {}
     try:
-        proc = subprocess.run(
-            ["gh", "repo", "view", "--json", "visibility", "-q", ".visibility"],
-            cwd=repo,
-            capture_output=True,
-            text=True,
-            timeout=10,
+        proc = _lookup(
+            ["gh", "repo", "view", "--json", "visibility", "-q", ".visibility"], 10, cwd=repo
         )
         visibility = proc.stdout.strip().lower() if proc.returncode == 0 else ""
     except (OSError, subprocess.SubprocessError):
@@ -353,12 +359,7 @@ def _repo_visibility(repo: Path, *, now: datetime | None = None) -> str:
 
 def _repo_name(repo: Path) -> str:
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "remote", "get-url", "origin"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        proc = _lookup(["git", "-C", str(repo), "remote", "get-url", "origin"], 5)
         url = proc.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -380,12 +381,7 @@ def _remote_has_commits(repo: Path) -> bool | None:
     keep granting the exemption after the first commit landed.
     """
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "ls-remote", "--heads", "origin"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
+        proc = _lookup(["git", "-C", str(repo), "ls-remote", "--heads", "origin"], 10)
     except (OSError, subprocess.SubprocessError):
         _breadcrumb(f"rules_has_commits({repo})", "ls-remote failed")
         return None
@@ -398,12 +394,7 @@ def _remote_has_commits(repo: Path) -> bool | None:
 
 def _repo_branch(repo: Path) -> str:
     try:
-        proc = subprocess.run(
-            ["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        proc = _lookup(["git", "-C", str(repo), "rev-parse", "--abbrev-ref", "HEAD"], 5)
         return proc.stdout.strip()
     except (OSError, subprocess.SubprocessError):
         return ""
@@ -415,12 +406,7 @@ def _git_out(repo: Path, *args: str, config: tuple[str, ...] = ()) -> str | None
     filtered by :func:`_cmdline_config`, so a read sees what the push will."""
     flags = [f for kv in config for f in ("-c", kv)]
     try:
-        proc = subprocess.run(
-            ["git", *flags, "-C", str(repo), *args],
-            capture_output=True,
-            text=True,
-            timeout=5,
-        )
+        proc = _lookup(["git", *flags, "-C", str(repo), *args], 5)
     except (OSError, subprocess.SubprocessError):
         return None
     return proc.stdout if proc.returncode == 0 else None
@@ -807,6 +793,8 @@ class CommandSite:
             return ()
         try:
             return tuple(self.writes())
+        except deadline.DeadlineExceededError:
+            raise  # never partial information: the guard denies (#460)
         except Exception:
             return ()
 
@@ -929,7 +917,7 @@ def evaluate(
     ``git -c k=v push``, but not ``git log --grep push``.
 
     Raises :class:`deadline.DeadlineExceededError` when the guard's judging
-    budget runs out mid-evaluation; the guard then fails open (#460).
+    budget runs out mid-evaluation; the guard then denies (#460).
     """
     tool = str(action.get("tool") or "")
     command = str(action.get("command") or "")

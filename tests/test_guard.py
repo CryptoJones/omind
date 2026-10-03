@@ -5450,37 +5450,189 @@ def test_hard_rules_fail_closed_past_the_deadline(monkeypatch: pytest.MonkeyPatc
     assert guard._hard_policy_verdict(command) is None
 
 
-def test_soft_gates_fail_open_past_the_deadline(monkeypatch: pytest.MonkeyPatch) -> None:
-    """#460: once the hard rules have passed, an exhausted budget skips the
-    soft gates (here the consult gate, which would deny) and allows."""
+def _deadline_events() -> list[tuple[str, str, str, str]]:
+    return [
+        (e["rule_id"], e["session"], e["outcome"], e["severity"])
+        for e in compliance.read_events()
+        if e["kind"] == "deadline-exceeded"
+    ]
+
+
+def _assert_deadline_deny(verdict: guard.Verdict, session: str) -> None:
+    assert not verdict.allow
+    assert verdict.rule_id == guard.DEADLINE_RULE
+    assert verdict.reason == f"omi-guard (hard): {guard.BUDGET_EXCEEDED_MESSAGE}"
+    assert _deadline_events() == [(guard.DEADLINE_RULE, session, "deny", policy.SEVERITY_HARD)]
+
+
+def test_soft_gates_fail_closed_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#460 review: several gates after the hard rules are hard denies too.
+    A global-config write padded until judging passes the deadline is denied
+    with the deadline reason, not waved through the global-config gate."""
     from omind import deadline
+
+    command = "cd x; " * 2000 + "echo '{}' > ~/.claude/settings.json"
+    action = {"tool": "Bash", "command": command, "session": "dl-soft", "cwd": str(tmp_path)}
+    guard.begin_turn("dl-soft", "What does the guard do?")
+    in_time = guard.decide(action)
+    assert not in_time.allow and in_time.rule_id == "global-config-explicit-auth"
 
     monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 0.05)
     monkeypatch.setattr(deadline, "HARD_RULE_FLOOR_SECONDS", 30.0)
     real = guard._repo_root_for_action
 
     def slow(action: dict[str, Any]) -> Path | None:
-        time.sleep(0.2)
+        time.sleep(0.2)  # the padding's cost, past the budget
         return real(action)
 
     monkeypatch.setattr(guard, "_repo_root_for_action", slow)
-    action = {"tool": "Bash", "command": "echo deadline-460-soft", "session": "dl-soft"}
-    verdict = guard.check_action(action)
-    assert verdict.allow
-    events = [e for e in compliance.read_events() if e["kind"] == "deadline-exceeded"]
-    assert [(e["session"], e["outcome"], e["severity"]) for e in events] == [
-        ("dl-soft", "fail-open", policy.SEVERITY_SOFT)
-    ]
-    # The hard rules still ran in full, so a real match is still denied.
+    _assert_deadline_deny(guard.check_action(action), "dl-soft")
+    # The hard rules kept their floor, so a real match still names its rule.
     sudo = guard.check_action({**action, "command": "sudo id"})
     assert not sudo.allow and sudo.rule_id == "sudo-use-fleet-sudo"
 
 
-def test_a_slow_earlier_step_does_not_deny_a_plain_command(
+def test_note_rules_fail_closed_past_the_deadline(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#460 review: `_note_rules_verdict` swallowed the deadline as "no rule
+    matched", so a padded command skipped every operator deny rule. It now
+    denies with the deadline reason and event, before the hard rules run."""
+    from omind import deadline
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    (omi / "Guard Rules.md").write_text(
+        '# Guard Rules\n\n```omind-rule\nid: no-deploy\ntool: Bash\nmatch: "*deploy*"\n'
+        'action: deny\nmessage: "m"\n```\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 0.05)
+    real = guard._rules_command_view
+
+    def slow(action: dict[str, Any]) -> Any:
+        time.sleep(0.2)
+        return real(action)
+
+    monkeypatch.setattr(guard, "_rules_command_view", slow)
+    hard = []
+    monkeypatch.setattr(guard, "_judge_hard_rules", lambda *a: hard.append(a))
+    action = {"tool": "Bash", "command": "echo hi", "session": "dl-note", "cwd": str(tmp_path)}
+    _assert_deadline_deny(guard.check_action(action, omi), "dl-note")
+    assert hard == []  # denied in the note-rule phase itself
+
+
+@pytest.mark.parametrize(
+    ("target", "patched"),
+    [
+        (lambda: guard._git_dash_c_path("git status"), "_shell_walk"),
+        (lambda: guard._local_code_texts("git status"), "_hard_rule_subjects"),
+        (lambda: guard._rules_command_view({"command": "git status"}), "_shell_walk"),
+        (lambda: guard._repo_root_for_action({"command": "git status"}), "_git_dash_c_path"),
+        (lambda: guard._bash_write_repo({"command": "echo > f"}), "_shell_walk"),
+        (lambda: guard._note_rules_verdict({"command": "x"}, Path(".")), "_rules_command_view"),
+    ],
+)
+def test_handlers_never_turn_the_deadline_into_partial_information(
+    monkeypatch: pytest.MonkeyPatch, target: Callable[[], object], patched: str
+) -> None:
+    """#460 review: every fail-open handler on the judging path re-raises the
+    deadline to `decide()`/`check_action()`, which deny, instead of answering
+    "no repo", "no rule", or "only the raw command"."""
+    from omind import deadline
+
+    def expired(*_a: object, **_k: object) -> None:
+        raise deadline.DeadlineExceededError
+
+    monkeypatch.setattr(guard, patched, expired)
+    with pytest.raises(deadline.DeadlineExceededError):
+        target()
+
+
+def test_a_command_sites_write_repos_re_raise_the_deadline() -> None:
+    """#460 review: `CommandSite.write_repos` fails open to `()` on errors,
+    but not on the deadline."""
+    from omind import deadline, rules
+
+    def expired() -> tuple[Path, ...]:
+        raise deadline.DeadlineExceededError
+
+    def broken() -> tuple[Path, ...]:
+        raise OSError("unreadable")
+
+    site = rules.CommandSite(text="cat > f", repo=None, writes=expired)
+    with pytest.raises(deadline.DeadlineExceededError):
+        _ = site.write_repos
+    assert rules.CommandSite(text="cat > f", repo=None, writes=broken).write_repos == ()
+
+
+def test_a_slow_gh_lookup_leaves_only_that_fact_unknown(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#460 review: a fact lookup that hangs times out on its own bound, well
+    inside the budget: visibility becomes unknown (the rule logs it and does
+    not fire) and the plain command is allowed, not denied by the deadline."""
+    from omind import deadline, rules
+
+    monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 2.0)
+    monkeypatch.setattr(deadline, "LOOKUP_TIMEOUT_SECONDS", 0.2)
+    monkeypatch.setattr(deadline, "LOOKUP_RESERVE_SECONDS", 1.0)
+    repo = tmp_path / "repo"
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    (omi / "Guard Rules.md").write_text(
+        '# Guard Rules\n\n```omind-rule\nid: public-deploy\ntool: Bash\nmatch: "*deploy*"\n'
+        'when:\n  repo_visibility: public\naction: deny\nmessage: "m"\n```\n',
+        encoding="utf-8",
+    )
+    timeouts: list[float] = []
+
+    def fake_run(args: list[str], **kwargs: Any) -> subprocess.CompletedProcess[str]:
+        if args[0] == "gh":
+            timeouts.append(kwargs["timeout"])
+            time.sleep(kwargs["timeout"] + 0.05)  # past its own timeout
+            raise subprocess.TimeoutExpired(args, kwargs["timeout"])
+        # `git remote -v`: a GitHub remote, so the failed lookup is unknown.
+        return subprocess.CompletedProcess(args, 0, "origin\tgit@github.com:o/r.git (push)\n", "")
+
+    monkeypatch.setattr(rules.subprocess, "run", fake_run)
+    guard.mark_consulted("dl-gh")
+    action = {"tool": "Bash", "command": "echo deploy", "session": "dl-gh", "cwd": str(repo)}
+    verdict = guard.check_action(action, omi)
+    assert verdict.allow, verdict
+    assert timeouts == [0.2]
+    assert _deadline_events() == []
+    unknown = [e for e in compliance.read_events() if e["rule_id"] == "note-rule:public-deploy"]
+    assert [e["outcome"] for e in unknown] == ["unknown-visibility"]
+
+
+def test_lookups_stop_short_of_the_judging_reserve() -> None:
+    """#460 review: inside a judging scope a lookup gets at most its bound and
+    never eats into the reserve left for judging; with no time left it is not
+    started at all (its fact is unknown)."""
+    from omind import deadline, rules
+
+    assert deadline.lookup_timeout(10) == 10  # outside the guard: unchanged
+    with deadline.scope(60.0):
+        assert deadline.lookup_timeout(10) == deadline.LOOKUP_TIMEOUT_SECONDS
+        assert deadline.lookup_timeout(1) == 1
+    with deadline.scope(deadline.LOOKUP_RESERVE_SECONDS):
+        assert deadline.lookup_timeout(10) == 0.0
+        with pytest.raises(subprocess.TimeoutExpired):
+            rules._lookup(["git", "--version"], 5)
+
+
+def test_the_hard_rules_keep_their_floor_after_a_slow_step(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """#460: the hard rules always get their floor, so a note rule's slow
-    network lookup spending the budget never turns `echo` into a deny."""
+    """#460: a step that spends the budget before the hard rules (here the
+    note rules) cannot pre-empt them: they still name their own rule. What
+    comes after them is past the deadline, so a plain command is denied with
+    the deadline reason, never waved through."""
     from omind import deadline
 
     monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 0.05)
@@ -5491,6 +5643,122 @@ def test_a_slow_earlier_step_does_not_deny_a_plain_command(
 
     monkeypatch.setattr(guard, "_note_rules_verdict", slow_note_rules)
     base = {"tool": "Bash", "session": "dl-floor"}
-    assert guard.check_action({**base, "command": "echo hi"}).allow
     sudo = guard.check_action({**base, "command": "sudo id"})
     assert not sudo.allow and sudo.rule_id == "sudo-use-fleet-sudo"
+    _assert_deadline_deny(guard.check_action({**base, "command": "echo hi"}), "dl-floor")
+
+
+def test_a_crash_in_the_soft_gates_fails_open_with_the_hard_rules_rechecked(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#460 review (coverage restored): the repo lookup crashing in the soft
+    gates fails open, after the hard rules; the fail-open re-check reuses
+    their verdict instead of judging (and opening a second floor) again."""
+    monkeypatch.setattr(guard, "_repo_root_for_action", _boom)
+    real = guard._judge_hard_rules
+    judged: list[str] = []
+
+    def spy(command: str, session: str) -> guard.Verdict | None:
+        judged.append(command)
+        return real(command, session)
+
+    monkeypatch.setattr(guard, "_judge_hard_rules", spy)
+    verdict = guard.check_action({"tool": "Bash", "command": "ls", "session": "s460c"})
+    assert verdict.allow
+    assert judged == ["ls"]  # judged once, re-checked from the cached verdict
+    error = [e for e in compliance.read_events() if e["rule_id"] == guard.GUARD_ERROR_RULE]
+    assert [(e["session"], e["outcome"]) for e in error] == [("s460c", "fail-open")]
+    sudo = guard.check_action({"tool": "Bash", "command": "sudo id", "session": "s460c"})
+    assert not sudo.allow and sudo.rule_id == "sudo-use-fleet-sudo"
+
+
+def test_the_steps_after_the_verdict_are_outside_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#460 review: the budget re-arm, the excerpt and the retrieval
+    suggestion run after the verdict; a deadline there is neither a judging
+    failure (`guard-internal-error`) nor a deadline deny."""
+    from omind import deadline
+
+    monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 0.05)
+
+    def slow_budget(action: dict[str, Any], omi_dir: Path | None) -> None:
+        time.sleep(0.1)
+        deadline.check()
+
+    monkeypatch.setattr(guard, "budget_verdict", slow_budget)
+    guard.mark_consulted("dl-tail")
+    verdict = guard.check_action({"tool": "Bash", "command": "ls", "session": "dl-tail"})
+    assert verdict.allow
+    assert _deadline_events() == []
+    assert not [e for e in compliance.read_events() if e["rule_id"] == guard.GUARD_ERROR_RULE]
+
+
+def test_enclosing_repo_skips_a_path_holding_a_nul(tmp_path: Path) -> None:
+    """#460 review: a NUL in a `git -C` or `cd` path makes `resolve()` raise
+    `ValueError`. `harness.py` and `provision.py` call `decide()` bare, so it
+    must fall back to the next candidate, never raise."""
+    (tmp_path / ".git").mkdir()
+    (tmp_path / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    nul = tmp_path / "a\0b"
+    assert guard._enclosing_repo([nul, tmp_path]) == tmp_path.resolve()
+    assert guard._enclosing_repo([nul, tmp_path], {}, {}) == tmp_path.resolve()
+    for command in ("git -C /tm\0p commit -m x", "cd /tm\0p && git push", "cd a\0b; git push"):
+        verdict = guard.decide({"tool": "Bash", "command": command, "cwd": str(tmp_path)})
+        assert verdict.rule_id != guard.DEADLINE_RULE
+
+
+def test_a_cd_chain_through_the_note_rules_is_linear(tmp_path: Path) -> None:
+    """#460 review: `_rules_command_view` resolved and walked every parent of
+    each distinct cwd of a `cd x; ` chain (quadratic: 8 s, then the deadline).
+    Resolution and the parent walk are memoised per command."""
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    (omi / "Guard Rules.md").write_text(
+        '# Guard Rules\n\n```omind-rule\nid: every-bash\ntool: Bash\nmatch: "*"\n'
+        'when:\n  repo_visibility: public\naction: deny\nmessage: "m"\n```\n',
+        encoding="utf-8",
+    )
+    action = {"tool": "Bash", "command": "cd x; " * 2000 + "echo hi", "cwd": str(tmp_path)}
+    cold_shell_caches()
+    with _hard_time_limit(traced_bound(2.5)):
+        verdict = guard.check_action({**action, "session": "dl-cd"}, omi)
+    assert verdict.rule_id != guard.DEADLINE_RULE
+
+
+#: The shapes #460 names: each returns a verdict well inside the 8 s budget.
+_ISSUE_460_SHAPES = {
+    "cd-chain": "cd x; " * 2000 + "echo hi",
+    "bash-c": "bash -c 'echo hi'; " * 100_000,
+    "heredoc-line": "cat " + "<<E " * 20_000 + "\n" + "x\nE\n" * 20_000,
+}
+
+
+@pytest.mark.parametrize("shape", list(_ISSUE_460_SHAPES))
+def test_the_issue_460_shapes_are_judged_well_inside_the_budget(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
+) -> None:
+    """#460 acceptance line 2: each shape, through `check_action` (note rules
+    included) and `decide()`, returns a real verdict well under the 8 s budget
+    (untraced: at most about 2.3 s, the `bash -c` flood). The budget is raised
+    here so a slow CI runner measures the shape instead of tripping it."""
+    from omind import deadline
+
+    monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 600.0)
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    (omi / "Guard Rules.md").write_text(
+        '# Guard Rules\n\n```omind-rule\nid: every-bash\ntool: Bash\nmatch: "*"\n'
+        'when:\n  repo_visibility: public\naction: deny\nmessage: "m"\n```\n',
+        encoding="utf-8",
+    )
+    action = {"tool": "Bash", "command": _ISSUE_460_SHAPES[shape], "cwd": str(tmp_path)}
+    for judge in (
+        lambda: guard.check_action({**action, "session": "dl-shape"}, omi),
+        lambda: guard.decide({**action, "session": "dl-shape"}),
+    ):
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(5.0)):
+            verdict = judge()
+        assert verdict.rule_id != guard.DEADLINE_RULE
+    assert _deadline_events() == []

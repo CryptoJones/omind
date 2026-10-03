@@ -2,8 +2,15 @@
 
 A hook the harness kills on its timeout returns no verdict at all, and a
 missing verdict skips every gate. So judging one action runs under a deadline
-well inside the hook timeout, and the guard decides what an exhausted budget
-means: the hard rules fail CLOSED, the soft gates fail open.
+well inside the hook timeout, and an exhausted budget fails CLOSED: the guard
+denies the action with an explicit "too large/complex to judge" reason. A
+padded command must not slip past a hard gate by outrunning it.
+
+Ordinary commands never get there. Each fact lookup that waits on another
+process or the network (``gh repo view``, ``git ls-remote``, ``git config``)
+runs under its own timeout from :func:`lookup_timeout`, cut so that
+:data:`LOOKUP_RESERVE_SECONDS` of the budget always remain for judging. A
+lookup that times out makes that one fact unknown; it never spends the budget.
 
 The deadline is cooperative: the walk, the stage loops and the rule loops call
 :func:`check` at their loop points, and :func:`check` raises
@@ -37,6 +44,14 @@ JUDGE_BUDGET_SECONDS = 8.0
 #: earlier step spent (see :func:`at_least`).
 HARD_RULE_FLOOR_SECONDS = 3.0
 
+#: Longest any one fact lookup (a ``gh``/``git`` subprocess) may take while
+#: judging: well inside the budget.
+LOOKUP_TIMEOUT_SECONDS = 3.0
+
+#: Seconds of the budget fact lookups leave for judging itself, which takes
+#: milliseconds on an ordinary command: lookups stop short of them.
+LOOKUP_RESERVE_SECONDS = 3.0
+
 
 class DeadlineExceededError(Exception):
     """The active judging budget is spent (#460)."""
@@ -50,24 +65,10 @@ class Deadline:
     def __init__(self, end: float) -> None:
         self.end = end
 
-    def expired(self) -> bool:
-        return time.monotonic() >= self.end
-
 
 _ACTIVE: contextvars.ContextVar[Deadline | None] = contextvars.ContextVar(
     "omind_judge_deadline", default=None
 )
-
-
-def active() -> Deadline | None:
-    """The deadline judging currently runs under, if any."""
-    return _ACTIVE.get()
-
-
-def expired() -> bool:
-    """Whether a deadline is active and spent."""
-    current = _ACTIVE.get()
-    return current is not None and current.expired()
 
 
 def check() -> None:
@@ -76,6 +77,34 @@ def check() -> None:
     current = _ACTIVE.get()
     if current is not None and time.monotonic() >= current.end:
         raise DeadlineExceededError
+
+
+def lookup_timeout(cap: float) -> float:
+    """The timeout for one fact lookup whose own limit is ``cap`` seconds.
+
+    Outside a judging scope, ``cap``. Inside one, at most
+    :data:`LOOKUP_TIMEOUT_SECONDS`, and never past the point where
+    :data:`LOOKUP_RESERVE_SECONDS` of the budget remain: a slow lookup then
+    times out, and only that fact is unknown. ``0.0`` when the reserve is
+    already reached; the caller treats the fact as unknown without asking."""
+    current = _ACTIVE.get()
+    if current is None:
+        return cap
+    left = current.end - time.monotonic() - LOOKUP_RESERVE_SECONDS
+    return max(0.0, min(cap, LOOKUP_TIMEOUT_SECONDS, left))
+
+
+@contextlib.contextmanager
+def suspended() -> Iterator[None]:
+    """Run the block with no deadline at all (:func:`check` a no-op). For the
+    steps after a verdict is reached (the gate's budget re-arm, a deny's
+    note excerpt, the retrieval suggestion): they have their own bounds, and
+    a deadline hit there is not a judging failure."""
+    token = _ACTIVE.set(None)
+    try:
+        yield
+    finally:
+        _ACTIVE.reset(token)
 
 
 @contextlib.contextmanager
