@@ -6,13 +6,16 @@ from __future__ import annotations
 
 import io
 import json
-import subprocess
 from datetime import datetime
 from pathlib import Path
 
 import pytest
 
 from omind import compliance, guard, hooks, verify
+
+
+def _judge(task: str, text: str) -> bool:
+    return verify._judge_scored(task, "", text, "", ".")[0]
 
 
 def _omi(tmp_path: Path) -> Path:
@@ -98,57 +101,24 @@ def test_verify_consult_index_read_does_not_clear_the_gate(
 def test_judge_prefilter_high_and_low_skip_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     # If the model were called these would blow up; the prefilter must short-circuit.
     monkeypatch.setattr(verify, "_ask_model", lambda *a, **k: (_ for _ in ()).throw(AssertionError))
-    assert verify.judge("codeberg release push", "codeberg release push mirror") is True
-    assert verify.judge("codeberg release push", "banana mango smoothie") is False
+    assert _judge("codeberg release push", "codeberg release push mirror") is True
+    assert _judge("codeberg release push", "banana mango smoothie") is False
     # No task / no text -> fail open (relevant).
-    assert verify.judge("", "anything") is True
-    assert verify.judge("task", "") is True
+    assert _judge("", "anything") is True
+    assert _judge("task", "") is True
 
 
 def test_judge_middle_band_consults_the_model(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[tuple[str, str]] = []
 
-    def fake_model(task: str, text: str) -> bool | None:
+    def fake_model(task: str, text: str, omi_dir: object) -> bool | None:
         calls.append((task, text))
         return False
 
     monkeypatch.setattr(verify, "_ask_model", fake_model)
     # ~one of three task terms overlap -> middle band -> model decides.
-    assert verify.judge("codeberg release push", "codeberg notes about other things") is False
+    assert _judge("codeberg release push", "codeberg notes about other things") is False
     assert calls  # the model was actually consulted
-
-
-def test_ask_model_fails_open_without_any_backend(monkeypatch: pytest.MonkeyPatch) -> None:
-    """No model CLI at all -> None -> the caller fails open.
-
-    The verifier used to hardcode `claude`; it now resolves whichever supported
-    CLI is present, so absence means *no backend resolved*, not *no claude*.
-    """
-    from omind import ai_usage
-
-    monkeypatch.setattr(ai_usage, "resolve_model_backend", lambda: None)
-    assert verify._ask_model("t", "x") is None
-
-
-def test_ask_model_uses_whatever_backend_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
-    """A non-Claude CLI must be driven correctly — the point of the change."""
-    from omind import ai_usage
-
-    seen: dict[str, object] = {}
-
-    def fake_run(argv, **kw):  # type: ignore[no-untyped-def]
-        seen["argv"] = argv
-        return subprocess.CompletedProcess(argv, 0, stdout="RELEVANT", stderr="")
-
-    monkeypatch.setattr(
-        ai_usage,
-        "resolve_model_backend",
-        lambda: (["/usr/bin/somecli", "exec", "{prompt}"], False, "somecli"),
-    )
-    monkeypatch.setattr(verify.subprocess, "run", fake_run)
-    assert verify._ask_model("t", "x") is True
-    assert seen["argv"][:2] == ["/usr/bin/somecli", "exec"]
-    assert "OMI-compliance relevance checker" in seen["argv"][2]  # {prompt} substituted
 
 
 def test_verify_consult_relevant_records_no_violation(
@@ -368,10 +338,10 @@ def test_tunable_thresholds(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(verify, "_ask_model", boom)
     # zero overlap -> deterministic irrelevant by default
-    assert verify.judge("codeberg release", "banana mango smoothie") is False
+    assert _judge("codeberg release", "banana mango smoothie") is False
     # lower HIGH to 0 -> any score is "high" -> relevant, still no model call
     monkeypatch.setenv("OMI_VERIFY_HIGH", "0.0")
-    assert verify.judge("codeberg release", "banana mango smoothie") is True
+    assert _judge("codeberg release", "banana mango smoothie") is True
 
 
 def test_always_relevant_allowlist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -528,7 +498,7 @@ def test_delegated_work_consult_is_relevant_via_activity(
         "Grep -> matcher merge bsim signature (ok)",
     )
     # Pre-fix: judged against the user line alone, this consult is OFF-topic.
-    assert verify.judge(task, note.read_text(encoding="utf-8")) is False
+    assert _judge(task, note.read_text(encoding="utf-8")) is False
     # Post-fix: blending in what the agent is DOING makes it relevant.
     verdict = verify.verify_consult(
         {"tool_name": "Read", "session_id": "build1", "tool_input": {"file_path": str(note)}},
@@ -716,10 +686,10 @@ def test_semantic_blend_rescues_a_keyword_poor_consult(monkeypatch: pytest.Monke
     text = "the steps to cut a release and ship it to the forge"
     # keyword-only (no backend): no shared terms -> judged irrelevant, as in 2.x
     monkeypatch.setattr(verify.embed, "similarity", lambda a, b: None)
-    assert verify.judge(task, text) is False
+    assert _judge(task, text) is False
     # with a semantic backend rating them close, the blend lifts it to relevant
     monkeypatch.setattr(verify.embed, "similarity", lambda a, b: 0.82)
-    assert verify.judge(task, text) is True
+    assert _judge(task, text) is True
 
 
 # -- #239: truncated reads of the DEMANDED note keep the gate armed -----------

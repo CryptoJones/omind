@@ -530,14 +530,6 @@ def _commit_locked(omi_dir: Path, message: str) -> bool:
     return True
 
 
-def commit_local(omi_dir: Path, node_id: str) -> bool:
-    """Commit local changes. The lock spans staging, so a concurrent store
-    write can never be half-staged."""
-    store = OmiStore(omi_dir)
-    with store.write_lock():
-        return _commit_locked(omi_dir, f"omind: local changes on {node_id}")
-
-
 def _first_line(text: str) -> str:
     """The most diagnostic line of a git message (CONFLICT/error/fatal first)."""
     lines = [ln for ln in text.strip().splitlines() if ln.strip()]
