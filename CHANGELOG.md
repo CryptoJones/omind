@@ -7,6 +7,36 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.28] - 2026-10-02
+
+### Fixed
+- **The guard no longer raises on paths the filesystem cannot look up, and
+  judges each action under a deadline
+  ([#460](https://github.com/CryptoJones/omind/issues/460)).** `decide()` raised
+  `OSError` (`ENAMETOOLONG`) on `cd x; ` repeated about 2,000 times and on a long
+  `git -C` or Write path, and `ValueError` on a Write path holding a NUL: the walked
+  directory or target reached `stat`/`resolve` uncaught (invariant 2). Such a path
+  now degrades to an unknown repo.
+  - A `cd` chain stops growing past 4,096 characters (`PATH_MAX`; the directory is
+    unknowable there) and is joined as text, so `cd x; ` × 100,000 is walked in
+    linear time instead of quadratic. The note-rule view resolves and walks each
+    directory of a chain once per command, so `cd x; ` × 2,000 through
+    `check_action` with note rules takes about 1 s instead of 8.
+  - Judging one action runs under a cooperative wall-clock deadline
+    (`omind.deadline`, 8 s, inside the 15 s OMI guard hook timeout), checked at the
+    walk, stage, hard-rule and note-rule loop points. Past it, wherever it fires,
+    the action is denied with the #445 reason (`command too large/complex to judge
+    safely — split it or shorten it`, rule `omi-guard-deadline`) and a
+    `deadline-exceeded` event. Several gates after the hard rules are hard denies
+    too (global config, capability questions, repo work, operator note-rule
+    denies), so padding a command past the budget must not skip them. A hook
+    timeout used to return no verdict at all, which skipped every gate.
+  - Ordinary commands never get there: every `gh`/`git` fact lookup runs under its
+    own timeout (at most 3 s, and never into the 3 s left for judging), so a slow
+    lookup makes only that fact unknown. The hard rules always get at least 3 s
+    of their own. The steps after a verdict (the budget re-arm, the note excerpt,
+    the retrieval suggestion) run outside the deadline.
+
 ## [10.2.27] - 2026-10-02
 
 ### Fixed

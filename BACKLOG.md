@@ -79,6 +79,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.28)
+
+- [x] **guard: `decide()` raises OSError (ENAMETOOLONG) on long cd chains; add an overall fail-closed hook deadline** ([#460](https://github.com/CryptoJones/omind/issues/460)) — **v10.2.28** — _bug_ —
+  unlookable paths (too long, embedded NUL) degrade to an unknown repo; a `cd` chain is walked in
+  linear time; judging runs under an 8 s cooperative deadline past which the action is denied with
+  the #445 reason and a `deadline-exceeded` event; each `gh`/`git` fact lookup has its own timeout,
+  so a slow lookup leaves only that fact unknown.
+
 ### Shipped — 2026-10-02 (v10.2.27)
 
 - [x] **guard hard rules: quoted wrapper switch values and unique-prefix long options hide sudo** ([#464](https://github.com/CryptoJones/omind/issues/464)) — **v10.2.27** — _bug_ —
