@@ -11,9 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **guard hard rules: `find -exec sudo`, `$(…)`/`${…}` program names and `eval "$(…)"` are not judged** ([#455](https://github.com/CryptoJones/omind/issues/455)) — _bug_ —
-  deferred from #444: each needs either `find -exec` unwrapping or the output of a command
-  substitution, which the guard does not evaluate.
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
@@ -81,6 +78,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-02 (v10.2.26)
+
+- [x] **guard hard rules: `find -exec sudo`, `$(…)`/`${…}` program names and `eval "$(…)"` are not judged** ([#455](https://github.com/CryptoJones/omind/issues/455)) — **v10.2.26** — _bug_ —
+  the words after `-exec`/`-execdir`/`-ok`/`-okdir` up to `\;`, `';'` or `{} +` are judged as a
+  command, and an expansion that prints a literal program name (`$(printf sudo) id`, `${X:-sudo} id`,
+  `` `echo sudo` id ``, `eval "$(echo sudo id)"`) is judged with that name in its place. Expansions the
+  guard would have to evaluate (`$X`, `$(cat f)`, format strings) are documented as out of scope.
 
 ### Shipped — 2026-10-02 (v10.2.25)
 
