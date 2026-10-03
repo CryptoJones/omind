@@ -3760,7 +3760,9 @@ def test_find_exec_and_expansion_searches_stay_linear(shape: tuple[str, str], co
         guard._EVAL_LITERAL_RE.sub("", command)
         guard._EXPANDED_NAME_RE.sub("", command)
     cold_shell_caches()
-    with _hard_time_limit(traced_bound(1.0)):
+    # The full verdict at 100k is ~0.4 s untraced; CI's 3.10 coverage run is
+    # ~7x slower. A quadratic regression costs 10x+ more, so 2 s still bites.
+    with _hard_time_limit(traced_bound(2.0)):
         guard._hard_policy_verdict(command)
 
 
