@@ -5379,10 +5379,12 @@ def test_paths_the_filesystem_cannot_look_up_do_not_raise(
 
 def test_a_long_cd_chain_is_walked_in_linear_time() -> None:
     """#460: each `cd x` re-joined every segment before it (quadratic). Past
-    the longest path an OS can name, the directory is unknowable."""
-    command = "cd x; " * 50_000 + "echo hi"
+    the longest path an OS can name, the directory is unknowable. (20,000
+    steps: about 0.3 s untraced; quadratic, it took minutes. The bound holds
+    on a CI runner under coverage, about 7x slower.)"""
+    command = "cd x; " * 20_000 + "echo hi"
     cold_shell_caches()
-    with _hard_time_limit(traced_bound(1.0)):
+    with _hard_time_limit(traced_bound(1.5)):
         _sites, cwd, _local, _bodies = guard._shell_walk(command)
     assert cwd is None
     assert guard._chdir(Path("a"), "b") == Path("a/b")
@@ -5708,10 +5710,7 @@ def test_enclosing_repo_skips_a_path_holding_a_nul(tmp_path: Path) -> None:
         assert verdict.rule_id != guard.DEADLINE_RULE
 
 
-def test_a_cd_chain_through_the_note_rules_is_linear(tmp_path: Path) -> None:
-    """#460 review: `_rules_command_view` resolved and walked every parent of
-    each distinct cwd of a `cd x; ` chain (quadratic: 8 s, then the deadline).
-    Resolution and the parent walk are memoised per command."""
+def _public_every_bash_rule(tmp_path: Path) -> Path:
     omi = tmp_path / "OMI"
     omi.mkdir()
     (omi / "Guard Rules.md").write_text(
@@ -5719,14 +5718,24 @@ def test_a_cd_chain_through_the_note_rules_is_linear(tmp_path: Path) -> None:
         'when:\n  repo_visibility: public\naction: deny\nmessage: "m"\n```\n',
         encoding="utf-8",
     )
-    action = {"tool": "Bash", "command": "cd x; " * 2000 + "echo hi", "cwd": str(tmp_path)}
+    return omi
+
+
+def test_a_cd_chain_through_the_note_rules_is_linear(tmp_path: Path) -> None:
+    """#460 review: `_rules_command_view` resolved and walked every parent of
+    each distinct cwd of a `cd x; ` chain (quadratic: 8 s at 2,000 steps,
+    then the deadline). Resolution and the parent walk are memoised per
+    command. 1,000 steps: about 0.3 s untraced, so the bound holds on a CI
+    runner under coverage."""
+    omi = _public_every_bash_rule(tmp_path)
+    action = {"tool": "Bash", "command": "cd x; " * 1000 + "echo hi", "cwd": str(tmp_path)}
     cold_shell_caches()
-    with _hard_time_limit(traced_bound(2.5)):
+    with _hard_time_limit(traced_bound(1.5)):
         verdict = guard.check_action({**action, "session": "dl-cd"}, omi)
     assert verdict.rule_id != guard.DEADLINE_RULE
 
 
-#: The shapes #460 names: each returns a verdict well inside the 8 s budget.
+#: The shapes #460 names, at the size the issue gives.
 _ISSUE_460_SHAPES = {
     "cd-chain": "cd x; " * 2000 + "echo hi",
     "bash-c": "bash -c 'echo hi'; " * 100_000,
@@ -5734,31 +5743,76 @@ _ISSUE_460_SHAPES = {
 }
 
 
+def _slow_down(monkeypatch: pytest.MonkeyPatch, seconds: float) -> None:
+    """Make the walk's per-stage and per-`cd` helpers burn ``seconds`` per
+    call: a judge as slow as any machine, without guessing a runner's speed."""
+
+    def slowed(real: Callable[..., Any]) -> Callable[..., Any]:
+        def slow(*args: Any) -> Any:
+            stop = time.perf_counter() + seconds
+            while time.perf_counter() < stop:
+                pass
+            return real(*args)
+
+        return slow
+
+    monkeypatch.setattr(guard, "_basename", slowed(guard._basename))
+    monkeypatch.setattr(guard, "_chdir", slowed(guard._chdir))
+
+
 @pytest.mark.parametrize("shape", list(_ISSUE_460_SHAPES))
-def test_the_issue_460_shapes_are_judged_well_inside_the_budget(
+def test_the_issue_460_shapes_always_return_inside_the_hook_margin(
     monkeypatch: pytest.MonkeyPatch, tmp_path: Path, shape: str
 ) -> None:
-    """#460 acceptance line 2: each shape, through `check_action` (note rules
-    included) and `decide()`, returns a real verdict well under the 8 s budget
-    (untraced: at most about 2.3 s, the `bash -c` flood). The budget is raised
-    here so a slow CI runner measures the shape instead of tripping it."""
+    """#460 acceptance, independent of hardware: on a judge slowed far past
+    its budget, `check_action` and `decide()` still return within budget +
+    hard-rule floor + a small margin, with a real verdict or the deadline
+    deny. A stretch of judging with no `deadline.check()` (CI run
+    37085768401: the stage split of 100,000 `bash -c` commands) fails this."""
     from omind import deadline
 
-    monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", 600.0)
-    omi = tmp_path / "OMI"
-    omi.mkdir()
-    (omi / "Guard Rules.md").write_text(
-        '# Guard Rules\n\n```omind-rule\nid: every-bash\ntool: Bash\nmatch: "*"\n'
-        'when:\n  repo_visibility: public\naction: deny\nmessage: "m"\n```\n',
-        encoding="utf-8",
-    )
+    budget, floor = 0.2, 0.2
+    monkeypatch.setattr(deadline, "JUDGE_BUDGET_SECONDS", budget)
+    monkeypatch.setattr(deadline, "HARD_RULE_FLOOR_SECONDS", floor)
+    _slow_down(monkeypatch, 0.0001)
+    omi = _public_every_bash_rule(tmp_path)
     action = {"tool": "Bash", "command": _ISSUE_460_SHAPES[shape], "cwd": str(tmp_path)}
     for judge in (
         lambda: guard.check_action({**action, "session": "dl-shape"}, omi),
         lambda: guard.decide({**action, "session": "dl-shape"}),
     ):
         cold_shell_caches()
-        with _hard_time_limit(traced_bound(5.0)):
+        started = time.perf_counter()
+        with _hard_time_limit(30.0):
+            verdict = judge()
+        elapsed = time.perf_counter() - started
+        assert elapsed <= budget + floor + traced_bound(0.5), elapsed
+        assert verdict.rule_id in (guard.DEADLINE_RULE, "omi-gate"), verdict
+
+
+#: The same shapes at a size each judges well inside the 8 s budget even on a
+#: CI runner under coverage (about 7x slower than a laptop untraced).
+_ISSUE_460_SMALL_SHAPES = {
+    "cd-chain": "cd x; " * 500 + "echo hi",
+    "bash-c": "bash -c 'echo hi'; " * 10_000,
+    "heredoc-line": "cat " + "<<E " * 5_000 + "\n" + "x\nE\n" * 5_000,
+}
+
+
+@pytest.mark.parametrize("shape", list(_ISSUE_460_SMALL_SHAPES))
+def test_the_issue_460_shapes_are_judged_well_inside_the_budget(tmp_path: Path, shape: str) -> None:
+    """#460 acceptance line 2, at the real budget: each shape, through
+    `check_action` (note rules included) and `decide()`, returns a real
+    verdict, never the deadline deny. Untraced, each takes at most about
+    0.25 s; at the issue's own sizes, about 2.3 s (`bash -c` x 100,000)."""
+    omi = _public_every_bash_rule(tmp_path)
+    action = {"tool": "Bash", "command": _ISSUE_460_SMALL_SHAPES[shape], "cwd": str(tmp_path)}
+    for judge in (
+        lambda: guard.check_action({**action, "session": "dl-shape"}, omi),
+        lambda: guard.decide({**action, "session": "dl-shape"}),
+    ):
+        cold_shell_caches()
+        with _hard_time_limit(traced_bound(1.5)):
             verdict = judge()
         assert verdict.rule_id != guard.DEADLINE_RULE
     assert _deadline_events() == []

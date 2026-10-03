@@ -2094,6 +2094,7 @@ def _stage_ends(code: str, starts: list[int]) -> dict[int, int]:
     following = [*starts[1:], n]  # built once: per stage it was quadratic (#445)
     r = 0
     for idx, pos in enumerate(starts):
+        deadline.check()
         while real[r] <= pos:
             r += 1
         # A split-off redirect target ends at the next stage of any kind.
@@ -3432,6 +3433,7 @@ def _program_stages_cached(
     stages: list[tuple[str, tuple[str, ...], int, int]] = []
     # An escaped `\;` (find's -exec terminator) is a word, not a separator (#419).
     for seg in _SEGMENT_RE.finditer(code):
+        deadline.check()  # one per segment: a long chain stays inside the budget (#460)
         end = seg.end()
         while end < n and code[end].isspace():
             end += 1
