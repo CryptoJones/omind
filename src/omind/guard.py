@@ -2465,33 +2465,66 @@ def _rules_command_view(action: dict[str, Any]) -> rules_mod.CommandView | None:
             if site.cwd not in repos:
                 cands = [base] if site.cwd is None else [base / site.cwd, base]
                 repos[site.cwd] = _enclosing_repo(cands)
-        memo: dict[Path, Path | None] = {}
+        writers = _rules_write_finders(command, sites, base)
         return rules_mod.CommandView(
             local_text=local_text,
             sites=tuple(
                 rules_mod.CommandSite(
-                    text=site.text,
-                    repo=repos[site.cwd],
-                    opaque=site.opaque,
-                    write_repos=_rules_write_repos(site, base, memo),
+                    text=site.text, repo=repos[site.cwd], opaque=site.opaque, writes=writes
                 )
-                for site in sites
+                for site, writes in zip(sites, writers, strict=True)
             ),
         )
     except Exception:
         return None
 
 
-def _rules_write_repos(
-    site: _ShellSite, base: Path, memo: dict[Path, Path | None]
+def _rules_write_finders(
+    command: str, sites: tuple[_ShellSite, ...], base: Path
+) -> list[Callable[[], tuple[Path, ...]] | None]:
+    """For each site of ``command``, a deferred lookup of the repos it writes
+    into (#458), run only when a repo-scoped rule matches that site.
+
+    The targets come from the walk :func:`_bash_write_repo` reads, of the
+    command with its ``[[ … ]]`` / ``(( … ))`` comparisons blanked: the plain
+    walk drops the ``((`` and ``))`` that mark ``(( a > b ))`` as arithmetic,
+    so its sites cannot tell that ``>`` from a redirect. Both walks are cached.
+    A git site gets none: a redirect says where its output goes, not where it
+    acts, and its repo is already judged through ``cd``/``-C``. Every site gets
+    ``None`` when the two walks do not pair up (fail open)."""
+    stripped = _without_comparisons(command)
+    write_sites = sites if stripped == command else _shell_walk(stripped)[0]
+    if len(write_sites) != len(sites) or any(
+        a.program != b.program for a, b in zip(sites, write_sites, strict=True)
+    ):
+        return [None] * len(sites)
+    memo: dict[Path, Path | None] = {}
+    resolved: dict[tuple[str, Path | None], Path | None] = {}
+    seen: dict[tuple[str, str, Path | None], tuple[Path, ...]] = {}
+    return [
+        None
+        if site.program == "git"
+        else functools.partial(_unique_write_repos, site, base, memo, resolved, seen)
+        for site in write_sites
+    ]
+
+
+def _unique_write_repos(
+    site: _ShellSite,
+    base: Path,
+    memo: dict[Path, Path | None],
+    resolved: dict[tuple[str, Path | None], Path | None],
+    seen: dict[tuple[str, str, Path | None], tuple[Path, ...]],
 ) -> tuple[Path, ...]:
-    """The repos one site writes into, for the note rules (#458), without
-    duplicates. ``()`` on any failure: the site is still judged where it runs,
-    only its written repos are dropped (fail open)."""
-    try:
-        return tuple(dict.fromkeys(_site_write_repos(site, base, memo)))
-    except Exception:
-        return ()
+    """The repos one site writes into, without duplicates (#458). ``seen``
+    holds the answer per site text and directory, shared by every site of one
+    command: a rule matching all 100,000 copies of ``echo x > f;`` reads the
+    targets once. Raises on a malformed site: :class:`rules.CommandSite` then
+    drops them (fail open)."""
+    key = (site.program, site.text, site.cwd)
+    if key not in seen:
+        seen[key] = tuple(dict.fromkeys(_site_write_repos(site, base, memo, resolved)))
+    return seen[key]
 
 
 def _repo_has_remote(repo: Path) -> bool:
@@ -3026,8 +3059,9 @@ def _bash_write_repo(action: dict[str, Any]) -> Path | None:
     try:
         base = _action_base_dir(action)
         memo: dict[Path, Path | None] = {}
+        resolved: dict[tuple[str, Path | None], Path | None] = {}
         for site in _shell_walk(_without_comparisons(_action_command(action)))[0]:
-            for found in _site_write_repos(site, base, memo):
+            for found in _site_write_repos(site, base, memo, resolved):
                 return found
     except Exception:
         return None
@@ -3035,22 +3069,30 @@ def _bash_write_repo(action: dict[str, Any]) -> Path | None:
 
 
 def _site_write_repos(
-    site: _ShellSite, base: Path, memo: dict[Path, Path | None]
+    site: _ShellSite,
+    base: Path,
+    memo: dict[Path, Path | None],
+    resolved: dict[tuple[str, Path | None], Path | None],
 ) -> Iterator[Path]:
     """The repo each file one simple command writes or removes lands in, in
-    order, as the Write tool's path picks its repo (#448, #458). ``base`` is
-    the shell's starting directory; ``memo`` is shared by every site of one
-    command (see :func:`_dir_repo`). A target in no repo yields nothing. Raises
-    on a malformed site: callers fail open."""
+    order, as the Write tool's path picks its repo (#448, #458). ``site``
+    comes from the walk of the command with its comparisons blanked
+    (:func:`_without_comparisons`). ``base`` is the shell's starting
+    directory; ``memo`` (see :func:`_dir_repo`) and ``resolved`` (each target
+    word's resolved path, per directory) are shared by every site of one
+    command, so a target repeated 20,000 times resolves once. A target in no
+    repo yields nothing. Raises on a malformed site: callers fail open."""
     cwd = None if site.cwd is None else base / site.cwd
-    text = _without_comparisons(site.text)
-    targets = _redirect_targets(text)
+    targets = _redirect_targets(site.text)
     if site.program in _FILE_OPS:
-        targets += _file_op_targets(site.program, text)
+        targets += _file_op_targets(site.program, site.text)
     elif site.program in _EDITOR_SWITCHES:
-        targets += _in_place_edit_targets(site.program, text)
+        targets += _in_place_edit_targets(site.program, site.text)
     for word in targets:
-        target = _write_target(word, cwd)
+        key = (word, cwd)
+        if key not in resolved:
+            resolved[key] = _write_target(word, cwd)
+        target = resolved[key]
         found = None if target is None else _dir_repo(target, memo)
         if found is not None:
             yield found

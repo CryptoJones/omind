@@ -4476,7 +4476,7 @@ _LONG_REPEATS_445 = {"assignments": "x=1;", "bash-c": "bash -c 'echo hi; '"}
 
 @pytest.mark.parametrize("count", [10_000, 100_000])
 @pytest.mark.parametrize("shape", list(_LONG_REPEATS_445.values()), ids=list(_LONG_REPEATS_445))
-def test_long_repeats_are_judged_within_a_second(shape: str, count: int) -> None:
+def test_long_repeats_are_judged_within_a_second(shape: str, count: int, tmp_path: Path) -> None:
     """Every judge of one long command, each from cold caches, under the
     SIGALRM bound: the walk, the hard rules' subjects and verdict, and the
     repo-work classifier. The bound is 1 s on a plain interpreter and 3 s
@@ -4484,11 +4484,23 @@ def test_long_repeats_are_judged_within_a_second(shape: str, count: int) -> None
     `--cov` on runners about 2.5x slower than a laptop, where a flat 1 s
     would flake; untraced, every judge here takes at most about 0.35 s."""
     command = shape * count
+    # The note-rule view and verdict (#458): a repo-scoped rule matching every
+    # site, judged from a directory in no repo.
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    (omi / "Guard Rules.md").write_text(
+        '# Guard Rules\n\n```omind-rule\nid: every-bash\ntool: Bash\nmatch: "*"\n'
+        'when:\n  repo_visibility: public\naction: deny\nmessage: "m"\n```\n',
+        encoding="utf-8",
+    )
+    action = {"tool": "Bash", "command": command, "cwd": tmp_path.as_posix()}
     judges: list[Callable[[], object]] = [
         lambda: guard._shell_walk(command),
         lambda: guard._hard_rule_subjects(command),
         lambda: guard._hard_policy_verdict(command),
         lambda: guard._is_repo_sensitive_action({"tool": "Bash", "command": command}),
+        lambda: guard._rules_command_view(action),
+        lambda: guard._note_rules_verdict(action, omi),
     ]
     for judge in judges:
         cold_shell_caches()

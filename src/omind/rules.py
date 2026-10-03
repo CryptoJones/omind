@@ -56,7 +56,8 @@ import os
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -791,9 +792,22 @@ class CommandSite:
     #: The program runs a quoted argument as code the guard did not unwrap
     #: (``su -c``, a python ``-c`` calling ``os.system``): its text fails closed.
     opaque: bool = False
-    #: The repos the files this command writes or removes land in, each the
-    #: repo the Write tool on that path would be judged against (#458).
-    write_repos: tuple[Path, ...] = ()
+    #: Finds the repos the files this command writes or removes land in
+    #: (#458). Called only when a repo-scoped rule matches this command, so a
+    #: long command no rule matches never pays for its write targets.
+    writes: Callable[[], tuple[Path, ...]] | None = field(default=None, compare=False, repr=False)
+
+    @functools.cached_property
+    def write_repos(self) -> tuple[Path, ...]:
+        """The repos this command writes into, each the repo the Write tool on
+        that path would be judged against (#458). ``()`` when unknown or on
+        any failure: the command is still judged where it runs (fail open)."""
+        if self.writes is None:
+            return ()
+        try:
+            return tuple(self.writes())
+        except Exception:
+            return ()
 
 
 @dataclass(frozen=True)
