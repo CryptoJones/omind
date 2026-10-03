@@ -3482,6 +3482,57 @@ def test_windows_tokenizing_leaves_benign_stdin_operands_alone(command: str) -> 
     assert guard._hard_policy_verdict(command) is None
 
 
+#: #451: a wrapper switch cluster whose last letter takes a value consumes the
+#: next word, as getopt (and `guard._switch_width`) reads it, so that word is
+#: not mistaken for the program.
+CLUSTERED_WRAPPER_HARD_COMMANDS = (
+    "env -iC /x sudo id",
+    "env -iu VAR sudo id",
+    "env -iu VAR -C /x sudo id",
+    "xargs -0I {} sudo id",
+    "xargs -0rI {} sudo id",
+    "time -po /x sudo id",
+    "caffeinate -it 5 sudo id",
+    "/usr/bin/env -iC /x sudo id",
+    "true && env -iC /x sudo id",
+    # EM review: no value letter before the last one, so `C` takes `u`
+    # (env -Cu) and `I` takes the attached `{}` (xargs -0I{}).
+    "env -Cu sudo id",
+    "xargs -0I{} sudo id",
+    # Pinned: these already passed before #451.
+    "env -iC/x sudo id",
+    "nice -n5 sudo id",
+    "timeout -k5 10 sudo id",
+    "timeout -sKILL 5 sudo id",
+    "stdbuf -oL sudo id",
+    "ionice -c3 sudo id",
+    "sudo -Eu root id",
+)
+
+
+@pytest.mark.parametrize("command", CLUSTERED_WRAPPER_HARD_COMMANDS)
+def test_hard_rules_read_wrapper_clusters_getopt_style(command: str) -> None:
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # The value-taking letter's word is a value, not the program.
+        "env -iC sudo echo hi",
+        "xargs -0I sudo echo hi",
+        "env -iC /x echo sudo",
+        "nice -n5 grep sudo f",
+        "timeout -k5 10 echo sudo",
+        "command -v sudo",
+        "tmux new -s sudo-test",
+    ],
+)
+def test_wrapper_clusters_leave_benign_commands_alone(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
 @pytest.mark.parametrize("tokenizing", ["posix", "windows"])
 def test_unclosed_process_substitution_is_still_judged(
     tokenizing: str, request: pytest.FixtureRequest
@@ -3550,6 +3601,9 @@ def test_windows_shell_tokens_join_mid_word_quotes_and_keep_backslashes(
         "cat <<E | bash\nx\nE\n" * 500,
         "bash -c '$@' _ x; " * 1000,
         "env -S x; " * 2000,
+        # #451 review: runs of value-taking clusters stay linear too.
+        "env -iC /x " * 400 + "x",
+        "xargs -0I {} " * 400 + "x",
     ],
 )
 def test_wrapper_runs_cannot_backtrack_the_hard_rules(command: str) -> None:
@@ -3650,6 +3704,22 @@ def test_stage_parser_reads_the_same_wrapper_shapes(command: str) -> None:
     stages = guard._program_stages(policy.shell_code_text(command), command)
     assert [program for program, *_ in stages] == ["sed"]
     assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+@pytest.mark.parametrize("command", CLUSTERED_WRAPPER_HARD_COMMANDS)
+def test_stage_parser_agrees_with_hard_rules_on_wrapper_clusters(command: str) -> None:
+    """#451 review: the hard rules and ``_program_stages`` read a wrapper
+    cluster the same way, so both find ``sudo`` behind the wrappers. sudo is
+    itself a stage wrapper, so the stage parser lands on the ``id`` it runs; and
+    with a plain program in sudo's place, the stage parser reaches that word."""
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert (stages[-1][0], stages[-1][1]) == ("id", [])
+    if not command.startswith("sudo "):
+        swapped = command.replace("sudo id", "sed -i s/a/b/ f")
+        swapped_stages = guard._program_stages(policy.shell_code_text(swapped), swapped)
+        assert swapped_stages[-1][0] == "sed"
 
 
 # --- #434: repo-work classifier gaps -----------------------------------------

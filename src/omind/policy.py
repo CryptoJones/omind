@@ -81,6 +81,8 @@ _HEREDOC_OWNER_SKIP = frozenset({"env", "command", "exec", "nohup", "time", "bui
 #: value is the wrapper's switches that take a SEPARATE argument, so
 #: ``sudo -u bob sed -i`` and ``xargs -I {} sed -i`` still reach the editor.
 #: One table for the guard's stage parser and :data:`_CMD_WRAPPERS` (#430).
+#: No listed switch takes an OPTIONAL value (getopt ``x::``); adding one needs
+#: its own branch in ``_wrapper_pattern`` and ``guard._switch_width`` (#451).
 STAGE_WRAPPERS: dict[str, frozenset[str]] = {
     **{name: frozenset() for name in _HEREDOC_OWNER_SKIP},
     **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
@@ -121,10 +123,23 @@ def _wrapper_pattern(name: str, takes_arg: frozenset[str]) -> str:
     Each word can match only one way, so a run of wrapper words cannot make the
     pattern backtrack exponentially: a value-taking switch is kept out of the
     generic ``-…`` branch and always consumes the next word, and the duration
-    must start with a digit where every switch starts with ``-``."""
+    must start with a digit where every switch starts with ``-``.
+
+    A short cluster reads like getopt, as ``guard._switch_width`` reads it
+    (#451): the first value-taking letter takes the rest of the word, or the
+    next word when it ends the cluster, so ``env -iC /x sudo id`` and
+    ``xargs -0I {} sudo id`` still reach the program. A cluster ending in a
+    value-taking letter holds no other one before it, so it matches only the
+    value branch."""
     switch = r"-[^\svV]*" if name in _LOOKUP_WRAPPERS else r"-\S*"
     if takes_arg:
-        names = "|".join(re.escape(opt) for opt in sorted(takes_arg))
+        long_names = sorted(opt for opt in takes_arg if len(opt) != 2)
+        letters = "".join(sorted(opt[1] for opt in takes_arg if len(opt) == 2))
+        valued = [re.escape(opt) for opt in long_names]
+        if letters:
+            letter_class = re.escape(letters)
+            valued.append(rf"-(?!-)[^\s{letter_class}]*[{letter_class}]")
+        names = "|".join(valued)
         switch = rf"(?:{names})[ \t]+\S+|(?!(?:{names})(?:\s|$)){switch}"
     switches = rf"(?:[ \t]+(?:{switch}))*"
     pattern = r"(?:[./][^\s;&|`()]*/)?" + re.escape(name) + switches
