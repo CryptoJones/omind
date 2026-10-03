@@ -1472,6 +1472,79 @@ def test_matching_push_to_an_unfetched_remote_or_url_judges_every_branch(
         assert _denied(omi, command, repo, monkeypatch), command
 
 
+@pytest.mark.parametrize(
+    "command",
+    [
+        "git push --al origin",
+        "git push --bra origin",
+        "git push --b origin",
+        "git push --mirr origin",
+        "git push --m",
+        "git push origin 'refs/heads/*:refs/heads/*'",
+        "git push origin '+refs/heads/*:refs/heads/*'",
+        "git push origin '*:*'",
+        "git push origin 'refs/heads/ma*:refs/heads/ma*'",
+    ],
+)
+def test_prefix_and_glob_pushes_from_feature_branch_are_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch, command: str
+) -> None:
+    """#443: a unique prefix of `--all`/`--branches`/`--mirror` is that option,
+    and a glob refspec sends every local ref its source matches, `main` too."""
+    omi, repo = remote_has_main
+    assert _denied(omi, command, repo, monkeypatch), command
+
+
+def test_ambiguous_prefix_and_feature_glob_are_allowed(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#443: `--a` (all/atomic) is ambiguous to git, so it stays a plain flag;
+    a glob whose source matches only `feature/*` never reaches `main`."""
+    omi, repo = remote_has_main
+    for command in (
+        "git push --a origin",
+        "git push --at origin feature/x",
+        "git push --repo=origin",
+        "git push origin 'refs/heads/feature/*:refs/heads/feature/*'",
+        "git push origin 'feature/*:feature/*'",  # git matches full refnames only
+        "git push origin '^refs/heads/main' feature/x",
+    ):
+        assert not _denied(omi, command, repo, monkeypatch), command
+
+
+def test_configured_glob_push_refspec_is_denied(
+    remote_has_main: tuple[Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#443: a stored `remote.origin.push` glob makes a bare push send `main`."""
+    omi, repo = remote_has_main
+    _git(repo, "config", "remote.origin.push", "refs/heads/feature/*:refs/heads/feature/*")
+    for command in ("git push", "git push origin"):
+        assert not _denied(omi, command, repo, monkeypatch), command
+    _git(repo, "config", "remote.origin.push", "+refs/heads/*:refs/heads/*")
+    for command in ("git push", "git push origin"):
+        assert _denied(omi, command, repo, monkeypatch), command
+
+
+def test_glob_lookup_failure_judges_the_destination_literally(
+    remote_has_main: tuple[Path, Path], tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """AGENTS.md invariant 2: when git cannot list refs the glob fails open to
+    its destination read literally, as before #443."""
+    omi, repo = remote_has_main
+    not_a_repo = tmp_path / "plain-443"
+    not_a_repo.mkdir()
+    assert rules._glob_branches(not_a_repo, "refs/heads/*", "refs/heads/*") == ["*"]
+    command = "git push origin 'refs/heads/*:refs/heads/*'"
+    assert rules.evaluate(_action(command), omi, not_a_repo) is None
+
+    def no_git(*args: object, **kwargs: object) -> object:
+        raise FileNotFoundError("git")
+
+    monkeypatch.setattr(rules.subprocess, "run", no_git)
+    assert rules._glob_branches(repo, "refs/heads/*", "refs/heads/*") == ["*"]
+    assert rules.evaluate(_action(command), omi, repo) is None
+
+
 @pytest.mark.parametrize("count", [10_000, 100_000])
 @pytest.mark.parametrize("shape", ["x=1;", "bash -c 'echo hi; '"], ids=["assignments", "bash-c"])
 def test_long_repeats_are_judged_within_a_second(

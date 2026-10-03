@@ -7,6 +7,21 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **The repo-scoped push rules see unique-prefix push options and glob refspecs
+  ([#443](https://github.com/CryptoJones/omind/issues/443)).** git takes any
+  unique prefix of a long option, so `git push --al origin` is `--all` and
+  `git push --mirr origin` is `--mirror`; the rules read them as a bare push of
+  the checked-out branch, and a push from `feature/x` reached a public `main`.
+  Push options now resolve by unique prefix over git push's own long options
+  (`policy._long_prefixes`); an ambiguous prefix (`--a`) stays a plain flag.
+  - A refspec holding `*` (`'refs/heads/*:refs/heads/*'`, `'*:*'`) is judged
+    against every local ref its source matches, by full refname as git matches
+    it, mapped to the destination. A configured `remote.<name>.push` glob is
+    judged the same way for a bare `git push`. Negative (`^`) refspecs are
+    skipped. When git cannot list refs, the destination is read literally, as
+    before.
+
 ## [10.2.28] - 2026-10-02
 
 ### Fixed
