@@ -85,6 +85,8 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   a quoted switch value with blanks (`env -iC "/a b" sudo id`, `xargs -0I '{} x' sudo id`) is one word
   to the command-position regex and the stage parser, and a long value-taking switch matches by unique
   prefix (`env --chd /x sudo id`) in the regex and `_switch_width`. An ambiguous prefix stays a flag.
+  Every value-taking wrapper switch has its long twin (`timeout --kill-after`, `xargs --max-args`, …),
+  and both parsers share one shell-word definition, so `\"` and `a\ b` read the same in each.
 
 ### Shipped — 2026-10-02 (v10.2.26)
 

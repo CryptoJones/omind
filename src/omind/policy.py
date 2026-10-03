@@ -86,19 +86,36 @@ _HEREDOC_OWNER_SKIP = frozenset({"env", "command", "exec", "nohup", "time", "bui
 STAGE_WRAPPERS: dict[str, frozenset[str]] = {
     **{name: frozenset() for name in _HEREDOC_OWNER_SKIP},
     **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},
-    "xargs": frozenset({"-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"}),
-    "sudo": frozenset({"-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"}),
+    # #464 review: each value-taking short switch with its long twin. Not
+    # `--replace`, `--eof` or `--max-lines`: their value is OPTIONAL and only
+    # ever attached (`--eof=X`), so the next word is the command.
+    "xargs": frozenset(
+        {
+            *("-I", "-n", "-P", "-L", "-s", "-d", "-E", "-a"),
+            *("--max-args", "--max-procs", "--max-chars", "--delimiter", "--arg-file"),
+            "--process-slot-var",
+        }
+    ),
+    "sudo": frozenset(
+        {
+            *("-u", "-g", "-C", "-h", "-p", "-U", "-r", "-t", "-D"),
+            *("--user", "--group", "--close-from", "--host", "--prompt"),
+            *("--other-user", "--role", "--type", "--chdir"),
+        }
+    ),
     # Not `-S`: its value is itself a command (`env -S sudo id`), so the word
     # after it stays in command position (#430 review).
     "env": frozenset({"-u", "-C", "--unset", "--chdir"}),
-    "nice": frozenset({"-n"}),
-    "timeout": frozenset({"-s", "-k"}),
-    "time": frozenset({"-f", "-o"}),
+    "nice": frozenset({"-n", "--adjustment"}),
+    "timeout": frozenset({"-s", "-k", "--signal", "--kill-after"}),
+    "time": frozenset({"-f", "-o", "--format", "--output"}),
     # #434: wrappers that also exec their trailing command; #444 review:
     # `stdbuf --output L sudo id`.
     "stdbuf": frozenset({"-i", "-o", "-e", "--input", "--output", "--error"}),
     "caffeinate": frozenset({"-t", "-w"}),
-    "ionice": frozenset({"-c", "-n", "-p", "-P", "-u"}),
+    "ionice": frozenset(
+        {"-c", "-n", "-p", "-P", "-u", "--class", "--classdata", "--pid", "--pgid", "--uid"}
+    ),
     "chronic": frozenset(),
     # #444: execs the next word (`setsid sudo id`).
     "setsid": frozenset(),
@@ -115,16 +132,25 @@ _LOOKUP_WRAPPERS = frozenset({"command", "builtin"})
 def _word_piece(excluded: str = "") -> str:
     """One piece of a shell word for the hard rules (#464): a quoted run
     (``"/a b"``, ``'{} x'``), a backslash with the character it escapes (``a\\
-    b``), or a character that is none of blank, quote, backslash or
-    ``excluded``. Each piece starts with a different character, so a word
-    splits into pieces one way only and cannot make a search backtrack. No
-    piece crosses a newline, as ``_cmd_position_cost`` assumes."""
-    return r"""(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|\\.|[^\s"'\\""" + excluded + "])"
+    b``), or a character that is none of blank, quote or backslash. A letter
+    in ``excluded`` is no piece, bare or escaped. Each piece starts with a
+    different character, so a word splits into pieces one way only and cannot
+    make a search backtrack. No piece crosses a newline, as
+    ``_cmd_position_cost`` assumes; so a backslash-newline continuation inside
+    a word (``a\\<newline>b``) is not joined (out of scope for #464)."""
+    return rf"""(?:"(?:[^"\\\n]|\\.)*"|'[^'\n]*'|\\[^\n{excluded}]|[^\s"'\\{excluded}])"""
 
 
 #: A shell word's piece, and a whole word (a switch's or assignment's value).
 _WORD_PIECE = _word_piece()
 _WORD = _WORD_PIECE + "+"
+#: The words of a text: runs of :data:`_WORD_PIECE`, or of a quote or a
+#: backslash with no partner, an ordinary character there. The one definition
+#: of a shell word that the hard rules, ``guard``'s stage parser and
+#: :func:`_cmd_position_cost` share (#464 review), so ``a\ b``, ``"/a b"`` and
+#: ``\"`` split the same way in all three.
+SHELL_PIECE_RE = re.compile(_WORD_PIECE + r"""|["'\\]""")
+SHELL_WORD_RE = re.compile("(?:" + _WORD_PIECE + r"""|["'\\])+""")
 
 
 def _long_prefixes(names: list[str]) -> list[str]:
@@ -165,7 +191,13 @@ def _wrapper_pattern(name: str, takes_arg: frozenset[str]) -> str:
     "/a b" sudo id``, #464), and a long value-taking switch matches by any
     unambiguous prefix (``env --chd /x sudo id``), as ``guard._switch_width``
     reads it."""
-    switch = "-" + _word_piece("vV" if name in _LOOKUP_WRAPPERS else "") + "*"
+    switch = "-" + _WORD_PIECE + "*"
+    if name in _LOOKUP_WRAPPERS:
+        # An escaped `\v` is a `v` too (`command -\v sudo`, #464 review). A
+        # quoted run stays a switch piece: the search reads it blanked, so
+        # `-"v"` cannot be told from `-"p"`, which runs the program; both are
+        # judged, failing closed.
+        switch = "-" + _word_piece("vV") + "*"
     if takes_arg:
         long_names = _long_prefixes(sorted(opt for opt in takes_arg if len(opt) != 2))
         letters = "".join(sorted(opt[1] for opt in takes_arg if len(opt) == 2))
@@ -249,43 +281,61 @@ def _cmd_position_cost(text: str) -> int:
     skips a chain of assignment and wrapper words, each a blank-free run
     joined by blanks; so the bound sums, over the starts, the extent of the
     chain each could skip. A word counts as a link unless it cannot be an
-    assignment, a wrapper, a switch or a switch's value, so the bound only
-    overestimates. A word holding a quote or a backslash may open a quoted
-    run or escape a blank that a link reads past (``env -C "/a b"``, #464),
-    so a chain that enters it, or an assignment after a separator inside it,
-    is bounded by the end of its line instead: no word piece crosses a
-    newline. Linear; a short text
+    assignment, a wrapper, a switch, a switch's value or a quoted duration, so
+    the bound only overestimates.
+
+    Words are :data:`SHELL_WORD_RE`'s, the search's own (#464 review), so a
+    quoted value with blanks in it (``env -C "/a b"``) is one word and its
+    chain is bounded as tightly as any other. Two places read past a word's
+    end, and are bounded by the end of its line, since no word piece crosses
+    a newline: a separator inside a quoted run (``"$(a;b)"``), where a chain
+    starting after it may pair the quotes another way; and a quote with no
+    partner, whose run is tried to the end of the line. Linear; a short text
     returns its trivial bound unscanned."""
     n = len(text)
     if n * n <= CMD_SEARCH_BUDGET:
         return n * n
-    spans = [(m.start(), m.end()) for m in _WORD_SPAN_RE.finditer(text)]
+    spans = [(m.start(), m.end()) for m in SHELL_WORD_RE.finditer(text)]
     count = len(spans)
     # joined[i]: word i + 1 follows word i across blanks only (`[ \t]+`).
     joined = [
         bool(_CHAIN_GAP_RE.fullmatch(text, spans[i][1], spans[i + 1][0])) for i in range(count - 1)
     ] + [False]
-    newlines = [m.start() for m in re.finditer("\n", text)]
+    newlines: list[int] = []
 
     def line_end(pos: int) -> int:
-        k = bisect.bisect_left(newlines, pos)
-        return newlines[k] if k < len(newlines) else n
+        if not newlines:
+            newlines.extend(m.start() for m in re.finditer("\n", text))
+            newlines.append(n)
+        return newlines[bisect.bisect_left(newlines, pos)]
 
-    quoted = [bool(_QUOTE_RE.search(text, start, end)) for start, end in spans]
-    # reach[i]: how far a chain that enters word i can run.
-    reach = [n] * (count + 1)
-    for i in range(count - 1, -1, -1):
-        start, end = spans[i]
-        link = bool(_CHAIN_LINK_RE.match(text, start)) or (
+    # far[i]: where a search reading word i may stop, past its end for an
+    # unpartnered quote. inner[i]: its separators inside a quoted run.
+    far = [end for _start, end in spans]
+    inner = [0] * count
+    for i, (start, end) in enumerate(spans):
+        if not _QUOTE_RE.search(text, start, end):
+            continue
+        for piece in SHELL_PIECE_RE.finditer(text, start, end):
+            if piece.group() in ('"', "'"):
+                far[i] = line_end(end)
+            elif piece.group()[0] in "\"'":
+                inner[i] += sum(piece.group().count(ch) for ch in _SEPARATOR_CHARS)
+    # link[i]: word i may be a link in a chain.
+    link = [False] * count
+    for i, (start, _end) in enumerate(spans):
+        link[i] = bool(_CHAIN_LINK_RE.match(text, start)) or (
             i > 0
             and (
                 text[spans[i - 1][0]] == "-"  # a switch's value
-                or (quoted[i] and text.endswith("timeout", *spans[i - 1]))  # a duration
+                # `timeout -s K "5"`: a quoted duration ends a chain of links.
+                or (text[start] in "\"'" and link[i - 1] and joined[i - 1])
             )
         )
-        reach[i] = reach[i + 1] if link and joined[i] else end
-        if link and quoted[i]:
-            reach[i] = max(reach[i], line_end(end))
+    # reach[i]: how far a chain that enters word i can run.
+    reach = [n] * (count + 1)
+    for i in range(count - 1, -1, -1):
+        reach[i] = max(reach[i + 1] if link[i] and joined[i] else spans[i][1], far[i])
     cost = n
     previous_end = 0
     for i, (start, end) in enumerate(spans):
@@ -294,10 +344,9 @@ def _cmd_position_cost(text: str) -> int:
         # A separator inside it starts a chain at the rest of it.
         seps = sum(text.count(ch, start, end) for ch in _SEPARATOR_CHARS if ch != "\n")
         if seps:
-            rest = reach[i + 1] if joined[i] else end
-            if quoted[i] and "=" in text[start:end]:
-                rest = max(rest, line_end(end))  # `;X="a b"`: an assignment
-            cost += seps * (rest - start)
+            rest = max(reach[i + 1] if joined[i] else end, far[i])
+            cost += (seps - inner[i]) * (rest - start)
+            cost += inner[i] * (max(rest, line_end(end)) - start)
         previous_end = end
     return cost
 

@@ -3311,11 +3311,11 @@ def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int,
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_]\w*=")
 
 
-#: A word of a stage segment: blank-free runs and quoted runs, so a quoted
-#: value with blanks in it (``env -C "/a b" sudo``, blanked to ``"   "`` by
-#: ``shell_code_text``) stays one word, as the hard rules read it (#464). A
-#: quote with no partner in the segment is an ordinary character.
-_STAGE_WORD_RE = re.compile(r"""(?:"[^"]*"|'[^']*'|[^\s"']|["'])+""")
+#: A word of a stage segment: the hard rules' own word (#464 review), so a
+#: quoted value with blanks in it (``env -C "/a b" sudo``, blanked to ``"   "``
+#: by ``shell_code_text``) or an escaped blank (``a\ b``) stays one word, and
+#: an escaped quote (``\"``) opens no quoted run.
+_STAGE_WORD_RE = policy.SHELL_WORD_RE
 
 
 def _word_offset(text: str, words: list[str], offsets: list[int], k: int) -> int:

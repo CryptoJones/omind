@@ -29,10 +29,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     in the regex, in `_switch_width` and in `env --chdir` tracking. An
     ambiguous prefix stays a plain flag. `env --chd sudo echo hi` is no longer
     a false positive.
-  - The stage parser keeps a quoted run as one word, so it lands on the same
-    program as the hard rules; the parity test covers the new shapes.
-  - `_cmd_position_cost` bounds a chain through a quoted or escaped word by
-    the end of its line, since no word piece crosses a newline.
+  - The wrapper table lists the long twin of every value-taking switch:
+    `timeout --signal`/`--kill-after`, `nice --adjustment`, `ionice
+    --class`/`--classdata`/`--pid`/`--pgid`/`--uid`, `time
+    --format`/`--output`, `xargs --max-args`/`--max-procs`/`--max-chars`/
+    `--delimiter`/`--arg-file`/`--process-slot-var`, and sudo's. GNU xargs'
+    `--replace`, `--eof` and `--max-lines` take an OPTIONAL value (attached
+    with `=` only), so the word after them is the command and they stay out.
+  - The hard rules, the stage parser and the search-cost bound share one
+    definition of a shell word (`policy.SHELL_WORD_RE`). So an escaped quote
+    (`env -u \" bash -c 'sudo id' x "y"`) opens no quoted run that would hide
+    the `bash -c` stage, and an escaped blank (`env -C a\ b sudo id`) joins
+    its word in both parsers; the parity test covers both.
+  - `_cmd_position_cost` reads those same words, so a quoted value is one
+    word and its chain is bounded as tightly as any other (`A="x" true; ` ×
+    700 is judged, not denied as too complex). Only a separator inside a
+    quoted run (`"$(a;b)"`) and a quote with no partner are bounded by the
+    end of their line. A quoted duration after a switch value (`timeout -s K
+    "5"`) counts as a link, so the bound still only overestimates.
+  - `command -\v sudo` is a lookup, as `command -v sudo` is. A quoted lookup
+    switch (`command -"v"`) is still judged: the search reads it blanked and
+    cannot tell it from `-"p"`, which runs the program.
+  - Out of scope: a backslash-newline continuation inside a wrapper value
+    (`env -C a\<newline>b sudo id`, missed on main too). No word piece crosses
+    a newline, which the search-cost bound relies on; an `xfail(strict)`
+    test pins it.
 
 ## [10.2.26] - 2026-10-02
 
