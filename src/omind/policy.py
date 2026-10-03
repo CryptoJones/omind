@@ -81,6 +81,8 @@ _HEREDOC_OWNER_SKIP = frozenset({"env", "command", "exec", "nohup", "time", "bui
 #: value is the wrapper's switches that take a SEPARATE argument, so
 #: ``sudo -u bob sed -i`` and ``xargs -I {} sed -i`` still reach the editor.
 #: One table for the guard's stage parser and :data:`_CMD_WRAPPERS` (#430).
+#: No listed switch takes an OPTIONAL value (getopt ``x::``); adding one needs
+#: its own branch in ``_wrapper_pattern`` and ``guard._switch_width`` (#451).
 STAGE_WRAPPERS: dict[str, frozenset[str]] = {
     **{name: frozenset() for name in _HEREDOC_OWNER_SKIP},
     **{kw: frozenset() for kw in ("do", "then", "else", "elif", "if", "while", "until", "{", "!")},

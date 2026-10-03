@@ -3495,6 +3495,10 @@ CLUSTERED_WRAPPER_HARD_COMMANDS = (
     "caffeinate -it 5 sudo id",
     "/usr/bin/env -iC /x sudo id",
     "true && env -iC /x sudo id",
+    # EM review: no value letter before the last one, so `C` takes `u`
+    # (env -Cu) and `I` takes the attached `{}` (xargs -0I{}).
+    "env -Cu sudo id",
+    "xargs -0I{} sudo id",
     # Pinned: these already passed before #451.
     "env -iC/x sudo id",
     "nice -n5 sudo id",
@@ -3597,6 +3601,9 @@ def test_windows_shell_tokens_join_mid_word_quotes_and_keep_backslashes(
         "cat <<E | bash\nx\nE\n" * 500,
         "bash -c '$@' _ x; " * 1000,
         "env -S x; " * 2000,
+        # #451 review: runs of value-taking clusters stay linear too.
+        "env -iC /x " * 400 + "x",
+        "xargs -0I {} " * 400 + "x",
     ],
 )
 def test_wrapper_runs_cannot_backtrack_the_hard_rules(command: str) -> None:
@@ -3697,6 +3704,22 @@ def test_stage_parser_reads_the_same_wrapper_shapes(command: str) -> None:
     stages = guard._program_stages(policy.shell_code_text(command), command)
     assert [program for program, *_ in stages] == ["sed"]
     assert guard._is_repo_sensitive_action({"tool": "Bash", "command": command})
+
+
+@pytest.mark.parametrize("command", CLUSTERED_WRAPPER_HARD_COMMANDS)
+def test_stage_parser_agrees_with_hard_rules_on_wrapper_clusters(command: str) -> None:
+    """#451 review: the hard rules and ``_program_stages`` read a wrapper
+    cluster the same way, so both find ``sudo`` behind the wrappers. sudo is
+    itself a stage wrapper, so the stage parser lands on the ``id`` it runs; and
+    with a plain program in sudo's place, the stage parser reaches that word."""
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert (stages[-1][0], stages[-1][1]) == ("id", [])
+    if not command.startswith("sudo "):
+        swapped = command.replace("sudo id", "sed -i s/a/b/ f")
+        swapped_stages = guard._program_stages(policy.shell_code_text(swapped), swapped)
+        assert swapped_stages[-1][0] == "sed"
 
 
 # --- #434: repo-work classifier gaps -----------------------------------------
