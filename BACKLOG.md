@@ -11,8 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
-  follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428. Also adds the Nebraska banner and drops the stale Codeberg badge.
 - [ ] **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428)) — _enhancement (infra)_ —
@@ -78,6 +76,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — unreleased
+
+- [x] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
+  a unique prefix of a git push long option is read as that option (`--al`/`--bra` are `--all`,
+  `--mirr` is `--mirror`); a glob refspec, on the command line or in `remote.<name>.push`, is judged
+  against the local refs its source matches, mapped to the destination. Fails open to the literal
+  destination.
 
 ### Shipped — 2026-10-02 (v10.2.28)
 
