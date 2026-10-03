@@ -55,6 +55,9 @@ KIND_VIOLATION = "violation"
 KIND_GATE_RESET = "gate-reset"
 #: A hard rule denied a command too costly to judge, not a real match (#445).
 KIND_BUDGET_EXCEEDED = "budget-exceeded"
+#: Judging one action ran past the guard's wall-clock deadline (#460): the
+#: hard rules denied it (``deny``) or the soft gates waved it on (``fail-open``).
+KIND_DEADLINE_EXCEEDED = "deadline-exceeded"
 
 
 def compliance_log_path() -> Path:

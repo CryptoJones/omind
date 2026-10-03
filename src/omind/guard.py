@@ -53,7 +53,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, TextIO
 
-from omind import compliance, filelock, paths, policy
+from omind import compliance, deadline, filelock, paths, policy
 
 if TYPE_CHECKING:
     from omind import rules as rules_mod
@@ -1531,10 +1531,11 @@ def _is_global_config_path(raw: str) -> bool:
         p = Path(raw).expanduser()
         if not p.is_absolute():
             p = Path.cwd() / p
-    except (OSError, RuntimeError):
+    except (OSError, RuntimeError, ValueError):
         return False
     candidates = {p}
-    with contextlib.suppress(OSError):
+    # An embedded NUL makes resolve() raise ValueError (#460).
+    with contextlib.suppress(OSError, ValueError):
         candidates.add(p.resolve())
     homes = {Path.home()}
     with contextlib.suppress(OSError):
@@ -1668,7 +1669,20 @@ def _chdir(cwd: Path | None, step: str) -> Path | None:
         return None
     if target.is_absolute():
         return target
-    return None if cwd is None else cwd / target
+    if cwd is None:
+        return None
+    # Joined as text, not with `/`: a Path built by `/` keeps every segment
+    # it was joined from, so a `cd x; cd x; …` chain re-joined all of them at
+    # each step (#460).
+    moved = Path(os.path.join(str(cwd), str(target)))
+    # Longer than the OS can name in one lookup: unknowable, and the chain
+    # stops growing here (#460).
+    return None if len(str(moved)) > _MAX_CWD_CHARS else moved
+
+
+#: Longest directory path the walk keeps (#460): Linux's ``PATH_MAX``; macOS
+#: allows 1,024 and Windows 260 unless long paths are enabled.
+_MAX_CWD_CHARS = 4_096
 
 
 #: A redirection operator alone (``>``, ``2>``, ``&>``, ``>&``): its target is
@@ -1899,6 +1913,7 @@ def _shell_sites(
     sites: list[_ShellSite] = []
     scopes: list[tuple[Path | None, tuple[Path | None, ...]]] = []
     for pos, _kind, item in sorted(events, key=lambda e: (e[0], e[1])):
+        deadline.check()
         if item == "(":
             scopes.append((cwd, dirs))
             continue
@@ -2393,6 +2408,7 @@ def _enclosing_repo(candidates: list[Path]) -> Path | None:
         except OSError:
             cur = candidate.absolute()
         for parent in (cur, *cur.parents):
+            deadline.check()
             if _is_worktree_root(parent):
                 return parent
     return None
@@ -2405,7 +2421,12 @@ def _is_worktree_root(path: Path) -> bool:
     not turn every child path into a repository and demand an impossible
     freshness fetch."""
     marker = path / ".git"
-    return marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file())
+    try:
+        return marker.is_file() or (marker.is_dir() and (marker / "HEAD").is_file())
+    except (OSError, ValueError):
+        # A path the filesystem cannot even look up (ENAMETOOLONG after a long
+        # `cd` chain, an embedded NUL) holds no worktree it can name (#460).
+        return False
 
 
 def _dir_repo(path: Path, memo: dict[Path, Path | None]) -> Path | None:
@@ -2419,6 +2440,7 @@ def _dir_repo(path: Path, memo: dict[Path, Path | None]) -> Path | None:
             found = memo[parent]
             break
         visited.append(parent)
+        deadline.check()
         if _is_worktree_root(parent):
             found = parent
             break
@@ -2431,8 +2453,17 @@ def _repo_root_for_action(action: dict[str, Any]) -> Path | None:
     candidates: list[Path] = []
     raw_path = _action_path(action)
     if raw_path:
-        p = Path(raw_path).expanduser()
-        candidates.append(p if p.is_dir() else p.parent)
+        try:
+            p = Path(raw_path).expanduser()
+        except (OSError, RuntimeError, ValueError):
+            return None  # an unknown `~user`: the action's repo is unknown
+        try:
+            is_dir = p.is_dir()
+        except (OSError, ValueError):
+            # Too long to look up, or an embedded NUL: not a directory. Its
+            # parents are walked as for any file (#460).
+            is_dir = False
+        candidates.append(p if is_dir else p.parent)
     else:
         base = _action_base_dir(action)
         # A Bash action carries no file path, so the repo was previously always
@@ -3091,6 +3122,7 @@ def _site_write_repos(
     elif site.program in _EDITOR_SWITCHES:
         targets += _in_place_edit_targets(site.program, site.text)
     for word in targets:
+        deadline.check()
         key = (word, cwd)
         if key not in resolved:
             resolved[key] = _write_target(word, cwd)
@@ -4150,6 +4182,7 @@ def _local_shell_subjects(
     for program, _args, pos, _end in stages:
         if program not in _LOCAL_SHELLS and program not in ("source", "."):
             continue
+        deadline.check()
         stop = ends[pos]
         try:
             tokens = _shell_tokens(text[pos:stop])
@@ -4265,7 +4298,8 @@ def _hard_rule_subjects(command: str) -> _HardSubjects:
     subjects through :func:`_local_code_texts`. Cached per command, so
     :func:`decide` searches once for the hard rules and both classifiers.
 
-    Pure and never raises: on any walk error only the command itself is
+    Pure, and raises only :class:`deadline.DeadlineExceededError` (#460),
+    which is never cached: on any other walk error only the command itself is
     judged, which is the pre-#430 behaviour. When the subject search fails
     partway, what it already found is kept (#449 review).
 
@@ -4282,6 +4316,8 @@ def _subjects_of(command: str, *, expand: bool) -> _HardSubjects:
     ``expand``. Never raises."""
     try:
         sites, _cwd, _local, bodies = _shell_walk(command)
+    except deadline.DeadlineExceededError:
+        raise
     except Exception:
         return _HardSubjects((command,))
     code: list[str] = [command, *bodies]
@@ -4301,12 +4337,16 @@ def _subjects_of(command: str, *, expand: bool) -> _HardSubjects:
             pass  # keep what was already found: more text judged, never less
     try:
         for text in (command, *bodies):
+            deadline.check()
             _local_shell_subjects(text, code, words, runs)
+    except deadline.DeadlineExceededError:
+        raise
     except Exception:
         pass  # keep what was already found: more text judged, never less
     quoted: list[str] = []
     try:
         for site in sites:
+            deadline.check()
             if not site.opaque:
                 continue
             if site.piped:
@@ -4319,6 +4359,8 @@ def _subjects_of(command: str, *, expand: bool) -> _HardSubjects:
                 if not has_body:
                     continue  # it reads stdin or a file: judged above
             quoted.append(re.sub(r"['\"]|\\n", "\n", site.text))
+    except deadline.DeadlineExceededError:
+        raise
     except Exception:
         pass  # likewise: keep the sites already read
     for expanded in expansions:
@@ -4344,12 +4386,14 @@ def _hard_rule_hits(rule: policy.Rule, command: str, subjects: _HardSubjects) ->
 
     Raises :class:`policy.SearchBudgetExceededError` when nothing matched but a
     subject was too costly to judge (#445): the hard-rule callers deny that
-    with its own reason. May raise on a malformed rule; the callers skip that
-    rule."""
+    with its own reason. Raises :class:`deadline.DeadlineExceededError` when
+    the judging budget runs out (#460). May raise on a malformed rule; the
+    callers skip that rule."""
     over_budget = False
 
     def found(regex: re.Pattern[str] | None, text: str) -> bool:
         nonlocal over_budget
+        deadline.check()
         if regex is None:
             judged = rule.judge(text)
         elif rule.match == "command":
@@ -4407,6 +4451,39 @@ def _log_budget_exceeded(rule: policy.Rule, command: str, session: str) -> None:
         )
 
 
+#: ``rule_id`` of the deny the hard rules return when judging one action ran
+#: out of time (#460).
+DEADLINE_RULE = "omi-guard-deadline"
+
+
+def _log_deadline_exceeded(
+    command: str, session: str, *, outcome: str, severity: str, tool: str = "Bash"
+) -> None:
+    """Record that judging one action ran out of time (#460): ``deny`` for
+    the hard rules, ``fail-open`` for the soft gates. Never raises."""
+    with contextlib.suppress(Exception):
+        compliance.log_event(
+            compliance.KIND_DEADLINE_EXCEEDED,
+            session=session,
+            tool=tool,
+            command=command,
+            rule_id=DEADLINE_RULE,
+            severity=severity,
+            outcome=outcome,
+        )
+
+
+def _deadline_deny(command: str, session: str) -> Verdict:
+    """The hard rules' verdict when judging ``command`` ran out of time
+    (#460): they fail CLOSED, with the #445 budget reason."""
+    _log_deadline_exceeded(command, session, outcome="deny", severity=policy.SEVERITY_HARD)
+    return Verdict(
+        allow=False,
+        reason=f"omi-guard (hard): {BUDGET_EXCEEDED_MESSAGE}",
+        rule_id=DEADLINE_RULE,
+    )
+
+
 def _hard_policy_verdict(command: str, session: str = "") -> Verdict | None:
     """The deny for the first ``hard`` policy rule ``command`` matches, else None.
 
@@ -4427,13 +4504,30 @@ def _hard_policy_verdict(command: str, session: str = "") -> Verdict | None:
     is denied with :data:`BUDGET_EXCEEDED_MESSAGE` and logged as a
     ``budget-exceeded`` event under ``session`` (#445): the hard rules fail
     CLOSED there, and only they do.
+
+    Judging runs under the action's deadline, extended so at least
+    :data:`deadline.HARD_RULE_FLOOR_SECONDS` remain (#460). When it runs out
+    the hard rules fail CLOSED the same way, with :data:`DEADLINE_RULE` and a
+    ``deadline-exceeded`` event: no verdict at all (a hook timeout) would
+    skip every gate.
     """
+    with deadline.at_least(deadline.HARD_RULE_FLOOR_SECONDS):
+        try:
+            return _judge_hard_rules(command, session)
+        except deadline.DeadlineExceededError:
+            return _deadline_deny(command, session)
+
+
+def _judge_hard_rules(command: str, session: str) -> Verdict | None:
+    """:func:`_hard_policy_verdict` without its deadline handling. Raises
+    :class:`deadline.DeadlineExceededError` when the budget runs out."""
     try:
         rules: list[policy.Rule] = list(policy.load_policy())
     except Exception:
         rules = list(policy.SEED_RULES)
     subjects = _hard_rule_subjects(command)
     for rule in rules:
+        deadline.check()
         if rule.severity != policy.SEVERITY_HARD:
             continue
         # A single malformed rule must never brick the guard on EVERY tool call:
@@ -4445,6 +4539,8 @@ def _hard_policy_verdict(command: str, session: str = "") -> Verdict | None:
         # the rules after it.
         try:
             hits = _hard_rule_hits(rule, command, subjects)
+        except deadline.DeadlineExceededError:
+            raise
         except policy.SearchBudgetExceededError:
             # Too costly to judge, and the rule's keyword is in it: a hard
             # rule fails CLOSED, with a reason that says why (#445).
@@ -4472,31 +4568,59 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
     """The harness-agnostic policy. See the module docstring for the schema.
 
     ``git_rules_missing`` (#358) waives ONLY the git-rules read demand, for a
-    vault that positively lacks the note; every other gate still runs."""
+    vault that positively lacks the note; every other gate still runs.
+
+    Judging runs under the action's wall-clock deadline (#460, see
+    :mod:`omind.deadline`), so a verdict comes back before the hook times
+    out. The hard rules fail CLOSED when it runs out
+    (:func:`_hard_policy_verdict`); every gate after them fails OPEN: the
+    action is allowed and a ``deadline-exceeded`` event says so."""
     session = str(action.get("session") or "")
     command = str(action.get("command") or "")
-    repo = _repo_root_for_action(action)
 
-    # 1) Consulting OMI sets the per-turn sentinel and is always allowed. When
-    # the adapter knows what was consulted, record it (with target) so the
-    # verifier can judge relevance; otherwise just mark the gate consulted.
-    if action.get("is_omi_consult"):
-        target = str(action.get("consult_target") or "")
-        if target:
-            record_consult(
+    with deadline.scope():
+        # 1) Consulting OMI sets the per-turn sentinel and is always allowed. When
+        # the adapter knows what was consulted, record it (with target) so the
+        # verifier can judge relevance; otherwise just mark the gate consulted.
+        if action.get("is_omi_consult"):
+            target = str(action.get("consult_target") or "")
+            if target:
+                record_consult(
+                    session,
+                    kind=str(action.get("consult_kind") or "consult"),
+                    target=target,
+                    tool=str(action.get("tool") or ""),
+                )
+            else:
+                mark_consulted(session)
+            return Verdict(allow=True)
+
+        # 2) Hard blocks — every ``hard`` rule in the data-driven policy.
+        hard = _hard_policy_verdict(command, session)
+        if hard is not None:
+            return hard
+
+        try:
+            deadline.check()
+            return _soft_verdict(action, session, command, git_rules_missing)
+        except deadline.DeadlineExceededError:
+            _log_deadline_exceeded(
+                command or _action_path(action),
                 session,
-                kind=str(action.get("consult_kind") or "consult"),
-                target=target,
+                outcome="fail-open",
+                severity=policy.SEVERITY_SOFT,
                 tool=str(action.get("tool") or ""),
             )
-        else:
-            mark_consulted(session)
-        return Verdict(allow=True)
+            return Verdict(allow=True)
 
-    # 2) Hard blocks — every ``hard`` rule in the data-driven policy.
-    hard = _hard_policy_verdict(command, session)
-    if hard is not None:
-        return hard
+
+def _soft_verdict(
+    action: dict[str, Any], session: str, command: str, git_rules_missing: bool
+) -> Verdict:
+    """:func:`decide` past the hard rules: the repo, capability, global-config
+    and consult gates. Raises :class:`deadline.DeadlineExceededError` when the
+    judging budget runs out; :func:`decide` then fails open (#460)."""
+    repo = _repo_root_for_action(action)
 
     if repo is not None and _is_freshness_command(command):
         # Recorded optimistically here (PreToolUse cannot know the exit code);
@@ -4767,7 +4891,16 @@ def check_action(action: dict[str, Any], omi_dir: Path | None = None) -> Verdict
     classifier fails OPEN via :func:`_fail_open_verdict`. A deny already
     decided before the exception still stands — only an undecided action is
     waved through.
+
+    The whole check, note rules included, runs under one judging deadline
+    (#460); see :func:`decide` for what an exhausted one means.
     """
+    with deadline.scope():
+        return _check_action(action, omi_dir)
+
+
+def _check_action(action: dict[str, Any], omi_dir: Path | None) -> Verdict:
+    """:func:`check_action` inside its deadline scope."""
     verdict: Verdict | None = None
     try:
         verdict = _note_rules_verdict(action, omi_dir)

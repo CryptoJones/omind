@@ -62,7 +62,7 @@ from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
 
-from omind import filelock, paths, policy
+from omind import deadline, filelock, paths, policy
 
 ACTION_DENY = "deny"
 ACTION_WARN = "warn"
@@ -636,6 +636,7 @@ def _glob_matches(text: str, pattern: str) -> bool:
 
 
 def _rule_matches(text: str, pattern: str) -> bool:
+    deadline.check()  # one call per site: a long chain stays inside the hook budget (#460)
     return _glob_matches(text, pattern) or _glob_matches(_canonical_git(text), pattern)
 
 
@@ -832,6 +833,7 @@ def _judge(
     of pushes in one repo asks git for its branch once."""
     if repo is None:
         return None
+    deadline.check()
     memo: dict[tuple[str, Path], Any] = {} if facts is None else facts
 
     def fact(name: str, fn: Any) -> Any:
@@ -925,6 +927,9 @@ def evaluate(
     A git global option between ``git`` and its subcommand never hides a
     match (#414): ``*git push*`` matches ``git -C d push`` and
     ``git -c k=v push``, but not ``git log --grep push``.
+
+    Raises :class:`deadline.DeadlineExceededError` when the guard's judging
+    budget runs out mid-evaluation; the guard then fails open (#460).
     """
     tool = str(action.get("tool") or "")
     command = str(action.get("command") or "")
@@ -934,6 +939,7 @@ def evaluate(
     code_texts: list[str] | None = None  # per site, computed on first need
     facts: dict[tuple[str, Path], Any] = {}
     for rule in rules if rules is not None else load_rules(omi_dir):
+        deadline.check()
         if rule.invalid:
             continue
         if rule.tool not in ("*", tool):
