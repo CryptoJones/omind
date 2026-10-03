@@ -3507,6 +3507,44 @@ CLUSTERED_WRAPPER_HARD_COMMANDS = (
     "stdbuf -oL sudo id",
     "ionice -c3 sudo id",
     "sudo -Eu root id",
+    # #464: a switch value with a blank in it, quoted, is one word.
+    'env -iC "/a b" sudo id',
+    "xargs -0I '{} x' sudo id",
+    'env -C "/a b" sudo id',
+    'env -C"/a b" sudo id',
+    'env --chdir="/a b" sudo id',
+    'sudo -u "a b" id',
+    'X="a b" env -C "/a b" sudo id',
+    'timeout "5" sudo id',
+    # #464: a long value-taking switch by unique prefix takes the next word.
+    "env --chd /x sudo id",
+    'env --chd "/a b" sudo id',
+    "env --u VAR sudo id",
+    "stdbuf --out L sudo id",
+    # #464 review: one word definition for both parsers, so an escaped quote
+    # opens no quoted run and an escaped blank joins its word.
+    'env -u \\" sudo id',
+    "env -C a\\ b sudo id",
+    "env -C '/a b' sudo id",
+    'env -u \\" -C "/a b" sudo id',
+    # #464 review: the long twin of every value-taking wrapper switch.
+    "timeout --kill-after 5 10 sudo id",
+    "timeout --signal KILL 5 sudo id",
+    "timeout --sig KILL 5 sudo id",
+    "xargs --max-args 1 sudo id",
+    "xargs --max-procs 2 sudo id",
+    "xargs --max-chars 99 sudo id",
+    "xargs --arg-file f sudo id",
+    "xargs --delimiter , sudo id",
+    "xargs --process-slot-var V sudo id",
+    "nice --adjustment 5 sudo id",
+    "ionice --class 3 sudo id",
+    "ionice --classdata 7 sudo id",
+    "ionice --pid 1 sudo id",
+    "time --output f sudo id",
+    "time --format %e sudo id",
+    "sudo --user root id",
+    "sudo --chdir /x id",
 )
 
 
@@ -3527,6 +3565,15 @@ def test_hard_rules_read_wrapper_clusters_getopt_style(command: str) -> None:
         "timeout -k5 10 echo sudo",
         "command -v sudo",
         "tmux new -s sudo-test",
+        # #464: the prefix takes `sudo` as its value; a quoted value hides it.
+        "env --chd sudo echo hi",
+        'env -C "sudo x" echo hi',
+        # #464 review: a long twin takes `sudo` as its value; an escaped `v`
+        # is still a lookup.
+        "timeout --signal sudo 5 echo hi",
+        "xargs --max-args sudo echo hi",
+        "command -\\v sudo",
+        "command -\\V sudo",
     ],
 )
 def test_wrapper_clusters_leave_benign_commands_alone(command: str) -> None:
@@ -3787,6 +3834,13 @@ def test_windows_shell_tokens_join_mid_word_quotes_and_keep_backslashes(
         # #451 review: runs of value-taking clusters stay linear too.
         "env -iC /x " * 400 + "x",
         "xargs -0I {} " * 400 + "x",
+        # #464: quoted values and long-option prefixes stay linear too.
+        'env -iC "/a b" ' * 400 + "x",
+        "xargs -0I '{} x' " * 400 + "x",
+        'env -C "-a -b" ' * 400 + "x",
+        "env --chd /x " * 400 + "x",
+        'X="a b" ' * 400 + "x",
+        'timeout "5" ' * 400 + "x",
     ],
 )
 def test_wrapper_runs_cannot_backtrack_the_hard_rules(command: str) -> None:
@@ -4464,6 +4518,122 @@ def test_long_option_unique_prefix(given: str, expected: str) -> None:
     assert guard._long_option(given, known) == expected
 
 
+@pytest.mark.parametrize(
+    ("word", "width"),
+    [
+        ("--chdir", 2),
+        ("--chd", 2),
+        ("--c", 2),
+        ("--chd=/x", 1),
+        ("--u", 2),
+        ("--", 1),
+        ("--debug", 1),
+    ],
+)
+def test_switch_width_reads_long_options_by_unique_prefix(word: str, width: int) -> None:
+    """#464: a long value-taking wrapper switch may be any unambiguous prefix."""
+    assert guard._switch_width(word, policy.STAGE_WRAPPERS["env"]) == width
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        'env -iC "/a b" sudo id',
+        "xargs -0I '{} x' sudo id",
+        'env --chdir="/a b" sudo id',
+        'timeout "5" sudo id',
+        "env -C a\\ b sudo id",
+    ],
+)
+def test_command_position_reads_a_quoted_wrapper_value_as_one_word(command: str) -> None:
+    """#464: the hard-rule regex itself reaches ``sudo`` past a quoted value,
+    rather than relying on the walk's opaque-site fallback."""
+    rule = next(r for r in policy.SEED_RULES if r.id == "sudo-use-fleet-sudo")
+    assert rule.judge(command) is True
+
+
+def test_ambiguous_long_prefix_is_a_plain_flag() -> None:
+    """#464: a prefix two value-taking switches share takes no value, in the
+    stage parser and in the hard rules alike."""
+    takes_arg = frozenset({"--output", "--outfile"})
+    assert guard._switch_width("--out", takes_arg) == 1
+    assert guard._switch_width("--outp", takes_arg) == 2
+    spellings = policy._long_prefixes(sorted(takes_arg))
+    assert "--outp" in spellings and "--outf" in spellings
+    assert not {"--o", "--ou", "--out"} & set(spellings)
+
+
+def test_env_chdir_value_reads_a_long_prefix() -> None:
+    assert guard._env_chdir_value("--chd", "/x") == "/x"
+    assert guard._env_chdir_value("--chd=/y", "/x") == "/y"
+    assert guard._env_chdir_value("--debug", "/x") is None
+
+
+def test_an_escaped_quote_hides_no_stage() -> None:
+    """#464 review: ``\\"`` is an escaped character, not a quote that opens a
+    run to the next ``"``, so the ``bash -c`` stage after it is still read and
+    its body judged (denied on main, allowed by the first cut of #464)."""
+    command = 'env -u \\" bash -c \'sudo id\' x "y"'
+    stages = guard._program_stages(policy.shell_code_text(command), command)
+    assert [program for program, *_ in stages] == ["bash"]
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize(
+    ("text", "words"),
+    [
+        ('env -u \\" bash -c x "y"', ["env", "-u", '\\"', "bash", "-c", "x", '"y"']),
+        ("env -C a\\ b sudo id", ["env", "-C", "a\\ b", "sudo", "id"]),
+        ('env -C "/a b" x', ["env", "-C", '"/a b"', "x"]),
+        ('a \'b c\' \\" "d\\"e"', ["a", "'b c'", '\\"', '"d\\"e"']),
+    ],
+)
+def test_stage_words_are_the_hard_rules_words(text: str, words: list[str]) -> None:
+    """#464 review: the stage parser splits a segment with the hard rules' own
+    word definition, and each word is one ``_WORD`` match there."""
+    assert guard._STAGE_WORD_RE is policy.SHELL_WORD_RE
+    assert guard._STAGE_WORD_RE.findall(text) == words
+    assert all(re.fullmatch(policy._WORD, word) for word in words)
+
+
+@pytest.mark.parametrize(
+    "command",
+    ["xargs --max-lines sudo id", "xargs --replace sudo id", "xargs --eof sudo id"],
+)
+def test_optional_value_long_switches_take_no_next_word(command: str) -> None:
+    """#464 review: GNU xargs' ``--max-lines``, ``--replace`` and ``--eof`` take
+    an OPTIONAL value, only ever attached with ``=``, so the next word is the
+    command they run; they stay out of the value-taking table."""
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+@pytest.mark.parametrize("command", ['command -"v" sudo id', 'command -"p" sudo id'])
+def test_quoted_lookup_switch_fails_closed(command: str) -> None:
+    """#464 review: the search reads a quoted switch blanked, so ``-"v"`` (a
+    lookup) cannot be told from ``-"p"`` (which runs sudo). Both are judged:
+    the hard rule fails closed, as it did on main."""
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+def test_env_chdir_resolves_a_quoted_directory(tmp_path: Path) -> None:
+    """#464 review: ``env -C "/a b"`` moves to ``/a b``, not to a relative
+    directory named with its quotes; the prefix is unquoted with shell rules."""
+    target = (tmp_path / "a b").as_posix()
+    for prefix in (f'env -C "{target}" ', f"env -iC '{target}' ", f'env --chd="{target}" '):
+        assert guard._env_chdir(prefix + "git status", tmp_path / "x") == Path(target), prefix
+
+
+@pytest.mark.xfail(strict=True, reason="#464 out of scope: no word piece joins a continuation")
+def test_line_continuation_inside_a_wrapper_value_is_out_of_scope() -> None:
+    """``env -C a\\<newline>b sudo id`` runs sudo (the shell joins ``a`` and
+    ``b``). Missed on main too: a word piece never crosses a newline, which
+    the search-cost bound relies on. Pinned so a fix shows up here."""
+    assert guard._hard_policy_verdict("env -C a\\\nb sudo id") is not None
+
+
 def test_redirect_with_no_target_repo_is_not_repo_work(tmp_path: Path) -> None:
     """No target repo, nothing to protect: the redirect check fails open."""
     action = {"tool": "Bash", "command": "echo x > x.py", "cwd": tmp_path.as_posix()}
@@ -4910,6 +5080,21 @@ def test_command_position_cost_bounds_the_chain_shapes() -> None:
         assert policy._cmd_position_cost(text) < 4 * len(text), text[:8]
     for chain in ("x=1;" * 2_000, "a=1 a=1;" * 2_000, "env -x;" * 2_000):
         assert policy._cmd_position_cost(chain) > policy.CMD_SEARCH_BUDGET, chain[:8]
+    # #464 review: a quoted word is one word, so a benign quoted assignment
+    # line stays near its length, and a chain through quoted values or a
+    # quoted duration after a switch value is still counted in full.
+    for text in ('A="x" true; ' * 700 + "echo sudo", 'echo "a b"; ' * 2_000, "X='a b' y\n" * 2_000):
+        assert policy._cmd_position_cost(text) < 4 * len(text), text[:8]
+    for chain in ('x="a b";' * 2_000, 'env -C "/a b";' * 2_000, 'env -u \\";' * 2_000):
+        assert policy._cmd_position_cost(chain) > policy.CMD_SEARCH_BUDGET, chain[:8]
+    durations = ";" * 1_000 + ' timeout -s K "5"' * 1_000
+    assert policy._cmd_position_cost(durations) > 1_000 * (len(durations) - 1_000)
+
+
+def test_a_benign_quoted_one_liner_stays_under_the_budget() -> None:
+    """#464 review: quoted assignments between separators are judged, not
+    denied as too complex (allowed on main)."""
+    assert guard._hard_policy_verdict('A="x" true; ' * 700 + "echo sudo") is None
 
 
 def test_split_words_tokenizes_like_shlex() -> None:

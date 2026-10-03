@@ -7,6 +7,54 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.27] - 2026-10-02
+
+### Fixed
+- **The hard rules read a quoted wrapper switch value as one word, and a long
+  value-taking wrapper switch by unique prefix
+  ([#464](https://github.com/CryptoJones/omind/issues/464)).** `env --chd /x
+  sudo id` and `stdbuf --out L sudo id` were allowed: the command-position
+  regex and `guard._switch_width` treated any `--…` they did not know exactly
+  as a flag with no value, so the value was read as the program. `env -iC "/a
+  b" sudo id` and `xargs -0I '{} x' sudo id` were denied only through the
+  shell walk's opaque-site fallback; the regex itself took a value as `\S+`,
+  and the stage parser split the quoted value in two.
+  - A wrapper switch, its value and a leading `VAR=value` assignment may hold
+    a quoted run with blanks (`"…"`, `'…'`) or an escaped character (`a\ b`).
+    Every piece of a word starts with a different character, so a word still
+    matches one way only and long runs cannot backtrack. `timeout`'s duration
+    may be quoted too.
+  - A long value-taking switch matches by any prefix that no other
+    value-taking switch of that wrapper shares, as GNU getopt_long reads it,
+    in the regex, in `_switch_width` and in `env --chdir` tracking. An
+    ambiguous prefix stays a plain flag. `env --chd sudo echo hi` is no longer
+    a false positive.
+  - The wrapper table lists the long twin of every value-taking switch:
+    `timeout --signal`/`--kill-after`, `nice --adjustment`, `ionice
+    --class`/`--classdata`/`--pid`/`--pgid`/`--uid`, `time
+    --format`/`--output`, `xargs --max-args`/`--max-procs`/`--max-chars`/
+    `--delimiter`/`--arg-file`/`--process-slot-var`, and sudo's. GNU xargs'
+    `--replace`, `--eof` and `--max-lines` take an OPTIONAL value (attached
+    with `=` only), so the word after them is the command and they stay out.
+  - The hard rules, the stage parser and the search-cost bound share one
+    definition of a shell word (`policy.SHELL_WORD_RE`). So an escaped quote
+    (`env -u \" bash -c 'sudo id' x "y"`) opens no quoted run that would hide
+    the `bash -c` stage, and an escaped blank (`env -C a\ b sudo id`) joins
+    its word in both parsers; the parity test covers both.
+  - `_cmd_position_cost` reads those same words, so a quoted value is one
+    word and its chain is bounded as tightly as any other (`A="x" true; ` ×
+    700 is judged, not denied as too complex). Only a separator inside a
+    quoted run (`"$(a;b)"`) and a quote with no partner are bounded by the
+    end of their line. A quoted duration after a switch value (`timeout -s K
+    "5"`) counts as a link, so the bound still only overestimates.
+  - `command -\v sudo` is a lookup, as `command -v sudo` is. A quoted lookup
+    switch (`command -"v"`) is still judged: the search reads it blanked and
+    cannot tell it from `-"p"`, which runs the program.
+  - Out of scope: a backslash-newline continuation inside a wrapper value
+    (`env -C a\<newline>b sudo id`, missed on main too). No word piece crosses
+    a newline, which the search-cost bound relies on; an `xfail(strict)`
+    test pins it.
+
 ## [10.2.26] - 2026-10-02
 
 ### Fixed

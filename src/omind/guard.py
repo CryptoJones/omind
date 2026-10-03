@@ -1800,13 +1800,15 @@ def _env_chdir_value(word: str, after: str) -> str | None:
     next word), or ``None`` when it changes none. ``-C`` may end or sit inside
     a short cluster (``-iC <dir>``, ``-iC<dir>``). A letter before it that
     takes a value (``-uC`` unsets ``C``), or ``-S`` (its rest is a command),
-    ends the cluster first."""
-    if word in ("-C", "--chdir"):
+    ends the cluster first. ``--chdir`` may be any unambiguous prefix of it
+    (``--chd <dir>``, #464)."""
+    if word == "-C":
         return after
-    if word.startswith("--chdir="):
-        return word.partition("=")[2]
     if word.startswith("--"):
-        return None
+        name, eq, value = word.partition("=")
+        if _long_option(name, _long_names(_STAGE_WRAPPERS["env"])) != "--chdir":
+            return None
+        return value if eq else after
     for k in range(1, len(word)):
         if word[k] == "C":
             return word[k + 1 :] or after
@@ -3269,15 +3271,26 @@ def _switch_width(word: str, takes_arg: frozenset[str]) -> int:
     switches in ``takes_arg`` that take a value. A short cluster reads like
     getopt (#432 review): the first value-taking letter takes the rest of the
     word, or the next word when it ends the cluster (``env -iC <dir>``,
-    ``sudo -iu bob``), so that next word is never read as the program."""
+    ``sudo -iu bob``), so that next word is never read as the program. A long
+    switch may be any unambiguous prefix of its name (``env --chd <dir>``,
+    #464), as :func:`_long_option` resolves it; an ambiguous one is a flag."""
     if word in takes_arg:
         return 2
-    if word.startswith("--") or len(word) < 3:
+    if word.startswith("--"):
+        valued = "=" not in word and _long_option(word, _long_names(takes_arg)) in takes_arg
+        return 2 if valued else 1
+    if len(word) < 3:
         return 1
     for k in range(1, len(word)):
         if "-" + word[k] in takes_arg:
             return 2 if k == len(word) - 1 else 1
     return 1
+
+
+@functools.lru_cache(maxsize=64)
+def _long_names(options: frozenset[str]) -> frozenset[str]:
+    """The long (``--name``) options among ``options``."""
+    return frozenset(opt for opt in options if opt.startswith("--"))
 
 
 def _basename(word: str) -> str:
@@ -3298,8 +3311,15 @@ def _program_stages(code: str, raw: str = "") -> list[tuple[str, list[str], int,
 _ASSIGNMENT_WORD_RE = re.compile(r"[A-Za-z_]\w*=")
 
 
+#: A word of a stage segment: the hard rules' own word (#464 review), so a
+#: quoted value with blanks in it (``env -C "/a b" sudo``, blanked to ``"   "``
+#: by ``shell_code_text``) or an escaped blank (``a\ b``) stays one word, and
+#: an escaped quote (``\"``) opens no quoted run.
+_STAGE_WORD_RE = policy.SHELL_WORD_RE
+
+
 def _word_offset(text: str, words: list[str], offsets: list[int], k: int) -> int:
-    """Where ``words[k]`` (``text.split()``) starts in ``text``. ``offsets``
+    """Where ``words[k]`` (:data:`_STAGE_WORD_RE`) starts in ``text``. ``offsets``
     caches the words located so far, so a segment's words are found once each
     and only up to the last one a stage asks for (#445)."""
     while len(offsets) <= k:
@@ -3337,12 +3357,12 @@ def _program_stages_cached(
         end = seg.end()
         while end < n and code[end].isspace():
             end += 1
-        # Words by `str.split` (the same Unicode blanks as `\S+`), offsets
+        # Words by one regex scan (the same Unicode blanks as `\S+`), offsets
         # only where a stage needs one, and the next `-exec` by bisection, so
         # one long segment is not walked word by word in Python (#445).
         text = seg.group()
         base_at = seg.start()
-        words = text.split()
+        words = _STAGE_WORD_RE.findall(text)
         offsets: list[int] = []
         ntok = len(words)
         execs = (
