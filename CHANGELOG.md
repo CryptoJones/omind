@@ -7,6 +7,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.26] - 2026-10-02
+
+### Fixed
+- **The hard rules judge the command a `find` action runs, and an expansion
+  that prints a literal program name
+  ([#455](https://github.com/CryptoJones/omind/issues/455)).** `find . -exec
+  sudo id \;` was allowed: `-exec` is not a separator or a wrapper, so `sudo`
+  never reached command position. `$(printf sudo) id`, `${X:-sudo} id` and
+  `eval "$(echo sudo id)"` were allowed too.
+  - The words after `-exec`, `-execdir`, `-ok` and `-okdir`, up to `\;`,
+    `';'` or `{} +`, are judged as a command. The split comes from the same
+    stage walk the repo-work classifier reads. `find . -name sudo`, `find .
+    -exec grep sudo {} +` and `find . -exec echo sudo \;` stay allowed.
+  - An expansion that is a whole word and prints a bare program name is
+    replaced by that name before the command is judged: `$(echo|printf
+    NAME)`, `` `echo NAME` ``, `${X:-NAME}` (`-`, `=`, `:=` too), optionally
+    double-quoted. So is `eval` of a literal `echo`/`printf`. The name counts
+    only in command position, so `echo $(printf sudo)` and `grep ${X:-sudo} f`
+    stay allowed.
+  - Out of scope, and pinned as allowed by tests: an expansion whose output
+    the guard would have to evaluate (`X=sudo; $X id`, `$(cat f) id`,
+    `$(printf '%s' sudo) id`, `$(echo -n sudo) id`, `eval "$(cat f)"`).
+
 ## [10.2.25] - 2026-10-02
 
 ### Fixed

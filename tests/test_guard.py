@@ -3533,6 +3533,87 @@ def test_wrapper_clusters_leave_benign_commands_alone(command: str) -> None:
     assert guard._hard_policy_verdict(command) is None
 
 
+#: #455: the command a `find` action runs, and an expansion that prints a
+#: literal program name in command position.
+FIND_EXEC_AND_EXPANSION_HARD_COMMANDS = (
+    ("find . -exec sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -execdir sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -ok sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -okdir sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -exec sudo id ';'", "sudo-use-fleet-sudo"),
+    ('find . -exec sudo id ";"', "sudo-use-fleet-sudo"),
+    ("find . -exec sudo id {} +", "sudo-use-fleet-sudo"),
+    ("find . -exec env sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -exec /usr/bin/sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -name x -exec grep sudo {} + -exec sudo id \\;", "sudo-use-fleet-sudo"),
+    ("cd x && find . -exec sudo id \\;", "sudo-use-fleet-sudo"),
+    ("bash -c 'find . -exec sudo id \\;'", "sudo-use-fleet-sudo"),
+    ("find . -exec doas id \\;", "privesc-alternatives"),
+    ("find . -exec gh repo delete o/r --yes \\;", "gh-repo-delete"),
+    ("$(printf sudo) id", "sudo-use-fleet-sudo"),
+    ("$(echo 'sudo') id", "sudo-use-fleet-sudo"),
+    ('"$(printf sudo)" id', "sudo-use-fleet-sudo"),
+    ("`echo sudo` id", "sudo-use-fleet-sudo"),
+    ("$(printf /usr/bin/sudo) id", "sudo-use-fleet-sudo"),
+    ("${X:-sudo} id", "sudo-use-fleet-sudo"),
+    ("${X-sudo} id", "sudo-use-fleet-sudo"),
+    ("${X:=sudo} id", "sudo-use-fleet-sudo"),
+    ("true && $(printf sudo) id", "sudo-use-fleet-sudo"),
+    ("env $(printf sudo) id", "sudo-use-fleet-sudo"),
+    ("X=1 ${X:-sudo} id", "sudo-use-fleet-sudo"),
+    ('eval "$(echo sudo id)"', "sudo-use-fleet-sudo"),
+    ("eval $(echo sudo id)", "sudo-use-fleet-sudo"),
+    ("eval \"$(printf 'sudo id')\"", "sudo-use-fleet-sudo"),
+)
+
+
+@pytest.mark.parametrize("tokenizing", ["posix", "windows"])
+@pytest.mark.parametrize(("command", "rule_id"), FIND_EXEC_AND_EXPANSION_HARD_COMMANDS)
+def test_hard_rules_judge_find_exec_and_expanded_programs(
+    command: str, rule_id: str, tokenizing: str, request: pytest.FixtureRequest
+) -> None:
+    if tokenizing == "windows":
+        request.getfixturevalue("windows_tokens")
+    verdict = guard._hard_policy_verdict(command)
+    assert verdict is not None and verdict.rule_id == rule_id
+
+
+@pytest.mark.parametrize(
+    "command",
+    [
+        # `sudo` is an argument of find, or of the command -exec runs.
+        "find . -name sudo",
+        "find . -exec grep sudo {} +",
+        "find . -exec echo sudo \\;",
+        "find . -name '*.py' -exec sed -i s/sudo/x/ {} +",
+        "find . -path ./sudo -prune -o -print",
+        "find . -exec ls {} \\; -name sudo",
+        "find . -exec env OMI_SUDO_OK=1 sudo id \\;",
+        # The printed name is not in command position, or is a string.
+        "echo $(printf sudo)",
+        "grep ${X:-sudo} f",
+        "echo '$(printf sudo) id'",
+        'echo "$(printf sudo) id"',
+        "OMI_SUDO_OK=1 $(printf sudo) id",
+        "${EDITOR:-vi} file",
+        "$(which python3) -V",
+        'cd "${TMPDIR:-/tmp}"',
+        'eval "$(echo hi)"',
+        'eval "$(ssh-agent -s)"',
+        'eval "$(pyenv init -)"',
+        # Out of scope (#455): the guard does not evaluate an expansion whose
+        # output is not a literal it can read, so these are not judged.
+        "X=sudo; $X id",
+        "$(cat prog.txt) id",
+        "$(printf '%s' sudo) id",
+        "$(echo -n sudo) id",
+        'eval "$(cat script.sh)"',
+    ],
+)
+def test_hard_rules_leave_find_args_and_unread_expansions_alone(command: str) -> None:
+    assert guard._hard_policy_verdict(command) is None
+
+
 @pytest.mark.parametrize("tokenizing", ["posix", "windows"])
 def test_unclosed_process_substitution_is_still_judged(
     tokenizing: str, request: pytest.FixtureRequest

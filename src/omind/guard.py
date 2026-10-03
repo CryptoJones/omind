@@ -3962,6 +3962,93 @@ def _with_positionals(body: str, positional: list[str]) -> str | None:
     return _ALL_POSITIONALS_RE.sub(lambda _m: joined, body)
 
 
+#: A ``find`` action word whose following words are a command (#455).
+_EXEC_ACTION_RE = re.compile(r"(?<!\S)-(?:exec|execdir|ok|okdir)(?!\S)")
+_WORD_RE = re.compile(r"\S+")
+
+
+def _find_exec_commands(
+    text: str, masked: str, stages: list[tuple[str, list[str], int, int]]
+) -> str | None:
+    """The commands ``find -exec``/``-execdir``/``-ok``/``-okdir`` run in
+    ``text``, one per line, each from the word after the action to the last
+    word before its ``\\;``/``';'``/``{} +`` (#455): ``find . -exec sudo id
+    \\;`` runs ``sudo id``. ``None`` when there is none.
+
+    ``stages`` are :func:`_program_stages` of ``masked`` (its
+    :func:`policy.shell_code_text`), which already cuts a segment at each
+    action, so a stage that shares its segment's end with the stage before
+    it is an ``-exec`` command. Its text starts at the action, not at the
+    program, so wrappers (``-exec env sudo id``) and an opt-in assignment
+    are judged as the hard rules judge any command. Each action's window is
+    scanned once, so a long chain stays linear (#445)."""
+    commands: list[str] = []
+    prev_start = prev_end = -1
+    for _program, args, start, end in stages:
+        if end == prev_end:
+            action: re.Match[str] | None = None
+            for action in _EXEC_ACTION_RE.finditer(masked, prev_start, start):  # noqa: B007
+                pass
+            if action is not None:
+                stop = start
+                for k, word in enumerate(_WORD_RE.finditer(masked, start, end)):
+                    stop = word.end()
+                    if k >= len(args):
+                        break
+                commands.append(text[action.end() : stop])
+        prev_start, prev_end = start, end
+    return "\n".join(commands) if commands else None
+
+
+def _literal_name(tag: str) -> str:
+    """A literal program name, optionally quoted, as an expansion prints it;
+    its groups are suffixed with ``tag``."""
+    return rf"""(?P<q{tag}>['"]?)(?P<name{tag}>[\w./+-]+)(?P=q{tag})"""
+
+
+#: An expansion that is a whole word and prints a bare program name (#455):
+#: ``$(printf sudo)``, ``$(echo 'sudo')``, `` `echo sudo` ``, ``${X:-sudo}``
+#: (``-``, ``:-``, ``=``, ``:=``), optionally double-quoted as one word. Only
+#: these shapes: anything else (a variable, ``$(cat f)``, ``printf '%s'``,
+#: ``echo -n``) needs the shell to evaluate it, which the guard does not.
+_EXPANDED_NAME_RE = re.compile(
+    r'(?<![^\s;&|(`])(?P<dq>"?)(?:'
+    r"\$\([ \t]*(?:echo|printf)[ \t]+" + _literal_name("a") + r"[ \t]*\)"
+    r"|`[ \t]*(?:echo|printf)[ \t]+" + _literal_name("b") + r"[ \t]*`"
+    r"|\$\{\w+:?[-=]" + _literal_name("c") + r"\}"
+    r")(?P=dq)(?=[\s;&|)]|\Z)"
+)
+#: ``eval`` of an ``echo``/``printf`` of literal words (#455): ``eval "$(echo
+#: sudo id)"`` runs ``sudo id``. Literal means no ``$``, quote, backtick,
+#: ``%`` or backslash in the printed words.
+_EVAL_LITERAL_RE = re.compile(
+    r"(?<![^\s;&|(`])eval[ \t]+(?P<dq>\"?)\$\([ \t]*(?:echo|printf)[ \t]+"
+    r"""(?P<q>['"]?)(?P<words>[\w./+=,: \t-]+)(?P=q)[ \t]*\)(?P=dq)(?=[\s;&|)]|\Z)"""
+)
+
+
+def _expanded_command_text(text: str) -> str | None:
+    """``text`` with each expansion that prints a literal program name
+    replaced by that name, and each ``eval`` of literal ``echo``/``printf``
+    words replaced by those words (#455), so the hard rules judge what runs:
+    ``$(printf sudo) id`` and ``${X:-sudo} id`` run ``sudo id``. The result
+    is judged as the command is, so the name counts only in command
+    position: ``echo $(printf sudo)`` and ``grep ${X:-sudo} f`` stay data,
+    and a single-quoted expansion stays a string. ``None`` when nothing was
+    replaced. Out of scope: anything whose output needs evaluating (a
+    variable, ``$(cat f)``, a format string, ``$(printf sudo)`` glued to
+    other text)."""
+    if "$" not in text and "`" not in text:
+        return None
+
+    def name(match: re.Match[str]) -> str:
+        return match.group("namea") or match.group("nameb") or match.group("namec")
+
+    expanded = _EVAL_LITERAL_RE.sub(lambda m: m.group("words"), text)
+    expanded = _EXPANDED_NAME_RE.sub(name, expanded)
+    return expanded if expanded != text else None
+
+
 def _local_shell_subjects(
     text: str, code: list[str], words: list[str], runs: list[str] | None = None
 ) -> None:
@@ -3981,6 +4068,10 @@ def _local_shell_subjects(
     # Each stage stops at the next stage's start too, so a `find -exec sh x
     # {} +` chain is not rescanned to the end per shell (#432 review).
     ends = _stage_ends(masked, sorted(stage[2] for stage in stages))
+    # `find . -exec sudo id \;` runs `sudo id` (#455).
+    exec_commands = _find_exec_commands(text, masked, stages)
+    if exec_commands is not None:
+        code.append(exec_commands)
     floor = 0
     for program, _args, pos, _end in stages:
         if program not in _LOCAL_SHELLS and program not in ("source", "."):
@@ -4112,6 +4203,11 @@ def _hard_rule_subjects(command: str) -> _HardSubjects:
     runs: list[str] = []
     try:
         for text in (command, *bodies):
+            # `$(printf sudo) id`, `${X:-sudo} id`, `eval "$(echo sudo id)"`
+            # (#455): the literal the expansion prints, in its place.
+            expanded = _expanded_command_text(text)
+            if expanded is not None:
+                code.append(expanded)
             _local_shell_subjects(text, code, words, runs)
     except Exception:
         pass  # keep what was already found: more text judged, never less
