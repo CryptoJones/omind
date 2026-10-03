@@ -56,7 +56,8 @@ import os
 import re
 import shlex
 import subprocess
-from dataclasses import dataclass
+from collections.abc import Callable
+from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Any
@@ -791,6 +792,22 @@ class CommandSite:
     #: The program runs a quoted argument as code the guard did not unwrap
     #: (``su -c``, a python ``-c`` calling ``os.system``): its text fails closed.
     opaque: bool = False
+    #: Finds the repos the files this command writes or removes land in
+    #: (#458). Called only when a repo-scoped rule matches this command, so a
+    #: long command no rule matches never pays for its write targets.
+    writes: Callable[[], tuple[Path, ...]] | None = field(default=None, compare=False, repr=False)
+
+    @functools.cached_property
+    def write_repos(self) -> tuple[Path, ...]:
+        """The repos this command writes into, each the repo the Write tool on
+        that path would be judged against (#458). ``()`` when unknown or on
+        any failure: the command is still judged where it runs (fail open)."""
+        if self.writes is None:
+            return ()
+        try:
+            return tuple(self.writes())
+        except Exception:
+            return ()
 
 
 @dataclass(frozen=True)
@@ -887,8 +904,11 @@ def evaluate(
     repo-scoped rule judges EACH simple command the local shell runs that it
     matches, against that command's own repo and refspec, and denies when any
     of them hits (`git status && cd /public && git push origin main` is judged
-    at /public). A command matches on its code text (:func:`_code_text`):
-    quoted arguments of a program that does not run them are data, so
+    at /public). A matching command is also judged against each repo it
+    writes into (``CommandSite.write_repos``, #458), so ``cat > X/f`` run
+    from /tmp is judged at X, as the Write tool on X/f is. A command matches
+    on its code text (:func:`_code_text`): quoted arguments of a program that
+    does not run them are data, so
     ``grep 'git push' README.md``, ``echo 'git push origin main'`` and
     ``git commit -m "… git push …"`` judge nothing (#413 review 3). Quoted
     text IS judged, against both the command's repo and ``repo``, when its
@@ -935,10 +955,14 @@ def evaluate(
             else:
                 if code_texts is None:
                     code_texts = [_code_text(s.text) for s in view.sites]
+                # A matching command is judged where it runs AND in each repo
+                # it writes into (#458): `cat > X/f` from /tmp writes X, as
+                # the Write tool on X/f would.
                 judged = [
-                    (s.repo, _pushed_branches(s.text))
+                    (r, _pushed_branches(s.text))
                     for s, code in zip(view.sites, code_texts, strict=True)
                     if _rule_matches(code, rule.match)
+                    for r in (s.repo, *s.write_repos)
                 ]
                 # A body run by an executor the guard does not unwrap
                 # (`su -c '…'`) is code: judged as before #394, fail closed.
@@ -946,13 +970,16 @@ def evaluate(
                     (r, _pushed_branches(s.text, in_code=False))
                     for s in view.sites
                     if s.opaque and _rule_matches(s.text, rule.match)
-                    for r in (s.repo, repo)
+                    for r in (s.repo, repo, *s.write_repos)
                 ]
                 if not judged:
                     if not _rule_matches(_code_text(view.local_text), rule.match):
                         continue  # quoted data, or only inside an ssh payload
-                    # A glob spanning simple commands: the command as a whole.
-                    judged = [(repo, _pushed_branches(view.local_text))]
+                    # A glob spanning simple commands: the command as a whole,
+                    # where it runs and in every repo it writes into.
+                    pushed = _pushed_branches(view.local_text)
+                    written = dict.fromkeys(r for s in view.sites for r in s.write_repos)
+                    judged = [(r, pushed) for r in (repo, *written)]
             outcomes = {_judge(rule, r, pushed, facts) for r, pushed in judged}
             if "hit" not in outcomes:
                 if "unknown" in outcomes:

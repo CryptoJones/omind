@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.2.24] - 2026-10-02
+
+### Fixed
+- **Guard: repo-scoped note rules judge the repo a Bash write targets
+  ([#458](https://github.com/CryptoJones/omind/issues/458)).** A note rule with
+  `repo_visibility`, `branch`, `except_repos` or `repo_has_commits` judged a
+  Bash command only in the repo it ran in, so `cat > X/file <<EOF` or
+  `sed -i … X/file` run from `/tmp`, or `echo > X/f && cd Y` run from Y, was
+  never judged against X. Each simple command the rule matches is now also
+  judged against every repo its writes land in, resolved per target as the
+  Write tool's path is (#448), with that command's own refspec. A write
+  outside X is not judged against X, and a failure resolving write targets
+  drops only the written repos (fail open).
+  - A `>` in a `(( … ))` / `[[ … ]]` comparison is not a write: the targets
+    come from the same comparison-blanked walk the repo-work classifier reads.
+  - A git command's redirect is not where it acts: `git push origin main >
+    X/push.log` is judged where the push runs, not in X.
+  - The written repos are looked up only when a repo-scoped rule matches the
+    command, and each target resolves once per command, so a long command no
+    rule matches pays nothing for them.
+
 ## [10.2.23] - 2026-10-02
 
 ### Fixed

@@ -1534,3 +1534,243 @@ def test_code_text_fast_path_answers_as_the_slow_path() -> None:
     for _ in range(20_000):
         text = "".join(rng.choice(pieces) for _ in range(rng.randint(0, 12)))
         assert rules._code_text(text) == _slow_code_text(text), repr(text)
+
+
+@pytest.fixture
+def write_repos(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Path, Path, Path, Path]:
+    """(omi, x, y, outside) for #458: a deny on every Bash command in public
+    repo X; Y is private and ``outside`` is in no repo."""
+    omi = tmp_path / "OMI"
+    _note_with_rule(
+        omi,
+        id="no-bash-in-x",
+        match='"*"',
+        when="\n  repo_visibility: public",
+        except_repos="[]",
+    )
+    x, y, outside = tmp_path / "x", tmp_path / "y", tmp_path / "outside"
+    for r in (x, y):
+        (r / ".git").mkdir(parents=True)
+        (r / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    outside.mkdir()
+    x, y, outside = x.resolve(), y.resolve(), outside.resolve()
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public" if r == x else "private")
+    monkeypatch.setattr(rules, "_repo_branch", lambda r: "main")
+    monkeypatch.setattr(rules, "_repo_name", lambda r: r.name)
+    return omi, x, y, outside
+
+
+def test_repo_rule_judges_the_repo_a_bash_write_targets(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458: a repo-scoped rule on X fires for a Bash write into X from
+    outside it, as the Write tool on that path would be judged against X."""
+    omi, x, y, outside = write_repos
+    px, py, pout = x.as_posix(), y.as_posix(), outside.as_posix()
+    for command, where in (
+        (f"cat > {px}/file.py <<EOF\nprint(1)\nEOF\n", outside),
+        (f"sed -i s/a/b/ {px}/f.txt", outside),
+        (f"echo x > {px}/f && cd {py}", y),
+        (f"cd {pout} && echo x > {px}/f", y),
+        (f"bash -c 'echo x > {px}/f'", outside),
+        # A relative target after `cd` resolves from the new directory.
+        (f"cd {pout} && echo x > ../{x.name}/f", y),
+    ):
+        assert _denied(omi, command, where, monkeypatch), command
+
+
+def test_repo_rule_ignores_writes_outside_the_repo(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458: a write that lands outside X is not judged against X."""
+    omi, _x, y, outside = write_repos
+    py, pout = y.as_posix(), outside.as_posix()
+    for command, where in (
+        (f"cat > {pout}/file.py <<EOF\nprint(1)\nEOF\n", outside),
+        (f"echo x > {py}/f", outside),
+        (f"sed -i s/a/b/ {py}/f.txt", outside),
+        ("echo x > /dev/null 2>&1", y),
+        ("echo x > f.txt", outside),
+        (f"cd {pout} && echo x > ../{y.name}/f", outside),
+    ):
+        assert not _denied(omi, command, where, monkeypatch), command
+
+
+def test_a_comparison_is_not_a_write(write_repos: tuple[Path, Path, Path, Path]) -> None:
+    """#458 EM review: `>` in `(( … ))` arithmetic or an escaped `\\>` in a
+    `[ … ]` test compares; the plain walk drops `((`/`))`, so the write
+    targets come from the walk with comparisons blanked. Run from inside X,
+    where `b`/`3` would land, no site writes anywhere."""
+    _omi, x, _y, _outside = write_repos
+    for command in (
+        "(( a > b )) && echo y",
+        "if (( n > 3 )); then echo y; fi",
+        "[[ a > b ]] && echo y",
+        "[ a \\> b ]",
+    ):
+        view = guard._rules_command_view({"tool": "Bash", "command": command, "cwd": x.as_posix()})
+        assert view is not None, command
+        assert [s.write_repos for s in view.sites] == [()] * len(view.sites), command
+    # The same `>` outside a comparison is still a write into X.
+    view = guard._rules_command_view({"tool": "Bash", "command": "echo a > b", "cwd": x.as_posix()})
+    assert view is not None and view.sites[0].write_repos == (x,)
+
+
+def test_a_git_commands_redirect_is_not_where_it_acts(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#458 EM review: a redirect says where a git command's output goes, not
+    where the git command acts, so `git push origin main > X/push.log` from a
+    private repo is not a push in public X. A non-git write into X is still
+    judged there."""
+    omi, public, private = two_repos
+    pub, priv = public.as_posix(), private.as_posix()
+    outside = tmp_path / "elsewhere"
+    outside.mkdir()
+    for command, where in (
+        (f"git push origin main > {pub}/push.log", private),
+        (f"git push origin main > {pub}/push.log", outside),
+        (f"cd {priv} && git push origin main > {pub}/push.log", outside),
+        (f"echo x > {pub}/f; git push origin main", outside),
+    ):
+        assert not _denied(omi, command, where, monkeypatch), command
+    # Not git: `echo` writes X, and the rule's text matches it.
+    assert _denied(omi, f"echo git push origin main > {pub}/notes", outside, monkeypatch)
+    # Where the git command acts is still judged.
+    assert _denied(omi, f"git -C {pub} push origin main > {priv}/push.log", outside, monkeypatch)
+
+
+def test_opaque_site_is_judged_in_the_repo_it_writes(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458 EM review: an opaque site (`su -c '…'`) matched only on its quoted
+    body is judged in the repo its own redirect writes into. A write inside
+    the quoted body is a body the guard does not unwrap (#448's known limit)."""
+    omi, x, _y, outside = write_repos
+    _note_with_rule(
+        omi,
+        id="no-bash-in-x",
+        match='"*echo*"',
+        when="\n  repo_visibility: public",
+        except_repos="[]",
+    )
+    px, pout = x.as_posix(), outside.as_posix()
+    view = guard._rules_command_view(
+        {"tool": "Bash", "command": f"su -c 'echo y' > {px}/log", "cwd": pout}
+    )
+    assert view is not None and view.sites[0].opaque and view.sites[0].write_repos == (x,)
+    assert _denied(omi, f"su -c 'echo y' > {px}/log", outside, monkeypatch)
+    assert not _denied(omi, f"su -c 'echo y' > {pout}/log", outside, monkeypatch)
+
+
+def test_spanning_glob_is_judged_in_the_repos_written(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458 EM review: a rule glob that spans two simple commands matches no
+    single site; the command as a whole is judged where it runs and in every
+    repo any of its sites writes into."""
+    omi, x, y, outside = write_repos
+    _note_with_rule(
+        omi,
+        id="no-bash-in-x",
+        match='"*echo a; echo b*"',
+        when="\n  repo_visibility: public",
+        except_repos="[]",
+    )
+    px, py = x.as_posix(), y.as_posix()
+    assert _denied(omi, f"echo a; echo b > {px}/f", outside, monkeypatch)
+    assert not _denied(omi, f"echo a; echo b > {py}/f", outside, monkeypatch)
+
+
+def test_except_repos_applies_to_each_judged_repo(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458 EM review: with X and Y both public and only X exempt, a command
+    is denied when EITHER the repo it runs in or the repo it writes into is
+    not exempt, and allowed when both are."""
+    omi, x, y, _outside = write_repos
+    _note_with_rule(
+        omi,
+        id="no-bash-in-x",
+        match='"*"',
+        when="\n  repo_visibility: public",
+        except_repos=f"[{x.name}]",
+    )
+    monkeypatch.setattr(rules, "_repo_visibility", lambda r, **k: "public")
+    px, py = x.as_posix(), y.as_posix()
+    # Written repo exempt, cwd repo not.
+    assert _denied(omi, f"echo z > {px}/f", y, monkeypatch)
+    # Cwd repo exempt, written repo not.
+    assert _denied(omi, f"echo z > {py}/f", x, monkeypatch)
+    # Both exempt.
+    assert not _denied(omi, f"echo z > {px}/f", x, monkeypatch)
+
+
+def test_write_repo_lookup_failure_fails_open(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#458 (invariant 2): a crash resolving write targets drops only the
+    written repos; the view survives, the guard neither raises nor loses the
+    cwd judgement."""
+    omi, x, _y, outside = write_repos
+
+    def boom(*_a: object, **_k: object) -> None:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(guard, "_dir_repo", boom)
+    command = f"echo x > {x.as_posix()}/f"
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
+    view = guard._rules_command_view(action)
+    assert view is not None
+    assert len(view.sites) == 1 and view.sites[0].write_repos == ()
+    assert not _denied(omi, command, outside, monkeypatch)
+    assert _denied(omi, "echo x > f", x, monkeypatch)
+
+
+def test_write_targets_are_read_only_for_a_matching_site(
+    two_repos: tuple[Path, Path, Path], monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """#458 EM review: the view defers each site's write targets until a
+    repo-scoped rule matches that site, so a long command no rule matches
+    never pays for them. `*git push*` matches neither `echo` site."""
+    omi, public, _private = two_repos
+    calls: list[str] = []
+    real = guard._site_write_repos
+
+    def counting(site: object, *a: object) -> object:
+        calls.append(str(getattr(site, "text", "")))
+        return real(site, *a)  # type: ignore[arg-type]
+
+    monkeypatch.setattr(guard, "_site_write_repos", counting)
+    command = f"echo x > {public.as_posix()}/f; echo y > f"
+    action = {"tool": "Bash", "command": command, "cwd": tmp_path.as_posix()}
+    assert guard._rules_command_view(action) is not None
+    assert not _denied(omi, command, tmp_path, monkeypatch)
+    assert calls == []
+    # A matching site reads its own targets, once.
+    matching = f"echo git push origin main > {public.as_posix()}/f; echo y"
+    assert _denied(omi, matching, tmp_path, monkeypatch)
+    assert len(calls) == 1
+
+
+@pytest.mark.parametrize("count", [10_000, 20_000])
+def test_long_writes_are_judged_within_a_second(
+    write_repos: tuple[Path, Path, Path, Path], monkeypatch: pytest.MonkeyPatch, count: int
+) -> None:
+    """#458 EM review, under #445's bound: `echo x > f; ` repeated (the view
+    took 0.80 s at 20,000 when it read every site's targets eagerly), through
+    the note-rule view and verdict from cold caches. The `*` rule matches
+    every site, so every site's write targets are read, once per distinct
+    text. (At 100,000 the walk alone takes about 0.55 s on this shape; the
+    #445 judges in test_guard cover 100,000.)"""
+    omi, x, _y, outside = write_repos
+    command = "echo x > f; " * count + f"echo x > {x.as_posix()}/f"
+    action = {"tool": "Bash", "command": command, "cwd": outside.as_posix()}
+    cold_shell_caches()
+    with hard_time_limit(traced_bound(1.0)):
+        assert guard._rules_command_view(action) is not None
+    cold_shell_caches()
+    monkeypatch.chdir(outside)
+    with hard_time_limit(traced_bound(1.0)):
+        verdict = guard._note_rules_verdict(action, omi)
+    assert verdict is not None and not verdict.allow

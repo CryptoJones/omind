@@ -85,6 +85,12 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-02 (v10.2.24)
+
+- [x] **guard: repo-scoped note rules ignore the repo a Bash write targets** ([#458](https://github.com/CryptoJones/omind/issues/458)) — **v10.2.24** — _bug_ —
+  a repo-scoped note rule now judges each matching non-git command against every repo it
+  writes into, as the Write tool on that path is judged, as well as where it runs.
+
 ### Shipped — 2026-10-02 (v10.2.23)
 
 - [x] **guard: positional `"$@"` shell bodies are not classified as repo work** ([#449](https://github.com/CryptoJones/omind/issues/449)) — **v10.2.23** — _bug_ —
