@@ -3564,6 +3564,32 @@ FIND_EXEC_AND_EXPANSION_HARD_COMMANDS = (
     ('eval "$(echo sudo id)"', "sudo-use-fleet-sudo"),
     ("eval $(echo sudo id)", "sudo-use-fleet-sudo"),
     ("eval \"$(printf 'sudo id')\"", "sudo-use-fleet-sudo"),
+    # #455 EM review: the expanded text is searched again (item 3).
+    ("$(printf bash) -c 'sudo id'", "sudo-use-fleet-sudo"),
+    ("${X:-sh} -c 'sudo id'", "sudo-use-fleet-sudo"),
+    ("$(printf find) . -exec sudo id \\;", "sudo-use-fleet-sudo"),
+    # More expansion operators (item 4).
+    ("${X:+sudo} id", "sudo-use-fleet-sudo"),
+    ("${X+sudo} id", "sudo-use-fleet-sudo"),
+    # One -exec command's opt-in never covers another's match (item 2).
+    ("find . -exec env OMI_SUDO_OK=1 true \\; -exec sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . -exec sudo id \\; -exec env OMI_SUDO_OK=1 true \\;", "sudo-use-fleet-sudo"),
+    # More eval shapes (item 5).
+    ("eval `echo sudo id`", "sudo-use-fleet-sudo"),
+    ('eval " $(echo sudo id)"', "sudo-use-fleet-sudo"),
+    ('eval "\\$(echo sudo id)"', "sudo-use-fleet-sudo"),
+    # find argument traps (item 6).
+    ("find . -name -exec -exec sudo id \\;", "sudo-use-fleet-sudo"),
+    ("find . '-exec' sudo id \\;", "sudo-use-fleet-sudo"),
+    ('find . "-exec" sudo id \\;', "sudo-use-fleet-sudo"),
+    # Stdin-script words (should fix).
+    ("echo '$(printf sudo) id' | bash", "sudo-use-fleet-sudo"),
+    # Printers by another spelling, once pinned as out of scope.
+    ("$(command printf sudo) id", "sudo-use-fleet-sudo"),
+    ("$(printf -- sudo) id", "sudo-use-fleet-sudo"),
+    ("$(/usr/bin/printf sudo) id", "sudo-use-fleet-sudo"),
+    ("$(echo -e sudo) id", "sudo-use-fleet-sudo"),
+    ("$(echo -n sudo) id", "sudo-use-fleet-sudo"),
 )
 
 
@@ -3601,17 +3627,93 @@ def test_hard_rules_judge_find_exec_and_expanded_programs(
         'eval "$(echo hi)"',
         'eval "$(ssh-agent -s)"',
         'eval "$(pyenv init -)"',
+        # Only find's action words start a command (#455 review).
+        "mytool -ok sudo x",
+        "mytool -exec sudo x",
+        "find . -name '-exec sudo id'",
+        "find . -exec grep -e 'a; sudo id' {} +",
+        "find . -exec env OMI_SUDO_OK=1 sudo id \\; -exec ls \\;",
         # Out of scope (#455): the guard does not evaluate an expansion whose
         # output is not a literal it can read, so these are not judged.
         "X=sudo; $X id",
         "$(cat prog.txt) id",
         "$(printf '%s' sudo) id",
-        "$(echo -n sudo) id",
         'eval "$(cat script.sh)"',
     ],
 )
-def test_hard_rules_leave_find_args_and_unread_expansions_alone(command: str) -> None:
+@pytest.mark.parametrize("tokenizing", ["posix", "windows"])
+def test_hard_rules_leave_find_args_and_unread_expansions_alone(
+    command: str, tokenizing: str, request: pytest.FixtureRequest
+) -> None:
+    if tokenizing == "windows":
+        request.getfixturevalue("windows_tokens")
     assert guard._hard_policy_verdict(command) is None
+
+
+def test_find_exec_commands_are_one_subject_each() -> None:
+    """#455 review: each action's command is its own subject, so an opt-in
+    counts for its own command only."""
+    command = "find . -exec env OMI_SUDO_OK=1 true \\; -exec sudo id \\;"
+    subjects = guard._hard_rule_subjects(command)
+    assert "env OMI_SUDO_OK=1 true" in subjects.code
+    assert "sudo id" in subjects.code
+    assert not any("\n" in text for text in subjects.code[1:])
+
+
+@pytest.mark.parametrize(
+    ("broken", "command"),
+    [
+        ("_expanded_command_text", "find . -exec sudo id \\;"),
+        ("_find_exec_commands", "$(printf sudo) id"),
+        ("_find_exec_commands", "echo sudo id | bash"),
+    ],
+)
+def test_find_exec_and_expansion_failures_keep_other_subjects(
+    broken: str, command: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#455 review: either new search raising leaves the subject search to
+    finish with what the other parts find (fail open, never a crash)."""
+
+    def boom(*_args: object, **_kwargs: object) -> object:
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(guard, broken, boom)
+    cold_shell_caches()
+    try:
+        guard._hard_rule_subjects(command)  # never raises
+        verdict = guard._hard_policy_verdict(command)
+    finally:
+        cold_shell_caches()
+    assert verdict is not None and verdict.rule_id == "sudo-use-fleet-sudo"
+
+
+#: #455 review: (prefix, repeated part). The first is the measured shape.
+_LONG_EXPANSIONS_455 = {
+    "eval-blanks": ('sudo_x # eval "$(echo ', "\t"),
+    "eval-words": ('eval "$(echo ', "a "),
+    "eval-backtick": ("eval `echo ", " "),
+    "printf-blanks": ("$(printf ", "\t"),
+    "default-blanks": ("${X:-", " "),
+    "find-actions": ("find . ", "-exec "),
+}
+
+
+@pytest.mark.parametrize("count", [10_000, 100_000])
+@pytest.mark.parametrize(
+    "shape", list(_LONG_EXPANSIONS_455.values()), ids=list(_LONG_EXPANSIONS_455)
+)
+def test_find_exec_and_expansion_searches_stay_linear(shape: tuple[str, str], count: int) -> None:
+    """#455 review: `eval "$(echo ` then a long blank run was cubic in
+    `_EVAL_LITERAL_RE` (0.27 s at 800, about 17 s at 3,200). Both expansion
+    regexes, and the find action split, stay linear at 10,000 and 100,000."""
+    prefix, repeated = shape
+    command = prefix + repeated * count
+    with _hard_time_limit(traced_bound(1.0)):
+        guard._EVAL_LITERAL_RE.sub("", command)
+        guard._EXPANDED_NAME_RE.sub("", command)
+    cold_shell_caches()
+    with _hard_time_limit(traced_bound(1.0)):
+        guard._hard_policy_verdict(command)
 
 
 @pytest.mark.parametrize("tokenizing", ["posix", "windows"])

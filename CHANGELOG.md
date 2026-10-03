@@ -16,19 +16,29 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   sudo id \;` was allowed: `-exec` is not a separator or a wrapper, so `sudo`
   never reached command position. `$(printf sudo) id`, `${X:-sudo} id` and
   `eval "$(echo sudo id)"` were allowed too.
-  - The words after `-exec`, `-execdir`, `-ok` and `-okdir`, up to `\;`,
-    `';'` or `{} +`, are judged as a command. The split comes from the same
-    stage walk the repo-work classifier reads. `find . -name sudo`, `find .
-    -exec grep sudo {} +` and `find . -exec echo sudo \;` stay allowed.
+  - In a `find` stage, the words after every `-exec`, `-execdir`, `-ok` and
+    `-okdir`, quoted or not, up to `\;`, `';'`, `{} +` or the next action
+    word, are judged as a command of their own. Each action is its own
+    subject, so one command's opt-in never covers another's `sudo`. Even an
+    action word that is a primary's value (`-name -exec -exec sudo id \;`)
+    starts a candidate: over-judging is the safe direction. `find . -name
+    sudo`, `find . -exec grep sudo {} +`, `find . -exec echo sudo \;` and
+    `mytool -ok sudo x` stay allowed.
   - An expansion that is a whole word and prints a bare program name is
     replaced by that name before the command is judged: `$(echo|printf
-    NAME)`, `` `echo NAME` ``, `${X:-NAME}` (`-`, `=`, `:=` too), optionally
-    double-quoted. So is `eval` of a literal `echo`/`printf`. The name counts
-    only in command position, so `echo $(printf sudo)` and `grep ${X:-sudo} f`
-    stay allowed.
+    NAME)`, `` `echo NAME` ``, `${X:-NAME}` (`-`, `=`, `+`, each with or
+    without `:`), optionally double-quoted. The printer may carry `echo
+    -n/-e/-E`, `printf --`, a path, or `command`/`builtin`. So is `eval` of
+    a literal `echo`/`printf`, by `$(…)`, `\$(…)` or backticks. The expanded
+    command is searched again, one level deep, so `$(printf bash) -c 'sudo
+    id'` and `$(printf find) . -exec sudo id \;` are judged, and so are the
+    words a stdin script runs (`echo '$(printf sudo) id' | bash`). The name
+    counts only in command position, so `echo $(printf sudo)` and `grep
+    ${X:-sudo} f` stay allowed. Both expansion regexes match each blank run
+    one way only, so they stay linear (pinned at 100,000).
   - Out of scope, and pinned as allowed by tests: an expansion whose output
     the guard would have to evaluate (`X=sudo; $X id`, `$(cat f) id`,
-    `$(printf '%s' sudo) id`, `$(echo -n sudo) id`, `eval "$(cat f)"`).
+    `$(printf '%s' sudo) id`, `eval "$(cat f)"`).
 
 ## [10.2.25] - 2026-10-02
 
