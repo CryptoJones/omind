@@ -662,6 +662,21 @@ under Claude Code blocks under Laguna too. Re-runs replace only the entries
 omind owns (named `omind-omi-*`), so hooks you wrote and pool's own
 `stop_hook_max_continuations` are preserved.
 
+**Grok Build** (the `grok` CLI) gets memory, the guard, the skill, and a home
+rule from one `omind setup --agent grok`. The `omi` MCP server is registered
+under `[mcp_servers.omi]` in `~/.grok/config.toml`. Hooks go in
+`~/.grok/hooks/omind.json` (other files in that directory are left alone):
+`PreToolUse` hard-blocks via `omind guard adapter --harness grok`,
+`UserPromptSubmit` runs the per-turn preflight, and `PostToolUse` / `Stop` /
+`SessionStart` do accounting, the loop guard, and session bookkeeping. Grok
+does not inject `SessionStart` stdout, so priming is a managed
+`~/.grok/rules/omind.md` plus the packaged skill in `~/.grok/skills/omind/`.
+Grok also runs Claude Code's hooks and sends them a camelCase payload
+(`toolName`, `toolInput`, `sessionId`); the guard accepts that shape and
+answers a deny as `{"decision":"deny","reason":…}`. `$GROK_HOME` overrides
+`~/.grok`. `omind quickstart --agent grok` prints the same wiring to apply
+by hand.
+
 **goose** (Block's on-machine agent) gets OMI **memory + priming** from one
 `omind setup --agent goose` — it has no blocking pre-tool or session-start shell
 hooks, so the guard is not wired here. The `omi` MCP server is registered as a
@@ -696,7 +711,7 @@ as Claude Desktop but `Code/User`; a `servers` block with `type: stdio`); and Am
 Q's `~/.aws/amazonq/mcp.json` (`mcpServers`). Restart the tool afterward to load the
 server.
 
-`omind doctor --agent hermes|openclaw|opencode|codex|gemini|poolside|goose|claude-desktop|kiro|vscode|q`
+`omind doctor --agent hermes|openclaw|opencode|codex|gemini|poolside|goose|grok|claude-desktop|kiro|vscode|q`
 diagnoses that agent's wiring, and `omind quickstart --agent <name>` prints the manual
 steps (YAML/JSON snippets personalized to your paths) if you'd rather merge them in
 yourself.

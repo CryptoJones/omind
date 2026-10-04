@@ -83,6 +83,11 @@ def _load_model2vec() -> Backend | None:
     no network, load error — records a reason and fails open to the keyword path.
     """
     global _last_error
+    # Hugging Face prints "Fetching N files" on stderr while the model loads.
+    # A Grok PreToolUse hook that exits 2 shows that first stderr line as the
+    # deny reason, which hides the guard's actual text. Silence it before import.
+    os.environ.setdefault("HF_HUB_DISABLE_PROGRESS_BARS", "1")
+    os.environ.setdefault("TQDM_DISABLE", "1")
     try:
         from model2vec import StaticModel
     except Exception as exc:  # ImportError, or a broken partial install

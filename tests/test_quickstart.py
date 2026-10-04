@@ -173,3 +173,47 @@ def test_agy_quickstart_matches_provisioner(tmp_path: Path) -> None:
     out_alias = build_quickstart(config_alias)
     assert 'omind setup --agent antigravity --vault "' in out_alias
 
+
+def test_grok_quickstart_matches_provisioner(tmp_path: Path) -> None:
+    import tomlkit
+
+    from omind.agents import (
+        GROK_BOOTSTRAP_END,
+        GROK_BOOTSTRAP_START,
+        GrokProvisioner,
+        grok_config_path,
+        grok_hooks_path,
+        grok_rules_path,
+        grok_skill_dir,
+    )
+
+    config = SetupConfig(vault=tmp_path / "Vault", folder="OMI", agent="grok")
+    out = build_quickstart(config)
+
+    assert 'omind setup --agent grok --vault "' in out
+    assert "omind doctor --agent grok" in out
+    assert str(grok_config_path()) in out
+    assert str(grok_hooks_path()) in out
+    assert str(grok_rules_path()) in out
+    assert str(grok_skill_dir()) in out
+    assert "claude mcp add" not in out
+
+    prov = GrokProvisioner(config=config, log=lambda _m: None)
+
+    toml_blocks = _fenced(out, "toml")
+    assert len(toml_blocks) == 1
+    parsed = tomlkit.parse(toml_blocks[0])
+    got = parsed["mcp_servers"][config.server_name]
+    desired = prov.desired_mcp_entry()
+    assert got["command"] == desired["command"]
+    assert list(got["args"]) == desired["args"]
+
+    json_blocks = _fenced(out, "json")
+    assert len(json_blocks) == 1
+    assert json.loads(json_blocks[0]) == prov.desired_hooks_document()
+
+    md_blocks = _fenced(out, "markdown")
+    assert len(md_blocks) == 1
+    assert GROK_BOOTSTRAP_START in md_blocks[0] and GROK_BOOTSTRAP_END in md_blocks[0]
+    assert str(config.omi_dir) in md_blocks[0]
+

@@ -317,6 +317,48 @@ and say that OMI could not be read.
 <!-- omind:goose-bootstrap:end -->
 """
 
+# Managed home rule for Grok Build. Grok loads every Markdown file in
+# ~/.grok/rules/ into the system prompt. SessionStart hook stdout is ignored,
+# so this file — not the hook — is what primes a session.
+GROK_RULES_TEMPLATE = """\
+<!-- omind:grok-bootstrap:start -->
+## OMI Bootstrap
+
+This file is managed by `omind setup --agent grok`. It is a bootstrap pointer,
+not the source of truth.
+
+CryptoJones runs long-term assistant memory out of OMI. Use OMI for durable
+preferences, persona, project memory, and "remember this" requests. Do not rely
+on Grok's built-in memory as the only source for required behavior.
+
+- OMI MCP slug: `omi`
+- Local vault root on this machine: `{vault}`
+- OMI folder: `{folder}`
+- OMI directory: `{omi_dir}`
+
+- **Read OMI first.** Before acting on a task, consult OMI. The `omi` MCP server
+  is wired up; use `search-vault` then token-bounded `recall-note`. The vault's
+  `index.md` lists recent memories.
+- **Get live syntax.** For `/omind help` or CLI questions, call OMI MCP `help`;
+  do not rely on syntax embedded in this pointer.
+- **Save memories through omind only.** When something is worth keeping across
+  sessions, persist it with the single-writer CLI (never write files into the
+  OMI folder directly — a raw write can corrupt the index):
+
+  ```bash
+  omind note --title "Short Descriptive Title" \\
+    --summary "one-line summary" --tags "topic,subtopic" \\
+    --vault "{vault}" --folder "{folder}" <<'BODY'
+  The insight in plain Markdown, with [[wikilinks]] to related notes.
+  BODY
+  ```
+
+If OMI and the user's explicit current instruction conflict, the current
+instruction wins for that turn. If OMI is unavailable, proceed from this pointer
+and say that OMI could not be read.
+<!-- omind:grok-bootstrap:end -->
+"""
+
 # Managed global AGENTS.md section for Antigravity CLI (agy). Antigravity discovers
 # AGENTS.md rules globally in ~/.gemini/config/AGENTS.md.
 AGY_BOOTSTRAP_START = "<!-- omind:agy-bootstrap:start -->"

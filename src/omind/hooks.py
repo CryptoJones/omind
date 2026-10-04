@@ -64,7 +64,7 @@ HANDLED_EVENTS = ("PostToolUse", "Stop", "SessionStart")
 #: PreToolUse re-arm demand from the core, so nothing is lost — just nudged
 #: later. Declared here, not inferred from the event, because a phantom
 #: injection would be recorded as a consult the model never saw.
-INJECTING_HARNESSES = frozenset({"claude"})
+INJECTING_HARNESSES = frozenset({"claude", "grok"})
 #: Hermes Agent has no SessionStart hook; it fires ``pre_llm_call`` before every
 #: LLM turn and consumes a ``{"context": ...}`` payload on stdout. omind installs
 #: this event to inject the same priming the Claude SessionStart hook does — but

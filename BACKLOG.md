@@ -79,6 +79,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-04 (v10.3.0)
+
+- [x] **Grok Build client: setup, doctor, guard payloads, and quickstart** ([#470](https://github.com/CryptoJones/omind/issues/470)) — **v10.3.0** — _feature_ —
+  `omind setup --agent grok` registers the MCP server, hooks, skill, and rules file.
+  The guard reads Grok's camelCase events (including when Grok runs the Claude-compatible
+  hook), counts `omi__…` as a consult, and denies with stdout JSON so the reason is visible.
+  `omind quickstart --agent grok` prints the same wiring.
+
 ### Shipped — 2026-10-02 (v10.2.28)
 
 - [x] **guard: `decide()` raises OSError (ENAMETOOLONG) on long cd chains; add an overall fail-closed hook deadline** ([#460](https://github.com/CryptoJones/omind/issues/460)) — **v10.2.28** — _bug_ —
