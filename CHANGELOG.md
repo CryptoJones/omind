@@ -28,6 +28,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   shows. The embedding model load no longer prints a Hugging Face progress bar
   onto that channel.
 
+### Fixed
+- **Grok setup refuses to replace a hooks or rules file it cannot read.**
+  Invalid JSON or an unreadable `~/.grok/hooks/omind.json` raises
+  `ProvisionError` instead of being treated as missing. A rules file that
+  exists but cannot be decoded is left in place; a missing rules file is
+  still created.
+
 ## [10.2.28] - 2026-10-02
 
 ### Fixed

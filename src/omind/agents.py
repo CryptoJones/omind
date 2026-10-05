@@ -3667,10 +3667,9 @@ class GrokProvisioner(AgentProvisioner):
     def install_hooks(self) -> None:
         path = grok_hooks_path()
         desired = self.desired_hooks_document()
-        try:
-            current = self._read_hooks()
-        except ProvisionError:
-            current = None
+        # A missing file is {}. Bad JSON or an unreadable file raises, and
+        # that error must propagate: treating it as absent would overwrite it.
+        current = self._read_hooks()
         if current == desired and not self.config.force:
             self.log(f"  OMI hooks already installed in {path}")
             return
@@ -3701,8 +3700,12 @@ class GrokProvisioner(AgentProvisioner):
         desired = self.bootstrap_content()
         try:
             current = path.read_text(encoding="utf-8")
-        except (OSError, UnicodeDecodeError):
+        except FileNotFoundError:
             current = ""
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ProvisionError(
+                f"Could not read {path}; refusing to overwrite it."
+            ) from exc
         start = current.find(GROK_BOOTSTRAP_START)
         end = current.find(GROK_BOOTSTRAP_END)
         if start >= 0 and end >= start:

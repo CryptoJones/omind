@@ -11,7 +11,7 @@ from pathlib import Path
 import pytest
 import tomlkit
 
-from omind import adapters, agents, harness, paths, seeds
+from omind import adapters, agents, harness, paths
 from omind.agents import diagnose_grok, run_setup_for
 from omind.provision import ProvisionError, SetupConfig
 
@@ -86,8 +86,8 @@ def test_claude_hook_denies_grok_payload_as_json() -> None:
     assert code == 0 and stderr.getvalue() == ""
     body = json.loads(stdout.getvalue())
     assert body["decision"] == "deny"
-    assert "OMI guard:" in body["reason"]
-    assert "gh repo delete" in body["reason"] or body["reason"]
+    assert body["reason"].startswith("OMI guard: ")
+    assert "never delete a repo" in body["reason"]
 
 
 def test_grok_dispatcher_lifts_inner_mcp_tool() -> None:
@@ -137,11 +137,13 @@ def test_grok_setup_registers_mcp_hooks_skill_and_rules(
     doc = tomlkit.parse(agents.grok_config_path().read_text(encoding="utf-8"))
     omi = doc["mcp_servers"]["omi"]
     assert omi["command"]
-    assert list(omi["args"])[-4:] == ["node", "--vault", str(config.vault), "--folder"] or (
-        "node" in list(omi["args"]) and str(config.vault) in list(omi["args"])
-    )
-    assert str(config.vault) in list(omi["args"])
-    assert config.folder in list(omi["args"])
+    assert list(omi["args"])[-5:] == [
+        "node",
+        "--vault",
+        str(config.vault),
+        "--folder",
+        config.folder,
+    ]
 
     hooks = json.loads(agents.grok_hooks_path().read_text(encoding="utf-8"))["hooks"]
     for event in agents.GROK_HOOK_EVENTS:
@@ -158,9 +160,6 @@ def test_grok_setup_registers_mcp_hooks_skill_and_rules(
     assert str(config.vault) in skill.read_text(encoding="utf-8")
 
     rules = agents.grok_rules_path().read_text(encoding="utf-8")
-    assert seeds.GROK_RULES_TEMPLATE.split("\n", 1)[0].strip() in rules or (
-        "omind:grok-bootstrap:start" in rules and str(config.omi_dir) in rules
-    )
     assert "omind:grok-bootstrap:start" in rules
     assert str(config.omi_dir) in rules
 
@@ -210,6 +209,25 @@ def test_grok_setup_refuses_corrupt_toml(tmp_path: Path, grok_home: Path) -> Non
     with pytest.raises(ProvisionError):
         run_setup_for(_config(tmp_path), log=_quiet)
     assert agents.grok_config_path().read_text(encoding="utf-8") == "this = [\n"
+
+
+def test_grok_setup_refuses_unreadable_hooks(tmp_path: Path, grok_home: Path) -> None:
+    path = agents.grok_hooks_path()
+    path.parent.mkdir(parents=True)
+    path.write_text("{not json", encoding="utf-8")
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path), log=_quiet)
+    assert path.read_text(encoding="utf-8") == "{not json"
+
+
+def test_grok_setup_refuses_undecodable_rules(tmp_path: Path, grok_home: Path) -> None:
+    path = agents.grok_rules_path()
+    path.parent.mkdir(parents=True)
+    original = b"\xff\xfe not utf-8"
+    path.write_bytes(original)
+    with pytest.raises(ProvisionError):
+        run_setup_for(_config(tmp_path), log=_quiet)
+    assert path.read_bytes() == original
 
 
 def test_grok_setup_fails_without_install(
