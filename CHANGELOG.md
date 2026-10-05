@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.3.0] - 2026-10-04
+
+### Added
+- **Grok Build (`grok`) support
+  ([#470](https://github.com/CryptoJones/omind/issues/470)).** `omind setup --agent grok` registers the `omi`
+  MCP server in `~/.grok/config.toml`, installs lifecycle hooks in
+  `~/.grok/hooks/omind.json` (`PreToolUse`, `UserPromptSubmit`, `PostToolUse`,
+  `Stop`, `SessionStart`), installs the packaged skill under
+  `~/.grok/skills/omind/`, and writes a managed bootstrap rule at
+  `~/.grok/rules/omind.md`. Grok does not inject `SessionStart` stdout, so the
+  rules file is what primes a session. `omind doctor --agent grok` checks the
+  wiring. `omind quickstart --agent grok` prints the same MCP table, hook
+  file, rules block, and skill path.
+- **Grok hook payloads.** `omind guard adapter` accepts Grok's camelCase events
+  (`toolName`, `toolInput`, `sessionId`, `hookEventName`), including when Grok
+  is running the Claude-compatible hook. Built-in tool names map onto the names
+  the guard already classifies, and `omi__…` counts as a memory consult. A deny
+  is `{"decision":"deny","reason":…}` on stdout so the guard text is what Grok
+  shows. The embedding model load no longer prints a Hugging Face progress bar
+  onto that channel.
+
+### Fixed
+- **Grok setup refuses to replace a hooks or rules file it cannot read.**
+  Invalid JSON or an unreadable `~/.grok/hooks/omind.json` raises
+  `ProvisionError` instead of being treated as missing. A rules file that
+  exists but cannot be decoded is left in place; a missing rules file is
+  still created.
+
 ## [10.2.28] - 2026-10-02
 
 ### Fixed

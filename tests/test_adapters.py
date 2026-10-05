@@ -514,7 +514,7 @@ def _rendered_deny(harness: str, code: int, out: str) -> bool:
         hook = data["hookSpecificOutput"]
         decision = hook.get("permissionDecision") or hook.get("decision", {}).get("behavior")
         return bool(decision == "deny")
-    if fmt in (harness_mod.FMT_GEMINI, harness_mod.FMT_AGY):
+    if fmt in (harness_mod.FMT_GEMINI, harness_mod.FMT_AGY, harness_mod.FMT_GROK):
         return bool(data.get("decision") == "deny")
     if fmt == harness_mod.FMT_POOLSIDE:
         return bool(data["hook_specific_output"]["permission_decision"] == "deny")

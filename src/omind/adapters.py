@@ -160,6 +160,11 @@ def run_adapter(
         return harness_mod.render_decision(
             blocked, spec.block_format, sys.stdout, sys.stderr, event=""
         )
+    # Grok runs Claude's hooks and sends a camelCase payload. Deny with Grok's
+    # JSON decision so the reason is the guard text, not the first stderr line.
+    fmt = spec.block_format
+    if harness == "grok" or harness_mod.payload_is_grok(event):
+        fmt = harness_mod.FMT_GROK
     # Poolside's event shape differs from Claude's in three places (tool naming,
     # ``cmd``, ``tool_output``); translate ONCE here so the guard, verifier, and
     # accounting all see the Claude-shaped event they were written against.
@@ -184,7 +189,7 @@ def run_adapter(
         verdict = guard.check_action(action, omi_dir=omi_dir)
         stage = "adapter render"
         return harness_mod.render_decision(
-            verdict, spec.block_format, sys.stdout, sys.stderr, event=hook_event
+            verdict, fmt, sys.stdout, sys.stderr, event=hook_event
         )
     except Exception as exc:
         # ``check_action`` logs its own decision (and never raises), so a verdict
@@ -193,10 +198,10 @@ def run_adapter(
         fallback = _fail_open_verdict(event, action, exc, verdict, stage=stage)
         try:
             return harness_mod.render_decision(
-                fallback, spec.block_format, sys.stdout, sys.stderr, event=hook_event
+                fallback, fmt, sys.stdout, sys.stderr, event=hook_event
             )
         except Exception:
-            return _render_last_resort(spec.block_format, fallback.allow, hook_event)
+            return _render_last_resort(fmt, fallback.allow, hook_event)
 
 
 #: Fixed literal outputs for when :func:`omind.harness.render_decision` raises
@@ -273,6 +278,11 @@ _LAST_RESORT_DENY: dict[str, tuple[str, str, int]] = {
         0,
     ),
     "agy": (json.dumps({"decision": "deny", "reason": _LAST_RESORT_REASON}) + "\n", "", 0),
+    "grok": (
+        json.dumps({"decision": "deny", "reason": f"OMI guard: {_LAST_RESORT_REASON}"}) + "\n",
+        "",
+        0,
+    ),
 }
 _LAST_RESORT_ALLOW: dict[str, str] = {
     "json_signal": json.dumps({"allow": True, "reason": "", "rule_id": ""}) + "\n",

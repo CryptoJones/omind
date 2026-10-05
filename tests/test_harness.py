@@ -20,6 +20,7 @@ def test_specs_and_fallback() -> None:
     assert harness.spec_for("openclaw").block_format == harness.FMT_OPENCLAW
     assert harness.spec_for("agy").block_format == harness.FMT_AGY
     assert harness.spec_for("antigravity").block_format == harness.FMT_AGY
+    assert harness.spec_for("grok").block_format == harness.FMT_GROK
     assert harness.spec_for("unknown-harness").name == "claude"  # safe fallback
     # Gemini's BeforeTool hook hard-blocks; OpenClaw is detect-only until a live
     # gateway is confirmed to enforce a deny (issue #88).
@@ -139,6 +140,7 @@ def test_selftest_all_pass() -> None:
         "poolside",
         "openclaw",
         "agy",
+        "grok",
     }
     assert all(r["ok"] for r in results)
     assert all(r["blocked"] for r in results)  # every canned case is a hard rule
@@ -155,6 +157,9 @@ def test_selftest_all_pass() -> None:
     assert by["openclaw"]["format"] == harness.FMT_OPENCLAW
     assert by["agy"]["format"] == harness.FMT_AGY
     assert '"decision": "deny"' in by["agy"]["rendered"]
+    assert by["grok"]["format"] == harness.FMT_GROK
+    assert '"decision": "deny"' in by["grok"]["rendered"]
+    assert by["grok"]["command"] == "gh repo delete acme/widget"
 
 
 def test_run_guard_selftest_action() -> None:

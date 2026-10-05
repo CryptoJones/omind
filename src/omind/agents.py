@@ -256,6 +256,46 @@ CODEX_HOOK_EVENTS = (
 )
 
 
+def grok_config_dir() -> Path:
+    """Grok Build's config directory: ``$GROK_HOME`` or ``~/.grok``."""
+    base = os.environ.get("GROK_HOME")
+    return Path(base) if base else Path.home() / ".grok"
+
+
+def grok_config_path() -> Path:
+    """Grok's user config. MCP servers live in ``[mcp_servers.<name>]``."""
+    return grok_config_dir() / "config.toml"
+
+
+def grok_hooks_path() -> Path:
+    """The hook file omind owns. Sibling JSON files in the same directory stay."""
+    return grok_config_dir() / "hooks" / "omind.json"
+
+
+def grok_skill_dir() -> Path:
+    """User-scope Grok skill installed by omind setup."""
+    return grok_config_dir() / "skills" / "omind"
+
+
+def grok_rules_path() -> Path:
+    """Home rule Grok injects into every session. SessionStart stdout is ignored,
+    so this file is the priming channel."""
+    return grok_config_dir() / "rules" / "omind.md"
+
+
+#: Substring identifying omind's own Grok guard hook, so doctor can see it.
+GROK_GUARD_MARKER = "guard adapter --harness grok"
+GROK_BOOTSTRAP_START = "<!-- omind:grok-bootstrap:start -->"
+GROK_BOOTSTRAP_END = "<!-- omind:grok-bootstrap:end -->"
+GROK_HOOK_EVENTS = (
+    "PreToolUse",
+    "UserPromptSubmit",
+    "PostToolUse",
+    "Stop",
+    "SessionStart",
+)
+
+
 def _codex_omind_hook(event: str, hook: dict[str, Any]) -> bool:
     command = str(hook.get("command", ""))
     if event in {"PreToolUse", "PermissionRequest"}:
@@ -3479,6 +3519,339 @@ def diagnose_agy(config: SetupConfig) -> list[CheckResult]:
     return results
 
 
+# -- Grok Build -----------------------------------------------------------------
+
+
+class GrokProvisioner(AgentProvisioner):
+    """Wire Grok Build: the ``omi`` MCP server, guard hooks, skill, and a home rule.
+
+    Grok reads MCP servers from ``[mcp_servers.<name>]`` in ``~/.grok/config.toml``
+    and hooks from every JSON file under ``~/.grok/hooks/``. omind owns
+    ``hooks/omind.json`` and leaves every other file alone. Grok does not inject
+    ``SessionStart`` or allowing ``UserPromptSubmit`` stdout, so priming is a
+    managed ``~/.grok/rules/omind.md`` (loaded into the system prompt) plus the
+    packaged skill. The hooks still run: PreToolUse hard-blocks, UserPromptSubmit
+    resets the per-turn gate, and PostToolUse can inject ``additionalContext``.
+    """
+
+    AGENT_LABEL = "Grok Build"
+    INSTALL_HINT = "Install the Grok CLI (`grok`) and launch it once, then re-run."
+    DONE_MESSAGE = (
+        "Done. Start a new Grok session to load the OMI memory tools, hooks, skill, "
+        "and rules."
+    )
+
+    def agent_root(self) -> Path:
+        return grok_config_dir()
+
+    def skill_dir(self) -> Path:
+        return grok_skill_dir()
+
+    def integrate(self) -> None:
+        self.register_mcp()
+        self.install_hooks()
+        self.install_packaged_skill(self.skill_dir())
+        self.install_bootstrap()
+
+    def _read_toml_config(self) -> tomlkit.TOMLDocument:
+        path = grok_config_path()
+        if not path.is_file():
+            return tomlkit.document()
+        try:
+            return tomlkit.parse(path.read_text(encoding="utf-8"))
+        except (OSError, UnicodeDecodeError, tomlkit.exceptions.ParseError) as exc:
+            raise ProvisionError(
+                f"{path} is not valid TOML ({exc}). Refusing to overwrite it."
+            ) from exc
+
+    def desired_mcp_entry(self) -> dict[str, Any]:
+        argv = canonical_omind_argv()
+        return {
+            "command": argv[0],
+            "args": [
+                *argv[1:],
+                "node",
+                "--vault",
+                str(self.config.vault),
+                "--folder",
+                self.config.folder,
+            ],
+        }
+
+    def registered_mcp_entry(self) -> dict[str, Any] | None:
+        try:
+            doc = self._read_toml_config()
+        except ProvisionError:
+            return None
+        servers = doc.get("mcp_servers")
+        entry = servers.get(self.config.server_name) if isinstance(servers, dict) else None
+        if not isinstance(entry, dict):
+            return None
+        return {"command": entry.get("command"), "args": list(entry.get("args") or [])}
+
+    def register_mcp(self) -> None:
+        path = grok_config_path()
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            doc = self._read_toml_config()
+            desired = self.desired_mcp_entry()
+            if self.registered_mcp_entry() == desired and not self.config.force:
+                self.log(
+                    f"  MCP server '{self.config.server_name}' already points at "
+                    f"{self.config.omi_dir}"
+                )
+                return
+            servers = doc.get("mcp_servers")
+            if not isinstance(servers, dict):
+                servers = tomlkit.table()
+                doc["mcp_servers"] = servers
+            elif self.config.server_name != LEGACY_SERVER_NAME and LEGACY_SERVER_NAME in servers:
+                del servers[LEGACY_SERVER_NAME]
+            entry = tomlkit.table()
+            entry["command"] = desired["command"]
+            entry["args"] = desired["args"]
+            servers[self.config.server_name] = entry
+            self._record(
+                f"register MCP server '{self.config.server_name}' in {path} -> "
+                f"{self.config.omi_dir}"
+            )
+            if not self.config.dry_run:
+                path.parent.mkdir(parents=True, exist_ok=True)
+                paths.atomic_write_text(path, tomlkit.dumps(doc))
+
+    def _hook_command(self, event: str) -> str:
+        omind = self._omind_cmd()
+        omi = self._arg(self.config.omi_dir)
+        if event == "PreToolUse":
+            body = f"{omind} guard adapter --harness grok --omi-dir {omi}"
+        elif event == "UserPromptSubmit":
+            body = f"{omind} guard preflight --harness grok --omi-dir {omi}"
+        else:
+            body = f"{self._omind_hook_command(event)} --harness grok"
+        return self._hook_line(body)
+
+    def desired_hooks_document(self) -> dict[str, Any]:
+        timeouts = {
+            "PreToolUse": 30,
+            "UserPromptSubmit": 30,
+            "PostToolUse": 30,
+            "Stop": 20,
+            "SessionStart": 20,
+        }
+        return {
+            "hooks": {
+                event: [
+                    {
+                        "hooks": [
+                            {
+                                "type": "command",
+                                "command": self._hook_command(event),
+                                "timeout": timeouts[event],
+                            }
+                        ]
+                    }
+                ]
+                for event in GROK_HOOK_EVENTS
+            }
+        }
+
+    def _read_hooks(self) -> dict[str, Any]:
+        return self._read_settings(grok_hooks_path())
+
+    def _hooks_wired(self) -> bool:
+        try:
+            data = self._read_hooks()
+        except ProvisionError:
+            return False
+        return data == self.desired_hooks_document()
+
+    def install_hooks(self) -> None:
+        path = grok_hooks_path()
+        desired = self.desired_hooks_document()
+        # A missing file is {}. Bad JSON or an unreadable file raises, and
+        # that error must propagate: treating it as absent would overwrite it.
+        current = self._read_hooks()
+        if current == desired and not self.config.force:
+            self.log(f"  OMI hooks already installed in {path}")
+            return
+        self._record(f"install OMI hooks in {path}")
+        if self.config.dry_run:
+            return
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(path.with_suffix(path.suffix + ".lock")):
+            paths.atomic_write_text(path, json.dumps(desired, indent=2) + "\n")
+
+    def bootstrap_content(self) -> str:
+        return seeds.GROK_RULES_TEMPLATE.format(
+            vault=self.config.vault,
+            folder=self.config.folder,
+            omi_dir=self.config.omi_dir,
+        ).rstrip() + "\n"
+
+    def bootstrap_installed(self) -> bool:
+        path = grok_rules_path()
+        try:
+            text = path.read_text(encoding="utf-8")
+        except (OSError, UnicodeDecodeError):
+            return False
+        return GROK_BOOTSTRAP_START in text and GROK_BOOTSTRAP_END in text
+
+    def install_bootstrap(self) -> None:
+        path = grok_rules_path()
+        desired = self.bootstrap_content()
+        try:
+            current = path.read_text(encoding="utf-8")
+        except FileNotFoundError:
+            current = ""
+        except (OSError, UnicodeDecodeError) as exc:
+            raise ProvisionError(
+                f"Could not read {path}; refusing to overwrite it."
+            ) from exc
+        start = current.find(GROK_BOOTSTRAP_START)
+        end = current.find(GROK_BOOTSTRAP_END)
+        if start >= 0 and end >= start:
+            prefix = current[:start].rstrip()
+            suffix = current[end + len(GROK_BOOTSTRAP_END) :].lstrip()
+            if prefix and suffix:
+                updated = f"{prefix}\n\n{desired}\n{suffix}"
+            elif prefix:
+                updated = f"{prefix}\n\n{desired}"
+            elif suffix:
+                updated = f"{desired}\n{suffix}"
+            else:
+                updated = desired
+        elif current.strip():
+            updated = current.rstrip() + "\n\n" + desired
+        else:
+            updated = desired
+        if updated == current and not self.config.force:
+            self.log(f"  OMI bootstrap pointer already in {path}")
+            return
+        self._record(f"install OMI bootstrap pointer in {path}")
+        if not self.config.dry_run:
+            path.parent.mkdir(parents=True, exist_ok=True)
+            paths.atomic_write_text(path, updated)
+
+    def verify(self) -> None:
+        if self.config.dry_run:
+            return
+        if self.registered_mcp_entry() == self.desired_mcp_entry():
+            self.log(
+                f"  verified: MCP server '{self.config.server_name}' wired into "
+                f"{grok_config_path()}"
+            )
+        else:
+            self.log(
+                "  NOTE: could not confirm the MCP server in Grok's config.toml; "
+                "re-run with --force."
+            )
+        if self._hooks_wired():
+            self.log(f"  verified: OMI hooks installed in {grok_hooks_path()}")
+        else:
+            self.log("  NOTE: could not confirm the OMI hooks; re-run with --force.")
+        skill = self.skill_dir() / paths.AGENT_SKILL_FILENAME
+        if skill.is_file():
+            self.log(f"  verified: omind skill installed in {skill}")
+        else:
+            self.log("  NOTE: could not confirm the omind skill; re-run with --force.")
+        if self.bootstrap_installed():
+            self.log(f"  verified: OMI bootstrap pointer installed in {grok_rules_path()}")
+        else:
+            self.log("  NOTE: could not confirm the OMI rules pointer; re-run with --force.")
+
+
+def diagnose_grok(config: SetupConfig) -> list[CheckResult]:
+    """Doctor checks for Grok Build: root, OMI folder, MCP, hooks, skill, rules."""
+    prov = GrokProvisioner(config=config, log=lambda _msg: None)
+    results = _diagnose_tools(prov.REQUIRED_TOOLS)
+    root = prov.agent_root()
+    if root.is_dir():
+        results.append(CheckResult("grok_root", "ok", f"Grok Build found: {root}"))
+    else:
+        results.append(
+            CheckResult(
+                "grok_root",
+                "fail",
+                f"Grok config directory not found: {root} does not exist",
+            )
+        )
+    results.extend(_diagnose_omi_folder(config))
+    name = config.server_name
+    try:
+        entry = prov.registered_mcp_entry()
+    except ProvisionError as exc:
+        results.append(CheckResult("grok_mcp_registration", "fail", str(exc)))
+        entry = None
+    if entry is None:
+        results.append(
+            CheckResult(
+                "grok_mcp_registration",
+                "fail",
+                f"MCP server '{name}' not in {grok_config_path()} "
+                "(run `omind setup --agent grok`)",
+            )
+        )
+    elif entry != prov.desired_mcp_entry():
+        results.append(
+            CheckResult(
+                "grok_mcp_registration",
+                "warn",
+                f"MCP server '{name}' in {grok_config_path()} differs from expected wiring "
+                "(run `omind setup --agent grok`)",
+            )
+        )
+    else:
+        results.append(
+            CheckResult("grok_mcp_registration", "ok", f"MCP server '{name}' -> {config.omi_dir}")
+        )
+    bad = _unreadable_config(prov._read_hooks)
+    if bad is not None:
+        results.append(CheckResult("grok_hooks", "fail", bad))
+    elif prov._hooks_wired():
+        results.append(CheckResult("grok_hooks", "ok", f"OMI hooks wired into {grok_hooks_path()}"))
+    else:
+        results.append(
+            CheckResult(
+                "grok_hooks",
+                "fail",
+                f"OMI hooks missing from {grok_hooks_path()} (run `omind setup --agent grok`)",
+            )
+        )
+    try:
+        hook_doc = prov._read_hooks()
+    except ProvisionError:
+        hook_doc = None
+    quoted = _go_cmd_quote_check(
+        "grok_cmd_quotes", "grok", _hook_commands_in(hook_doc), config.folder
+    )
+    if quoted is not None:
+        results.append(quoted)
+    skill_file = prov.skill_dir() / paths.AGENT_SKILL_FILENAME
+    if skill_file.is_file():
+        results.append(CheckResult("grok_skill", "ok", f"omind skill found: {skill_file}"))
+    else:
+        results.append(
+            CheckResult(
+                "grok_skill",
+                "fail",
+                f"omind skill missing from {skill_file} (run `omind setup --agent grok`)",
+            )
+        )
+    if prov.bootstrap_installed():
+        results.append(
+            CheckResult("grok_bootstrap", "ok", f"OMI bootstrap pointer in {grok_rules_path()}")
+        )
+    else:
+        results.append(
+            CheckResult(
+                "grok_bootstrap",
+                "fail",
+                f"OMI bootstrap pointer missing from {grok_rules_path()} "
+                "(run `omind setup --agent grok`)",
+            )
+        )
+    return results
+
+
 PROVISIONERS: dict[str, type[Provisioner]] = {
     "claude": Provisioner,
     "hermes": HermesProvisioner,
@@ -3495,6 +3868,7 @@ PROVISIONERS: dict[str, type[Provisioner]] = {
     "goose": GooseProvisioner,
     "agy": AgyProvisioner,
     "antigravity": AgyProvisioner,
+    "grok": GrokProvisioner,
 }
 
 DIAGNOSERS = {
@@ -3513,6 +3887,7 @@ DIAGNOSERS = {
     "goose": diagnose_goose,
     "agy": diagnose_agy,
     "antigravity": diagnose_agy,
+    "grok": diagnose_grok,
 }
 
 AGENT_CHOICES = tuple(PROVISIONERS)
@@ -3520,7 +3895,7 @@ AGENT_CHOICES = tuple(PROVISIONERS)
 
 def run_setup_for(config: SetupConfig, log: Logger = print) -> list[str]:
     """Run the provisioner for ``config.agent`` (claude, hermes, openclaw, opencode,
-    codex, gemini, deepseek, poolside, goose, agy, claude-desktop, kiro, vscode, q)."""
+    codex, gemini, deepseek, poolside, goose, agy, grok, claude-desktop, kiro, vscode, q)."""
     return PROVISIONERS[config.agent](config=config, log=log).run()
 
 
