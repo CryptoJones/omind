@@ -13,14 +13,12 @@ the exact order of operations._
 
 - [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
   follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
+- [ ] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — _bug_ —
+  follow-up from the #474 review: Codex `write_stdin` (`chars`) and Antigravity `send_command_input`
+  (`Input`) send text to a shell that is already running, so the hard rules and the freshness gate
+  never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
-  prerequisites: #429 (merged) and #428. Also adds the Nebraska banner and drops the stale Codeberg badge.
-- [ ] **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428)) — _enhancement (infra)_ —
-  deploy [samarmstrong/conveyor](https://github.com/samarmstrong/conveyor) as a fork with omind's
-  `factory.config.json` and `principles.md`. Run it with the `claude-code` worker as a dedicated
-  unprivileged user on dl380, isolated from the RAG corpus, on a systemd timer. It grooms issues and
-  keeps one PR in flight; merging stays human. The issue lists the plan, the definition of done and
-  the rollback.
+  prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
   trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
@@ -34,6 +32,11 @@ the exact order of operations._
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
 
+- **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428), closed not-planned) — _closed: deployed outside this repo_ —
+  conveyor was deployed on 2026-10-02: the CryptoJones/conveyor fork with omind's
+  `factory.config.json` and `principles.md`, a `factory` user on dl380 behind an nftables lockdown,
+  and a systemd timer. **Closed not-planned 2026-10-03** by the factory's own groom, because nothing
+  was left to build in omind.
 - **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
   they declare every capability's tier, read/write scope, network need, and
   destructiveness in `config/capabilities.json`, verify it, and state explicitly
