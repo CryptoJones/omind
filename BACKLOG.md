@@ -79,6 +79,18 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-09 (v10.3.1)
+
+- [x] **Grok Claude-hook fast path does not count a `use_tool` recall as a consult** ([#472](https://github.com/CryptoJones/omind/issues/472)) — **v10.3.1** — _bug_ —
+  `omi-guard.sh` unwraps `use_tool` / `CallMcpTool` and camelCase Grok events before the consult
+  case, and maps `run_terminal_command` onto Bash. A snake_case-only dispatcher on the Claude
+  harness is translated too, so PostToolUse records the consult. Listing tools still do not clear
+  the gate. JSON-string `arguments` are parsed in both paths.
+- [x] **Commit freshness gate skipped every non-Claude shell tool** ([#473](https://github.com/CryptoJones/omind/issues/473)) — **v10.3.1** — _bug_ —
+  the gate matched `Bash` only, so Antigravity, Gemini, Hermes, OpenCode and Poolside commits
+  never needed a fetch. The adapter maps their shell tools onto `Bash`; Antigravity takes the
+  repo from `run_command`'s `Cwd`. Cross-harness fetch-then-multi-line-commit tests added.
+
 ### Shipped — 2026-10-04 (v10.3.0)
 
 - [x] **Grok Build client: setup, doctor, guard payloads, and quickstart** ([#470](https://github.com/CryptoJones/omind/issues/470)) — **v10.3.0** — _feature_ —

@@ -53,14 +53,13 @@ def _derive_command(event: dict[str, Any], tool_input: dict[str, Any]) -> str:
     """
     # Poolside's ``shell`` tool carries the command line as ``cmd``;
     # Antigravity uses ``CommandLine``.
-    for source in (
-        event.get("command"),
-        tool_input.get("command"),
-        tool_input.get("CommandLine"),
-        tool_input.get("cmd"),
-    ):
-        if isinstance(source, str) and source:
-            return source
+    source = event.get("command")
+    if isinstance(source, str) and source:
+        return source
+    # command / CommandLine / cmd, a string or an argv list (Codex local_shell).
+    shell = guard.shell_command_text(tool_input)
+    if shell:
+        return shell
     for container in (event, tool_input):
         for key in ("args", "input"):
             val = container.get(key)
@@ -95,6 +94,8 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
             tool_input = args
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     command = _derive_command(event, tool_input)
+    if command and tool in guard.SHELL_TOOL_NAMES:
+        tool = "Bash"
     file_path = _first_str(
         tool_input, ("file_path", "path", "TargetFile", "AbsolutePath")
     ) or _first_str(event, ("file_path", "path", "TargetFile", "AbsolutePath"))

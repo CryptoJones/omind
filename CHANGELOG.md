@@ -7,6 +7,59 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.3.1] - 2026-10-09
+
+### Fixed
+- **Grok's Claude-hook fast path counts a `use_tool` recall as a consult
+  ([#472](https://github.com/CryptoJones/omind/issues/472)).** `omi-guard.sh`
+  reads `.tool_name` only, and v10.3.0's Grok translation runs in the Python
+  adapter. On the bash fast path a recall arrives as `use_tool` with
+  `omi__recall-note` nested inside, so it is not a consult, and the gate
+  denies the recall that would have cleared it. The script now accepts
+  camelCase, unwraps `use_tool` / `CallMcpTool`, and maps Grok's built-in
+  names (`run_terminal_command`, `read_file`, …) onto the names it already
+  classifies. A snake_case-only `use_tool` or built-in name on
+  `--harness claude` is translated the same way, so PostToolUse records the
+  consult. Listing tools still do not clear the gate, and vault writes are
+  still not consults. A plain Claude event is unchanged. A dispatcher's
+  `arguments` sent as a JSON string is parsed, an empty first payload no
+  longer hides the real arguments, and a dispatcher with no inner tool name or
+  an event with no tool is left alone instead of erroring jq. The Python
+  translator applies the same rules.
+- **The commit freshness gate runs in every harness, not just Claude
+  ([#473](https://github.com/CryptoJones/omind/issues/473)).** Its checks matched the tool name `Bash` only. Antigravity
+  (`run_command`), Gemini (`run_shell_command`), Hermes (`terminal`), OpenCode
+  (`bash`) and Poolside (`shell`) send their own names, so a commit with no
+  fetch went through, and the repo-work and global-config checks were skipped
+  too. The adapter now maps each harness's shell tool onto `Bash`
+  (`guard.SHELL_TOOL_NAMES`), and `guard.decide` does the same for a caller
+  that builds the action itself. The command is read from `command`,
+  `CommandLine` or `cmd`, as a string or an argv list (Codex `local_shell`),
+  by both the PreToolUse path and the PostToolUse retraction, so a failed
+  fetch under any of these names is retracted.
+- **The no-jq, no-core last resort in `omi-guard.sh` fails closed for every
+  shell tool name and for any `use_tool` / `CallMcpTool` dispatcher.** It
+  matched `Bash` and `run_terminal_command` only. A test pins its list to
+  `guard.SHELL_TOOL_NAMES`.
+- **A dispatcher whose first name field is empty is still unwrapped.** jq's
+  `//` kept `""`, so `{"tool_name":"","name":"run_terminal_command",…}` stayed
+  `use_tool` and its command never reached the Bash path. jq now takes the
+  first non-empty name, as the Python translator does.
+- **Antigravity resolves the repo from `run_command`'s own `Cwd`.** It wins
+  over a top-level `cwd` and the workspace root, so a `git fetch` or
+  `git commit` run in a repo outside the root is judged against that repo. A
+  JSON-quoted `Cwd` is decoded, and a relative one is taken from the
+  workspace root.
+
+### Tests
+- A fetch, then a commit with a multi-line `-m` trailer block, run from a
+  different repo's cwd, is fresh in every harness that runs the guard
+  (Claude, Codex, Grok, Antigravity, Gemini, Hermes, OpenCode, Poolside;
+  MiniMax models run inside these). omind 10.0.2 split that commit at the
+  newline inside the quotes, lost its `git -C` path, and judged it against
+  the cwd's repo, so a commit right after a clean fetch was blocked. Later
+  releases fixed that as a side effect; these tests pin it.
+
 ## [10.3.0] - 2026-10-04
 
 ### Added

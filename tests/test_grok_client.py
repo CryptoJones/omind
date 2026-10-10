@@ -105,6 +105,46 @@ def test_grok_dispatcher_lifts_inner_mcp_tool() -> None:
     assert event["tool_input"]["name"].startswith("Operational Rules")
 
 
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        {"name": "omi__recall-note", "arguments": json.dumps({"name": "Rules"})},
+        {"toolName": "omi__recall-note", "tool_input": {}, "arguments": {"name": "Rules"}},
+    ],
+)
+def test_grok_dispatcher_parses_string_and_skips_empty_args(tool_input: dict[str, object]) -> None:
+    """#472: JSON-string `arguments` are parsed and an empty first payload is
+    skipped, the same as omi-guard.sh, so the consult target is the note."""
+    event = harness.translate_event("grok", {"toolName": "use_tool", "toolInput": tool_input})
+    assert event["tool_name"] == "mcp__omi__recall-note"
+    assert event["tool_input"] == {"name": "Rules"}
+
+
+def test_claude_harness_translates_snake_case_grok_tools() -> None:
+    """#472: Grok's Claude-compatible hook can send snake_case only. On
+    `--harness claude` a `use_tool` or a Grok built-in name is still mapped,
+    so PostToolUse records the consult and the shell command is Bash."""
+    recall = harness.translate_event(
+        "claude",
+        {
+            "tool_name": "use_tool",
+            "tool_input": {"tool_name": "omi__recall-note", "tool_input": {"name": "Rules"}},
+        },
+    )
+    assert recall["tool_name"] == "mcp__omi__recall-note"
+    assert recall["tool_input"] == {"name": "Rules"}
+    shell = harness.translate_event(
+        "claude", {"tool_name": "run_terminal_command", "tool_input": {"command": "ls"}}
+    )
+    assert shell["tool_name"] == "Bash"
+
+
+@pytest.mark.parametrize("tool", ["Bash", "Edit", "mcp__omi__recall-note", "Write"])
+def test_claude_harness_leaves_plain_claude_events_alone(tool: str) -> None:
+    event = {"tool_name": tool, "tool_input": {"command": "ls"}, "session_id": "s"}
+    assert harness.translate_event("claude", event) is event
+
+
 @pytest.fixture
 def grok_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     root = tmp_path / "grok-home"
