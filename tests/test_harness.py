@@ -368,30 +368,35 @@ def test_translate_event_recovers_agy_prompt_from_transcript(tmp_path: Path) -> 
 
 
 
-@pytest.mark.parametrize("cwd", ["/w/repo", '"/w/repo"'])
-def test_agy_run_command_cwd_beats_the_workspace_root(cwd: str) -> None:
+@pytest.mark.parametrize("quoted", [False, True])
+def test_agy_run_command_cwd_beats_the_workspace_root(tmp_path: Path, quoted: bool) -> None:
     """Antigravity's run_command runs in its own `Cwd`, plain or JSON-quoted.
     The workspace root is only the fallback, so a commit in another repo is
-    judged against that repo."""
+    judged against that repo. Real absolute paths: on Windows `/w` is
+    drive-relative, not absolute."""
+    repo, root = str(tmp_path / "repo"), str(tmp_path / "root")
+    cwd = json.dumps(repo) if quoted else repo
     event = {
         "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit", "Cwd": cwd}},
         "conversationId": "a",
-        "workspacePaths": ["/w/root"],
+        "workspacePaths": [root],
     }
-    assert harness.translate_event("agy", event)["cwd"] == "/w/repo"
+    assert harness.translate_event("agy", event)["cwd"] == repo
     del event["toolCall"]["args"]["Cwd"]
-    assert harness.translate_event("agy", event)["cwd"] == "/w/root"
+    assert harness.translate_event("agy", event)["cwd"] == root
 
 
-def test_agy_cwd_beats_a_top_level_cwd_and_resolves_relative() -> None:
+def test_agy_cwd_beats_a_top_level_cwd_and_resolves_relative(tmp_path: Path) -> None:
+    repo, root, other = (str(tmp_path / name) for name in ("repo", "root", "other"))
+
     def cwd_of(args: dict[str, str], **top: str) -> str:
         event = {
             "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit", **args}},
-            "workspacePaths": ["/w/root"],
+            "workspacePaths": [root],
             **top,
         }
         return str(harness.translate_event("agy", event)["cwd"])
 
-    assert cwd_of({"Cwd": "/w/repo"}, cwd="/w/root") == "/w/repo"
-    assert Path(cwd_of({"Cwd": "todo"})) == Path("/w/root") / "todo"
-    assert cwd_of({}, cwd="/elsewhere") == "/elsewhere"
+    assert cwd_of({"Cwd": repo}, cwd=root) == repo
+    assert Path(cwd_of({"Cwd": "todo"})) == Path(root) / "todo"
+    assert cwd_of({}, cwd=other) == other
