@@ -241,11 +241,6 @@ def read_events(limit: int | None = None) -> list[dict[str, Any]]:
     return list(events[-limit:]) if limit is not None else list(events)
 
 
-def recidivism(rule_id: str) -> int:
-    """How many times ``rule_id`` has been recorded (decision + violation)."""
-    return sum(1 for e in read_events() if e.get("rule_id") == rule_id)
-
-
 def recidivism_counts(events: list[dict[str, Any]] | None = None) -> Counter[str]:
     """Per-rule occurrence counts across the whole log (drives escalation).
 

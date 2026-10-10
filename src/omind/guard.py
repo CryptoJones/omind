@@ -1872,15 +1872,9 @@ def _env_chdir_value(word: str, after: str) -> str | None:
     return None
 
 
-def _shell_body(tokens: list[str]) -> str | None:
-    """The ``-c`` body of ``sh/bash/zsh … -c '<body>'`` (``-lc``, ``-ec`` and
-    ``-o opt`` before it included), or ``None`` when there is no ``-c``."""
-    i = _shell_body_index(tokens)
-    return None if i is None else tokens[i]
-
-
 def _shell_body_index(tokens: list[str]) -> int | None:
-    """Where :func:`_shell_body` finds the body in ``tokens``."""
+    """Where the ``-c`` body of ``sh/bash/zsh … -c '<body>'`` sits in ``tokens``
+    (``-lc``, ``-ec`` and ``-o opt`` before it included), or ``None``."""
     has_c = False
     i = 1
     while i < len(tokens):
