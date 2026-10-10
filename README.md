@@ -671,9 +671,10 @@ under `[mcp_servers.omi]` in `~/.grok/config.toml`. Hooks go in
 `SessionStart` do accounting, the loop guard, and session bookkeeping. Grok
 does not inject `SessionStart` stdout, so priming is a managed
 `~/.grok/rules/omind.md` plus the packaged skill in `~/.grok/skills/omind/`.
-Grok also runs Claude Code's hooks and sends them a camelCase payload
-(`toolName`, `toolInput`, `sessionId`); the guard accepts that shape and
-answers a deny as `{"decision":"deny","reason":…}`. `$GROK_HOME` overrides
+Grok also runs Claude Code's hooks. The bash fast path and the Python
+adapter accept camelCase (`toolName`, `toolInput`, `sessionId`) and
+snake_case, unwrap `use_tool` so an `omi__…` recall counts as a consult,
+and answer a deny as `{"decision":"deny","reason":…}`. `$GROK_HOME` overrides
 `~/.grok`. `omind quickstart --agent grok` prints the same wiring to apply
 by hand.
 

@@ -511,6 +511,28 @@ def _retract_git_freshness(session: str, repo: Path) -> None:
                 path.unlink()
 
 
+def shell_command_text(tool_input: object) -> str:
+    """The command a shell tool runs, from any harness's key, or ``""``.
+
+    ``command`` (Claude, Codex, Gemini, Hermes, Grok), ``CommandLine``
+    (Antigravity) or ``cmd`` (Poolside, Codex ``exec_command``). An argv list
+    (Codex ``local_shell``) is joined with spaces. PreToolUse and the
+    PostToolUse retraction both read it here, so a failed fetch is retracted
+    under the same key it was granted under (#473).
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "CommandLine", "cmd"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            joined = " ".join(str(part) for part in value if part is not None).strip()
+            if joined:
+                return joined
+    return ""
+
+
 def _tool_outcome_failed(tool_response: object) -> bool:
     """True on an EXPLICIT failure signal only — a harness that reports no
     outcome at all is trusted (mirrors hooks._extract_outcome's discipline)."""
@@ -538,10 +560,9 @@ def record_freshness_outcome(event: dict[str, Any]) -> None:
     enforced it (2026-08-27 review). This retracts the grant when the outcome
     says the command failed. Best-effort; never raises."""
     try:
-        if str(event.get("tool_name") or "") != "Bash":
+        if str(event.get("tool_name") or "") not in SHELL_TOOL_NAMES:
             return
-        tool_input = event.get("tool_input")
-        command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
+        command = shell_command_text(event.get("tool_input"))
         if not command or not _is_freshness_command(command):
             return
         if not _tool_outcome_failed(event.get("tool_response")):
@@ -1304,6 +1325,24 @@ def clear_all_gates() -> None:
 #: Hard rules still apply to everything here; they match on command text, which
 #: none of these tools carry.
 _GATE_EXEMPT_TOOLS = frozenset({"ToolSearch", "exit", "todo_action"})
+#: Each harness's shell tool. The adapter maps these onto ``Bash`` so every
+#: Bash-only check (commit freshness, repo work, global-config mutation) judges
+#: them. Before, a commit from Antigravity's ``run_command`` or Gemini's
+#: ``run_shell_command`` skipped the freshness gate: it was not named Bash.
+SHELL_TOOL_NAMES = frozenset(
+    {
+        "Bash",
+        "bash",  # OpenCode
+        "shell",  # Poolside, Codex
+        "local_shell",  # Codex
+        "exec_command",  # Codex
+        "shell_command",  # Codex
+        "terminal",  # Hermes
+        "run_command",  # Antigravity
+        "run_shell_command",  # Gemini CLI
+        "run_terminal_command",  # Grok
+    }
+)
 _WRITE_TOOLS = frozenset(
     {
         "Edit",
@@ -4638,6 +4677,10 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
     timeout, so an ordinary command never gets there."""
     session = str(action.get("session") or "")
     command = str(action.get("command") or "")
+    # Every harness's shell tool is Bash to the checks below, whatever built
+    # the action (#473). The adapter maps it too; this covers direct callers.
+    if command and str(action.get("tool") or "") in SHELL_TOOL_NAMES:
+        action = {**action, "tool": "Bash"}
 
     with deadline.scope():
         try:

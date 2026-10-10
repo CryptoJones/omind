@@ -1123,6 +1123,21 @@ def test_hook_without_jq_and_without_omind_fails_closed_for_bash_only(tmp_path: 
     assert run(_BASH_EVENT) == 2  # destructive command must not run unchecked
     edit_event = {"tool_name": "Edit", "session_id": "h", "tool_input": {"file_path": "/x"}}
     assert run(edit_event) == 0  # a non-Bash tool must not wedge the host
+    # #473: every harness's shell tool, and a dispatcher that may wrap one.
+    for name in sorted(guard.SHELL_TOOL_NAMES | {"use_tool", "CallMcpTool"}):
+        command = {"command": "rm -rf /tmp/x"}
+        assert run({"tool_name": name, "tool_input": command}) == 2, name
+        assert run({"toolName": name, "toolInput": command}) == 2, name
+
+
+def test_hook_no_jq_fallback_lists_every_shell_tool() -> None:
+    """The no-jq, no-core grep in omi-guard.sh is a hand-written copy of
+    guard.SHELL_TOOL_NAMES. Fail when the two drift apart."""
+    src = importlib.resources.files("omind").joinpath("omi-guard.sh").read_text(encoding="utf-8")
+    match = re.search(r'\[\[:space:\]\]\*"\(([^)]*)\)"\'; then', src)
+    assert match is not None
+    names = set(match.group(1).split("|"))
+    assert names == set(guard.SHELL_TOOL_NAMES) | {"use_tool", "CallMcpTool"}
 
 
 def _read_event(omi: Path, name: str, sid: str) -> dict[str, object]:
@@ -1317,6 +1332,45 @@ def test_dash_c_fetch_attributes_freshness_to_the_target_repo(
     guard.clear_gate("dashc")
 
 
+def test_multiline_commit_message_keeps_the_dash_c_repo(tmp_path: Path) -> None:
+    """A commit whose quoted `-m` spans lines (a trailer block) still resolves
+    to its `git -C` repo. omind 10.0.2 split the command at the newline inside
+    the quotes, lost the `-C`, and judged the commit against the event cwd's
+    repo. That repo was never fetched, so a commit right after a clean fetch
+    was blocked. Seen in Claude (Co-Authored-By trailers) and expected from
+    any agent that writes trailers (Grok, Codex, Antigravity, MiniMax models)."""
+    vault = _mk_repo(tmp_path, "vault")
+    target = _mk_repo(tmp_path, "todo")
+    session = "mlcommit"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    fetch = guard.decide(
+        {
+            "tool": "Bash",
+            "command": f'git -C "{target}" fetch --all --prune',
+            "session": session,
+            "cwd": str(vault),
+        }
+    )
+    assert fetch.allow
+    assert str(target) in guard._fresh_repos(session)
+    message = "Co-Authored-By: Agent <noreply@example.com>\nAgent-Session: https://x.invalid/s"
+    commit = {
+        "tool": "Bash",
+        "command": f'git -C "{target}" commit -q -am "Add #15" -m "{message}"',
+        "session": session,
+        "cwd": str(vault),
+    }
+    assert guard._repo_root_for_action(commit) == target
+    verdict = guard.decide(commit)
+    assert verdict.allow, verdict.reason
+    # The vault repo was never fetched: a multi-line commit there is still stale.
+    stale = guard.decide({**commit, "command": commit["command"].replace(str(target), str(vault))})
+    assert not stale.allow
+    assert stale.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
+
+
 def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1434,6 +1488,137 @@ def test_hook_forwards_the_event_cwd_to_the_core(tmp_path: Path) -> None:
     event = {**_BASH_EVENT, "cwd": "/w/tree"}
     assert _run_hook(hook, event) == 0
     assert json.loads(capture.read_text(encoding="utf-8"))["cwd"] == "/w/tree"
+
+
+_RULES = "Operational Rules - Git Repos and Secrets"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+@pytest.mark.parametrize(
+    "event",
+    [
+        # Grok's camelCase dispatcher with an object payload.
+        {
+            "toolName": "use_tool",
+            "sessionId": "g",
+            "toolInput": {"tool_name": "omi__recall-note", "tool_input": {"name": _RULES}},
+        },
+        # snake_case dispatcher on the Claude-compatible hook, JSON-string args.
+        {
+            "tool_name": "use_tool",
+            "session_id": "g",
+            "tool_input": {"name": "omi__recall-note", "arguments": json.dumps({"name": _RULES})},
+        },
+        # An empty first payload does not hide the real arguments.
+        {
+            "tool_name": "CallMcpTool",
+            "session_id": "g",
+            "tool_input": {
+                "toolName": "recall-note",
+                "tool_input": {},
+                "arguments": {"name": _RULES},
+            },
+        },
+    ],
+)
+def test_hook_counts_a_grok_dispatched_recall_as_a_consult(
+    tmp_path: Path, event: dict[str, object]
+) -> None:
+    """#472: a recall wrapped in `use_tool` / `CallMcpTool` reaches the core as
+    an OMI consult of the note it names, so it clears the gate."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["is_omi_consult"] is True
+    assert sent["tool"] == "mcp__omi__recall-note"
+    assert sent["consult_target"] == _RULES
+    assert sent["session"] == "g"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_judges_grok_terminal_command_as_bash(tmp_path: Path) -> None:
+    """#472: Grok's `run_terminal_command` goes down the fail-closed Bash path
+    with its command and cwd, so the hard rules and freshness see it."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {
+        "toolName": "run_terminal_command",
+        "sessionId": "g",
+        "cwd": "/w/tree",
+        "toolInput": {"command": 'git -C "/w/tree" fetch --all --prune'},
+    }
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["tool"] == "Bash"
+    assert sent["command"] == 'git -C "/w/tree" fetch --all --prune'
+    assert sent["cwd"] == "/w/tree"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"tool_name": "use_tool", "session_id": "g", "tool_input": "omi__recall-note"},
+        {"tool_name": "use_tool", "session_id": "g", "tool_input": {}},
+        {"session_id": "g", "tool_input": {"command": "ls"}},
+    ],
+)
+def test_hook_odd_dispatcher_shapes_are_not_consults(
+    tmp_path: Path, event: dict[str, object]
+) -> None:
+    """A dispatcher with no inner tool name, or an event with no tool at all,
+    is not a consult. The normalizer leaves it alone instead of erroring."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    assert _run_hook(hook, event) == 0  # the capturing core allows
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["is_omi_consult"] is False
+
+
+_DISPATCHED = "gh repo delete a/b"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        # An empty first name: jq's `//` used to keep "" and skip the unwrap.
+        {"tool_name": "", "name": "run_terminal_command", "arguments": {"command": _DISPATCHED}},
+        {"name": "run_terminal_command", "arguments": json.dumps({"command": _DISPATCHED})},
+    ],
+)
+def test_hook_unwraps_a_dispatched_shell_command_onto_bash(
+    tmp_path: Path, tool_input: dict[str, object]
+) -> None:
+    """A shell command wrapped in `use_tool` reaches the core's Bash path with
+    its command, so the hard rules see it. Python unwraps the same way."""
+    from omind import harness
+
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {"tool_name": "use_tool", "session_id": "g", "tool_input": tool_input}
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert (sent["tool"], sent["command"]) == ("Bash", _DISPATCHED)
+    translated = harness.translate_event("grok", {**event, "toolName": "use_tool"})
+    assert translated["tool_name"] == "Bash"
+    assert translated["tool_input"]["command"] == _DISPATCHED
+
+
+def test_decide_treats_every_shell_tool_as_bash(tmp_path: Path) -> None:
+    """#473: a caller that builds the action itself (no adapter) with a
+    harness's shell tool name still gets the commit freshness gate."""
+    repo = _mk_repo(tmp_path, "r")
+    session = "decide-shell"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    for tool in sorted(guard.SHELL_TOOL_NAMES):
+        verdict = guard.decide(
+            {"tool": tool, "command": f'git -C "{repo}" commit -am x', "session": session}
+        )
+        assert verdict.rule_id == "repo-work-fresh-base", tool
+    guard.clear_gate(session)
 
 
 @pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard-hermes.sh is a POSIX bash+jq adapter")
@@ -2428,6 +2613,37 @@ def test_record_freshness_outcome_retracts_for_dash_c_repo(tmp_path: Path) -> No
     guard.record_freshness_outcome(failed_event)
     # Freshness must be retracted from the -C repo, not from cwd
     assert not guard._git_fresh_for_repo("sess-f", repo)
+
+
+@pytest.mark.parametrize(
+    ("tool", "key"),
+    [
+        ("run_command", "CommandLine"),  # Antigravity, untranslated
+        ("shell", "cmd"),  # Poolside, untranslated
+        ("run_shell_command", "command"),  # Gemini
+        ("terminal", "command"),  # Hermes
+        ("run_terminal_command", "command"),  # Grok
+        ("exec_command", "cmd"),  # Codex
+    ],
+)
+def test_failed_fetch_is_retracted_for_every_shell_tool(
+    tmp_path: Path, tool: str, key: str
+) -> None:
+    """#473: a fetch that failed under a non-Bash shell tool name, with the
+    command under that harness's own key, does not leave the repo fresh."""
+    repo = _mk_repo(tmp_path, "subrepo")
+    session = f"retract-{tool}"
+    guard.begin_turn(session, "task")
+    guard._record_git_freshness(session, repo, f'git -C "{repo}" fetch')
+    guard.record_freshness_outcome(
+        {
+            "session_id": session,
+            "tool_name": tool,
+            "tool_input": {key: f'git -C "{repo}" fetch --all --prune'},
+            "tool_response": {"exit_code": 1},
+        }
+    )
+    assert not guard._git_fresh_for_repo(session, repo)
 
 
 # ---------------------------------------------------------------------------

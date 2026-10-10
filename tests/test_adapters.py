@@ -679,3 +679,125 @@ def test_run_adapter_last_resort_renders_a_literal_allow(
         data = json.loads(out)
         assert data.get("allow", True) is True
         assert data.get("decision", "allow") == "allow"
+
+
+# -- fetch-then-commit freshness across harnesses ----------------------------
+
+
+def _bare_repo(root: Path, name: str) -> Path:
+    repo = root / name
+    (repo / ".git").mkdir(parents=True)
+    (repo / ".git" / "HEAD").write_text("ref: refs/heads/main\n", encoding="utf-8")
+    (repo / ".git" / "config").write_text(
+        '[remote "origin"]\n\turl = https://example.invalid/r.git\n', encoding="utf-8"
+    )
+    return repo.resolve()
+
+
+def _shell_event(harness: str, command: str, session: str, cwd: Path, root: Path) -> dict[str, Any]:
+    """One shell call in ``harness``'s native hook shape, run in ``cwd``.
+    ``root`` is the session's workspace root, which differs from ``cwd``."""
+    if harness == "grok":
+        return {
+            "hookEventName": "pre_tool_use",
+            "toolName": "run_terminal_command",
+            "toolInput": {"command": command},
+            "sessionId": session,
+            "cwd": str(cwd),
+        }
+    if harness == "agy":
+        return {
+            "toolCall": {"name": "run_command", "args": {"CommandLine": command, "Cwd": str(cwd)}},
+            "conversationId": session,
+            "workspacePaths": [str(root)],
+        }
+    return {
+        "hook_event_name": "PreToolUse",
+        "tool_name": _SHELL_TOOL.get(harness, "Bash"),
+        "tool_input": {"cmd" if harness == "poolside" else "command": command},
+        "session_id": session,
+        "cwd": str(cwd),
+    }
+
+
+#: The shell tool name each harness sends; the rest send ``Bash``.
+_SHELL_TOOL = {
+    "gemini": "run_shell_command",
+    "hermes": "terminal",
+    "opencode": "bash",
+    "poolside": "shell",
+}
+
+
+def _denied(code: int, out: str) -> bool:
+    """A deny in any harness's block format: exit 2, or a deny/block JSON."""
+    if code == 2:
+        return True
+    try:
+        body = json.loads(out) if out.strip() else {}
+    except ValueError:
+        return False
+    text = json.dumps(body)
+    return '"deny"' in text or '"block"' in text or body.get("allow") is False
+
+
+@pytest.mark.parametrize(
+    "harness", ["claude", "codex", "grok", "agy", "gemini", "hermes", "opencode", "poolside"]
+)
+@pytest.mark.parametrize("dash_c", [False, True])
+def test_fetch_then_multiline_commit_is_fresh_in_every_harness(
+    harness: str, dash_c: bool, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A clean standalone fetch frees the next commit in the same repo, in
+    every harness that runs the guard (MiniMax models run inside these). The
+    commit message spans lines, the session's workspace root is another repo,
+    and the repo comes from `git -C` or from the shell's cwd. Each harness
+    sends its own shell tool name, so the commit before the fetch must be
+    blocked too: a non-`Bash` name used to skip the freshness gate."""
+    root = _bare_repo(tmp_path, "workspace")
+    target = _bare_repo(tmp_path, "todo")
+    session = f"fresh-{harness}-{int(dash_c)}"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    prefix = f'git -C "{target}"' if dash_c else "git"
+    cwd = root if dash_c else target
+
+    last = {"text": ""}
+
+    def run(command: str) -> bool:
+        event = _shell_event(harness, command, session, cwd, root)
+        code = adapters.run_adapter(io.StringIO(json.dumps(event)), harness=harness)
+        captured = capsys.readouterr()
+        last["text"] = captured.out + captured.err
+        return not _denied(code, captured.out)
+
+    commit = f'{prefix} commit -q -am "Add #15" -m "Co-Authored-By: A <a@example.com>\nSession: x"'
+    assert not run(commit), "a commit before any fetch must be blocked"
+    assert "freshness" in last["text"], "blocked by the freshness gate, not another rule"
+    assert run(f"{prefix} fetch --all --prune")
+    assert str(target) in guard._fresh_repos(session)
+    assert run(commit), "the commit after a clean fetch must pass"
+    guard.clear_gate(session)
+
+
+@pytest.mark.parametrize(
+    ("tool", "tool_input"),
+    [
+        ("exec_command", {"cmd": "git commit -am x"}),
+        ("local_shell", {"command": ["git", "commit", "-am", "x"]}),
+        ("shell_command", {"command": "git commit -am x"}),
+    ],
+)
+def test_codex_shell_tools_reach_the_bash_path(tool: str, tool_input: dict[str, Any]) -> None:
+    """#473: Codex's own shell tools, with `cmd` or an argv list, normalize
+    to a Bash action carrying the command."""
+    action = adapters.normalize_action({"tool_name": tool, "tool_input": tool_input})
+    assert action["tool"] == "Bash"
+    assert action["command"] == "git commit -am x"
+
+
+def test_non_shell_tool_with_a_command_key_is_not_bash() -> None:
+    action = adapters.normalize_action(
+        {"tool_name": "read_file", "tool_input": {"command": "x", "path": "/a"}}
+    )
+    assert action["tool"] == "read_file"

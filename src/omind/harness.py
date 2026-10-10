@@ -397,6 +397,47 @@ def payload_is_grok(event: dict[str, Any]) -> bool:
     return "toolName" in event or "toolInput" in event
 
 
+def _agy_cwd(tool_call: object) -> str:
+    """The ``Cwd`` argument of an Antigravity ``run_command``, or ``""``.
+
+    Antigravity's transcript logs record argument values JSON-encoded, with
+    literal double quotes around the path. The hook may send either form, so
+    a quoted value is decoded.
+    """
+    if not isinstance(tool_call, dict):
+        return ""
+    args = tool_call.get("args")
+    value = args.get("Cwd") if isinstance(args, dict) else None
+    if not isinstance(value, str):
+        return ""
+    value = value.strip()
+    if len(value) >= 2 and value.startswith('"') and value.endswith('"'):
+        try:
+            decoded = json.loads(value)
+        except (ValueError, RecursionError):
+            return value
+        return decoded if isinstance(decoded, str) else ""
+    return value
+
+
+def _first_dict_arg(*values: object) -> dict[str, Any] | None:
+    """The first non-empty dispatcher argument: an object, or a JSON string of one.
+
+    An OpenAI-style ``use_tool`` sends ``arguments`` as a JSON string. Without
+    parsing it, the consult target would be the dispatcher wrapper instead of
+    the note name. ``omi-guard.sh`` parses the same keys in the same order.
+    """
+    for value in values:
+        if isinstance(value, str):
+            try:
+                value = json.loads(value)
+            except (ValueError, RecursionError):
+                continue
+        if isinstance(value, dict) and value:
+            return dict(value)
+    return None
+
+
 def _translate_grok(event: dict[str, Any]) -> dict[str, Any]:
     """Map a Grok hook event onto the Claude-shaped event the rest of omind uses."""
     out = dict(event)
@@ -430,13 +471,13 @@ def _translate_grok(event: dict[str, Any]) -> dict[str, Any]:
         inner = tool_input.get("tool_name") or tool_input.get("toolName") or tool_input.get("name")
         if isinstance(inner, str) and inner:
             tool = inner
-            nested = (
-                tool_input.get("tool_input")
-                or tool_input.get("arguments")
-                or tool_input.get("toolInput")
+            nested = _first_dict_arg(
+                tool_input.get("tool_input"),
+                tool_input.get("arguments"),
+                tool_input.get("toolInput"),
             )
-            if isinstance(nested, dict):
-                out["tool_input"] = dict(nested)
+            if nested is not None:
+                out["tool_input"] = nested
             out["tool_name"] = tool
     if tool in _GROK_TOOL_ALIASES:
         tool = _GROK_TOOL_ALIASES[tool]
@@ -448,6 +489,19 @@ def _translate_grok(event: dict[str, Any]) -> dict[str, Any]:
     elif tool in _GROK_BARE_OMI_TOOLS:
         out["tool_name"] = "mcp__omi__" + tool
     return out
+
+
+def _claude_event_uses_grok_tool(event: dict[str, Any]) -> bool:
+    """True when a snake_case Claude-hook event is one of Grok's own tool names.
+
+    Grok's Claude-compatible hook sometimes sends ``tool_name`` / ``tool_input``
+    and no camelCase keys, so :func:`payload_is_grok` is false. ``use_tool``
+    still hides the MCP tool, and ``run_terminal_command`` is not ``Bash``.
+    A plain Claude event (``Bash``, ``Edit``, ``mcp__omi__…``, ``omi__…``) does
+    not match, so :func:`translate_event` can return that same object.
+    """
+    tool = event.get("tool_name")
+    return isinstance(tool, str) and (tool in _GROK_DISPATCHERS or tool in _GROK_TOOL_ALIASES)
 
 
 def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
@@ -464,7 +518,10 @@ def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
     - Grok: camelCase ``toolName`` / ``toolInput`` / ``sessionId``, built-in
       tool names aliased onto Claude's, MCP tools ``<server>__<tool>``. A
       Grok-shaped payload is translated even when the hook was installed as
-      Claude's, because Grok runs those hooks with its own event shape.
+      Claude's, because Grok runs those hooks with its own event shape. A
+      snake_case ``use_tool`` / ``CallMcpTool`` or a Grok built-in name on the
+      Claude harness is translated too (#472). ``omi-guard.sh`` normalizes the
+      same shapes before its consult case.
     """
     if not isinstance(event, dict):
         return event
@@ -488,10 +545,21 @@ def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
                 out["tool_input"] = agy_tool_input
         if "session_id" not in out and "conversationId" in out:
             out["session_id"] = out["conversationId"]
-        if "cwd" not in out:
-            workspaces = out.get("workspacePaths")
-            if isinstance(workspaces, list) and workspaces and isinstance(workspaces[0], str):
-                out["cwd"] = workspaces[0]
+        workspaces = out.get("workspacePaths")
+        root = ""
+        if isinstance(workspaces, list) and workspaces and isinstance(workspaces[0], str):
+            root = workspaces[0]
+        # run_command's own Cwd is where the command runs, so it wins over a
+        # top-level cwd and the workspace root: a `git commit` run in a repo
+        # outside the root is judged against that repo (#473). A relative Cwd
+        # is taken from the root, not from wherever this hook process runs.
+        agy_cwd = _agy_cwd(tool_call)
+        if agy_cwd:
+            if root and not Path(agy_cwd).is_absolute():
+                agy_cwd = str(Path(root) / agy_cwd)
+            out["cwd"] = agy_cwd
+        elif "cwd" not in out and root:
+            out["cwd"] = root
         if "prompt" not in out:
             prompt = agy_last_prompt(out.get("transcriptPath"))
             if prompt:
@@ -511,6 +579,8 @@ def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
         ):
             out["tool_name"] = "mcp__omi__" + tool
         return out
+    if harness == "claude" and _claude_event_uses_grok_tool(event):
+        return _translate_grok(event)
     if spec.name != "poolside":
         return event
     out = dict(event)

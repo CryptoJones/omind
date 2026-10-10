@@ -44,12 +44,69 @@ if ! command -v jq >/dev/null 2>&1; then
   # No jq AND no working omind core: the policy genuinely couldn't be evaluated.
   # Fail OPEN for non-Bash (so the host doesn't wedge on every Read/consult) but
   # CLOSED for Bash (a destructive command must never run unchecked).
-  if printf '%s' "$input" | grep -q '"tool_name"[[:space:]]*:[[:space:]]*"Bash"'; then
+  # Every harness's shell tool (guard.SHELL_TOOL_NAMES), camelCase or
+  # snake_case, and any use_tool / CallMcpTool dispatcher (it can wrap a
+  # shell call) is a Bash command here. With neither jq nor the core it must
+  # not run unchecked.
+  if printf '%s' "$input" | grep -Eq '"(tool_name|toolName)"[[:space:]]*:[[:space:]]*"(Bash|bash|shell|local_shell|exec_command|shell_command|terminal|run_command|run_shell_command|run_terminal_command|use_tool|CallMcpTool)"'; then
     printf 'omi-guard: omind core unreachable too — BLOCKING this Bash command (fail-closed).\n' >&2
     exit 2
   fi
   exit 0
 fi
+
+# Grok Build runs this Claude hook. A camelCase event, a use_tool / CallMcpTool
+# dispatcher, and Grok's built-in names have to look like the Claude events the
+# case below already classifies. Otherwise a recall arrives as use_tool, the
+# gate does not treat it as a consult, and the recall that would clear the gate
+# is itself denied (#472). A plain Claude event is unchanged. A jq failure
+# keeps the raw event rather than dropping it.
+normalized="$(printf '%s' "$input" | jq -c '
+  def filled(k): (.[k] | type) == "string" and (.[k] | length) > 0;
+  if (filled("tool_name") | not) and filled("toolName") then .tool_name = .toolName else . end
+  | if ((.tool_input | type) != "object") and ((.toolInput | type) == "object") then .tool_input = .toolInput else . end
+  | if (filled("session_id") | not) and filled("sessionId") then .session_id = .sessionId else . end
+  | if (filled("transcript_path") | not) and filled("transcriptPath") then .transcript_path = .transcriptPath else . end
+  | if (filled("prompt") | not) and filled("userPrompt") then .prompt = .userPrompt
+    elif (filled("prompt") | not) and filled("message") then .prompt = .message
+    else . end
+  | (.tool_name | if type == "string" then . else "" end) as $tool
+  | if ($tool == "use_tool" or $tool == "CallMcpTool") then
+      (if (.tool_input | type) == "object" then .tool_input else {} end) as $outer
+      # First NON-EMPTY name, as the Python `or` chain picks. The jq `//`
+      # keeps "", which left `{"tool_name":"","name":"run_terminal_command"}`
+      # wrapped and its command off the Bash path.
+      | ([$outer.tool_name, $outer.toolName, $outer.name]
+          | map(select(type == "string" and length > 0)) | first // "") as $inner
+      | if ($inner | type) == "string" and ($inner | length) > 0 then
+          .tool_name = $inner
+          # The nested arguments may arrive as a JSON string (an OpenAI-style
+          # dispatcher). Parse it, so the consult target is the note name and
+          # not the dispatcher wrapper.
+          | .tool_input = (
+              [$outer.tool_input, $outer.arguments, $outer.toolInput]
+              | map(if type == "string" then (fromjson? // null) else . end)
+              | map(select(type == "object" and length > 0))
+              | first // $outer
+            )
+        else . end
+    else . end
+  | (.tool_name | if type == "string" then . else "" end) as $t
+  | if $t == "" then .
+    elif $t == "run_terminal_command" then .tool_name = "Bash"
+    elif $t == "read_file" then .tool_name = "Read"
+    elif $t == "search_replace" then .tool_name = "Edit"
+    elif $t == "write" then .tool_name = "Write"
+    elif $t == "grep" then .tool_name = "Grep"
+    elif $t == "list_dir" then .tool_name = "LS"
+    elif $t == "web_search" then .tool_name = "WebSearch"
+    elif $t == "spawn_subagent" then .tool_name = "Task"
+    elif ($t | startswith("omi__")) or (($t | contains("__")) and ($t | startswith("mcp__") | not)) then .tool_name = "mcp__" + $t
+    elif ($t | startswith("omi_")) then .tool_name = "mcp__omi__" + $t[4:]
+    elif ($t == "search-vault" or $t == "recall-note" or $t == "read-note" or $t == "create-note" or $t == "edit-note" or $t == "list-notes" or $t == "help") then .tool_name = "mcp__omi__" + $t
+    else . end
+' 2>/dev/null)" || normalized=""
+[ -n "$normalized" ] && input="$normalized"
 
 tool="$(printf '%s' "$input" | jq -r '.tool_name // empty' 2>/dev/null)"
 sid="$(printf '%s' "$input" | jq -r '.session_id // empty' 2>/dev/null | tr -cd 'A-Za-z0-9._-')"
