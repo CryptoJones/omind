@@ -180,7 +180,54 @@ def _is_git_rules_read(event: dict[str, Any], target: str) -> bool:
     )
 
 
-def _update_git_rules_completeness(event: dict[str, Any], session: str, out: Any = None) -> None:
+def _response_version(value: Any, depth: int = 0) -> str:
+    """The ``version`` token a read-note result carries, at any depth (inside
+    MCP text blocks whose text is JSON too), or ``""``. Never raises."""
+    if depth > _TRUNCATION_WALK_DEPTH:
+        return ""
+    if isinstance(value, dict):
+        version = value.get("version")
+        if isinstance(version, str) and version.strip():
+            return version.strip()
+        for v in value.values():
+            found = _response_version(v, depth + 1)
+            if found:
+                return found
+        return ""
+    if isinstance(value, list):
+        for v in value:
+            found = _response_version(v, depth + 1)
+            if found:
+                return found
+        return ""
+    if isinstance(value, str):
+        stripped = value.strip()
+        if stripped[:1] in ("{", "["):
+            try:
+                return _response_version(json.loads(stripped), depth + 1)
+            except ValueError:
+                return ""
+    return ""
+
+
+def _is_exact_git_rules_target(target: str) -> bool:
+    """True when ``target`` names the git-rules note itself (its bare name or
+    a path whose filename is it), not a note that merely contains its title,
+    such as ``... Secrets Backup.md`` (#478). Only an exact read may carry the
+    session acknowledgement."""
+    name = target.strip().replace("\\", "/").rsplit("/", 1)[-1]
+    if name.lower().endswith(".md"):
+        name = name[:-3]
+    return name.strip().casefold() == guard.GIT_RULES_NOTE.casefold()
+
+
+def _update_git_rules_completeness(
+    event: dict[str, Any],
+    session: str,
+    out: Any = None,
+    omi_dir: Path | str | None = None,
+    target: str = "",
+) -> None:
     """Record whether a read of the git-rules note was complete (#239, #392).
 
     The recurrence log on the git-rules note records three real violations
@@ -201,6 +248,11 @@ def _update_git_rules_completeness(event: dict[str, Any], session: str, out: Any
     credited, so the gate never fired. Once a full read lands, a later partial
     read this turn does not re-arm the gate. Best-effort: any parsing surprise
     counts the read as complete (fail open).
+
+    #478: a full read is also remembered for the rest of the SESSION, keyed
+    to the note version it returned (``read-note``'s ``version``; the on-disk
+    version for a read that carries none), so a later turn need not re-read
+    an unchanged note. The fail-open branch records no such carry-over.
     """
     try:
         from omind import recall
@@ -220,8 +272,11 @@ def _update_git_rules_completeness(event: dict[str, Any], session: str, out: Any
         except (TypeError, ValueError):
             asked = default
         best_possible = is_read_note and asked >= recall.READ_NOTE_HARD_CAP
-        partial = bool(section) or native_partial or _response_truncated(event.get("tool_response"))
-        if partial and not best_possible:
+        # The hard-cap waiver covers truncation only: a section drill-down or an
+        # offset/limit Read is partial however large ``max_chars`` is (#478).
+        truncated = _response_truncated(event.get("tool_response")) and not best_possible
+        partial = bool(section) or native_partial or truncated
+        if partial:
             if not guard.record_partial_consult(session, note):
                 return  # already read in full this turn; a drill-down adds to it
             if section:
@@ -241,6 +296,11 @@ def _update_git_rules_completeness(event: dict[str, Any], session: str, out: Any
             )
         else:
             guard.record_full_consult(session, note)
+            if omi_dir is not None and _is_exact_git_rules_target(target):
+                version = _response_version(
+                    event.get("tool_response")
+                ) or guard.git_rules_note_version(omi_dir)
+                guard.record_git_rules_ack(session, version)
     except Exception:
         guard.clear_incomplete_consult(session)
 
@@ -626,7 +686,7 @@ def verify_consult(
         guard.reset_offtopic(session)
         return "relevant"
     if kind == "read" and _is_git_rules_read(event, target):
-        _update_git_rules_completeness(event, session, out=out)
+        _update_git_rules_completeness(event, session, out=out, omi_dir=omi_dir, target=target)
     if (
         _always_relevant(target)
         or _guard_demanded(session, target)

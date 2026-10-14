@@ -934,6 +934,13 @@ def run_hook(
             # and compact (the summary dropped it) always prime, and mark.
             source = str(event.get("source") or "").strip().lower()
             session = str(event.get("session_id") or "")
+            if session and source in ("compact", "clear"):
+                # #478: the session's full read of the git-rules note carries
+                # across turns only while its text is still in context. A
+                # compaction summary or a /clear drops it, so demand it again.
+                from omind import guard
+
+                guard.clear_git_rules_ack(session)
             primed_before = _already_primed(session) if session else False
             if source == "resume" and primed_before:
                 return 0

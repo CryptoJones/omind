@@ -82,6 +82,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-14 (v10.3.2)
+
+- [x] **guard: git-rules gate forces a full re-read of an unchanged note every turn** ([#478](https://github.com/CryptoJones/omind/issues/478)) — **v10.3.2** — _bug_ —
+  one full read per session per note version: the read is remembered with the note's version
+  token and carries across turns until the note changes, the context is compacted or cleared, or
+  a new session starts. Truncated, section-only and offset/limit reads still never count.
+
 ### Shipped — 2026-10-09 (v10.3.1)
 
 - [x] **Grok Claude-hook fast path does not count a `use_tool` recall as a consult** ([#472](https://github.com/CryptoJones/omind/issues/472)) — **v10.3.1** — _bug_ —

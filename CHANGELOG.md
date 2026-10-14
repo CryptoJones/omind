@@ -7,6 +7,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.3.2] - 2026-10-14
+
+### Fixed
+- **The git-rules gate asks for one full read per session, not one per turn
+  ([#478](https://github.com/CryptoJones/omind/issues/478)).** The demanded
+  `read-note` of "Operational Rules - Git Repos and Secrets" (~11.5k chars,
+  ~2.9k tokens) reset on every user message, so one session re-read the same
+  unchanged note 8 times (~23k tokens). A full read is now also recorded for
+  the session (`gitrules-ack-<session>.json` in the state dir) with the note's
+  version token (`read-note`'s `version`, or the on-disk version for a read
+  that carries none). Later turns pass the gate while the vault still holds
+  that version. A changed note, a new session, or a SessionStart with
+  `source=compact|clear` (the note text has left the context) needs a new
+  read; `resume` keeps it. `omind guard reset` with no session reaps the
+  record. Only a read of the note itself is remembered, not of a note whose
+  name merely contains its title. The block message says one full read per
+  session is enough.
+- **A section-only or offset/limit read of the git-rules note no longer counts
+  as full because it asked for 65536 chars.** The hard-cap waiver was meant
+  for truncation of a note larger than any read; it now covers only that.
+
 ## [10.3.1] - 2026-10-09
 
 ### Fixed

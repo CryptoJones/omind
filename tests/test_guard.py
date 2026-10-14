@@ -6034,3 +6034,196 @@ def test_the_issue_460_shapes_are_judged_well_inside_the_budget(tmp_path: Path, 
             verdict = judge()
         assert verdict.rule_id != guard.DEADLINE_RULE
     assert _deadline_events() == []
+
+
+# -- #478: one full read of the git-rules note per session per note version ---
+
+
+def _rules_vault(tmp_path: Path) -> Path:
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(NoteFields(title=guard.GIT_RULES_NOTE, summary="rules v1"))
+    return omi
+
+
+def _new_turn(session: str) -> None:
+    """What a user message does: the turn-start reset clears every per-turn
+    file. The ordinary consult gate is not under test, so satisfy it."""
+    guard.clear_gate(session)
+    guard.begin_turn(session, "run the tests")
+    guard.mark_consulted(session)
+
+
+def _full_read(session: str, omi: Path, **tool_input: Any) -> None:
+    from omind import verify
+
+    version = guard.git_rules_note_version(omi)
+    result = {"filename": f"{guard.GIT_RULES_NOTE}.md", "version": version, "raw": "all rules"}
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "mcp__omi__read-note",
+            "tool_input": {
+                "name": guard.GIT_RULES_NOTE,
+                "representation": "raw",
+                "max_chars": 65536,
+                **tool_input,
+            },
+            "tool_response": {"content": [{"type": "text", "text": json.dumps(result)}]},
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+
+
+def _repo_verdict(session: str, omi: Path) -> guard.Verdict:
+    return guard.check_action({"tool": "Bash", "command": "pytest", "session": session}, omi)
+
+
+def test_full_read_clears_and_carries_to_the_next_turn(tmp_path: Path) -> None:
+    omi = _rules_vault(tmp_path)
+    session = "ack478-carry"
+    _new_turn(session)
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    _full_read(session, omi)
+    assert _repo_verdict(session, omi).allow  # the first read clears
+
+    # Next user message, same note version: no re-read demanded.
+    _new_turn(session)
+    assert _repo_verdict(session, omi).allow
+    _new_turn(session)
+    assert guard.decide(
+        {"tool": "Bash", "command": "pytest", "session": session}, omi_dir=omi
+    ).allow
+    # Without the vault the version cannot be compared: per-turn rule, strict.
+    assert not guard._has_consulted_git_rules(session)
+    guard.clear_gate(session)
+    guard.clear_git_rules_ack(session)
+
+
+def test_changed_note_requires_a_re_read(tmp_path: Path) -> None:
+    from omind.store import OmiStore
+
+    omi = _rules_vault(tmp_path)
+    session = "ack478-changed"
+    _new_turn(session)
+    _full_read(session, omi)
+    assert _repo_verdict(session, omi).allow
+
+    store = OmiStore(omi)
+    fields = store.read_fields(guard.GIT_RULES_NOTE)
+    fields.summary = "rules v2"
+    store.update_note(guard.GIT_RULES_NOTE, fields)
+    _new_turn(session)
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    _full_read(session, omi)
+    assert _repo_verdict(session, omi).allow
+    guard.clear_gate(session)
+    guard.clear_git_rules_ack(session)
+
+
+def test_truncated_or_section_read_records_no_session_ack(tmp_path: Path) -> None:
+    from omind import verify
+
+    omi = _rules_vault(tmp_path)
+    session = "ack478-trunc"
+    _new_turn(session)
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "mcp__omi__read-note",
+            "tool_input": {"name": guard.GIT_RULES_NOTE, "max_chars": 200},
+            "tool_response": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "version": guard.git_rules_note_version(omi),
+                                "raw": "x\n\n[truncated: showing 200 of 13000 chars]",
+                            }
+                        ),
+                    }
+                ]
+            },
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    assert not guard.git_rules_acked(session, omi)
+
+    _full_read(session, omi, section="Secrets")  # section-only: not a full read
+    assert not guard.git_rules_acked(session, omi)
+    _new_turn(session)
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)
+
+
+def test_new_session_or_compaction_requires_a_read(tmp_path: Path) -> None:
+    from omind import hooks
+
+    omi = _rules_vault(tmp_path)
+    _new_turn("ack478-a")
+    _full_read("ack478-a", omi)
+    assert _repo_verdict("ack478-a", omi).allow
+
+    # A different session has read nothing.
+    _new_turn("ack478-b")
+    assert _repo_verdict("ack478-b", omi).rule_id == "repo-work-read-git-rules"
+
+    # A resume keeps the read (the transcript still holds it); a compaction drops it.
+    for source, kept in (("resume", True), ("compact", False)):
+        event = {"hook_event_name": "SessionStart", "source": source, "session_id": "ack478-a"}
+        stdin = io.StringIO(json.dumps(event))
+        hooks.run_hook("SessionStart", omi, stdin=stdin, stdout=io.StringIO())
+        _new_turn("ack478-a")
+        assert _repo_verdict("ack478-a", omi).allow is kept
+    guard.clear_gate("ack478-a")
+    guard.clear_gate("ack478-b")
+
+
+def test_a_read_of_a_lookalike_note_records_no_session_ack(tmp_path: Path) -> None:
+    """A native Read of ``<title> Backup.md`` matches the title as a substring
+    and carries no version; it must not acknowledge the real note (#478)."""
+    from omind import verify
+
+    omi = _rules_vault(tmp_path)
+    lookalike = omi / f"{guard.GIT_RULES_NOTE} Backup.md"
+    lookalike.write_text("old rules", encoding="utf-8")
+    session = "ack478-lookalike"
+    _new_turn(session)
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(lookalike)},
+            "tool_response": {"type": "text", "file": {"content": "old rules"}},
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert not guard.git_rules_acked(session, omi)
+    assert verify._is_exact_git_rules_target(str(omi / f"{guard.GIT_RULES_NOTE}.md"))
+    assert verify._is_exact_git_rules_target(guard.GIT_RULES_NOTE)
+    guard.clear_gate(session)
+
+
+def test_by_hand_reset_reaps_session_acks(tmp_path: Path) -> None:
+    omi = _rules_vault(tmp_path)
+    session = "ack478-reap"
+    _new_turn(session)
+    _full_read(session, omi)
+    assert guard.git_rules_acked(session, omi)
+    guard.clear_all_gates()
+    assert not guard.git_rules_acked(session, omi)
+
+
+def test_git_rules_message_says_one_read_per_session() -> None:
+    assert "One full read per session" in guard.GIT_RULES_MESSAGE
+    assert "truncated or section-only read does not clear" in guard.GIT_RULES_MESSAGE
