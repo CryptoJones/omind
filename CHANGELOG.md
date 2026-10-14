@@ -21,7 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   that version. A changed note, a new session, or a SessionStart with
   `source=compact|clear` (the note text has left the context) needs a new
   read; `resume` keeps it. `omind guard reset` with no session reaps the
-  record. The block message says one full read per session is enough.
+  record. Only a read of the note itself is remembered, not of a note whose
+  name merely contains its title. The block message says one full read per
+  session is enough.
 - **A section-only or offset/limit read of the git-rules note no longer counts
   as full because it asked for 65536 chars.** The hard-cap waiver was meant
   for truncation of a note larger than any read; it now covers only that.

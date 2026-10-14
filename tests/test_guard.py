@@ -6187,6 +6187,33 @@ def test_new_session_or_compaction_requires_a_read(tmp_path: Path) -> None:
     guard.clear_gate("ack478-b")
 
 
+def test_a_read_of_a_lookalike_note_records_no_session_ack(tmp_path: Path) -> None:
+    """A native Read of ``<title> Backup.md`` matches the title as a substring
+    and carries no version; it must not acknowledge the real note (#478)."""
+    from omind import verify
+
+    omi = _rules_vault(tmp_path)
+    lookalike = omi / f"{guard.GIT_RULES_NOTE} Backup.md"
+    lookalike.write_text("old rules", encoding="utf-8")
+    session = "ack478-lookalike"
+    _new_turn(session)
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(lookalike)},
+            "tool_response": {"type": "text", "file": {"content": "old rules"}},
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert not guard.git_rules_acked(session, omi)
+    assert verify._is_exact_git_rules_target(str(omi / f"{guard.GIT_RULES_NOTE}.md"))
+    assert verify._is_exact_git_rules_target(guard.GIT_RULES_NOTE)
+    guard.clear_gate(session)
+
+
 def test_by_hand_reset_reaps_session_acks(tmp_path: Path) -> None:
     omi = _rules_vault(tmp_path)
     session = "ack478-reap"
