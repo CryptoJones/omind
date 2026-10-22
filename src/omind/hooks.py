@@ -96,8 +96,6 @@ _PRIMING_FILE_CHAR_CAP = 16_000  # per-file guard so a runaway note can't flood 
 # current working directory. Auto-journal actions remain searchable but are not
 # injected at session start.
 _SESSION_STATE_GLOB = "Session State *.md"
-_JOURNAL_GLOB = paths.JOURNAL_GLOB
-_JOURNAL_TAIL_BULLETS = 20
 # Maximum canonical "full" capsule. Runtime selection lives in ai_usage.
 _TOTAL_CONTEXT_CHAR_CAP = 24_000
 _TRUNCATION_MARKER = "\n…[truncated]"
@@ -410,19 +408,6 @@ def _read_priming_note(path: Path) -> str | None:
     return text
 
 
-def _latest_by_name(directory: Path, pattern: str) -> Path | None:
-    """Newest note matching ``pattern``, by filename descending. Never raises.
-
-    Filenames embed ``YYYY-MM-DD``, so a plain lexicographic sort is also a
-    chronological sort.
-    """
-    try:
-        matches = sorted(directory.glob(pattern), key=lambda p: p.name, reverse=True)
-    except OSError:
-        return None
-    return matches[0] if matches else None
-
-
 def action_bullets(text: str) -> list[str]:
     """The ``- `` bullets under a journal's ``## Actions`` heading.
 
@@ -439,18 +424,6 @@ def action_bullets(text: str) -> list[str]:
         if in_actions and line.startswith("- "):
             bullets.append(line)
     return bullets
-
-
-def _journal_tail(path: Path, limit: int = _JOURNAL_TAIL_BULLETS) -> str | None:
-    """Last ``limit`` action bullets of a journal note, or ``None``. Never raises."""
-    try:
-        text = path.read_text(encoding="utf-8", errors="replace")
-    except OSError:
-        return None
-    bullets = action_bullets(text)
-    if not bullets:
-        return None
-    return "\n".join(bullets[-limit:])
 
 
 def _update_nudge_line() -> str | None:

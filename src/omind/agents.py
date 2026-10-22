@@ -197,11 +197,6 @@ def dsh_guard_plugin_path() -> Path:
     return dsh_home() / "plugins" / "omi-guard.dsh.js"
 
 
-#: Substring identifying omind's own DSH guard plugin in the patch YAML,
-#: so a re-run finds and replaces only our entry (never duplicates).
-DSH_GUARD_MARKER = "omi-guard.dsh.js"
-
-
 def codex_config_dir() -> Path:
     """OpenAI Codex CLI's config directory: ``$CODEX_HOME`` or ``~/.codex``."""
     base = os.environ.get("CODEX_HOME")
@@ -283,8 +278,6 @@ def grok_rules_path() -> Path:
     return grok_config_dir() / "rules" / "omind.md"
 
 
-#: Substring identifying omind's own Grok guard hook, so doctor can see it.
-GROK_GUARD_MARKER = "guard adapter --harness grok"
 GROK_BOOTSTRAP_START = "<!-- omind:grok-bootstrap:start -->"
 GROK_BOOTSTRAP_END = "<!-- omind:grok-bootstrap:end -->"
 GROK_HOOK_EVENTS = (
@@ -426,8 +419,6 @@ def agy_skill_dir() -> Path:
 
 
 AGY_HOOK_NAME = "omind-omi-memory"
-AGY_GUARD_MARKER = "guard adapter --harness agy"
-AGY_HOOK_MARKER = "--harness agy"
 AGY_BOOTSTRAP_START = seeds.AGY_BOOTSTRAP_START
 AGY_BOOTSTRAP_END = seeds.AGY_BOOTSTRAP_END
 
