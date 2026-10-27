@@ -65,7 +65,7 @@ Trust **BACKLOG.md + CHANGELOG.md** (10.1.1–10.2.11) for detail.
 
 The sweep closed #393 #392 #391 #394 #414 #402 #403 #406 #416 #377 #380 #417 #419
 #420 #423 #425 via PRs #405, #407–#413, #415, #418, #421, #422, #424 and #426.
-The only open item is **#267**: the owner must register the PyPI trusted publisher.
+Every item from that sweep is closed.
 
 Lessons for the next agent:
 
@@ -132,8 +132,7 @@ found 35 issues; all are fixed in the working tree. The classes worth rememberin
 
 The feature roadmap (agent identity/attribution, a usefulness feedback loop,
 sleep-time consolidation, write-time dedup, scoped writes) is Part 2 of the review
-report — none of it is started. `omind` is still not on PyPI (#267 needs the
-user's PyPI account/credentials).
+report — none of it is started.
 
 ---
 

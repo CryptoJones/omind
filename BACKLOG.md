@@ -17,15 +17,6 @@ the exact order of operations._
   never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
-- [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
-  the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
-  trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
-  stopped at `invalid-publisher`; 10.1.0 through 10.2.11 were never released. What remains is two
-  operator steps: (1) on pypi.org, open *Publishing* and add a pending trusted publisher (owner
-  `CryptoJones`, repo `omind`, workflow `publish.yml`, environment `pypi`); (2) publish a GitHub
-  release (`gh release create vX.Y.Z`); pushing a tag alone does not trigger the upload. See
-  [PyPI Publish Setup](#pypi-publish-setup-2026-08-24-267) below.
-
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -957,38 +948,5 @@ _Added 2026-10-02 so every closed issue has a line here. Details live on each is
 - [x] guard: git -C freshness misattributed to cwd; single-slot marker; consult-gate blocks provably-inert commands ([#147](https://github.com/CryptoJones/omind/issues/147))
 - [x] verifier: credit guard-demanded note reads; stop scoring vault writes as consults; log judgement context on off-topic denials ([#148](https://github.com/CryptoJones/omind/issues/148))
 - [x] omind guard locked on new repos with no remotes because pulls / fetches are not possible ([#149](https://github.com/CryptoJones/omind/issues/149))
-
----
-
-## PyPI Publish Setup (2026-08-24) ([#267](https://github.com/CryptoJones/omind/issues/267))
-
-- **Status: `omind` is not on PyPI yet. The first publish is pending** (tracked as the open #267 item above). The package has never
-  been uploaded (HTTP 404 on the simple index, re-checked 2026-10-02). Everything that
-  does not need a PyPI account is done:
-  - [x] **Publish workflow:** `.github/workflows/publish.yml`. It uses trusted publishing over
-    OIDC, so there is **no API token** to mint, store or rotate. It builds sdist + wheel with
-    `uv build`, refuses a release whose tag is not `v` + the `pyproject` version, and runs
-    `twine check --strict`. The upload runs from a separate job in the `pypi` environment, and
-    only that job holds `id-token: write`. Actions are pinned by commit SHA, like the rest of CI.
-  - [x] **GitHub `pypi` environment:** exists. It has no protection rules; if you want a manual
-    gate on every upload, add yourself as a required reviewer under Settings → Environments
-    (optional).
-  - [x] **The pipeline is proven up to PyPI:** the release runs for v9.7.3, v9.7.5, v10.0.0,
-    v10.0.1 and v10.0.2 all built, minted an OIDC token, and were refused with
-    `invalid-publisher` (no matching publisher). That is the expected fail-closed result:
-    nothing is uploaded. Versions 10.1.0 through 10.2.11 were never released (no GitHub
-    release was cut for them), so the workflow never ran for them.
-
-  **What is left. The operator does both steps; there are no credentials anywhere, by design:**
-  1. Log in to https://pypi.org/ with the account that will own the project. Go to
-     *Your account → Publishing → Add a new pending publisher → GitHub* and enter owner
-     `CryptoJones`, repository `omind`, workflow `publish.yml`, environment `pypi`.
-     A pending publisher does not need the project to exist, but it does **not** reserve the
-     name. The name is yours only after the first successful upload, so do step 2 promptly.
-  2. Publish a GitHub release (`gh release create vX.Y.Z`) whose tag is `v<pyproject
-     version>` (see CONTRIBUTING.md → *Releasing*). The workflow fires only on
-     `release: published`; pushing a tag on its own does nothing. You can instead run the
-     workflow by hand (*Actions → publish → Run workflow*) with `dry_run` unchecked.
-     After the upload succeeds, tick #267 here and close the issue.
 
 *Proudly Made in Nebraska. Go Big Red! 🌽 <https://xkcd.com/2347/>*
