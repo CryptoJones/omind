@@ -50,7 +50,13 @@ _DEFAULT_TIMEOUT = 15
 #: read-note's body truncation marker (``server._clamp_body``). It has no
 #: ``truncated`` field, so a short read-note of the demanded note used to clear
 #: the "read it in full" gate (#392).
-_READ_NOTE_TRUNCATED_RE = re.compile(r"\[truncated: showing \d+ of \d+ chars")
+#: read-note's own body marker, plus Grok Build's middle elision (#484): Grok
+#: shows a long tool result to the model with ``[…trimmed…]`` spliced in even
+#: though the MCP call returned the whole note. A result the agent never saw
+#: whole is a partial read, so the elision counts as truncated too.
+_READ_NOTE_TRUNCATED_RE = re.compile(
+    r"\[truncated: showing \d+ of \d+ chars|\[(?:…|\.\.\.)\s*trimmed\s*(?:…|\.\.\.)\]"
+)
 _REQUIRE_ENV = "OMI_VERIFY_REQUIRE"
 _TIMEOUT_ENV = "OMI_VERIFY_TIMEOUT"
 #: REQUIRE mode re-closes the gate when an off-topic consult leaves the turn with
@@ -149,8 +155,9 @@ def _response_truncated(value: object, depth: int = 0) -> bool:
     Parses the STRUCTURE instead of searching serialized text: a ``truncated``
     field set to ``true`` at any depth, including inside MCP text content
     blocks whose text is itself JSON (compact ``{"truncated":true}`` included —
-    a substring search for ``"truncated": true`` missed it), or read-note's
-    ``[truncated: showing …]`` body marker in any string."""
+    a substring search for ``"truncated": true`` missed it), read-note's
+    ``[truncated: showing …]`` body marker, or Grok's ``[…trimmed…]`` middle
+    elision (#484), in any string."""
     if depth > _TRUNCATION_WALK_DEPTH:
         return False
     if isinstance(value, dict):

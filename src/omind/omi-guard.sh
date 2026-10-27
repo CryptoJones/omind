@@ -71,25 +71,32 @@ normalized="$(printf '%s' "$input" | jq -c '
     elif (filled("prompt") | not) and filled("message") then .prompt = .message
     else . end
   | (.tool_name | if type == "string" then . else "" end) as $tool
-  | if ($tool == "use_tool" or $tool == "CallMcpTool") then
-      (if (.tool_input | type) == "object" then .tool_input else {} end) as $outer
-      # First NON-EMPTY name, as the Python `or` chain picks. The jq `//`
-      # keeps "", which left `{"tool_name":"","name":"run_terminal_command"}`
-      # wrapped and its command off the Bash path.
-      | ([$outer.tool_name, $outer.toolName, $outer.name]
-          | map(select(type == "string" and length > 0)) | first // "") as $inner
-      | if ($inner | type) == "string" and ($inner | length) > 0 then
-          .tool_name = $inner
-          # The nested arguments may arrive as a JSON string (an OpenAI-style
-          # dispatcher). Parse it, so the consult target is the note name and
-          # not the dispatcher wrapper.
-          | .tool_input = (
-              [$outer.tool_input, $outer.arguments, $outer.toolInput]
-              | map(if type == "string" then (fromjson? // null) else . end)
-              | map(select(type == "object" and length > 0))
-              | first // $outer
-            )
-        else . end
+  | (if (.tool_input | type) == "object" then .tool_input else {} end) as $outer
+  # First NON-EMPTY name, as the Python `or` chain picks. The jq `//`
+  # keeps "", which left `{"tool_name":"","name":"run_terminal_command"}`
+  # wrapped and its command off the Bash path.
+  | ([$outer.tool_name, $outer.toolName, $outer.name]
+      | map(select(type == "string" and length > 0)) | first // "") as $inner
+  # #483: Grok may present the call under the ALREADY-qualified name
+  # (omi__read-note) while tool_input is still the use_tool wrapper. Match
+  # only tool_name/toolName (never .name, a real note name on a plain Claude
+  # event) and only when it names the same tool as the outer event.
+  | ([$outer.tool_name, $outer.toolName]
+      | map(select(type == "string" and length > 0)) | first // "") as $wname
+  | ($tool != "" and $wname != ""
+     and ($tool | sub("^mcp__"; "")) == ($wname | sub("^mcp__"; ""))) as $renamed
+  | if (($tool == "use_tool" or $tool == "CallMcpTool" or $renamed)
+        and ($inner | length) > 0) then
+      .tool_name = $inner
+      # The nested arguments may arrive as a JSON string (an OpenAI-style
+      # dispatcher). Parse it, so the consult target is the note name and
+      # not the dispatcher wrapper.
+      | .tool_input = (
+          [$outer.tool_input, $outer.arguments, $outer.toolInput]
+          | map(if type == "string" then (fromjson? // null) else . end)
+          | map(select(type == "object" and length > 0))
+          | first // $outer
+        )
     else . end
   | (.tool_name | if type == "string" then . else "" end) as $t
   | if $t == "" then .

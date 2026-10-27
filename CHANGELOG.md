@@ -17,6 +17,30 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   filelock CVEs are now `--ignore-vuln`-ed in the workflow (pip-audit 2.10 has
   no package-level skip), with the reason stated in the workflow comment.
 
+## [10.3.3] - 2026-10-26
+
+### Fixed
+- **A Grok `read-note` presented under the qualified name never cleared the
+  git-rules gate ([#483](https://github.com/CryptoJones/omind/issues/483)).**
+  Grok's hooks can present an MCP call under the already-qualified name
+  (`omi__read-note`) while `tool_input` is still the `use_tool` wrapper
+  (`{"tool_name": …, "tool_input": {…}}`). The dispatcher unwrap only fired on
+  `use_tool` / `CallMcpTool`, and the wrapper carries `tool_name`, not `name`,
+  so the consult target read as empty: neither the consult nor the
+  `gitrules-ack` was recorded, and every later `read_file` / `grep` in the
+  session stayed denied even though the read had returned the whole note.
+  `harness._translate_grok` now unwraps the wrapper when its inner `tool_name`
+  names the same tool as the outer event (never on `name`, so a plain Claude
+  event is untouched), and `omi-guard.sh` normalizes the same shape.
+- **Grok's `[…trimmed…]` middle elision is now treated as a truncated read
+  ([#484](https://github.com/CryptoJones/omind/issues/484)).** Grok shows a
+  long tool result to the model with `[…trimmed…]` spliced in even when the
+  MCP call returned the whole note. `verify._response_truncated` matched only
+  read-note's own `[truncated: showing N of M chars` marker, so an elided
+  result — text the agent never saw whole — would have been credited as a
+  full read once #483 landed. It now counts as truncated the same way the
+  existing marker does.
+
 ## [10.3.2] - 2026-10-14
 
 ### Fixed
