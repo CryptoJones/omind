@@ -1537,6 +1537,28 @@ def test_hook_counts_a_grok_dispatched_recall_as_a_consult(
 
 
 @pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_counts_a_renamed_grok_read_as_a_consult(tmp_path: Path) -> None:
+    """#483: Grok presents the MCP call under the already-qualified name while
+    tool_input is still the use_tool wrapper. The consult target must survive
+    to the core, or the gate never sees the read that cleared it."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {
+        "tool_name": "omi__read-note",
+        "session_id": "g",
+        "tool_input": {
+            "tool_name": "omi__read-note",
+            "tool_input": {"name": _RULES, "representation": "raw", "max_chars": 65536},
+        },
+    }
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["is_omi_consult"] is True
+    assert sent["tool"] == "mcp__omi__read-note"
+    assert sent["consult_target"] == _RULES
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
 def test_hook_judges_grok_terminal_command_as_bash(tmp_path: Path) -> None:
     """#472: Grok's `run_terminal_command` goes down the fail-closed Bash path
     with its command and cwd, so the hard rules and freshness see it."""

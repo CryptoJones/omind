@@ -82,6 +82,20 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-26 (v10.3.3)
+
+- [x] **guard: Grok full read-note of the git-rules note never clears repo-work-read-git-rules** ([#483](https://github.com/CryptoJones/omind/issues/483)) — **v10.3.3** — _bug_ —
+  Grok may present the MCP call under the already-qualified name (`omi__read-note`)
+  while `tool_input` is still the `use_tool` wrapper. The unwrap only fired on the
+  dispatcher names, so the consult target read as empty and neither the consult nor
+  the session ack was recorded. `_translate_grok` and `omi-guard.sh` now unwrap a
+  wrapper whose inner `tool_name` names the same tool as the outer event.
+- [x] **guard: Grok's middle-elided read-note result is not treated as truncated** ([#484](https://github.com/CryptoJones/omind/issues/484)) — **v10.3.3** — _bug_ —
+  Grok shows a long tool result with a `[…trimmed…]` elision even when the MCP call
+  returned the whole note. `verify._response_truncated` now matches it the same way
+  it matches read-note's own `[truncated: showing N of M chars` marker, so an
+  elided read does not satisfy "read it in full".
+
 ### Shipped — 2026-10-14 (v10.3.2)
 
 - [x] **guard: git-rules gate forces a full re-read of an unchanged note every turn** ([#478](https://github.com/CryptoJones/omind/issues/478)) — **v10.3.2** — _bug_ —

@@ -402,8 +402,9 @@ _OWNER_NAME_MAX = max(len(name) for name in _HEREDOC_OWNER_SKIP | _SHELL_HEREDOC
 
 
 class _HeredocOwners:
-    """Whether each heredoc's owning simple command is a shell, in
-    linear time overall (#445). Each separator-bounded segment's words are
+    """Whether the simple command owning each heredoc in ``command`` is a shell
+    (skipping ``VAR=val`` assignments and transparent wrappers), in linear time
+    overall (#445). Each separator-bounded segment's words are
     found once, with the first one that is not skipped; a heredoc's owner is
     that word when it ends before the heredoc. Walking the words from the
     separator per heredoc was quadratic in a run of assignments followed by

@@ -1938,7 +1938,7 @@ def _env_chdir_value(word: str, after: str) -> str | None:
 
 
 def _shell_body_index(tokens: list[str]) -> int | None:
-    """Index of the ``-c`` body of ``sh/bash/zsh … -c '<body>'`` in ``tokens``
+    """Where the ``-c`` body of ``sh/bash/zsh … -c '<body>'`` sits in ``tokens``
     (``-lc``, ``-ec`` and ``-o opt`` before it included), or ``None``."""
     has_c = False
     i = 1

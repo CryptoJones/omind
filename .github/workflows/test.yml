@@ -36,7 +36,7 @@ jobs:
             python-version: "3.14"
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
       # setuptools too: the windows-latest Python 3.10 toolcache bundles a
@@ -45,7 +45,16 @@ jobs:
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: mypy src
-      - run: pip-audit
+      # filelock is not an omind dependency — pip-audit pulls it for its own
+      # cachecontrol filecache. Its fix (4.2.1) requires Python >=3.11, so the
+      # 3.10 matrix legs can never install a fixed version; ignore the six
+      # CVEs rather than pretend the 3.10 legs can be green. pip-audit 2.10
+      # has no package-level skip, hence the explicit IDs.
+      - run: >-
+          pip-audit
+          --ignore-vuln CVE-2026-112906 --ignore-vuln CVE-2026-112907
+          --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112914
+          --ignore-vuln CVE-2026-112937 --ignore-vuln CVE-2026-112940
       - run: pytest -v --cov=omind --cov-report=term-missing
 
   wheel:
@@ -62,11 +71,11 @@ jobs:
         os: [ubuntu-latest, macos-latest]
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       # Same build path as publish.yml, so every PR exercises what gets uploaded.
-      - uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0
+      - uses: astral-sh/setup-uv@07a047e608db84b3d8c06cd9a7c7dcc9c355c18e # v10.3.2
       - name: Build the wheel
         run: uv build --wheel
       - name: Install the built wheel (not editable)
@@ -132,7 +141,7 @@ jobs:
       OMIND_NO_AUTOHEAL: '1'
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - run: python -m pip install -U pip uv
@@ -205,7 +214,7 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+      - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: '3.12'
       - name: Conformance suite

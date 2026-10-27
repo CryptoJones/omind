@@ -31,7 +31,6 @@ from __future__ import annotations
 import json
 import os
 import re
-import subprocess
 import sys
 from datetime import datetime
 from pathlib import Path
@@ -50,7 +49,13 @@ _DEFAULT_TIMEOUT = 15
 #: read-note's body truncation marker (``server._clamp_body``). It has no
 #: ``truncated`` field, so a short read-note of the demanded note used to clear
 #: the "read it in full" gate (#392).
-_READ_NOTE_TRUNCATED_RE = re.compile(r"\[truncated: showing \d+ of \d+ chars")
+#: read-note's own body marker, plus Grok Build's middle elision (#484): Grok
+#: shows a long tool result to the model with ``[…trimmed…]`` spliced in even
+#: though the MCP call returned the whole note. A result the agent never saw
+#: whole is a partial read, so the elision counts as truncated too.
+_READ_NOTE_TRUNCATED_RE = re.compile(
+    r"\[truncated: showing \d+ of \d+ chars|\[(?:…|\.\.\.)\s*trimmed\s*(?:…|\.\.\.)\]"
+)
 _REQUIRE_ENV = "OMI_VERIFY_REQUIRE"
 _TIMEOUT_ENV = "OMI_VERIFY_TIMEOUT"
 #: REQUIRE mode re-closes the gate when an off-topic consult leaves the turn with
@@ -149,8 +154,9 @@ def _response_truncated(value: object, depth: int = 0) -> bool:
     Parses the STRUCTURE instead of searching serialized text: a ``truncated``
     field set to ``true`` at any depth, including inside MCP text content
     blocks whose text is itself JSON (compact ``{"truncated":true}`` included —
-    a substring search for ``"truncated": true`` missed it), or read-note's
-    ``[truncated: showing …]`` body marker in any string."""
+    a substring search for ``"truncated": true`` missed it), read-note's
+    ``[truncated: showing …]`` body marker, or Grok's ``[…trimmed…]`` middle
+    elision (#484), in any string."""
     if depth > _TRUNCATION_WALK_DEPTH:
         return False
     if isinstance(value, dict):
@@ -495,7 +501,7 @@ def _parse_verdict(text: str) -> bool | None:
     return None
 
 
-def _ask_model(task: str, text: str, omi_dir: Path | str | None = None) -> bool | None:
+def _ask_model(task: str, text: str, omi_dir: Path | str) -> bool | None:
     """Ask a headless one-shot model whether the consult was relevant.
 
     Backend-agnostic: whichever of the known CLIs is on PATH, or a custom one via
@@ -503,9 +509,9 @@ def _ask_model(task: str, text: str, omi_dir: Path | str | None = None) -> bool 
     fails open)."""
     from omind import ai_usage
 
-    limits = ai_usage.policy(omi_dir) if omi_dir is not None else None
-    task_cap = limits.verifier_task_chars if limits else 1_000
-    material_cap = limits.verifier_material_chars if limits else 2_000
+    limits = ai_usage.policy(omi_dir)
+    task_cap = limits.verifier_task_chars
+    material_cap = limits.verifier_material_chars
     prompt = (
         "You are an OMI-compliance relevance checker. An agent was told to consult "
         "its memory (OMI) before acting on a task, and it consulted the material "
@@ -521,35 +527,12 @@ def _ask_model(task: str, text: str, omi_dir: Path | str | None = None) -> bool 
         timeout = int(os.environ.get(_TIMEOUT_ENV) or _DEFAULT_TIMEOUT)
     except ValueError:
         timeout = _DEFAULT_TIMEOUT
-    if omi_dir is None:
-        # Compatibility path for the public pure ``judge`` helper. Real hook
-        # calls always supply the vault and therefore use the accounted wrapper.
-        from omind import ai_usage as _au
-
-        resolved = _au.resolve_model_backend()
-        if resolved is None:
-            return None
-        template, _as_json, _name = resolved
-        argv = [
-            prompt if part == "{prompt}" else part.replace("{prompt}", prompt)
-            for part in template
-        ]
-        stdin_text = prompt if _au.STDIN in template else None
-        if stdin_text is not None:
-            argv = [p for p in argv if p != _au.STDIN]
-        try:
-            result = subprocess.run(
-                argv, input=stdin_text, capture_output=True, text=True, timeout=timeout
-            )
-        except (subprocess.TimeoutExpired, OSError):
-            return None
-        return _parse_verdict(result.stdout or "") if result.returncode == 0 else None
     response = ai_usage.run_claude(
         omi_dir,
         "verifier",
         prompt,
         timeout=timeout,
-        allowed=limits.verifier_llm if limits else True,
+        allowed=limits.verifier_llm,
     )
     return _parse_verdict(response or "")
 
@@ -573,12 +556,15 @@ def _judge_scored(
     task: str,
     activity: str,
     text: str,
-    pending: str = "",
-    omi_dir: Path | str | None = None,
+    pending: str,
+    omi_dir: Path | str,
 ) -> tuple[bool, float]:
-    """:func:`judge_with_activity` plus the deterministic score it decided on,
-    so the off-topic log can carry WHAT the consult was judged against (#148) —
-    without it, a sampling pass cannot adjudicate false positives after the fact."""
+    """Relevance verdict plus the deterministic score it decided on. A consult is
+    relevant if it overlaps **any** of the turn task, the agent's recent activity
+    (#95), or the action the gate just blocked (#96), scored by ``max`` so none
+    dilutes another; the model only breaks the ambiguous middle band, fail-open
+    everywhere else. The score lets the off-topic log carry WHAT the consult was
+    judged against (#148)."""
     if not text or (not task and not activity and not pending):
         return True, 0.0  # can't judge without a signal -> fail open (relevant)
     high = _threshold(_HIGH_ENV, _HIGH)
@@ -592,35 +578,8 @@ def _judge_scored(
         return True, score
     if score <= low:
         return False, score
-    verdict = (
-        _ask_model(task or activity or pending, text)
-        if omi_dir is None
-        else _ask_model(task or activity or pending, text, omi_dir)
-    )
+    verdict = _ask_model(task or activity or pending, text, omi_dir)
     return (True if verdict is None else verdict), score
-
-
-def judge_with_activity(task: str, activity: str, text: str, pending: str = "") -> bool:
-    """Relevance verdict blending the captured task, the agent's recent activity
-    (issue #95), and the action the consult-gate just BLOCKED (issue #96): a consult
-    is relevant if it overlaps **any** of the three. Same deterministic-prefilter →
-    model-fallback ladder as :func:`judge`, scoring against ``max`` of the overlaps so
-    none dilutes another (concatenating would inflate the recall denominator — the
-    dilution 2.43.2 fought). The pending (blocked) action is the agent's freshest
-    intent: at a work *transition* the task and activity are both cold (still the
-    previous thread), but the blocked action is the new-thread work that tripped the
-    gate, so the FIRST consult clears instead of burning re-closes. Path noise in a
-    blocked command is normalized away first (#97). Only the REACTIVE order (attempt →
-    blocked → consult) records a pending; a proactive consult at a transition has none
-    to lean on, so prefer attempting the new work first at a transition."""
-    return _judge_scored(task, activity, text, pending)[0]
-
-
-def judge(task: str, text: str) -> bool:
-    """Relevance verdict for a single consult against the turn task alone.
-    Deterministic prefilter first (with operator-tunable thresholds), the model
-    only for the ambiguous middle, fail-open everywhere else."""
-    return judge_with_activity(task, "", text)
 
 
 def _require_mode(require: bool | None) -> bool:
