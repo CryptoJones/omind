@@ -7,6 +7,17 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **Commands typed into a running Antigravity shell skipped the guard
+  ([#475](https://github.com/CryptoJones/omind/issues/475)).** Antigravity's
+  `send_command_input` sends text to a command that is already running, under
+  `Input`. The guard read no command from it, so the hard rules, the repo-work gate
+  and the commit freshness gate never judged it. It is now in
+  `guard.SHELL_TOOL_NAMES` (and the `omi-guard.sh` fail-closed list), and
+  `guard.shell_command_text` reads `Input`. Each write is judged on its own; a
+  command split across several writes can still get through. Codex `write_stdin`
+  is not covered: Codex documents that it never runs PreToolUse, so no hook sees it.
+
 ### Removed
 - **PyPI publishing (`publish.yml`) and the `#267` publish blocker.** omind is an MCP
   server installed from source with `uv tool`, not a library distributed on PyPI, so the

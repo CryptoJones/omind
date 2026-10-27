@@ -801,3 +801,61 @@ def test_non_shell_tool_with_a_command_key_is_not_bash() -> None:
         {"tool_name": "read_file", "tool_input": {"command": "x", "path": "/a"}}
     )
     assert action["tool"] == "read_file"
+
+
+# --- #475: Antigravity send_command_input types into a running shell ---
+
+
+def _agy_stdin(text: str, session: str, root: Path | None = None) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "toolCall": {"name": "send_command_input", "args": {"CommandId": "abc", "Input": text}},
+        "conversationId": session,
+    }
+    if root is not None:
+        event["workspacePaths"] = [str(root)]
+    return event
+
+
+def _run_agy(event: dict[str, Any], capsys: pytest.CaptureFixture[str]) -> tuple[bool, str]:
+    code = adapters.run_adapter(io.StringIO(json.dumps(event)), harness="agy")
+    captured = capsys.readouterr()
+    return not _denied(code, captured.out), captured.out + captured.err
+
+
+def test_agy_stdin_hard_rule_is_denied(capsys: pytest.CaptureFixture[str]) -> None:
+    allowed, text = _run_agy(_agy_stdin("gh repo delete a/b\n", "agy-475-hard"), capsys)
+    assert not allowed
+    assert "delete a repo" in text
+
+
+def test_agy_stdin_commit_hits_freshness_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """A commit typed into a running shell, trailing newline and all, is held to
+    the same freshness gate as a run_command commit."""
+    repo = _bare_repo(tmp_path, "todo")
+    session = "agy-475-fresh"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    allowed, text = _run_agy(_agy_stdin("git commit -am x\n", session, repo), capsys)
+    assert not allowed
+    assert "freshness" in text
+    guard.clear_gate(session)
+
+
+@pytest.mark.parametrize("text", ["y\n", "q"])
+def test_agy_stdin_harmless_input_is_allowed(
+    text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    session = f"agy-475-ok-{text.strip()}"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target="Some Note", relevant=True)
+    allowed, _ = _run_agy(_agy_stdin(text, session), capsys)
+    assert allowed
+    guard.clear_gate(session)
+
+
+def test_shell_command_text_reads_agy_input() -> None:
+    assert guard.shell_command_text({"CommandId": "abc", "Input": "ls\n"}) == "ls\n"
+    # The launch keys still win over Input.
+    assert guard.shell_command_text({"CommandLine": "ls", "Input": "y"}) == "ls"
