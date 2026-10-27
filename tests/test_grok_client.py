@@ -145,6 +145,38 @@ def test_claude_harness_leaves_plain_claude_events_alone(tool: str) -> None:
     assert harness.translate_event("claude", event) is event
 
 
+@pytest.mark.parametrize("outer", ["omi__read-note", "mcp__omi__read-note"])
+def test_claude_harness_unwraps_a_renamed_grok_wrapper(outer: str) -> None:
+    """#483: Grok presents the MCP call under the qualified name but keeps the
+    use_tool wrapper in tool_input. Without the unwrap the consult target is
+    empty (the wrapper has tool_name, not name), so neither the consult nor
+    the git-rules ack is recorded even though the read succeeded."""
+    event = harness.translate_event(
+        "claude",
+        {
+            "tool_name": outer,
+            "session_id": "s",
+            "tool_input": {
+                "tool_name": "omi__read-note",
+                "tool_input": {"name": "Rules", "representation": "raw", "max_chars": 65536},
+            },
+        },
+    )
+    assert event["tool_name"] == "mcp__omi__read-note"
+    assert event["tool_input"] == {"name": "Rules", "representation": "raw", "max_chars": 65536}
+
+
+def test_renamed_grok_wrapper_needs_a_matching_inner_name() -> None:
+    """A plain Claude event whose tool_input happens to carry a tool_name is
+    unwrapped only when it names the SAME tool as the outer event."""
+    event = {
+        "tool_name": "mcp__omi__read-note",
+        "tool_input": {"name": "Rules", "tool_name": "something_else"},
+        "session_id": "s",
+    }
+    assert harness.translate_event("claude", event) is event
+
+
 @pytest.fixture
 def grok_home(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> Path:
     root = tmp_path / "grok-home"

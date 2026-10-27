@@ -1043,6 +1043,31 @@ def test_compact_serialized_truncated_recall_does_not_clear(tmp_path: Path) -> N
     assert not guard._has_consulted_git_rules(session)
 
 
+@pytest.mark.parametrize("marker", ["[…trimmed…]", "[...trimmed...]"])
+def test_grok_middle_elision_counts_as_truncated(marker: str) -> None:
+    """#484: Grok shows a long read-note result to the model with a middle
+    elision even though the MCP call returned the whole note. A result the
+    agent never saw whole is not a full read."""
+    assert verify._response_truncated({"raw": f"head {marker} tail"})
+    assert not verify._response_truncated({"raw": "head tail"})
+
+
+def test_grok_elided_read_note_does_not_clear(tmp_path: Path) -> None:
+    """#484: an elided read must be treated exactly like read-note's own
+    truncation marker — below the hard cap it does not clear the gate."""
+    omi = _omi(tmp_path)
+    session = "v484-trim"
+    _armed(session)
+    body = "rules head […trimmed…]\n## References\n"
+    verify.verify_consult(
+        _demanded_event(session, "read-note", {"max_chars": 20000}, {"raw": body}),
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert not guard._has_consulted_git_rules(session)
+
+
 def test_response_truncated_parses_structure_not_text() -> None:
     assert verify._response_truncated({"truncated": True})
     assert verify._response_truncated([{"type": "text", "text": '{"a":{"truncated":true}}'}])

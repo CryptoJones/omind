@@ -438,6 +438,29 @@ def _first_dict_arg(*values: object) -> dict[str, Any] | None:
     return None
 
 
+def _is_renamed_grok_wrapper(tool: str, tool_input: dict[str, Any]) -> bool:
+    """True when Grok already renamed the tool to the qualified MCP name but
+    left ``tool_input`` as the ``use_tool`` wrapper (#483).
+
+    Grok's hook guide says a ``use_tool`` MCP call reaches hooks under the
+    qualified name (``omi__read-note``), yet the arguments stay wrapped:
+    ``{"tool_name": "omi__read-note", "tool_input": {...}}``. The dispatcher
+    branch in :func:`_translate_grok` never fires because the outer name is no
+    longer ``use_tool``, and the wrapper has ``tool_name``, not ``name`` — so
+    the consult target reads as empty and neither the consult nor the
+    git-rules ack is recorded even though the read succeeded. Match only on
+    ``tool_name``/``toolName`` (never ``name``, which is a real note name on a
+    plain Claude event) and only when it names the SAME tool as the outer
+    event, so a genuine Claude event is never unwrapped by accident.
+    """
+    if not tool or tool in _GROK_DISPATCHERS:
+        return False
+    inner = tool_input.get("tool_name") or tool_input.get("toolName")
+    if not isinstance(inner, str) or not inner:
+        return False
+    return inner.removeprefix("mcp__") == tool.removeprefix("mcp__")
+
+
 def _translate_grok(event: dict[str, Any]) -> dict[str, Any]:
     """Map a Grok hook event onto the Claude-shaped event the rest of omind uses."""
     out = dict(event)
@@ -467,7 +490,7 @@ def _translate_grok(event: dict[str, Any]) -> dict[str, Any]:
     tool = str(out.get("tool_name") or "")
     raw_input = out.get("tool_input")
     tool_input: dict[str, Any] = raw_input if isinstance(raw_input, dict) else {}
-    if tool in _GROK_DISPATCHERS:
+    if tool in _GROK_DISPATCHERS or _is_renamed_grok_wrapper(tool, tool_input):
         inner = tool_input.get("tool_name") or tool_input.get("toolName") or tool_input.get("name")
         if isinstance(inner, str) and inner:
             tool = inner
@@ -498,10 +521,17 @@ def _claude_event_uses_grok_tool(event: dict[str, Any]) -> bool:
     and no camelCase keys, so :func:`payload_is_grok` is false. ``use_tool``
     still hides the MCP tool, and ``run_terminal_command`` is not ``Bash``.
     A plain Claude event (``Bash``, ``Edit``, ``mcp__omi__…``, ``omi__…``) does
-    not match, so :func:`translate_event` can return that same object.
+    not match, so :func:`translate_event` can return that same object — unless
+    its ``tool_input`` is still the Grok wrapper under an already-renamed tool
+    name (#483), which only :func:`_translate_grok` knows how to unwrap.
     """
     tool = event.get("tool_name")
-    return isinstance(tool, str) and (tool in _GROK_DISPATCHERS or tool in _GROK_TOOL_ALIASES)
+    if not isinstance(tool, str):
+        return False
+    if tool in _GROK_DISPATCHERS or tool in _GROK_TOOL_ALIASES:
+        return True
+    ti = event.get("tool_input")
+    return isinstance(ti, dict) and _is_renamed_grok_wrapper(tool, ti)
 
 
 def translate_event(harness: str, event: dict[str, Any]) -> dict[str, Any]:
