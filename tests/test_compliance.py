@@ -94,7 +94,6 @@ def test_the_log_rotates_at_the_cap_without_losing_counts(
 def test_recidivism_counts_exclude_the_gate() -> None:
     for rid in ("r1", "r1", "r2", "omi-gate"):
         compliance.log_event(compliance.KIND_DECISION, rule_id=rid, outcome="deny")
-    assert compliance.recidivism_counts()["r1"] == 2
     counts = compliance.recidivism_counts()
     assert counts["r1"] == 2 and counts["r2"] == 1
     assert "omi-gate" not in counts
