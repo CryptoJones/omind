@@ -43,44 +43,57 @@ JOURNAL_PREFIX = "Session Journal"
 JOURNAL_GLOB = f"{JOURNAL_PREFIX} *.md"
 
 
-def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
-    """Write ``text`` to ``path`` atomically: same-dir temp file + ``os.replace``.
+def fsync_dir(directory: Path) -> None:
+    """Best-effort fsync of a directory so a rename into it is durable.
+    Silently skipped where the platform can't open a directory fd (Windows)."""
+    with contextlib.suppress(OSError, AttributeError):
+        dir_fd = os.open(directory, os.O_RDONLY)
+        try:
+            os.fsync(dir_fd)
+        finally:
+            os.close(dir_fd)
 
-    Used for every managed config/hook write (settings.json, config.toml, hook
-    scripts, backup.json, the provision manifest). A plain ``path.write_text``
-    truncates in place, so a crash / OOM / ENOSPC mid-write leaves a torn file —
-    which for a harness config means a bricked agent and for ``omi-guard.sh``
-    means every tool call is denied. The temp file + rename makes a concurrent
-    reader see either the old file or the new one in full, and the directory
-    fsync makes the rename itself durable across a power loss.
 
-    ``newline="\n"`` for the same reason as ``store._atomic_write``: the default
-    rewrites every ``\n`` to ``os.linesep``. That matters more here than there —
-    this function writes ``omi-guard.sh``, and a shell script whose shebang line
-    ends ``\r\n`` is not a shell script.
+def atomic_write_bytes(path: Path, data: bytes, *, mode: int | None = None) -> None:
+    """Write ``data`` to ``path`` atomically: same-dir temp file + ``os.replace``.
+
+    The one writer for notes, managed configs/hooks, and state files. A plain
+    ``path.write_text`` truncates in place, so a crash / OOM / ENOSPC mid-write
+    leaves a torn file — for a note, lost memory; for a harness config, a
+    bricked agent; for ``omi-guard.sh``, every tool call denied. The temp file +
+    rename makes a concurrent reader see either the old file or the new one in
+    full, and the directory fsync makes the rename itself durable across a
+    power loss. ``mode`` is applied to the temp file before the rename.
     """
     directory = path.parent
     directory.mkdir(parents=True, exist_ok=True)
     fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=path.suffix or ".tmp")
     try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
+        with os.fdopen(fd, "wb") as fh:
+            fh.write(data)
             fh.flush()
             os.fsync(fh.fileno())
         if mode is not None:
             with contextlib.suppress(OSError):
                 os.chmod(tmp, mode)
         os.replace(tmp, path)
-        with contextlib.suppress(OSError, AttributeError):
-            dir_fd = os.open(directory, os.O_RDONLY)
-            try:
-                os.fsync(dir_fd)
-            finally:
-                os.close(dir_fd)
+        fsync_dir(directory)
     except BaseException:
         with contextlib.suppress(OSError):
             os.unlink(tmp)
         raise
+
+
+def atomic_write_text(path: Path, text: str, *, mode: int | None = None) -> None:
+    """:func:`atomic_write_bytes` for UTF-8 text, never translating ``\n``.
+
+    Bytes are identical on every OS. Text mode's default newline rewrote every
+    ``\n`` to ``os.linesep``, so notes were CRLF on Windows and nothing could
+    see it because reads translate back — four Windows-only bugs (compliance
+    log rotation, both halves of the transaction journal) — and a shell hook
+    whose shebang line ends ``\r\n`` is not a shell script.
+    """
+    atomic_write_bytes(path, text.encode("utf-8"), mode=mode)
 
 
 def state_dir() -> Path:
