@@ -11,8 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
-  follow-up from the #433 review: git takes any unique prefix of `--all` / `--mirror`, and `'refs/heads/*:refs/heads/*'` sends `main`.
 - [ ] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — _bug_ —
   follow-up from the #474 review: Codex `write_stdin` (`chars`) and Antigravity `send_command_input`
   (`Input`) send text to a shell that is already running, so the hard rules and the freshness gate
@@ -83,6 +81,12 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 ## Done
 
 ### Shipped — 2026-10-26 (v10.3.3)
+
+- [x] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — **v10.3.3** — _bug_ —
+  a unique prefix of a git push long option is read as that option (`--al`/`--bra` are `--all`,
+  `--mirr` is `--mirror`); a glob refspec, on the command line or in `remote.<name>.push`, is judged
+  against the local refs its source matches, mapped to the destination. Fails open to the literal
+  destination.
 
 - [x] **guard: Grok full read-note of the git-rules note never clears repo-work-read-git-rules** ([#483](https://github.com/CryptoJones/omind/issues/483)) — **v10.3.3** — _bug_ —
   Grok may present the MCP call under the already-qualified name (`omi__read-note`)

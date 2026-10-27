@@ -472,7 +472,9 @@ def _default_push_branches(repo: Path, remote: str, config: tuple[str, ...] = ()
             ).split()
             for spec in specs:
                 src, _, dst = spec.lstrip("+").partition(":")
-                if src.upper() in _CURRENT_BRANCH_REFS:
+                if "*" in spec and not spec.startswith("^"):
+                    dests += _glob_branches(repo, src, dst or src)
+                elif src.upper() in _CURRENT_BRANCH_REFS:
                     dests.append(dst.removeprefix("refs/heads/") or current)
         # `push.default=matching`, or a configured `:` refspec (which wins
         # over push.default), pushes every local branch the remote also has,
@@ -678,8 +680,81 @@ _MIRROR = "(mirror):"
 #: Marker prefix for the ``:`` refspec (``git push origin :``): every local
 #: branch the remote also has (#433). The remote follows.
 _MATCHING = "(matching):"
+#: Marker prefix for a glob refspec (``refs/heads/*:refs/heads/*``, #443):
+#: the source pattern and the destination, split by :data:`_CONFIG_SEP`.
+_GLOB = "(glob):"
 #: Push options that send every local branch whatever the refspecs (#433).
 _ALL_BRANCH_OPTS = frozenset({"--all", "--branches"})
+#: git push's long options (builtin/push.c, `git push -h`), so a unique prefix
+#: (`--al`, `--mirr`) is read as git reads it (#443).
+_PUSH_LONG_OPTS = [
+    f"--{name}"
+    for name in (
+        "all",
+        "atomic",
+        "branches",
+        "delete",
+        "dry-run",
+        "exec",
+        "follow-tags",
+        "force",
+        "force-if-includes",
+        "force-with-lease",
+        "ipv4",
+        "ipv6",
+        "mirror",
+        "no-verify",
+        "porcelain",
+        "progress",
+        "prune",
+        "push-option",
+        "quiet",
+        "receive-pack",
+        "recurse-submodules",
+        "repo",
+        "set-upstream",
+        "signed",
+        "tags",
+        "thin",
+        "verbose",
+        "verify",
+    )
+]
+#: Each spelling git accepts for a push long option, mapped to the option.
+_PUSH_LONG_SPELLINGS = {
+    spelling: spelling
+    if spelling in _PUSH_LONG_OPTS
+    else next(o for o in _PUSH_LONG_OPTS if o.startswith(spelling))
+    for spelling in policy._long_prefixes(_PUSH_LONG_OPTS)
+}
+
+
+def _glob_dest(src: str, dst: str, ref: str) -> str | None:
+    """``ref`` mapped through the one-``*`` refspec ``src:dst`` as git maps
+    it, or None when ``src`` does not match it (#443)."""
+    head, _, tail = src.partition("*")
+    if len(ref) < len(head) + len(tail) or not ref.startswith(head) or not ref.endswith(tail):
+        return None
+    return dst.replace("*", ref[len(head) : len(ref) - len(tail)], 1)
+
+
+def _glob_branches(repo: Path, src: str, dst: str) -> list[str]:
+    """Branches a glob refspec ``src:dst`` lands on in ``repo`` (#443): every
+    local ref the source pattern matches (git matches the full refname,
+    unqualified), mapped to the destination. Fails open to the destination
+    read literally, as before #443."""
+    literal = [dst.removeprefix("refs/heads/")]
+    try:
+        out = _git_out(repo, "for-each-ref", "--format=%(refname)")
+        if out is None:
+            return literal
+        mapped = (_glob_dest(src, dst, ref) for ref in out.split())
+        return [d.removeprefix("refs/heads/") for d in mapped if d is not None]
+    except deadline.DeadlineExceededError:
+        raise
+    except Exception as exc:  # noqa: BLE001 - enforcement fails open
+        _breadcrumb(f"rules_glob({repo})", exc)
+        return literal
 
 
 def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
@@ -722,13 +797,15 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
     positional: list[str] = []
     mirror = False
     for token in tokens:
-        if token == "--tags":
+        # A unique prefix is the option (`--al` is `--all`, #443).
+        option = _PUSH_LONG_SPELLINGS.get(token.partition("=")[0], token)
+        if option == "--tags":
             refs.append("(tags)")
             continue
-        if token in _ALL_BRANCH_OPTS:
+        if option in _ALL_BRANCH_OPTS:
             refs.append(_ALL_BRANCHES)
             continue
-        if token == "--mirror":
+        if option == "--mirror":
             mirror = True
             continue
         if token.startswith("-"):
@@ -738,6 +815,12 @@ def _pushed_branches(command: str, *, in_code: bool = True) -> list[str] | None:
     for token in positional[1:]:
         if token.lstrip("+") == ":":
             refs.append(_MATCHING + positional[0])
+            continue
+        if token.startswith("^"):
+            continue  # a negative refspec only excludes
+        if "*" in token:
+            src, _, dst = token.lstrip("+").partition(":")
+            refs.append(_GLOB + src + _CONFIG_SEP + (dst or src))
             continue
         if ":" not in token and token.lstrip("+").upper() in _CURRENT_BRANCH_REFS:
             refs.append(_CURRENT_REF)
@@ -844,6 +927,11 @@ def _judge(
                 branches += fact(
                     f"push:{branch}",
                     functools.partial(_default_push_branches, remote=remote, config=tuple(config)),
+                )
+            elif branch.startswith(_GLOB):
+                src, _, dst = branch.removeprefix(_GLOB).partition(_CONFIG_SEP)
+                branches += fact(
+                    f"glob:{branch}", functools.partial(_glob_branches, src=src, dst=dst)
                 )
             elif branch == _ALL_BRANCHES:
                 branches += fact("local_branches", _local_branches)
