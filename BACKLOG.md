@@ -11,10 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — _bug_ —
-  follow-up from the #474 review: Codex `write_stdin` (`chars`) and Antigravity `send_command_input`
-  (`Input`) send text to a shell that is already running, so the hard rules and the freshness gate
-  never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
 ## Not planned
@@ -70,6 +66,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — Unreleased
+
+- [x] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — _bug_ —
+  Antigravity `send_command_input` is now a shell tool and its `Input` text is judged like a
+  command (hard rules, repo-work gate, commit freshness gate), each write on its own. Codex
+  `write_stdin` is not interceptable: per the Codex hooks docs it never fires PreToolUse, so
+  nothing was added for it.
 
 ### Shipped — 2026-10-26 (v10.3.3)
 

@@ -580,13 +580,15 @@ def shell_command_text(tool_input: object) -> str:
 
     ``command`` (Claude, Codex, Gemini, Hermes, Grok), ``CommandLine``
     (Antigravity) or ``cmd`` (Poolside, Codex ``exec_command``). An argv list
-    (Codex ``local_shell``) is joined with spaces. PreToolUse and the
+    (Codex ``local_shell``) is joined with spaces. ``Input`` is the text
+    Antigravity's ``send_command_input`` types into a running command; each
+    write is judged on its own (#475). PreToolUse and the
     PostToolUse retraction both read it here, so a failed fetch is retracted
     under the same key it was granted under (#473).
     """
     if not isinstance(tool_input, dict):
         return ""
-    for key in ("command", "CommandLine", "cmd"):
+    for key in ("command", "CommandLine", "cmd", "Input"):
         value = tool_input.get(key)
         if isinstance(value, str) and value:
             return value
@@ -1404,6 +1406,7 @@ SHELL_TOOL_NAMES = frozenset(
         "shell_command",  # Codex
         "terminal",  # Hermes
         "run_command",  # Antigravity
+        "send_command_input",  # Antigravity, stdin to a running command (#475)
         "run_shell_command",  # Gemini CLI
         "run_terminal_command",  # Grok
     }
