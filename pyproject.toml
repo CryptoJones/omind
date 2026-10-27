@@ -47,6 +47,10 @@ dependencies = [
     "cryptography>=50.0.0,<51.0",
     "pydantic-settings>=2.14.2,<3.0",
     "starlette>=1.3.1,<2.0",
+    # Security floor for PYSEC-2026-4320 (certifi via httpx/mcp). pip resolved
+    # the older 2026.7.22 on some CI legs; the floor makes the fixed version
+    # deterministic everywhere pip-audit looks.
+    "certifi>=2026.10.19,<2027",
 ]
 
 [project.optional-dependencies]

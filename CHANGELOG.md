@@ -7,6 +7,16 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **CI `pip-audit` gate red on dependency advisories, not on code.** Two
+  distinct causes: `certifi` resolved to the vulnerable 2026.7.22 on some legs
+  (PYSEC-2026-4320), now floored to `>=2026.10.19` alongside the other runtime
+  transitive floors; and `filelock` — pulled only by pip-audit's own
+  cachecontrol filecache, not an omind dependency — whose fix (4.2.1) requires
+  Python >=3.11 and so can never be installed on the 3.10 matrix legs. The six
+  filelock CVEs are now `--ignore-vuln`-ed in the workflow (pip-audit 2.10 has
+  no package-level skip), with the reason stated in the workflow comment.
+
 ## [10.3.3] - 2026-10-26
 
 ### Fixed

@@ -45,7 +45,16 @@ jobs:
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: mypy src
-      - run: pip-audit
+      # filelock is not an omind dependency — pip-audit pulls it for its own
+      # cachecontrol filecache. Its fix (4.2.1) requires Python >=3.11, so the
+      # 3.10 matrix legs can never install a fixed version; ignore the six
+      # CVEs rather than pretend the 3.10 legs can be green. pip-audit 2.10
+      # has no package-level skip, hence the explicit IDs.
+      - run: >-
+          pip-audit
+          --ignore-vuln CVE-2026-112906 --ignore-vuln CVE-2026-112907
+          --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112914
+          --ignore-vuln CVE-2026-112937 --ignore-vuln CVE-2026-112940
       - run: pytest -v --cov=omind --cov-report=term-missing
 
   wheel:
