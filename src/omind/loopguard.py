@@ -36,7 +36,6 @@ from __future__ import annotations
 
 import contextlib
 import json
-import os
 from collections.abc import Callable
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -80,16 +79,8 @@ def _load() -> dict[str, Any]:
 
 
 def _save(state: dict[str, Any]) -> None:
-    try:
-        p = _path()
-        p.parent.mkdir(parents=True, exist_ok=True)
-        # Unique tmp name: a fixed ".tmp" is shared by concurrent hook processes
-        # and two writers would corrupt each other's payload (2026-08-27 review).
-        tmp = p.with_suffix(f".json.{os.getpid()}.tmp")
-        tmp.write_text(json.dumps(state, indent=2), encoding="utf-8")
-        os.replace(tmp, p)
-    except OSError:
-        pass
+    with contextlib.suppress(OSError):
+        paths.atomic_write_text(_path(), json.dumps(state, indent=2))
 
 
 def _mutate(mutate: Callable[[dict[str, Any]], dict[str, Any] | None]) -> None:

@@ -31,7 +31,7 @@ from pathlib import Path
 
 from omind import filelock, paths, txn
 from omind.hooks import JOURNAL_TAGS, action_bullets, journal_dir
-from omind.store import NoteFields, OmiStore, _atomic_write, render_fields, today
+from omind.store import NoteFields, OmiStore, render_fields, today
 
 # Places older layouts left daily journals: the vault-folder root, plus the
 # short-lived ``logs/`` journal-location experiment some live vaults carry.
@@ -133,7 +133,7 @@ def migrate_journals(omi_dir: Path | str) -> list[str]:
             moved.append(stray.name)
         transaction.prepare()
         try:
-            transaction.apply(_atomic_write)
+            transaction.apply(paths.atomic_write_text)
         except BaseException:
             transaction.rollback()
             raise
@@ -329,7 +329,7 @@ def rollup_journals(
                     _tally(_read_held(path, held.get(path)), stats)
                 days = sorted({day.isoformat() for day, _ in [*archived_dated, *dated_paths]})
                 filename = rollup_name(wk)
-                _atomic_write(directory / filename, render_rollup(wk, days, stats))
+                paths.atomic_write_text(directory / filename, render_rollup(wk, days, stats))
                 # Windows refuses to rename or unlink a file that anyone still
                 # holds open, so the locks must go before the archive step —
                 # [WinError 32] otherwise. Dropping them here is not the race

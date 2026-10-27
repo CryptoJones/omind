@@ -36,11 +36,11 @@ from difflib import SequenceMatcher
 from pathlib import Path
 
 from omind.clock import Rev
+from omind.paths import atomic_write_text
 from omind.store import (
     TEMPLATE_SECTIONS,
     ActionItem,
     NoteFields,
-    _atomic_write,
     parse_note,
     render_fields,
     split_sections,
@@ -446,7 +446,7 @@ def run_merge_driver(
         # file (%A), so there is no multi-note window to roll back. The gap that
         # DID exist here was `write_text` truncating in place — a crash mid-merge
         # left a torn note *and* git believing the merge succeeded (#194).
-        _atomic_write(ours_path, merged)
+        atomic_write_text(ours_path, merged)
     except (OSError, UnicodeError) as exc:
         print(f"omind merge-driver: {label}: {exc}", file=sys.stderr)
         return 1
