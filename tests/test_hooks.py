@@ -530,7 +530,7 @@ def test_session_start_journal_tail_is_last_bullets_only(tmp_path: Path) -> None
     _write_priming_files(tmp_path)
     old = datetime(2026, 6, 1, 9, 0, 0)
     hooks.append_entry(tmp_path, "- 09:00 [session old00000] PostToolUse Bash -> OLD-J (ok)", old)
-    for i in range(hooks._JOURNAL_TAIL_BULLETS + 5):
+    for i in range(25):
         bullet = f"- 14:32 [session abcd1234] PostToolUse Bash -> c{i:02d} (ok)"
         hooks.append_entry(tmp_path, bullet, _NOW)
     ctx = hooks.build_session_start_context(tmp_path)
