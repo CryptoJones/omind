@@ -157,9 +157,11 @@ GIT_RULES_NOTE = "Operational Rules - Git Repos and Secrets"
 GIT_RULES_MESSAGE = (
     "ACTION BLOCKED. Next call OMI MCP `read-note` with "
     '`{"name":"Operational Rules - Git Repos and Secrets","representation":"raw",'
-    '"max_chars":65536}`, then retry. Repo work requires that specific memory this '
-    "turn — read it in full: a truncated or section-only read does not clear this "
-    "gate (recall-note stops at 8000 chars, so it cannot return a longer note whole)."
+    '"max_chars":65536}`, then retry. Repo work requires that specific memory — read '
+    "it in full: a truncated or section-only read does not clear this gate "
+    "(recall-note stops at 8000 chars, so it cannot return a longer note whole). One "
+    "full read per session is enough: it stays valid until the note changes or the "
+    "context is compacted or cleared."
 )
 #: Value of the per-turn demanded-note marker once the git-rules note is known
 #: to be absent (#358). Never a substring of a real consult target, so the
@@ -402,6 +404,68 @@ def incomplete_consult(session: str) -> str:
     return "" if text.startswith(_FULL_MARK) else text
 
 
+def _git_rules_ack_path(session: str) -> Path:
+    """The git-rules note version this SESSION has read in full (#478).
+
+    Unlike the per-turn files above, :func:`begin_turn` and the bash turn-start
+    reset leave it alone: one full read per session per note version is
+    enough, so an unchanged note is not re-read every turn. A changed note, a
+    new session, or a compaction/``/clear`` (``hooks`` clears it on SessionStart)
+    needs a new read."""
+    return paths.state_dir() / f"gitrules-ack-{_safe_sid(session)}.json"
+
+
+def git_rules_note_version(omi_dir: Path | str) -> str:
+    """The git-rules note's current version token (``OmiStore.note_version``,
+    the token ``read-note`` returns), or ``""`` when it is absent or unreadable.
+    Never raises."""
+    try:
+        from omind.store import OmiStore
+
+        return OmiStore(Path(omi_dir)).note_version(GIT_RULES_NOTE)
+    except Exception:
+        return ""
+
+
+def record_git_rules_ack(session: str, version: str) -> None:
+    """Remember that ``session`` read the git-rules note in full at ``version``
+    (#478). A blank session or version records nothing. Best-effort, never
+    raises."""
+    if not session or not version:
+        return
+    with contextlib.suppress(OSError):
+        path = _git_rules_ack_path(session)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        with filelock.exclusive(_sibling_lock(path)):
+            payload = json.dumps({"note": GIT_RULES_NOTE.lower(), "version": version})
+            paths.atomic_write_text(path, payload, mode=0o600)
+
+
+def clear_git_rules_ack(session: str) -> None:
+    """Forget this session's full read of the git-rules note. Never raises."""
+    with contextlib.suppress(OSError):
+        path = _git_rules_ack_path(session)
+        with filelock.exclusive(_sibling_lock(path)):
+            path.unlink()
+
+
+def git_rules_acked(session: str, omi_dir: Path | str | None) -> bool:
+    """True when ``session`` already read the git-rules note in full at the
+    version the vault holds now (#478). Strict on any doubt: no vault, no
+    record, an absent note or a different version all answer ``False``, and
+    the gate falls back to demanding the read. Never raises."""
+    if not session or omi_dir is None:
+        return False
+    try:
+        data = json.loads(_git_rules_ack_path(session).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return False
+    if not isinstance(data, dict) or data.get("note") != GIT_RULES_NOTE.lower():
+        return False
+    recorded = str(data.get("version") or "")
+    return bool(recorded) and recorded == git_rules_note_version(omi_dir)
+
+
 #: Tool-name prefixes of the OMI MCP server across harness spellings (kept in
 #: sync with ``adapters._OMI_CONSULT_PREFIXES``; not imported, adapters imports
 #: this module).
@@ -511,6 +575,28 @@ def _retract_git_freshness(session: str, repo: Path) -> None:
                 path.unlink()
 
 
+def shell_command_text(tool_input: object) -> str:
+    """The command a shell tool runs, from any harness's key, or ``""``.
+
+    ``command`` (Claude, Codex, Gemini, Hermes, Grok), ``CommandLine``
+    (Antigravity) or ``cmd`` (Poolside, Codex ``exec_command``). An argv list
+    (Codex ``local_shell``) is joined with spaces. PreToolUse and the
+    PostToolUse retraction both read it here, so a failed fetch is retracted
+    under the same key it was granted under (#473).
+    """
+    if not isinstance(tool_input, dict):
+        return ""
+    for key in ("command", "CommandLine", "cmd"):
+        value = tool_input.get(key)
+        if isinstance(value, str) and value:
+            return value
+        if isinstance(value, list):
+            joined = " ".join(str(part) for part in value if part is not None).strip()
+            if joined:
+                return joined
+    return ""
+
+
 def _tool_outcome_failed(tool_response: object) -> bool:
     """True on an EXPLICIT failure signal only — a harness that reports no
     outcome at all is trusted (mirrors hooks._extract_outcome's discipline)."""
@@ -538,10 +624,9 @@ def record_freshness_outcome(event: dict[str, Any]) -> None:
     enforced it (2026-08-27 review). This retracts the grant when the outcome
     says the command failed. Best-effort; never raises."""
     try:
-        if str(event.get("tool_name") or "") != "Bash":
+        if str(event.get("tool_name") or "") not in SHELL_TOOL_NAMES:
             return
-        tool_input = event.get("tool_input")
-        command = str(tool_input.get("command") or "") if isinstance(tool_input, dict) else ""
+        command = shell_command_text(event.get("tool_input"))
         if not command or not _is_freshness_command(command):
             return
         if not _tool_outcome_failed(event.get("tool_response")):
@@ -1277,6 +1362,7 @@ def clear_all_gates() -> None:
         "pending-*",
         "offtopic-*",
         "git-fresh-*",
+        "gitrules-ack-*",
         "turn-*",
         "injected-*",
         "namehints-*",
@@ -1304,6 +1390,24 @@ def clear_all_gates() -> None:
 #: Hard rules still apply to everything here; they match on command text, which
 #: none of these tools carry.
 _GATE_EXEMPT_TOOLS = frozenset({"ToolSearch", "exit", "todo_action"})
+#: Each harness's shell tool. The adapter maps these onto ``Bash`` so every
+#: Bash-only check (commit freshness, repo work, global-config mutation) judges
+#: them. Before, a commit from Antigravity's ``run_command`` or Gemini's
+#: ``run_shell_command`` skipped the freshness gate: it was not named Bash.
+SHELL_TOOL_NAMES = frozenset(
+    {
+        "Bash",
+        "bash",  # OpenCode
+        "shell",  # Poolside, Codex
+        "local_shell",  # Codex
+        "exec_command",  # Codex
+        "shell_command",  # Codex
+        "terminal",  # Hermes
+        "run_command",  # Antigravity
+        "run_shell_command",  # Gemini CLI
+        "run_terminal_command",  # Grok
+    }
+)
 _WRITE_TOOLS = frozenset(
     {
         "Edit",
@@ -1833,15 +1937,9 @@ def _env_chdir_value(word: str, after: str) -> str | None:
     return None
 
 
-def _shell_body(tokens: list[str]) -> str | None:
-    """The ``-c`` body of ``sh/bash/zsh … -c '<body>'`` (``-lc``, ``-ec`` and
-    ``-o opt`` before it included), or ``None`` when there is no ``-c``."""
-    i = _shell_body_index(tokens)
-    return None if i is None else tokens[i]
-
-
 def _shell_body_index(tokens: list[str]) -> int | None:
-    """Where :func:`_shell_body` finds the body in ``tokens``."""
+    """Where the ``-c`` body of ``sh/bash/zsh … -c '<body>'`` sits in ``tokens``
+    (``-lc``, ``-ec`` and ``-o opt`` before it included), or ``None``."""
     has_c = False
     i = 1
     while i < len(tokens):
@@ -2633,8 +2731,13 @@ def _repo_has_remote(repo: Path) -> bool:
     return bool(re.search(r"(?m)^[ \t]*\[remote[ \t]", text))
 
 
-def _has_consulted_git_rules(session: str) -> bool:
+def _has_consulted_git_rules(session: str, omi_dir: Path | str | None = None) -> bool:
     needle = GIT_RULES_NOTE.lower()
+    # #478: a full read earlier in this session, of the version the vault still
+    # holds, carries across turns. Needs the vault to compare versions, so a
+    # caller without one gets the per-turn rule below.
+    if git_rules_acked(session, omi_dir):
+        return True
     for consult in consults(session):
         if consult.get("failed"):
             # The read errored (not-found, locked vault…): the agent has read
@@ -4622,11 +4725,19 @@ def _judge_hard_rules(command: str, session: str) -> Verdict | None:
     return None
 
 
-def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdict:
+def decide(
+    action: dict[str, Any],
+    *,
+    git_rules_missing: bool = False,
+    omi_dir: Path | str | None = None,
+) -> Verdict:
     """The harness-agnostic policy. See the module docstring for the schema.
 
     ``git_rules_missing`` (#358) waives ONLY the git-rules read demand, for a
     vault that positively lacks the note; every other gate still runs.
+    ``omi_dir`` (#478) lets the git-rules gate honour a full read made earlier
+    in the session of the note's current version; without it the read is
+    demanded once per turn, as before.
 
     Judging runs under the action's wall-clock deadline (#460, see
     :mod:`omind.deadline`), so a verdict comes back before the hook times
@@ -4638,17 +4749,27 @@ def decide(action: dict[str, Any], *, git_rules_missing: bool = False) -> Verdic
     timeout, so an ordinary command never gets there."""
     session = str(action.get("session") or "")
     command = str(action.get("command") or "")
+    # Every harness's shell tool is Bash to the checks below, whatever built
+    # the action (#473). The adapter maps it too; this covers direct callers.
+    if command and str(action.get("tool") or "") in SHELL_TOOL_NAMES:
+        action = {**action, "tool": "Bash"}
 
     with deadline.scope():
         try:
-            return _decide(action, session, command, git_rules_missing)
+            return _decide(action, session, command, git_rules_missing, omi_dir)
         except deadline.DeadlineExceededError:
             return _deadline_deny(
                 command or _action_path(action), session, str(action.get("tool") or "")
             )
 
 
-def _decide(action: dict[str, Any], session: str, command: str, git_rules_missing: bool) -> Verdict:
+def _decide(
+    action: dict[str, Any],
+    session: str,
+    command: str,
+    git_rules_missing: bool,
+    omi_dir: Path | str | None = None,
+) -> Verdict:
     """:func:`decide` inside its deadline scope. Raises
     :class:`deadline.DeadlineExceededError` when the budget runs out."""
     # 1) Consulting OMI sets the per-turn sentinel and is always allowed. When
@@ -4673,11 +4794,15 @@ def _decide(action: dict[str, Any], session: str, command: str, git_rules_missin
         return hard
 
     deadline.check()
-    return _soft_verdict(action, session, command, git_rules_missing)
+    return _soft_verdict(action, session, command, git_rules_missing, omi_dir)
 
 
 def _soft_verdict(
-    action: dict[str, Any], session: str, command: str, git_rules_missing: bool
+    action: dict[str, Any],
+    session: str,
+    command: str,
+    git_rules_missing: bool,
+    omi_dir: Path | str | None = None,
 ) -> Verdict:
     """:func:`decide` past the hard rules: the repo, capability, global-config
     and consult gates. Raises :class:`deadline.DeadlineExceededError` when the
@@ -4733,7 +4858,7 @@ def _soft_verdict(
     if gate_repo is None and str(action.get("tool") or "") == "Bash":
         gate_repo = _bash_write_repo(action)
     if gate_repo is not None and _is_repo_sensitive_action(action):
-        if not git_rules_missing and not _has_consulted_git_rules(session):
+        if not git_rules_missing and not _has_consulted_git_rules(session, omi_dir):
             record_pending(session, command or _action_path(action))
             # Name the demanded note so the verifier credits the obeying read
             # as relevant instead of re-closing the gate over it (#148).
@@ -4989,7 +5114,7 @@ def _check_action(action: dict[str, Any], omi_dir: Path | None) -> Verdict:
             # marker waives the demand for the rest of it — one log line per turn,
             # not one per tool call.
             known_missing = demanded_note(session) == _GIT_RULES_MISSING_MARK
-            verdict = decide(action, git_rules_missing=known_missing)
+            verdict = decide(action, git_rules_missing=known_missing, omi_dir=omi_dir)
             if (
                 not verdict.allow
                 and verdict.rule_id == "repo-work-read-git-rules"
@@ -5012,7 +5137,7 @@ def _check_action(action: dict[str, Any], omi_dir: Path | None) -> Verdict:
                     detail=f"missing note: {GIT_RULES_NOTE}",
                 )
                 print(GIT_RULES_MISSING_MESSAGE, file=sys.stderr)
-                verdict = decide(action, git_rules_missing=True)
+                verdict = decide(action, git_rules_missing=True, omi_dir=omi_dir)
         # The verdict is reached: what follows (the budget re-arm, the deny's
         # note excerpt and retrieval suggestion, the log) has its own bounds,
         # and a deadline there is not a judging failure (#460 review).

@@ -21,6 +21,140 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     judged the same way for a bare `git push`. Negative (`^`) refspecs are
     skipped. When git cannot list refs, the destination is read literally, as
     before.
+- **CI `pip-audit` gate red on dependency advisories, not on code.** Two
+  distinct causes: `certifi` resolved to the vulnerable 2026.7.22 on some legs
+  (PYSEC-2026-4320), now floored to `>=2026.10.19` alongside the other runtime
+  transitive floors; and `filelock` — pulled only by pip-audit's own
+  cachecontrol filecache, not an omind dependency — whose fix (4.2.1) requires
+  Python >=3.11 and so can never be installed on the 3.10 matrix legs. The six
+  filelock CVEs are now `--ignore-vuln`-ed in the workflow (pip-audit 2.10 has
+  no package-level skip), with the reason stated in the workflow comment.
+
+## [10.3.3] - 2026-10-26
+
+### Fixed
+- **A Grok `read-note` presented under the qualified name never cleared the
+  git-rules gate ([#483](https://github.com/CryptoJones/omind/issues/483)).**
+  Grok's hooks can present an MCP call under the already-qualified name
+  (`omi__read-note`) while `tool_input` is still the `use_tool` wrapper
+  (`{"tool_name": …, "tool_input": {…}}`). The dispatcher unwrap only fired on
+  `use_tool` / `CallMcpTool`, and the wrapper carries `tool_name`, not `name`,
+  so the consult target read as empty: neither the consult nor the
+  `gitrules-ack` was recorded, and every later `read_file` / `grep` in the
+  session stayed denied even though the read had returned the whole note.
+  `harness._translate_grok` now unwraps the wrapper when its inner `tool_name`
+  names the same tool as the outer event (never on `name`, so a plain Claude
+  event is untouched), and `omi-guard.sh` normalizes the same shape.
+- **Grok's `[…trimmed…]` middle elision is now treated as a truncated read
+  ([#484](https://github.com/CryptoJones/omind/issues/484)).** Grok shows a
+  long tool result to the model with `[…trimmed…]` spliced in even when the
+  MCP call returned the whole note. `verify._response_truncated` matched only
+  read-note's own `[truncated: showing N of M chars` marker, so an elided
+  result — text the agent never saw whole — would have been credited as a
+  full read once #483 landed. It now counts as truncated the same way the
+  existing marker does.
+
+## [10.3.2] - 2026-10-14
+
+### Fixed
+- **The git-rules gate asks for one full read per session, not one per turn
+  ([#478](https://github.com/CryptoJones/omind/issues/478)).** The demanded
+  `read-note` of "Operational Rules - Git Repos and Secrets" (~11.5k chars,
+  ~2.9k tokens) reset on every user message, so one session re-read the same
+  unchanged note 8 times (~23k tokens). A full read is now also recorded for
+  the session (`gitrules-ack-<session>.json` in the state dir) with the note's
+  version token (`read-note`'s `version`, or the on-disk version for a read
+  that carries none). Later turns pass the gate while the vault still holds
+  that version. A changed note, a new session, or a SessionStart with
+  `source=compact|clear` (the note text has left the context) needs a new
+  read; `resume` keeps it. `omind guard reset` with no session reaps the
+  record. Only a read of the note itself is remembered, not of a note whose
+  name merely contains its title. The block message says one full read per
+  session is enough.
+- **A section-only or offset/limit read of the git-rules note no longer counts
+  as full because it asked for 65536 chars.** The hard-cap waiver was meant
+  for truncation of a note larger than any read; it now covers only that.
+
+## [10.3.1] - 2026-10-09
+
+### Fixed
+- **Grok's Claude-hook fast path counts a `use_tool` recall as a consult
+  ([#472](https://github.com/CryptoJones/omind/issues/472)).** `omi-guard.sh`
+  reads `.tool_name` only, and v10.3.0's Grok translation runs in the Python
+  adapter. On the bash fast path a recall arrives as `use_tool` with
+  `omi__recall-note` nested inside, so it is not a consult, and the gate
+  denies the recall that would have cleared it. The script now accepts
+  camelCase, unwraps `use_tool` / `CallMcpTool`, and maps Grok's built-in
+  names (`run_terminal_command`, `read_file`, …) onto the names it already
+  classifies. A snake_case-only `use_tool` or built-in name on
+  `--harness claude` is translated the same way, so PostToolUse records the
+  consult. Listing tools still do not clear the gate, and vault writes are
+  still not consults. A plain Claude event is unchanged. A dispatcher's
+  `arguments` sent as a JSON string is parsed, an empty first payload no
+  longer hides the real arguments, and a dispatcher with no inner tool name or
+  an event with no tool is left alone instead of erroring jq. The Python
+  translator applies the same rules.
+- **The commit freshness gate runs in every harness, not just Claude
+  ([#473](https://github.com/CryptoJones/omind/issues/473)).** Its checks matched the tool name `Bash` only. Antigravity
+  (`run_command`), Gemini (`run_shell_command`), Hermes (`terminal`), OpenCode
+  (`bash`) and Poolside (`shell`) send their own names, so a commit with no
+  fetch went through, and the repo-work and global-config checks were skipped
+  too. The adapter now maps each harness's shell tool onto `Bash`
+  (`guard.SHELL_TOOL_NAMES`), and `guard.decide` does the same for a caller
+  that builds the action itself. The command is read from `command`,
+  `CommandLine` or `cmd`, as a string or an argv list (Codex `local_shell`),
+  by both the PreToolUse path and the PostToolUse retraction, so a failed
+  fetch under any of these names is retracted.
+- **The no-jq, no-core last resort in `omi-guard.sh` fails closed for every
+  shell tool name and for any `use_tool` / `CallMcpTool` dispatcher.** It
+  matched `Bash` and `run_terminal_command` only. A test pins its list to
+  `guard.SHELL_TOOL_NAMES`.
+- **A dispatcher whose first name field is empty is still unwrapped.** jq's
+  `//` kept `""`, so `{"tool_name":"","name":"run_terminal_command",…}` stayed
+  `use_tool` and its command never reached the Bash path. jq now takes the
+  first non-empty name, as the Python translator does.
+- **Antigravity resolves the repo from `run_command`'s own `Cwd`.** It wins
+  over a top-level `cwd` and the workspace root, so a `git fetch` or
+  `git commit` run in a repo outside the root is judged against that repo. A
+  JSON-quoted `Cwd` is decoded, and a relative one is taken from the
+  workspace root.
+
+### Tests
+- A fetch, then a commit with a multi-line `-m` trailer block, run from a
+  different repo's cwd, is fresh in every harness that runs the guard
+  (Claude, Codex, Grok, Antigravity, Gemini, Hermes, OpenCode, Poolside;
+  MiniMax models run inside these). omind 10.0.2 split that commit at the
+  newline inside the quotes, lost its `git -C` path, and judged it against
+  the cwd's repo, so a commit right after a clean fetch was blocked. Later
+  releases fixed that as a side effect; these tests pin it.
+
+## [10.3.0] - 2026-10-04
+
+### Added
+- **Grok Build (`grok`) support
+  ([#470](https://github.com/CryptoJones/omind/issues/470)).** `omind setup --agent grok` registers the `omi`
+  MCP server in `~/.grok/config.toml`, installs lifecycle hooks in
+  `~/.grok/hooks/omind.json` (`PreToolUse`, `UserPromptSubmit`, `PostToolUse`,
+  `Stop`, `SessionStart`), installs the packaged skill under
+  `~/.grok/skills/omind/`, and writes a managed bootstrap rule at
+  `~/.grok/rules/omind.md`. Grok does not inject `SessionStart` stdout, so the
+  rules file is what primes a session. `omind doctor --agent grok` checks the
+  wiring. `omind quickstart --agent grok` prints the same MCP table, hook
+  file, rules block, and skill path.
+- **Grok hook payloads.** `omind guard adapter` accepts Grok's camelCase events
+  (`toolName`, `toolInput`, `sessionId`, `hookEventName`), including when Grok
+  is running the Claude-compatible hook. Built-in tool names map onto the names
+  the guard already classifies, and `omi__…` counts as a memory consult. A deny
+  is `{"decision":"deny","reason":…}` on stdout so the guard text is what Grok
+  shows. The embedding model load no longer prints a Hugging Face progress bar
+  onto that channel.
+
+### Fixed
+- **Grok setup refuses to replace a hooks or rules file it cannot read.**
+  Invalid JSON or an unreadable `~/.grok/hooks/omind.json` raises
+  `ProvisionError` instead of being treated as missing. A rules file that
+  exists but cannot be decoded is left in place; a missing rules file is
+  still created.
 
 ## [10.2.28] - 2026-10-02
 

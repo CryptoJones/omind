@@ -11,14 +11,12 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
+- [ ] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — _bug_ —
+  follow-up from the #474 review: Codex `write_stdin` (`chars`) and Antigravity `send_command_input`
+  (`Input`) send text to a shell that is already running, so the hard rules and the freshness gate
+  never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
-  prerequisites: #429 (merged) and #428. Also adds the Nebraska banner and drops the stale Codeberg badge.
-- [ ] **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428)) — _enhancement (infra)_ —
-  deploy [samarmstrong/conveyor](https://github.com/samarmstrong/conveyor) as a fork with omind's
-  `factory.config.json` and `principles.md`. Run it with the `claude-code` worker as a dedicated
-  unprivileged user on dl380, isolated from the RAG corpus, on a systemd timer. It grooms issues and
-  keeps one PR in flight; merging stays human. The issue lists the plan, the definition of done and
-  the rollback.
+  prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
 - [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
   the CI half is done: `.github/workflows/publish.yml` builds with `uv build` and uploads by
   trusted publishing, with no token. Every release from v9.7.3 through v10.0.2 reached the upload and
@@ -32,6 +30,11 @@ the exact order of operations._
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
 
+- **Run conveyor as omind's backlog factory on dl380** ([#428](https://github.com/CryptoJones/omind/issues/428), closed not-planned) — _closed: deployed outside this repo_ —
+  conveyor was deployed on 2026-10-02: the CryptoJones/conveyor fork with omind's
+  `factory.config.json` and `principles.md`, a `factory` user on dl380 behind an nftables lockdown,
+  and a systemd timer. **Closed not-planned 2026-10-03** by the factory's own groom, because nothing
+  was left to build in omind.
 - **Machine-readable capability contract verified by `doctor`** ([#196](https://github.com/CryptoJones/omind/issues/196), closed not-planned) — _closed: solved by other work_ —
   they declare every capability's tier, read/write scope, network need, and
   destructiveness in `config/capabilities.json`, verify it, and state explicitly
@@ -77,13 +80,52 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
-### Shipped — unreleased
+### Shipped — 2026-10-26 (v10.3.3)
 
-- [x] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — _bug_ —
+- [x] **rules: unique-prefix push options (`--al`, `--mirr`) and glob refspecs reach main from a feature branch** ([#443](https://github.com/CryptoJones/omind/issues/443)) — **v10.3.3** — _bug_ —
   a unique prefix of a git push long option is read as that option (`--al`/`--bra` are `--all`,
   `--mirr` is `--mirror`); a glob refspec, on the command line or in `remote.<name>.push`, is judged
   against the local refs its source matches, mapped to the destination. Fails open to the literal
   destination.
+
+- [x] **guard: Grok full read-note of the git-rules note never clears repo-work-read-git-rules** ([#483](https://github.com/CryptoJones/omind/issues/483)) — **v10.3.3** — _bug_ —
+  Grok may present the MCP call under the already-qualified name (`omi__read-note`)
+  while `tool_input` is still the `use_tool` wrapper. The unwrap only fired on the
+  dispatcher names, so the consult target read as empty and neither the consult nor
+  the session ack was recorded. `_translate_grok` and `omi-guard.sh` now unwrap a
+  wrapper whose inner `tool_name` names the same tool as the outer event.
+- [x] **guard: Grok's middle-elided read-note result is not treated as truncated** ([#484](https://github.com/CryptoJones/omind/issues/484)) — **v10.3.3** — _bug_ —
+  Grok shows a long tool result with a `[…trimmed…]` elision even when the MCP call
+  returned the whole note. `verify._response_truncated` now matches it the same way
+  it matches read-note's own `[truncated: showing N of M chars` marker, so an
+  elided read does not satisfy "read it in full".
+
+### Shipped — 2026-10-14 (v10.3.2)
+
+- [x] **guard: git-rules gate forces a full re-read of an unchanged note every turn** ([#478](https://github.com/CryptoJones/omind/issues/478)) — **v10.3.2** — _bug_ —
+  one full read per session per note version: the read is remembered with the note's version
+  token and carries across turns until the note changes, the context is compacted or cleared, or
+  a new session starts. Truncated, section-only and offset/limit reads still never count.
+
+### Shipped — 2026-10-09 (v10.3.1)
+
+- [x] **Grok Claude-hook fast path does not count a `use_tool` recall as a consult** ([#472](https://github.com/CryptoJones/omind/issues/472)) — **v10.3.1** — _bug_ —
+  `omi-guard.sh` unwraps `use_tool` / `CallMcpTool` and camelCase Grok events before the consult
+  case, and maps `run_terminal_command` onto Bash. A snake_case-only dispatcher on the Claude
+  harness is translated too, so PostToolUse records the consult. Listing tools still do not clear
+  the gate. JSON-string `arguments` are parsed in both paths.
+- [x] **Commit freshness gate skipped every non-Claude shell tool** ([#473](https://github.com/CryptoJones/omind/issues/473)) — **v10.3.1** — _bug_ —
+  the gate matched `Bash` only, so Antigravity, Gemini, Hermes, OpenCode and Poolside commits
+  never needed a fetch. The adapter maps their shell tools onto `Bash`; Antigravity takes the
+  repo from `run_command`'s `Cwd`. Cross-harness fetch-then-multi-line-commit tests added.
+
+### Shipped — 2026-10-04 (v10.3.0)
+
+- [x] **Grok Build client: setup, doctor, guard payloads, and quickstart** ([#470](https://github.com/CryptoJones/omind/issues/470)) — **v10.3.0** — _feature_ —
+  `omind setup --agent grok` registers the MCP server, hooks, skill, and rules file.
+  The guard reads Grok's camelCase events (including when Grok runs the Claude-compatible
+  hook), counts `omi__…` as a consult, and denies with stdout JSON so the reason is visible.
+  `omind quickstart --agent grok` prints the same wiring.
 
 ### Shipped — 2026-10-02 (v10.2.28)
 

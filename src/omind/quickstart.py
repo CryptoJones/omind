@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 
+import tomlkit
 import yaml
 
 from omind import paths, seeds
@@ -25,6 +26,7 @@ from omind.agents import (
     AmazonQProvisioner,
     ClaudeDesktopProvisioner,
     GooseProvisioner,
+    GrokProvisioner,
     HermesProvisioner,
     KiroProvisioner,
     McpOnlyProvisioner,
@@ -36,6 +38,10 @@ from omind.agents import (
     agy_skill_dir,
     goose_config_path,
     goose_hints_path,
+    grok_config_path,
+    grok_hooks_path,
+    grok_rules_path,
+    grok_skill_dir,
     hermes_config_path,
     openclaw_config_path,
 )
@@ -355,6 +361,96 @@ Undo: delete the '{config.server_name}' entry from {mcp_config}, remove
 """
 
 
+def _grok_mcp_document(config: SetupConfig, prov: GrokProvisioner) -> tomlkit.TOMLDocument:
+    """The ``[mcp_servers.<name>]`` table ``omind setup --agent grok`` writes."""
+    desired = prov.desired_mcp_entry()
+    doc = tomlkit.document()
+    servers = tomlkit.table()
+    entry = tomlkit.table()
+    entry.add("command", desired["command"])
+    entry.add("args", desired["args"])
+    servers.add(config.server_name, entry)
+    doc.add("mcp_servers", servers)
+    return doc
+
+
+def _build_grok_quickstart(config: SetupConfig) -> str:
+    """Manual steps for Grok Build: scaffold + mesh + MCP table + owned hook
+    file + home rule. The hook file is wholly owned; other files under
+    ``hooks/`` are left alone."""
+    prov = GrokProvisioner(config=config, log=lambda _msg: None)
+    omi = config.omi_dir
+    scaffold_block, mesh_block = _scaffold_and_mesh_blocks(config)
+    config_path = grok_config_path()
+    hooks_path = grok_hooks_path()
+    rules_path = grok_rules_path()
+    skill_dir = grok_skill_dir()
+
+    mcp_toml = tomlkit.dumps(_grok_mcp_document(config, prov)).rstrip()
+    mcp_block = f"```toml\n{mcp_toml}\n```"
+    hooks_json = json.dumps(prov.desired_hooks_document(), indent=2)
+    hooks_block = f"```json\n{hooks_json}\n```"
+    rules_block = f"```markdown\n{prov.bootstrap_content().rstrip()}\n```"
+
+    return f"""\
+omind quickstart — manual {prov.AGENT_LABEL} wiring for {omi}
+
+Everything below is exactly what `omind setup --agent {config.agent}` would do
+for you. Apply the steps you want by hand; each is independent and safe to
+re-run. Prefer the automated path? Just run:
+
+    omind setup --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
+
+[1/5] Scaffold the memory folder
+Create the folder and a minimal Obsidian config so it opens directly as a
+vault (skip any file you already have):
+
+{scaffold_block}
+
+[2/5] Initialize the mesh node
+Makes the folder a git working tree with omind's field-level merge driver,
+mints this machine's node identity, and locks the folder to owner-only:
+
+{mesh_block}
+
+[3/5] Register the MCP server with {prov.AGENT_LABEL}
+The server is omind's own node server (`omind node`) — no Node.js, npm, or
+third-party MCP package involved. MERGE this table into {config_path}
+(create the file if absent; don't replace other `[mcp_servers]` entries).
+`$GROK_HOME` overrides `~/.grok` for every path below:
+
+{mcp_block}
+
+[4/5] Install OMI lifecycle hooks
+Write this document to {hooks_path}. omind owns that file. Leave every other
+JSON file in the same directory alone. `PreToolUse` hard-blocks; a deny is
+`{{"decision":"deny","reason":…}}` on stdout:
+
+{hooks_block}
+
+[5/5] Prime Grok to read OMI first
+Grok does not inject `SessionStart` stdout, so this rules file is the primer.
+Write it to {rules_path} (the markers let a later `omind setup` manage only
+this block):
+
+{rules_block}
+
+Install the packaged skill:
+Run `omind setup --agent {config.agent}` or copy the packaged skill into:
+    {skill_dir}
+
+Verify the wiring (pure inspection, changes nothing):
+
+    omind doctor --agent {config.agent} --vault "{config.vault}" --folder {config.folder}
+
+Then start a new Grok session to load the tools, hooks, skill, and rules.
+
+Undo: delete the '{config.server_name}' table from {config_path}, delete
+{hooks_path}, and remove the marked block from {rules_path}. Your notes in
+"{omi}" are never touched by any of this.
+"""
+
+
 def build_quickstart(config: SetupConfig) -> str:
     """The full quickstart text for one vault/folder/server-name/agent combination."""
     if config.agent in ("hermes", "openclaw"):
@@ -363,6 +459,8 @@ def build_quickstart(config: SetupConfig) -> str:
         return _build_goose_quickstart(config)
     if config.agent in ("agy", "antigravity"):
         return _build_agy_quickstart(config)
+    if config.agent == "grok":
+        return _build_grok_quickstart(config)
     if config.agent in MCP_ONLY_PROVISIONERS:
         return _build_mcp_only_quickstart(config)
     prov = Provisioner(config=config, log=lambda _msg: None)

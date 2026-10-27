@@ -1123,6 +1123,21 @@ def test_hook_without_jq_and_without_omind_fails_closed_for_bash_only(tmp_path: 
     assert run(_BASH_EVENT) == 2  # destructive command must not run unchecked
     edit_event = {"tool_name": "Edit", "session_id": "h", "tool_input": {"file_path": "/x"}}
     assert run(edit_event) == 0  # a non-Bash tool must not wedge the host
+    # #473: every harness's shell tool, and a dispatcher that may wrap one.
+    for name in sorted(guard.SHELL_TOOL_NAMES | {"use_tool", "CallMcpTool"}):
+        command = {"command": "rm -rf /tmp/x"}
+        assert run({"tool_name": name, "tool_input": command}) == 2, name
+        assert run({"toolName": name, "toolInput": command}) == 2, name
+
+
+def test_hook_no_jq_fallback_lists_every_shell_tool() -> None:
+    """The no-jq, no-core grep in omi-guard.sh is a hand-written copy of
+    guard.SHELL_TOOL_NAMES. Fail when the two drift apart."""
+    src = importlib.resources.files("omind").joinpath("omi-guard.sh").read_text(encoding="utf-8")
+    match = re.search(r'\[\[:space:\]\]\*"\(([^)]*)\)"\'; then', src)
+    assert match is not None
+    names = set(match.group(1).split("|"))
+    assert names == set(guard.SHELL_TOOL_NAMES) | {"use_tool", "CallMcpTool"}
 
 
 def _read_event(omi: Path, name: str, sid: str) -> dict[str, object]:
@@ -1317,6 +1332,45 @@ def test_dash_c_fetch_attributes_freshness_to_the_target_repo(
     guard.clear_gate("dashc")
 
 
+def test_multiline_commit_message_keeps_the_dash_c_repo(tmp_path: Path) -> None:
+    """A commit whose quoted `-m` spans lines (a trailer block) still resolves
+    to its `git -C` repo. omind 10.0.2 split the command at the newline inside
+    the quotes, lost the `-C`, and judged the commit against the event cwd's
+    repo. That repo was never fetched, so a commit right after a clean fetch
+    was blocked. Seen in Claude (Co-Authored-By trailers) and expected from
+    any agent that writes trailers (Grok, Codex, Antigravity, MiniMax models)."""
+    vault = _mk_repo(tmp_path, "vault")
+    target = _mk_repo(tmp_path, "todo")
+    session = "mlcommit"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    fetch = guard.decide(
+        {
+            "tool": "Bash",
+            "command": f'git -C "{target}" fetch --all --prune',
+            "session": session,
+            "cwd": str(vault),
+        }
+    )
+    assert fetch.allow
+    assert str(target) in guard._fresh_repos(session)
+    message = "Co-Authored-By: Agent <noreply@example.com>\nAgent-Session: https://x.invalid/s"
+    commit = {
+        "tool": "Bash",
+        "command": f'git -C "{target}" commit -q -am "Add #15" -m "{message}"',
+        "session": session,
+        "cwd": str(vault),
+    }
+    assert guard._repo_root_for_action(commit) == target
+    verdict = guard.decide(commit)
+    assert verdict.allow, verdict.reason
+    # The vault repo was never fetched: a multi-line commit there is still stale.
+    stale = guard.decide({**commit, "command": commit["command"].replace(str(target), str(vault))})
+    assert not stale.allow
+    assert stale.rule_id == "repo-work-fresh-base"
+    guard.clear_gate(session)
+
+
 def test_dash_c_parsing_edge_cases_fall_back_to_cwd(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -1434,6 +1488,159 @@ def test_hook_forwards_the_event_cwd_to_the_core(tmp_path: Path) -> None:
     event = {**_BASH_EVENT, "cwd": "/w/tree"}
     assert _run_hook(hook, event) == 0
     assert json.loads(capture.read_text(encoding="utf-8"))["cwd"] == "/w/tree"
+
+
+_RULES = "Operational Rules - Git Repos and Secrets"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+@pytest.mark.parametrize(
+    "event",
+    [
+        # Grok's camelCase dispatcher with an object payload.
+        {
+            "toolName": "use_tool",
+            "sessionId": "g",
+            "toolInput": {"tool_name": "omi__recall-note", "tool_input": {"name": _RULES}},
+        },
+        # snake_case dispatcher on the Claude-compatible hook, JSON-string args.
+        {
+            "tool_name": "use_tool",
+            "session_id": "g",
+            "tool_input": {"name": "omi__recall-note", "arguments": json.dumps({"name": _RULES})},
+        },
+        # An empty first payload does not hide the real arguments.
+        {
+            "tool_name": "CallMcpTool",
+            "session_id": "g",
+            "tool_input": {
+                "toolName": "recall-note",
+                "tool_input": {},
+                "arguments": {"name": _RULES},
+            },
+        },
+    ],
+)
+def test_hook_counts_a_grok_dispatched_recall_as_a_consult(
+    tmp_path: Path, event: dict[str, object]
+) -> None:
+    """#472: a recall wrapped in `use_tool` / `CallMcpTool` reaches the core as
+    an OMI consult of the note it names, so it clears the gate."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["is_omi_consult"] is True
+    assert sent["tool"] == "mcp__omi__recall-note"
+    assert sent["consult_target"] == _RULES
+    assert sent["session"] == "g"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_counts_a_renamed_grok_read_as_a_consult(tmp_path: Path) -> None:
+    """#483: Grok presents the MCP call under the already-qualified name while
+    tool_input is still the use_tool wrapper. The consult target must survive
+    to the core, or the gate never sees the read that cleared it."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {
+        "tool_name": "omi__read-note",
+        "session_id": "g",
+        "tool_input": {
+            "tool_name": "omi__read-note",
+            "tool_input": {"name": _RULES, "representation": "raw", "max_chars": 65536},
+        },
+    }
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["is_omi_consult"] is True
+    assert sent["tool"] == "mcp__omi__read-note"
+    assert sent["consult_target"] == _RULES
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+def test_hook_judges_grok_terminal_command_as_bash(tmp_path: Path) -> None:
+    """#472: Grok's `run_terminal_command` goes down the fail-closed Bash path
+    with its command and cwd, so the hard rules and freshness see it."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {
+        "toolName": "run_terminal_command",
+        "sessionId": "g",
+        "cwd": "/w/tree",
+        "toolInput": {"command": 'git -C "/w/tree" fetch --all --prune'},
+    }
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["tool"] == "Bash"
+    assert sent["command"] == 'git -C "/w/tree" fetch --all --prune'
+    assert sent["cwd"] == "/w/tree"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"tool_name": "use_tool", "session_id": "g", "tool_input": "omi__recall-note"},
+        {"tool_name": "use_tool", "session_id": "g", "tool_input": {}},
+        {"session_id": "g", "tool_input": {"command": "ls"}},
+    ],
+)
+def test_hook_odd_dispatcher_shapes_are_not_consults(
+    tmp_path: Path, event: dict[str, object]
+) -> None:
+    """A dispatcher with no inner tool name, or an event with no tool at all,
+    is not a consult. The normalizer leaves it alone instead of erroring."""
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    assert _run_hook(hook, event) == 0  # the capturing core allows
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert sent["is_omi_consult"] is False
+
+
+_DISPATCHED = "gh repo delete a/b"
+
+
+@pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard.sh is a POSIX bash+jq adapter")
+@pytest.mark.parametrize(
+    "tool_input",
+    [
+        # An empty first name: jq's `//` used to keep "" and skip the unwrap.
+        {"tool_name": "", "name": "run_terminal_command", "arguments": {"command": _DISPATCHED}},
+        {"name": "run_terminal_command", "arguments": json.dumps({"command": _DISPATCHED})},
+    ],
+)
+def test_hook_unwraps_a_dispatched_shell_command_onto_bash(
+    tmp_path: Path, tool_input: dict[str, object]
+) -> None:
+    """A shell command wrapped in `use_tool` reaches the core's Bash path with
+    its command, so the hard rules see it. Python unwraps the same way."""
+    from omind import harness
+
+    fake, capture = _capturing_omind(tmp_path)
+    hook = _render_hook(tmp_path, str(fake))
+    event = {"tool_name": "use_tool", "session_id": "g", "tool_input": tool_input}
+    assert _run_hook(hook, event) == 0
+    sent = json.loads(capture.read_text(encoding="utf-8"))
+    assert (sent["tool"], sent["command"]) == ("Bash", _DISPATCHED)
+    translated = harness.translate_event("grok", {**event, "toolName": "use_tool"})
+    assert translated["tool_name"] == "Bash"
+    assert translated["tool_input"]["command"] == _DISPATCHED
+
+
+def test_decide_treats_every_shell_tool_as_bash(tmp_path: Path) -> None:
+    """#473: a caller that builds the action itself (no adapter) with a
+    harness's shell tool name still gets the commit freshness gate."""
+    repo = _mk_repo(tmp_path, "r")
+    session = "decide-shell"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+    for tool in sorted(guard.SHELL_TOOL_NAMES):
+        verdict = guard.decide(
+            {"tool": tool, "command": f'git -C "{repo}" commit -am x', "session": session}
+        )
+        assert verdict.rule_id == "repo-work-fresh-base", tool
+    guard.clear_gate(session)
 
 
 @pytest.mark.skipif(not _HOOK_TESTABLE, reason="omi-guard-hermes.sh is a POSIX bash+jq adapter")
@@ -2428,6 +2635,37 @@ def test_record_freshness_outcome_retracts_for_dash_c_repo(tmp_path: Path) -> No
     guard.record_freshness_outcome(failed_event)
     # Freshness must be retracted from the -C repo, not from cwd
     assert not guard._git_fresh_for_repo("sess-f", repo)
+
+
+@pytest.mark.parametrize(
+    ("tool", "key"),
+    [
+        ("run_command", "CommandLine"),  # Antigravity, untranslated
+        ("shell", "cmd"),  # Poolside, untranslated
+        ("run_shell_command", "command"),  # Gemini
+        ("terminal", "command"),  # Hermes
+        ("run_terminal_command", "command"),  # Grok
+        ("exec_command", "cmd"),  # Codex
+    ],
+)
+def test_failed_fetch_is_retracted_for_every_shell_tool(
+    tmp_path: Path, tool: str, key: str
+) -> None:
+    """#473: a fetch that failed under a non-Bash shell tool name, with the
+    command under that harness's own key, does not leave the repo fresh."""
+    repo = _mk_repo(tmp_path, "subrepo")
+    session = f"retract-{tool}"
+    guard.begin_turn(session, "task")
+    guard._record_git_freshness(session, repo, f'git -C "{repo}" fetch')
+    guard.record_freshness_outcome(
+        {
+            "session_id": session,
+            "tool_name": tool,
+            "tool_input": {key: f'git -C "{repo}" fetch --all --prune'},
+            "tool_response": {"exit_code": 1},
+        }
+    )
+    assert not guard._git_fresh_for_repo(session, repo)
 
 
 # ---------------------------------------------------------------------------
@@ -5818,3 +6056,196 @@ def test_the_issue_460_shapes_are_judged_well_inside_the_budget(tmp_path: Path, 
             verdict = judge()
         assert verdict.rule_id != guard.DEADLINE_RULE
     assert _deadline_events() == []
+
+
+# -- #478: one full read of the git-rules note per session per note version ---
+
+
+def _rules_vault(tmp_path: Path) -> Path:
+    from omind.store import NoteFields, OmiStore
+
+    omi = tmp_path / "OMI"
+    omi.mkdir()
+    OmiStore(omi).create_note(NoteFields(title=guard.GIT_RULES_NOTE, summary="rules v1"))
+    return omi
+
+
+def _new_turn(session: str) -> None:
+    """What a user message does: the turn-start reset clears every per-turn
+    file. The ordinary consult gate is not under test, so satisfy it."""
+    guard.clear_gate(session)
+    guard.begin_turn(session, "run the tests")
+    guard.mark_consulted(session)
+
+
+def _full_read(session: str, omi: Path, **tool_input: Any) -> None:
+    from omind import verify
+
+    version = guard.git_rules_note_version(omi)
+    result = {"filename": f"{guard.GIT_RULES_NOTE}.md", "version": version, "raw": "all rules"}
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "mcp__omi__read-note",
+            "tool_input": {
+                "name": guard.GIT_RULES_NOTE,
+                "representation": "raw",
+                "max_chars": 65536,
+                **tool_input,
+            },
+            "tool_response": {"content": [{"type": "text", "text": json.dumps(result)}]},
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+
+
+def _repo_verdict(session: str, omi: Path) -> guard.Verdict:
+    return guard.check_action({"tool": "Bash", "command": "pytest", "session": session}, omi)
+
+
+def test_full_read_clears_and_carries_to_the_next_turn(tmp_path: Path) -> None:
+    omi = _rules_vault(tmp_path)
+    session = "ack478-carry"
+    _new_turn(session)
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    _full_read(session, omi)
+    assert _repo_verdict(session, omi).allow  # the first read clears
+
+    # Next user message, same note version: no re-read demanded.
+    _new_turn(session)
+    assert _repo_verdict(session, omi).allow
+    _new_turn(session)
+    assert guard.decide(
+        {"tool": "Bash", "command": "pytest", "session": session}, omi_dir=omi
+    ).allow
+    # Without the vault the version cannot be compared: per-turn rule, strict.
+    assert not guard._has_consulted_git_rules(session)
+    guard.clear_gate(session)
+    guard.clear_git_rules_ack(session)
+
+
+def test_changed_note_requires_a_re_read(tmp_path: Path) -> None:
+    from omind.store import OmiStore
+
+    omi = _rules_vault(tmp_path)
+    session = "ack478-changed"
+    _new_turn(session)
+    _full_read(session, omi)
+    assert _repo_verdict(session, omi).allow
+
+    store = OmiStore(omi)
+    fields = store.read_fields(guard.GIT_RULES_NOTE)
+    fields.summary = "rules v2"
+    store.update_note(guard.GIT_RULES_NOTE, fields)
+    _new_turn(session)
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    _full_read(session, omi)
+    assert _repo_verdict(session, omi).allow
+    guard.clear_gate(session)
+    guard.clear_git_rules_ack(session)
+
+
+def test_truncated_or_section_read_records_no_session_ack(tmp_path: Path) -> None:
+    from omind import verify
+
+    omi = _rules_vault(tmp_path)
+    session = "ack478-trunc"
+    _new_turn(session)
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "mcp__omi__read-note",
+            "tool_input": {"name": guard.GIT_RULES_NOTE, "max_chars": 200},
+            "tool_response": {
+                "content": [
+                    {
+                        "type": "text",
+                        "text": json.dumps(
+                            {
+                                "version": guard.git_rules_note_version(omi),
+                                "raw": "x\n\n[truncated: showing 200 of 13000 chars]",
+                            }
+                        ),
+                    }
+                ]
+            },
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    assert not guard.git_rules_acked(session, omi)
+
+    _full_read(session, omi, section="Secrets")  # section-only: not a full read
+    assert not guard.git_rules_acked(session, omi)
+    _new_turn(session)
+    assert _repo_verdict(session, omi).rule_id == "repo-work-read-git-rules"
+    guard.clear_gate(session)
+
+
+def test_new_session_or_compaction_requires_a_read(tmp_path: Path) -> None:
+    from omind import hooks
+
+    omi = _rules_vault(tmp_path)
+    _new_turn("ack478-a")
+    _full_read("ack478-a", omi)
+    assert _repo_verdict("ack478-a", omi).allow
+
+    # A different session has read nothing.
+    _new_turn("ack478-b")
+    assert _repo_verdict("ack478-b", omi).rule_id == "repo-work-read-git-rules"
+
+    # A resume keeps the read (the transcript still holds it); a compaction drops it.
+    for source, kept in (("resume", True), ("compact", False)):
+        event = {"hook_event_name": "SessionStart", "source": source, "session_id": "ack478-a"}
+        stdin = io.StringIO(json.dumps(event))
+        hooks.run_hook("SessionStart", omi, stdin=stdin, stdout=io.StringIO())
+        _new_turn("ack478-a")
+        assert _repo_verdict("ack478-a", omi).allow is kept
+    guard.clear_gate("ack478-a")
+    guard.clear_gate("ack478-b")
+
+
+def test_a_read_of_a_lookalike_note_records_no_session_ack(tmp_path: Path) -> None:
+    """A native Read of ``<title> Backup.md`` matches the title as a substring
+    and carries no version; it must not acknowledge the real note (#478)."""
+    from omind import verify
+
+    omi = _rules_vault(tmp_path)
+    lookalike = omi / f"{guard.GIT_RULES_NOTE} Backup.md"
+    lookalike.write_text("old rules", encoding="utf-8")
+    session = "ack478-lookalike"
+    _new_turn(session)
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "Read",
+            "tool_input": {"file_path": str(lookalike)},
+            "tool_response": {"type": "text", "file": {"content": "old rules"}},
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert not guard.git_rules_acked(session, omi)
+    assert verify._is_exact_git_rules_target(str(omi / f"{guard.GIT_RULES_NOTE}.md"))
+    assert verify._is_exact_git_rules_target(guard.GIT_RULES_NOTE)
+    guard.clear_gate(session)
+
+
+def test_by_hand_reset_reaps_session_acks(tmp_path: Path) -> None:
+    omi = _rules_vault(tmp_path)
+    session = "ack478-reap"
+    _new_turn(session)
+    _full_read(session, omi)
+    assert guard.git_rules_acked(session, omi)
+    guard.clear_all_gates()
+    assert not guard.git_rules_acked(session, omi)
+
+
+def test_git_rules_message_says_one_read_per_session() -> None:
+    assert "One full read per session" in guard.GIT_RULES_MESSAGE
+    assert "truncated or section-only read does not clear" in guard.GIT_RULES_MESSAGE

@@ -388,16 +388,6 @@ _HEREDOC_RE = re.compile(
 _OWNER_SEP_RE = re.compile(r"[\n;&|(`]")
 
 
-def _heredoc_owner_is_shell(command: str, start: int) -> bool:
-    """True when the simple command owning the heredoc at ``start`` is a shell.
-
-    Scans back to the nearest separator and takes the first token that is not a
-    ``VAR=val`` assignment or a transparent wrapper, comparing its basename.
-    One heredoc's answer; :class:`_HeredocOwners` answers a run of them.
-    """
-    return _HeredocOwners(command).is_shell(start)
-
-
 def _owner_word_skipped(token: str) -> bool:
     """Whether a word before a heredoc's owner is passed over: a ``VAR=val``
     assignment or a transparent wrapper."""
@@ -412,8 +402,9 @@ _OWNER_NAME_MAX = max(len(name) for name in _HEREDOC_OWNER_SKIP | _SHELL_HEREDOC
 
 
 class _HeredocOwners:
-    """:func:`_heredoc_owner_is_shell` for every heredoc in ``command``, in
-    linear time overall (#445). Each separator-bounded segment's words are
+    """Whether the simple command owning each heredoc in ``command`` is a shell
+    (skipping ``VAR=val`` assignments and transparent wrappers), in linear time
+    overall (#445). Each separator-bounded segment's words are
     found once, with the first one that is not skipped; a heredoc's owner is
     that word when it ends before the heredoc. Walking the words from the
     separator per heredoc was quadratic in a run of assignments followed by

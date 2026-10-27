@@ -8,6 +8,8 @@ import io
 import json
 from pathlib import Path
 
+import pytest
+
 from omind import guard, harness
 
 
@@ -20,6 +22,7 @@ def test_specs_and_fallback() -> None:
     assert harness.spec_for("openclaw").block_format == harness.FMT_OPENCLAW
     assert harness.spec_for("agy").block_format == harness.FMT_AGY
     assert harness.spec_for("antigravity").block_format == harness.FMT_AGY
+    assert harness.spec_for("grok").block_format == harness.FMT_GROK
     assert harness.spec_for("unknown-harness").name == "claude"  # safe fallback
     # Gemini's BeforeTool hook hard-blocks; OpenClaw is detect-only until a live
     # gateway is confirmed to enforce a deny (issue #88).
@@ -139,6 +142,7 @@ def test_selftest_all_pass() -> None:
         "poolside",
         "openclaw",
         "agy",
+        "grok",
     }
     assert all(r["ok"] for r in results)
     assert all(r["blocked"] for r in results)  # every canned case is a hard rule
@@ -155,6 +159,9 @@ def test_selftest_all_pass() -> None:
     assert by["openclaw"]["format"] == harness.FMT_OPENCLAW
     assert by["agy"]["format"] == harness.FMT_AGY
     assert '"decision": "deny"' in by["agy"]["rendered"]
+    assert by["grok"]["format"] == harness.FMT_GROK
+    assert '"decision": "deny"' in by["grok"]["rendered"]
+    assert by["grok"]["command"] == "gh repo delete acme/widget"
 
 
 def test_run_guard_selftest_action() -> None:
@@ -359,3 +366,37 @@ def test_translate_event_recovers_agy_prompt_from_transcript(tmp_path: Path) -> 
     assert harness.agy_last_prompt(None) == ""
     assert harness.agy_last_prompt(str(tmp_path / "absent.jsonl")) == ""
 
+
+
+@pytest.mark.parametrize("quoted", [False, True])
+def test_agy_run_command_cwd_beats_the_workspace_root(tmp_path: Path, quoted: bool) -> None:
+    """Antigravity's run_command runs in its own `Cwd`, plain or JSON-quoted.
+    The workspace root is only the fallback, so a commit in another repo is
+    judged against that repo. Real absolute paths: on Windows `/w` is
+    drive-relative, not absolute."""
+    repo, root = str(tmp_path / "repo"), str(tmp_path / "root")
+    cwd = json.dumps(repo) if quoted else repo
+    event = {
+        "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit", "Cwd": cwd}},
+        "conversationId": "a",
+        "workspacePaths": [root],
+    }
+    assert harness.translate_event("agy", event)["cwd"] == repo
+    del event["toolCall"]["args"]["Cwd"]
+    assert harness.translate_event("agy", event)["cwd"] == root
+
+
+def test_agy_cwd_beats_a_top_level_cwd_and_resolves_relative(tmp_path: Path) -> None:
+    repo, root, other = (str(tmp_path / name) for name in ("repo", "root", "other"))
+
+    def cwd_of(args: dict[str, str], **top: str) -> str:
+        event = {
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit", **args}},
+            "workspacePaths": [root],
+            **top,
+        }
+        return str(harness.translate_event("agy", event)["cwd"])
+
+    assert cwd_of({"Cwd": repo}, cwd=root) == repo
+    assert Path(cwd_of({"Cwd": "todo"})) == Path(root) / "todo"
+    assert cwd_of({}, cwd=other) == other

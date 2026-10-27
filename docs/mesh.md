@@ -69,7 +69,7 @@ Every machine runs an identical **omind node**:
 | `omind/server.py` | Local **node MCP server** exposing `OmiStore` as MCP tools over stdio. Replaces the provisioned `obsidian-mcp`. (Since 2.27.0 the debounced-sync write signal lives in `OmiStore` itself, so every write surface — MCP, web UI, `omind note`, import — triggers it.) |
 | `omind/clock.py` | **Logical versioning** — a Lamport counter + stable node-id stamped into each note, the source of ordering truth for merges. |
 | `omind/merge.py` | The **git merge driver** for OMI notes (the core of the project). Field-level 3-way merge over `NoteFields`. |
-| `omind/mesh.py` | **Replication daemon** — `init`, `commit_local`, `sync(peers)`, `daemon`, `clone`, peer membership. |
+| `omind/mesh.py` | **Replication daemon** — `init`, `sync(peers)`, `daemon`, `clone`, peer membership. |
 
 ### Reused unchanged
 
