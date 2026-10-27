@@ -7,29 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-- **The repo-scoped push rules see unique-prefix push options and glob refspecs
-  ([#443](https://github.com/CryptoJones/omind/issues/443)).** git takes any
-  unique prefix of a long option, so `git push --al origin` is `--all` and
-  `git push --mirr origin` is `--mirror`; the rules read them as a bare push of
-  the checked-out branch, and a push from `feature/x` reached a public `main`.
-  Push options now resolve by unique prefix over git push's own long options
-  (`policy._long_prefixes`); an ambiguous prefix (`--a`) stays a plain flag.
-  - A refspec holding `*` (`'refs/heads/*:refs/heads/*'`, `'*:*'`) is judged
-    against every local ref its source matches, by full refname as git matches
-    it, mapped to the destination. A configured `remote.<name>.push` glob is
-    judged the same way for a bare `git push`. Negative (`^`) refspecs are
-    skipped. When git cannot list refs, the destination is read literally, as
-    before.
-- **CI `pip-audit` gate red on dependency advisories, not on code.** Two
-  distinct causes: `certifi` resolved to the vulnerable 2026.7.22 on some legs
-  (PYSEC-2026-4320), now floored to `>=2026.10.19` alongside the other runtime
-  transitive floors; and `filelock` — pulled only by pip-audit's own
-  cachecontrol filecache, not an omind dependency — whose fix (4.2.1) requires
-  Python >=3.11 and so can never be installed on the 3.10 matrix legs. The six
-  filelock CVEs are now `--ignore-vuln`-ed in the workflow (pip-audit 2.10 has
-  no package-level skip), with the reason stated in the workflow comment.
-
 ## [10.3.3] - 2026-10-26
 
 ### Fixed
@@ -53,6 +30,27 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   result — text the agent never saw whole — would have been credited as a
   full read once #483 landed. It now counts as truncated the same way the
   existing marker does.
+- **The repo-scoped push rules see unique-prefix push options and glob refspecs
+  ([#443](https://github.com/CryptoJones/omind/issues/443)).** git takes any
+  unique prefix of a long option, so `git push --al origin` is `--all` and
+  `git push --mirr origin` is `--mirror`; the rules read them as a bare push of
+  the checked-out branch, and a push from `feature/x` reached a public `main`.
+  Push options now resolve by unique prefix over git push's own long options
+  (`policy._long_prefixes`); an ambiguous prefix (`--a`) stays a plain flag.
+  - A refspec holding `*` (`'refs/heads/*:refs/heads/*'`, `'*:*'`) is judged
+    against every local ref its source matches, by full refname as git matches
+    it, mapped to the destination. A configured `remote.<name>.push` glob is
+    judged the same way for a bare `git push`. Negative (`^`) refspecs are
+    skipped. When git cannot list refs, the destination is read literally, as
+    before.
+- **CI `pip-audit` gate red on dependency advisories, not on code.** Two
+  distinct causes: `certifi` resolved to the vulnerable 2026.7.22 on some legs
+  (PYSEC-2026-4320), now floored to `>=2026.10.19` alongside the other runtime
+  transitive floors; and `filelock` — pulled only by pip-audit's own
+  cachecontrol filecache, not an omind dependency — whose fix (4.2.1) requires
+  Python >=3.11 and so can never be installed on the 3.10 matrix legs. The six
+  filelock CVEs are now `--ignore-vuln`-ed in the workflow (pip-audit 2.10 has
+  no package-level skip), with the reason stated in the workflow comment.
 
 ## [10.3.2] - 2026-10-14
 
