@@ -79,11 +79,9 @@ updater already gutted (see [troubleshooting](troubleshooting.md)).
 
 The check and the install pull from **GitHub** (public, no auth for read) — the
 channel the request named. Codeberg stays the canonical push target; this is a
-read-only consumer. There is no PyPI package yet. The trusted-publishing workflow
-(`.github/workflows/publish.yml`) exists but is still waiting on the one-time pypi.org
-registration tracked in [#267](https://github.com/CryptoJones/omind/issues/267), so the
-git ref is the install source. If omind is later published to an index, `uv tool upgrade`
-becomes the native path and `update_command` gains that branch.
+read-only consumer. omind is not distributed on a package index; the GitHub git ref
+is the install source, and `uv tool install` / `uv tool upgrade` against it is the
+native update path.
 
 ## Not (yet) done
 

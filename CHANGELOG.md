@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Removed
+- **PyPI publishing (`publish.yml`) and the `#267` publish blocker.** omind is an MCP
+  server installed from source with `uv tool`, not a library distributed on PyPI, so the
+  trusted-publishing pipeline was dropped. Releases stay GitHub releases on `v<version>`
+  tags that the fleet installs from git; nothing uploads to a package index.
+
 ## [10.3.3] - 2026-10-26
 
 ### Fixed
