@@ -17,11 +17,6 @@ the exact order of operations._
   never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
-- [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
-  `.github/workflows/publish.yml` uploads every published GitHub release with the
-  `PYPI_API_TOKEN` secret of the `pypi` environment (set 2026-10-27). Tick when the first
-  release is live on https://pypi.org/project/omind/.
-
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -951,6 +946,7 @@ _Added 2026-10-02 so every closed issue has a line here. Details live on each is
 - [x] Guard current-turn authorization does not unblock global hook mutations ([#121](https://github.com/CryptoJones/omind/issues/121))
 - [x] Guard should block side effects from capability questions without explicit authorization ([#122](https://github.com/CryptoJones/omind/issues/122))
 - [x] guard: git -C freshness misattributed to cwd; single-slot marker; consult-gate blocks provably-inert commands ([#147](https://github.com/CryptoJones/omind/issues/147))
+- [x] First PyPI publish of omind package — live as 10.3.4, uploaded by `publish.yml` with the `PYPI_API_TOKEN` environment secret ([#267](https://github.com/CryptoJones/omind/issues/267))
 - [x] verifier: credit guard-demanded note reads; stop scoring vault writes as consults; log judgement context on off-topic denials ([#148](https://github.com/CryptoJones/omind/issues/148))
 - [x] omind guard locked on new repos with no remotes because pulls / fetches are not possible ([#149](https://github.com/CryptoJones/omind/issues/149))
 
