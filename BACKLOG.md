@@ -11,7 +11,7 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
+- [x] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner, leads the install section with `uv tool install omind` (PyPI since 10.3.4; git install kept), and drops the stale Codeberg badge.
 ## Not planned
 
