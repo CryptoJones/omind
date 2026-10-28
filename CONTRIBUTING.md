@@ -124,9 +124,7 @@ The version is declared in three places that must stay in lockstep — `pyprojec
 ## Releasing
 
 A release is a **GitHub release** on a `v<version>` tag that points at merged `main`.
-It is what the fleet installs from: nodes run `uv tool install` / `uv tool upgrade`
-against the GitHub source, so cutting the release is what ships the new version. omind
-is an MCP server installed from source, not a library distributed on a package index.
+Publishing it is what ships the package to PyPI.
 
 1. Merge the PR that bumped the version (`pyproject.toml`, `src/omind/__init__.py`,
    `uv.lock`, and its `CHANGELOG.md` heading) to `main`.
@@ -136,6 +134,22 @@ is an MCP server installed from source, not a library distributed on a package i
    ```sh
    gh release create v<version> --target main --title "omind <version>" --generate-notes
    ```
+3. `.github/workflows/publish.yml` fires on `release: published`. It builds the sdist and
+   wheel with `uv build`, **fails if the tag does not match the packaged version**, runs
+   `twine check --strict`, and uploads to PyPI with the `PYPI_API_TOKEN` secret, which
+   lives only in the `pypi` environment (only the upload job can read it).
+
+To check a build without uploading, run the workflow by hand
+(*Actions → publish → Run workflow*). The `dry_run` box is checked by default. To
+re-publish a release whose upload failed, run the workflow by hand from that tag with
+`dry_run` unchecked; PyPI never accepts the same version twice. A manual run skips the
+tag-vs-version check (that check only runs on `release: published`), so it uploads
+whatever version the chosen ref holds: always pick the release tag as the ref, and run
+it once with `dry_run` checked before the real upload.
+
+If you rename the `pypi` environment, move the `PYPI_API_TOKEN` secret with it, or the
+upload fails with a 403. To rotate the token, mint a new one on pypi.org and run
+`gh secret set PYPI_API_TOKEN --env pypi`.
 
 ## Pull requests
 

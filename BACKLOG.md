@@ -17,6 +17,11 @@ the exact order of operations._
   never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
   prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
+- [ ] **[Priority 7 / P3] First PyPI publish of omind package** ([#267](https://github.com/CryptoJones/omind/issues/267)) — _chore_ —
+  `.github/workflows/publish.yml` uploads every published GitHub release with the
+  `PYPI_API_TOKEN` secret of the `pypi` environment (set 2026-10-27). Tick when the first
+  release is live on https://pypi.org/project/omind/.
+
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
