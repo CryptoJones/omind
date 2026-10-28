@@ -18,6 +18,7 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
+import math
 import os
 import re
 import secrets
@@ -701,25 +702,32 @@ def _update_sync_state(omi_dir: Path, mutate: Callable[[dict[str, Any]], None]) 
 
 
 def _failure_count(state: dict[str, Any]) -> int:
+    value = state.get("consecutive_failures")
+    if isinstance(value, float) and not math.isfinite(value):
+        return 0  # 1e309 in hand-edited JSON parses to inf
     try:
-        return max(0, int(state.get("consecutive_failures") or 0))
-    except (TypeError, ValueError):
+        return max(0, int(value or 0))
+    except (TypeError, ValueError, OverflowError):
         return 0
 
 
-def _sync_succeeded(report: SyncReport) -> bool:
+def _sync_succeeded(report: SyncReport, only: list[str] | None = None) -> bool:
     """Whether a completed pass counts as a SUCCESSFUL sync for doctor.
 
     Replication happened when the pass committed locally and reached at least
     one peer (or there is no peer to reach). One laptop being offline must not
-    mark a node unhealthy; every peer failing must.
+    mark a node unhealthy; every peer failing must. An empty report counts only
+    when no peer filter was given: ``--peer typo`` matched nothing and synced
+    nothing, so it must not reset the failure history.
     """
-    return not report.peers or any(p.pushed for p in report.peers)
+    if not report.peers:
+        return only is None
+    return any(p.pushed for p in report.peers)
 
 
-def _write_sync_state(omi_dir: Path, report: SyncReport) -> None:
+def _write_sync_state(omi_dir: Path, report: SyncReport, only: list[str] | None = None) -> None:
     now = _now_iso()
-    succeeded = _sync_succeeded(report)
+    succeeded = _sync_succeeded(report, only)
 
     def mutate(state: dict[str, Any]) -> None:
         state.update(
@@ -882,7 +890,7 @@ def _sync_pass(
             ps.error = f"push: {_first_line(str(exc)) or 'timed out'}"
         if not ps.pushed:
             log(f"peer {ps.name}: {ps.error}")
-    _write_sync_state(omi_dir, report)
+    _write_sync_state(omi_dir, report, only)
     for note_name in report.conflicts:
         log(f"conflict markers in {note_name} (tagged; resolve and save)")
     return report
@@ -955,8 +963,12 @@ STALE_LOCK_SECONDS = 600.0
 #: check has always used.
 STALE_SYNC_INTERVALS = 2
 
-#: How many self-heal events the sync state keeps for doctor.
-_MAX_LOCK_EVENTS = 5
+#: A lock whose mtime is more than this far in the FUTURE has an unknowable
+#: age (clock skew, a restored backup): doctor warns and nothing heals it.
+FUTURE_LOCK_TOLERANCE_SECONDS = 60.0
+
+#: The git environment variables that point a process at a repo from anywhere.
+_GIT_REPO_ENV = (b"GIT_DIR", b"GIT_WORK_TREE", b"GIT_COMMON_DIR", b"GIT_INDEX_FILE")
 
 #: Top-level lock files git leaves under ``.git/`` when it dies mid-command, by
 #: kind. ``refs/**/*.lock`` is walked separately and is always a ref lock.
@@ -967,9 +979,13 @@ _TOP_LEVEL_LOCKS = {
     "config.lock": "config",
 }
 
-#: A git failure caused by an existing lock file (``Unable to create
-#: '.../HEAD.lock': File exists``, ``cannot lock ref 'HEAD'``).
-_LOCK_ERROR_RE = re.compile(r"\.lock\b|cannot lock ref|unable to create", re.IGNORECASE)
+#: A git failure that an existing lock file can cause (``Unable to create
+#: '.../HEAD.lock': File exists``, ``cannot lock ref 'HEAD'``; a fetch creating a
+#: NEW tracking ref over a stale lock says only ``reference already exists``).
+#: A match only triggers a look: nothing acts unless a provably stale lock exists.
+_LOCK_ERROR_RE = re.compile(
+    r"\.lock\b|cannot lock ref|unable to create|reference already exists", re.IGNORECASE
+)
 
 
 @dataclass(frozen=True)
@@ -987,10 +1003,21 @@ class GitLock:
     git_running: bool | None
     #: (st_dev, st_ino, st_mtime_ns) when judged — removal proves it is the same file.
     identity: tuple[int, int, int] = (0, 0, 0)
+    #: How far the mtime sits in the future (0 for a normal lock).
+    future_seconds: float = 0.0
+
+    @property
+    def future(self) -> bool:
+        """An mtime beyond the skew tolerance: the age is unknowable."""
+        return self.future_seconds > FUTURE_LOCK_TOLERANCE_SECONDS
 
     @property
     def stale(self) -> bool:
-        return self.age_seconds >= STALE_LOCK_SECONDS and self.git_running is False
+        return (
+            not self.future
+            and self.age_seconds >= STALE_LOCK_SECONDS
+            and self.git_running is False
+        )
 
     @property
     def healable(self) -> bool:
@@ -1026,11 +1053,27 @@ def _argv_targets_repo(argv: list[str], cwd: Path, repo: Path) -> bool:
     return False
 
 
-def _linux_git_running(proc_root: Path, repo: Path) -> bool | None:
-    """Scan ``/proc`` for a git process whose cwd or argv points into *repo*.
+def _env_targets_repo(raw_environ: bytes, cwd: Path, repo: Path) -> bool:
+    """Whether ``GIT_DIR``/``GIT_WORK_TREE``/``GIT_COMMON_DIR``/``GIT_INDEX_FILE``
+    in a NUL-separated environment block point into the repo."""
+    for item in raw_environ.split(b"\0"):
+        key, sep, value = item.partition(b"=")
+        if not sep or key not in _GIT_REPO_ENV or not value:
+            continue
+        try:
+            if _within((cwd / os.fsdecode(value)).resolve(), repo):
+                return True
+        except (OSError, ValueError, RuntimeError):
+            continue
+    return False
 
-    A git process we cannot inspect (another user's, gone mid-read in an odd
-    way) makes the answer None — unknown — never False.
+
+def _linux_git_running(proc_root: Path, repo: Path) -> bool | None:
+    """Scan ``/proc`` for a git process whose cwd, argv or environment
+    (``GIT_DIR`` and friends) points into *repo*.
+
+    A git process we cannot inspect (another user's, whose cwd or environ is
+    unreadable) makes the answer None — unknown — never False.
     """
     unknown = False
     for entry in proc_root.iterdir():
@@ -1045,11 +1088,16 @@ def _linux_git_running(proc_root: Path, repo: Path) -> bool | None:
         try:
             cwd = Path(os.readlink(entry / "cwd"))
             raw = (entry / "cmdline").read_bytes()
+            environ = (entry / "environ").read_bytes()
         except OSError:
             unknown = True
             continue
         argv = [os.fsdecode(a) for a in raw.split(b"\0") if a]
-        if _within(cwd, repo) or _argv_targets_repo(argv, cwd, repo):
+        if (
+            _within(cwd, repo)
+            or _argv_targets_repo(argv, cwd, repo)
+            or _env_targets_repo(environ, cwd, repo)
+        ):
             return True
     return None if unknown else False
 
@@ -1074,11 +1122,12 @@ def _windows_process_name(line: str) -> str:
 def _git_process_running(omi_dir: Path) -> bool | None:
     """Whether a live git process is using the vault repo (None: can't tell).
 
-    Linux reads ``/proc`` and attributes each git process to a repo by its cwd
-    and argv. macOS/BSD (``ps``) and Windows (``tasklist``) cannot cheaply see
-    another process's cwd, so there the answer is only ever False when NO git
-    process is running at all; any git process anywhere answers None. That is
-    the conservative choice: a lock is never called stale on a guess.
+    Linux reads ``/proc`` and attributes each git process to a repo by its cwd,
+    argv and ``GIT_DIR``-style environment. macOS/BSD (``ps``) and Windows
+    (``tasklist``) cannot cheaply see another process's cwd, so there the
+    answer is only ever False when NO git process is running at all; any git
+    process anywhere answers None. That is the conservative choice: a lock is
+    never called stale on a guess.
     """
     try:
         repo = Path(omi_dir).expanduser().resolve()
@@ -1110,11 +1159,19 @@ def find_git_locks(omi_dir: Path, *, now: float | None = None) -> list[GitLock]:
         (git_dir / name, kind) for name, kind in _TOP_LEVEL_LOCKS.items()
     ]
     refs = git_dir / "refs"
-    if refs.is_dir():
+    # os.walk FOLLOWS a symlinked start directory (followlinks only governs
+    # subdirectories): `.git/refs -> .` would classify `.git/index.lock` as a ref
+    # lock, and git-new-workdir points refs at ANOTHER repo. Skip a linked root,
+    # and keep every ref lock's real path inside the real refs directory.
+    if refs.is_dir() and not refs.is_symlink():
+        refs_real = os.path.realpath(refs)
         for root, _dirs, files in os.walk(refs):  # followlinks=False
-            candidates.extend((Path(root) / f, "ref") for f in files if f.endswith(".lock"))
+            for f in files:
+                path = Path(root) / f
+                if f.endswith(".lock") and _real_within(path, refs_real):
+                    candidates.append((path, "ref"))
     clock = time.time() if now is None else now
-    found: list[tuple[Path, str, float, tuple[int, int, int]]] = []
+    found: list[tuple[Path, str, float, tuple[int, int, int], float]] = []
     for path, kind in candidates:
         try:
             st = path.lstat()
@@ -1123,13 +1180,24 @@ def find_git_locks(omi_dir: Path, *, now: float | None = None) -> list[GitLock]:
         if not stat.S_ISREG(st.st_mode):
             continue  # never act on a symlink or directory named *.lock
         ident = (st.st_dev, st.st_ino, st.st_mtime_ns)
-        found.append((path, kind, max(0.0, clock - st.st_mtime), ident))
+        delta = clock - st.st_mtime
+        found.append((path, kind, max(0.0, delta), ident, max(0.0, -delta)))
     running: bool | None = None
-    if any(age >= STALE_LOCK_SECONDS for _, _, age, _ in found):
+    if any(age >= STALE_LOCK_SECONDS for _, _, age, _, _ in found):
         running = _git_process_running(git_dir.parent)
     return [
-        GitLock(path, age, kind, running, ident) for path, kind, age, ident in sorted(found)
+        GitLock(path, age, kind, running, ident, ahead)
+        for path, kind, age, ident, ahead in sorted(found)
     ]
+
+
+def _real_within(path: Path, real_root: str) -> bool:
+    """Whether *path*'s real location stays inside the real directory *real_root*."""
+    try:
+        real = os.path.realpath(path)
+        return os.path.commonpath([real, real_root]) == real_root and real != real_root
+    except (OSError, ValueError):
+        return False
 
 
 def _fmt_age(seconds: float) -> str:
@@ -1151,10 +1219,11 @@ def _lock_label(omi_dir: Path, lock: GitLock) -> str:
 
 
 def _record_lock_event(omi_dir: Path, event: dict[str, Any]) -> None:
+    """Keep only the most recent self-heal: doctor reports just that one."""
+
     def mutate(state: dict[str, Any]) -> None:
-        events = state.get("lock_events")
-        kept = [e for e in events if isinstance(e, dict)] if isinstance(events, list) else []
-        state["lock_events"] = [*kept, event][-_MAX_LOCK_EVENTS:]
+        state.pop("lock_events", None)  # the list form some 10.3.7 builds wrote
+        state["last_lock_event"] = event
 
     _update_sync_state(omi_dir, mutate)
 
@@ -1186,11 +1255,14 @@ def _remove_if_same(lock: GitLock) -> bool:
 def heal_stale_ref_locks(omi_dir: Path, log: Logger = print) -> list[GitLock]:
     """Remove provably stale REF locks, then check the repo with ``git fsck``.
 
-    Runs under the store write lock (so no omind git operation can start
-    meanwhile) and RE-CHECKS every lock under it: removal needs the lock to be
-    older than STALE_LOCK_SECONDS, no live git process on the repo, and a ref
-    lock — never ``index.lock`` or ``config.lock``. Records a ``mesh-stale-lock``
-    event (stderr + the state dir, which doctor reads). Returns what it removed.
+    Runs under the store write lock, which keeps omind's working-tree git steps
+    (commit, merge) from starting meanwhile; ``git fetch``/``push`` run
+    unlocked, so the identity-checked removal in :func:`_remove_if_same` is what
+    protects a lock one of them takes in the gap. Every lock is RE-CHECKED under
+    the write lock: removal needs it to be older than STALE_LOCK_SECONDS, not
+    future-dated, no live git process on the repo, and a ref lock — never
+    ``index.lock`` or ``config.lock``. Records a ``mesh-stale-lock`` event
+    (stderr + the state dir, which doctor reads). Returns what it removed.
     """
     omi_dir = Path(omi_dir).expanduser()
     removed: list[GitLock] = []
@@ -1279,33 +1351,51 @@ def _handle_lock_failure(omi_dir: Path, message: str, log: Logger) -> bool | Non
         return False
 
 
+def _exc_line(exc: BaseException) -> str:
+    return _first_line(str(exc)) or type(exc).__name__
+
+
+def _heal_idle_locks(omi_dir: Path, log: Logger) -> None:
+    """Heal stale ref locks that never fail a LOCAL sync (``refs/omind/<peer>``,
+    an unused branch) — same guards as every heal. Fail-open."""
+    try:
+        if any(lk.healable for lk in _stale_locks(omi_dir)):
+            heal_stale_ref_locks(omi_dir, log=log)
+    except Exception as exc:
+        log(f"mesh-stale-lock: self-heal skipped: {exc}")
+
+
 def _sync_tick(omi_dir: Path, node_id: str, log: Logger) -> None:
     """One daemon sync, with stale-lock diagnosis and ref-lock self-heal (#498).
 
     A pass that dies on a stale lock is retried once, straight after the heal.
-    A peer whose fetch hit a stale remote-tracking ref lock is healed for the
-    next tick. Everything added here is fail-open: a detection or heal error
-    falls back to the plain ``sync failed`` line and never stops the daemon.
+    Every tick then heals any stale ref lock left over, including ones no sync
+    step trips on. Fail-open: ANY exception becomes one ``sync failed`` line
+    (``sync()`` has already recorded it for doctor) and never stops the daemon
+    — an escaping exception would restart-loop the service every 30s.
     """
     try:
-        report = sync(omi_dir, node_id, log=log)
-    except MeshError as exc:
-        message = _first_line(str(exc))
-        healed = _handle_lock_failure(omi_dir, message, log)
-        if healed is None:
-            log(f"sync failed: {message}")
-        if not healed:
-            return
         try:
             report = sync(omi_dir, node_id, log=log)
-        except MeshError as retry_exc:
-            log(f"sync failed after removing the stale lock: {_first_line(str(retry_exc))}")
-            return
-    if not report.ok:
-        log("sync finished with peer errors (see above)")
-        lock_errors = [p.error for p in report.peers if _LOCK_ERROR_RE.search(p.error)]
-        if lock_errors:
-            _handle_lock_failure(omi_dir, lock_errors[0], log)
+        except Exception as exc:
+            message = _exc_line(exc)
+            healed = _handle_lock_failure(omi_dir, message, log)
+            if healed is None:
+                log(f"sync failed: {message}")
+            if not healed:
+                return
+            try:
+                report = sync(omi_dir, node_id, log=log)
+            except Exception as retry_exc:
+                log(f"sync failed after removing the stale lock: {_exc_line(retry_exc)}")
+                return
+        if not report.ok:
+            log("sync finished with peer errors (see above)")
+            lock_errors = [p.error for p in report.peers if _LOCK_ERROR_RE.search(p.error)]
+            if lock_errors:
+                _handle_lock_failure(omi_dir, lock_errors[0], log)
+    finally:
+        _heal_idle_locks(omi_dir, log)
 
 
 # -- daemon ---------------------------------------------------------------------
@@ -1493,7 +1583,16 @@ def install_service(vault: Path, folder: str, log: Logger = print) -> None:
 
 
 def diagnose_mesh(config: Any) -> list[Any]:
-    """The mesh doctor checks (pure read except `git config --get` calls).
+    """The mesh doctor checks (see :func:`_diagnose_mesh_checks`). Never raises:
+    a malformed state file or an unexpected git answer becomes one warn line
+    instead of crashing ``omind doctor``."""
+    return _guarded(lambda: _diagnose_mesh_checks(config), "mesh")
+
+
+def _diagnose_mesh_checks(config: Any) -> list[Any]:
+    """The mesh doctor checks. Read-only on the vault, but not side-effect free:
+    it runs read-only git commands and, when an old lock exists, a process-table
+    scan (``/proc``, ``ps`` or ``tasklist``). Never raises (fail-open).
 
     ``config`` is a :class:`omind.provision.SetupConfig`; imported lazily to
     keep provision -> mesh a one-way dependency at module level.
@@ -1561,7 +1660,7 @@ def diagnose_mesh(config: Any) -> list[Any]:
             )
         )
 
-    results.extend(_diagnose_git_locks(omi))
+    results.extend(_guarded(lambda: _diagnose_git_locks(omi), "mesh_git_lock"))
 
     state = read_sync_state(omi)
     # Per-peer errors recorded by the last sync (fetch/merge/push failures). Doctor
@@ -1570,7 +1669,8 @@ def diagnose_mesh(config: Any) -> list[Any]:
     # healthy while the fleet silently diverged.
     peer_errors: dict[str, str] = {}
     if state is not None:
-        for entry in state.get("peers", []) or []:
+        recorded = state.get("peers")
+        for entry in recorded if isinstance(recorded, list) else []:
             if isinstance(entry, dict) and entry.get("error"):
                 peer_errors[str(entry.get("name") or "")] = str(entry.get("error"))
 
@@ -1615,8 +1715,13 @@ def diagnose_mesh(config: Any) -> list[Any]:
             CheckResult("mesh_sync", "warn", "never synced — `omind mesh sync` or install-service")
         )
     else:
-        results.append(_diagnose_sync_age(state, interval, peered=bool(peer_map)))
-        results.extend(_diagnose_lock_events(state))
+        results.extend(
+            _guarded(
+                lambda: [_diagnose_sync_age(state, interval, peered=bool(peer_map))],
+                "mesh_sync",
+            )
+        )
+        results.extend(_guarded(lambda: _diagnose_lock_events(state), "mesh_stale_lock"))
 
     conflicted = conflict_scan(omi)
     if conflicted:
@@ -1650,9 +1755,11 @@ def _parse_ts(value: object) -> datetime | None:
 def _diagnose_git_locks(omi: Path) -> list[Any]:
     """Doctor lines for git lock files under ``.git/`` (#498). Fail-open.
 
-    A fresh lock is an in-flight git operation: no line. A stale one fails,
-    with its path and age, because every sync fails until it is gone. An old
-    lock that a live (or possibly live) git process may own only warns.
+    A fresh lock is an in-flight git operation: no line. A stale ``index.lock``
+    or ref lock fails, with its path and age — git commands that need it fail
+    while it exists. A stale ``config.lock`` only warns (sync still runs). An
+    old lock a live (or possibly live) git process may own warns, and so does
+    a future-dated lock, whose age is unknowable.
     """
     from omind.provision import CheckResult
 
@@ -1662,22 +1769,50 @@ def _diagnose_git_locks(omi: Path) -> list[Any]:
         return []
     results: list[CheckResult] = []
     for lock in locks:
-        if lock.age_seconds < STALE_LOCK_SECONDS:
-            continue
         label = _lock_label(omi, lock)
-        age = _fmt_age(lock.age_seconds)
-        if lock.stale:
-            fix = (
-                "the mesh daemon removes it on its next failed sync, or delete it by hand"
-                if lock.healable
-                else "never removed automatically — check nothing is using the repo, then delete it"
-            )
+        key = f"mesh_git_lock:{label}"
+        if lock.future:
             results.append(
                 CheckResult(
-                    f"mesh_git_lock:{label}",
+                    key,
+                    "warn",
+                    f"git lock {label} is dated {_fmt_age(lock.future_seconds)} in the future "
+                    "(clock skew?) — its age is unknown, so it is never removed automatically",
+                )
+            )
+            continue
+        if lock.age_seconds < STALE_LOCK_SECONDS:
+            continue
+        age = _fmt_age(lock.age_seconds)
+        if lock.stale and lock.kind == "ref":
+            results.append(
+                CheckResult(
+                    key,
                     "fail",
-                    f"stale git lock {label} ({age} old, no git process running) — "
-                    f"every sync fails while it exists; {fix}",
+                    f"stale git lock {label} ({age} old, no git process running) — git cannot "
+                    "update that ref while it exists; the mesh daemon removes stale ref locks "
+                    "on its next tick, or delete it by hand",
+                )
+            )
+        elif lock.stale and lock.kind == "index":
+            results.append(
+                CheckResult(
+                    key,
+                    "fail",
+                    f"stale git lock {label} ({age} old, no git process running) — every "
+                    "commit, so every sync, fails while it exists; never removed automatically "
+                    "(it can hold staged content): check nothing is using the repo, then "
+                    "delete it",
+                )
+            )
+        elif lock.stale:
+            results.append(
+                CheckResult(
+                    key,
+                    "warn",
+                    f"stale git lock {label} ({age} old, no git process running) — git config "
+                    "writes fail while it exists; never removed automatically: check nothing "
+                    "is using the repo, then delete it",
                 )
             )
         else:
@@ -1686,14 +1821,16 @@ def _diagnose_git_locks(omi: Path) -> list[Any]:
                 if lock.git_running
                 else "could not confirm that no git process is using it"
             )
-            results.append(
-                CheckResult(
-                    f"mesh_git_lock:{label}", "warn", f"git lock {label} is {age} old; {why}"
-                )
-            )
+            results.append(CheckResult(key, "warn", f"git lock {label} is {age} old; {why}"))
     if not results:
         results.append(CheckResult("mesh_git_lock", "ok", "no stale git locks"))
     return results
+
+
+#: A peered node whose last success is older than this AND that is failing now
+#: fails doctor outright (exit non-zero), not just warns: telesto's five weeks
+#: of failed ticks would have stayed a warning forever.
+SYNC_FAIL_AFTER_SECONDS = 24 * 3600
 
 
 def _diagnose_sync_age(state: dict[str, Any], interval: int, *, peered: bool) -> Any:
@@ -1731,9 +1868,10 @@ def _diagnose_sync_age(state: dict[str, Any], interval: int, *, peered: bool) ->
     age = (now - success).total_seconds()
     if age <= limit:
         return CheckResult("mesh_sync", "ok", f"last successful sync {int(age)}s ago")
+    level = "fail" if failures and age > SYNC_FAIL_AFTER_SECONDS else "warn"
     return CheckResult(
         "mesh_sync",
-        "warn",
+        level,
         f"last successful sync {_fmt_age(age)} ago (> {STALE_SYNC_INTERVALS}x the "
         f"{interval}s interval)" + (detail or " — is the daemon running?"),
     )
@@ -1741,17 +1879,19 @@ def _diagnose_sync_age(state: dict[str, Any], interval: int, *, peered: bool) ->
 
 def _diagnose_lock_events(state: dict[str, Any]) -> list[Any]:
     """The most recent ``mesh-stale-lock`` self-heal, if it happened in the last
-    week: ok when fsck came back clean, warn when it did not."""
+    week: ok when fsck came back clean, warn when it did not. Tolerates any
+    malformed shape (hand-edited state) by reporting nothing."""
     from omind.provision import CheckResult
 
-    events = state.get("lock_events")
-    if not isinstance(events, list) or not events or not isinstance(events[-1], dict):
+    last = state.get("last_lock_event")
+    if not isinstance(last, dict):
         return []
-    last = events[-1]
     when = _parse_ts(last.get("at"))
     if when is None or datetime.now(timezone.utc) - when > timedelta(days=7):
         return []
-    removed = ", ".join(str(r) for r in last.get("removed") or []) or "?"
+    removed_raw = last.get("removed")
+    removed_list = removed_raw if isinstance(removed_raw, list) else []
+    removed = ", ".join(str(r) for r in removed_list) or "?"
     fsck = str(last.get("fsck") or "?")
     level = "ok" if fsck == "clean" else "warn"
     return [
@@ -1762,3 +1902,13 @@ def _diagnose_lock_events(state: dict[str, Any]) -> list[Any]:
             f"git fsck --connectivity-only: {fsck}",
         )
     ]
+
+
+def _guarded(check: Callable[[], list[Any]], key: str) -> list[Any]:
+    """Run one doctor helper; any exception becomes a warn line, never a crash."""
+    from omind.provision import CheckResult
+
+    try:
+        return check()
+    except Exception as exc:
+        return [CheckResult(key, "warn", f"check skipped: {_exc_line(exc)}")]

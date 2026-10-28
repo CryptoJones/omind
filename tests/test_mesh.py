@@ -15,7 +15,9 @@ import os
 import shutil
 import sys
 import time
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -736,9 +738,10 @@ def test_stale_head_lock_fails_doctor_then_daemon_heals_and_syncs(
     state = mesh.read_sync_state(a)
     assert state is not None
     assert state["consecutive_failures"] == 0
-    assert state["lock_events"][-1]["event"] == "mesh-stale-lock"
-    assert state["lock_events"][-1]["removed"] == [".git/HEAD.lock"]
-    assert state["lock_events"][-1]["fsck"] == "clean"
+    assert "lock_events" not in state
+    assert state["last_lock_event"]["event"] == "mesh-stale-lock"
+    assert state["last_lock_event"]["removed"] == [".git/HEAD.lock"]
+    assert state["last_lock_event"]["fsck"] == "clean"
     report = _doctor(a)
     assert report["mesh_git_lock"][0] == "ok"
     assert report["mesh_stale_lock"][0] == "ok"
@@ -858,9 +861,13 @@ def test_failed_syncs_are_counted_and_doctor_warns_on_old_success(
     assert state["consecutive_failures"] == 2
     assert "HEAD.lock" in state["last_error"]
     level, message = _doctor(a)["mesh_sync"]
-    assert level == "warn"
+    assert level == "fail"  # > 24h without success while failing: the telesto case
     assert "last successful sync" in message
     assert "2 failed sync(s) in a row" in message
+
+    an_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    mesh._update_sync_state(a, lambda s: s.update(last_success=an_hour_ago))
+    assert _doctor(a)["mesh_sync"][0] == "warn"
 
 
 def test_doctor_skips_sync_age_quietly_without_a_mesh(tmp_path: Path) -> None:
@@ -916,6 +923,7 @@ def test_linux_proc_scan_attributes_git_to_the_repo(tmp_path: Path) -> None:
         (entry / "comm").write_text(comm + "\n", encoding="utf-8")
         (entry / "cwd").symlink_to(cwd)
         (entry / "cmdline").write_bytes(b"\0".join(a.encode() for a in argv) + b"\0")
+        (entry / "environ").write_bytes(b"HOME=/home/u\0PATH=/usr/bin\0")
 
     _proc(1, "bash", repo, ["bash"])
     _proc(2, "git", elsewhere, ["git", "fetch"])
@@ -970,3 +978,232 @@ def test_any_exception_in_a_pass_is_recorded(
     assert state is not None
     assert state["consecutive_failures"] == 1
     assert "corrupt tombstones" in state["last_error"]
+
+
+# -- roundtable hardening (#501 review) ---------------------------------------------
+
+
+def test_sync_tick_survives_a_non_mesh_error(
+    omi_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An escaping exception would kill run_daemon and restart-loop the service."""
+    cfg = mesh.mesh_init(omi_dir, log=quiet)
+
+    def _explode(*_args: object, **_kw: object) -> mesh.SyncReport:
+        raise RuntimeError("index write exploded")
+
+    monkeypatch.setattr(mesh, "_sync_pass", _explode)
+    lines: list[str] = []
+    mesh._sync_tick(omi_dir, cfg.node_id, lines.append)  # must not raise
+    assert lines == ["sync failed: index write exploded"]
+    state = mesh.read_sync_state(omi_dir)
+    assert state is not None
+    assert state["consecutive_failures"] == 1
+
+
+def test_sync_tick_survives_a_non_mesh_error_on_the_retry(
+    pair: tuple[Path, str, Path, str],
+    monkeypatch: pytest.MonkeyPatch,
+    no_git_running: None,
+) -> None:
+    a, id_a, _b, _ = pair
+    _plant_lock(a, "HEAD.lock", STALE)
+    real_pass = mesh._sync_pass
+    calls = {"n": 0}
+
+    def _second_explodes(*args: Any, **kw: Any) -> mesh.SyncReport:
+        calls["n"] += 1
+        if calls["n"] == 2:
+            raise RuntimeError("retry exploded")
+        return real_pass(*args, **kw)
+
+    monkeypatch.setattr(mesh, "_sync_pass", _second_explodes)
+    OmiStore(a, node_id=id_a).create_note(NoteFields(title="Retry", summary="s"))
+    lines: list[str] = []
+    mesh._sync_tick(a, id_a, lines.append)
+    assert "sync failed after removing the stale lock: retry exploded" in lines
+
+
+def _write_raw_state(omi: Path, text: str) -> None:
+    from omind.paths import sync_state_path
+
+    path = sync_state_path(omi)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text, encoding="utf-8")
+
+
+def test_doctor_tolerates_malformed_sync_state(pair: tuple[Path, str, Path, str]) -> None:
+    a, _id_a, _b, _ = pair
+    now = datetime.now(timezone.utc).isoformat()
+    _write_raw_state(
+        a,
+        '{"last_success": 3, "consecutive_failures": 1e309, "peers": 5, '
+        f'"last_lock_event": {{"at": "{now}", "removed": 1, "fsck": "clean"}}}}',
+    )
+    report = _doctor(a)  # must not raise
+    assert report["mesh_stale_lock"][0] == "ok"
+    assert "self-healed ?" in report["mesh_stale_lock"][1]
+    assert report["mesh_sync"][0] == "warn"  # no usable success time
+    assert mesh._failure_count({"consecutive_failures": float("inf")}) == 0
+    assert mesh._failure_count({"consecutive_failures": "x"}) == 0
+
+
+def test_diagnose_mesh_never_raises(
+    pair: tuple[Path, str, Path, str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    a, _id_a, _b, _ = pair
+
+    def _broken(_omi: Path) -> dict[str, str]:
+        raise RuntimeError("git config exploded")
+
+    monkeypatch.setattr(mesh, "peers", _broken)
+    report = _doctor(a)
+    assert report == {"mesh": ("warn", "check skipped: git config exploded")}
+
+
+@pytest.mark.skipif(os.name == "nt", reason="directory symlinks need privileges on Windows")
+def test_symlinked_refs_root_never_makes_index_lock_a_ref(
+    omi_dir: Path, tmp_path: Path, no_git_running: None
+) -> None:
+    mesh.mesh_init(omi_dir, log=quiet)
+    git_dir = omi_dir / ".git"
+    shutil.rmtree(git_dir / "refs")
+    (git_dir / "refs").symlink_to(".")  # .git/refs -> .git
+    index_lock = _plant_lock(omi_dir, "index.lock", STALE)
+    kinds = {mesh._lock_label(omi_dir, lk): lk.kind for lk in mesh.find_git_locks(omi_dir)}
+    assert kinds == {".git/index.lock": "index"}
+    assert mesh.heal_stale_ref_locks(omi_dir, log=quiet) == []
+    assert index_lock.exists()
+
+    # git-new-workdir style: refs points at ANOTHER repo's refs; never touch those.
+    other = tmp_path / "other-refs"
+    (other / "heads").mkdir(parents=True)
+    foreign = other / "heads" / "main.lock"
+    foreign.write_bytes(b"")
+    old = time.time() - STALE
+    os.utime(foreign, (old, old))
+    (git_dir / "refs").unlink()
+    (git_dir / "refs").symlink_to(other)
+    assert all(lk.kind != "ref" for lk in mesh.find_git_locks(omi_dir))
+    mesh.heal_stale_ref_locks(omi_dir, log=quiet)
+    assert foreign.exists()
+
+
+@pytest.mark.skipif(os.name == "nt", reason="fake /proc needs POSIX symlinks")
+def test_linux_proc_scan_reads_git_dir_environment(tmp_path: Path) -> None:
+    repo = tmp_path / "Vault" / "OMI"
+    (repo / ".git").mkdir(parents=True)
+    proc = tmp_path / "proc"
+    entry = proc / "7"
+    entry.mkdir(parents=True)
+    (entry / "comm").write_text("git\n", encoding="utf-8")
+    (entry / "cwd").symlink_to(tmp_path.anchor)  # cwd "/", nothing in argv
+    (entry / "cmdline").write_bytes(b"git\0cat-file\0--batch\0")
+    # environ unreadable (another user's process): unknown, never False.
+    assert mesh._linux_git_running(proc, repo.resolve()) is None
+    env = f"PATH=/usr/bin\0GIT_DIR={(repo / '.git').as_posix()}\0".encode()
+    (entry / "environ").write_bytes(env)
+    assert mesh._linux_git_running(proc, repo.resolve()) is True
+    (entry / "environ").write_bytes(b"GIT_DIR=/somewhere/else/.git\0")
+    assert mesh._linux_git_running(proc, repo.resolve()) is False
+
+
+def test_idle_stale_ref_lock_is_healed_on_a_successful_tick(
+    pair: tuple[Path, str, Path, str], no_git_running: None
+) -> None:
+    """A lock on a ref no sync step touches never fails a sync, so only the
+    every-tick heal ever clears it."""
+    a, id_a, _b, _ = pair
+    idle = _plant_lock(a, "refs/heads/unused.lock", STALE)
+    lines: list[str] = []
+    mesh._sync_tick(a, id_a, lines.append)
+    assert not idle.exists()
+    assert not any("sync failed" in ln for ln in lines)
+    assert any(ln.startswith("mesh-stale-lock: removed stale .git/refs/heads/unused.lock")
+               for ln in lines)
+
+
+def test_future_dated_lock_warns_and_is_never_healed(
+    omi_dir: Path, no_git_running: None
+) -> None:
+    mesh.mesh_init(omi_dir, log=quiet)
+    lock = _plant_lock(omi_dir, "HEAD.lock", -3600)  # an hour in the future
+    (found,) = mesh.find_git_locks(omi_dir)
+    assert found.future and not found.stale and not found.healable
+    level, message = _doctor(omi_dir)["mesh_git_lock:.git/HEAD.lock"]
+    assert level == "warn"
+    assert "in the future" in message
+    assert mesh.heal_stale_ref_locks(omi_dir, log=quiet) == []
+    assert lock.exists()
+
+
+def test_stale_config_lock_only_warns(omi_dir: Path, no_git_running: None) -> None:
+    mesh.mesh_init(omi_dir, log=quiet)
+    _plant_lock(omi_dir, "config.lock", STALE)
+    level, message = _doctor(omi_dir)["mesh_git_lock:.git/config.lock"]
+    assert level == "warn"
+    assert "never removed automatically" in message
+
+
+def test_peer_filter_matching_nothing_is_not_a_success(
+    pair: tuple[Path, str, Path, str],
+) -> None:
+    a, id_a, _b, _ = pair
+    mesh._update_sync_state(a, lambda s: s.update(consecutive_failures=3))
+    report = mesh.sync(a, id_a, only=["typo"], log=quiet)
+    assert report.peers == []
+    state = mesh.read_sync_state(a)
+    assert state is not None
+    assert state["consecutive_failures"] == 4
+    assert "last_success" not in state
+    assert mesh.sync(a, id_a, log=quiet).ok
+    state = mesh.read_sync_state(a)
+    assert state is not None
+    assert state["consecutive_failures"] == 0
+
+
+def test_remove_if_same_never_deletes_when_relink_fails(
+    omi_dir: Path, monkeypatch: pytest.MonkeyPatch, no_git_running: None
+) -> None:
+    mesh.mesh_init(omi_dir, log=quiet)
+    path = _plant_lock(omi_dir, "HEAD.lock", STALE)
+    (judged,) = mesh.find_git_locks(omi_dir)
+    path.unlink()
+    path.write_bytes(b"fresh")
+    os.utime(path, (time.time(), time.time()))
+
+    def _no_link(*_args: object, **_kw: object) -> None:
+        raise OSError("hard links unsupported")
+
+    monkeypatch.setattr(mesh.os, "link", _no_link)
+    assert mesh._remove_if_same(judged) is False
+    aside = list((omi_dir / ".git").glob("omind-stale-lock-*"))
+    assert len(aside) == 1 and aside[0].read_bytes() == b"fresh"  # kept, never deleted
+
+
+def test_peer_fetch_lock_error_is_diagnosed_and_healed(
+    pair: tuple[Path, str, Path, str], no_git_running: None
+) -> None:
+    a, id_a, b, id_b = pair
+    assert mesh.sync(a, id_a, log=quiet).ok  # refs/remotes/b/main now exists
+    OmiStore(b, node_id=id_b).create_note(NoteFields(title="From B", summary="s"))
+    mesh.sync(b, id_b, log=quiet)
+    tracking = _plant_lock(a, "refs/remotes/b/main.lock", STALE)
+    lines: list[str] = []
+    mesh._sync_tick(a, id_a, lines.append)
+    assert any(
+        ln.startswith("sync failed: stale git lock .git/refs/remotes/b/main.lock") for ln in lines
+    )
+    assert not tracking.exists()
+    assert mesh.sync(a, id_a, log=quiet).ok
+    assert "From B.md" in git(a, "ls-files").stdout.splitlines()
+
+
+def test_lock_error_pattern_covers_git_s_wordings() -> None:
+    for message in (
+        "fatal: cannot lock ref 'HEAD': Unable to create '/v/OMI/.git/HEAD.lock': File exists.",
+        "error: fetching ref refs/remotes/b/main failed: reference already exists",
+        "fatal: Unable to create '/v/OMI/.git/index.lock': File exists.",
+    ):
+        assert mesh._LOCK_ERROR_RE.search(message), message
+    assert not mesh._LOCK_ERROR_RE.search("fatal: could not read from remote repository")

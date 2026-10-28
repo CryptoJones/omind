@@ -50,8 +50,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     meantime is put back), then runs
     `git fsck --connectivity-only`, records a `mesh-stale-lock` event (stderr and a
     doctor line), and retries the sync once.
-  - All of this fails open: a detection or heal error falls back to the plain
-    `sync failed` line and never stops sync or doctor.
+  - Every daemon tick also heals stale ref locks that never fail a local sync (a
+    lock on `refs/omind/<peer>` or an unused branch), under the same guards.
+  - All of this fails open: any exception in a tick (not only a git error) becomes
+    one `sync failed` line and is recorded, so the daemon never dies into a service
+    restart loop; `diagnose_mesh` never raises, and a malformed state file (an
+    infinite failure count, a non-list field) becomes a warn line at worst.
+  - Hardening from the Flatline Roundtable review of #501:
+    - A symlinked `.git/refs` root is never walked (with `refs -> .`, `index.lock`
+      read as a ref lock and was removed), and every ref lock's real path must stay
+      inside the real `refs/` directory (git-new-workdir links refs to another repo).
+    - On Linux a git process aimed at the repo through `GIT_DIR`, `GIT_WORK_TREE`,
+      `GIT_COMMON_DIR` or `GIT_INDEX_FILE` counts as live; an unreadable environment
+      makes the answer "unknown", never "none".
+    - A lock dated more than 60s in the future is reported (warn) and never healed.
+    - Doctor fails `mesh_sync` (non-zero exit) when the last success is over 24h old
+      and syncs are still failing. A stale `config.lock` warns rather than fails.
+    - `omind mesh sync --peer <typo>` syncs nothing and no longer counts as success.
+    - The state keeps only the last self-heal (`last_lock_event`), not a list.
+    - The 3.10-only filelock CVE ignores in CI now apply to the 3.10 legs only.
 
 ## [10.3.6] - 2026-10-28
 
