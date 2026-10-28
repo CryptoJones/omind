@@ -239,7 +239,7 @@ This is strictly simpler than tombstoning every delete, and it is reversible.
 | `omind mesh clone <url>` | Seed a fresh node from a peer. |
 | `omind mesh purge <note>` | Rare, deliberate hard-delete-with-tombstone. The default "delete" only disables; this is the exception. |
 | `omind setup` | Register the **local** node with Claude Code (stdio). |
-| `omind doctor` | Extended: git health, merge driver installed, per-peer ahead/behind, last-sync time, unresolved-conflict list. |
+| `omind doctor` | Extended: git health, merge driver installed, per-peer ahead/behind, last successful sync and consecutive failures, stale git `*.lock` files (path + age), the last `mesh-stale-lock` self-heal, unresolved-conflict list. |
 
 ## Testing
 

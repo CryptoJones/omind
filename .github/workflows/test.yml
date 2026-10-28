@@ -45,7 +45,7 @@ jobs:
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: mypy src
-      # filelock is not an omind dependency — pip-audit pulls it for its own
+      # filelock reaches this dev install only through pip-audit, for its own
       # cachecontrol filecache. Its fix (4.2.1) requires Python >=3.11, so the
       # 3.10 matrix legs can never install a fixed version; ignore the six
       # CVEs rather than pretend the 3.10 legs can be green. pip-audit 2.10

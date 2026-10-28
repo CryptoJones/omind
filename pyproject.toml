@@ -1,6 +1,6 @@
 [project]
 name = "omind"
-version = "10.3.6"
+version = "10.3.7"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
 requires-python = ">=3.10"
@@ -41,7 +41,8 @@ dependencies = [
     # Deliberately stepped to the mcp 2.x major (the cap above did its job and
     # held the fleet at 1.x until this was reviewed): 2.0 implements MCP
     # revision 2026-07-28, the stateless revision. Re-capped at the next major.
-    "mcp>=2.0.0,<3.0",
+    # Floor 2.2.0 is the security fix for CVE-2026-116684/5/6 and CVE-2026-59951 (#499).
+    "mcp>=2.2.0,<3.0",
     "tomlkit>=0.12,<1.0",
     # Security floors for runtime transitives pulled by fastapi/mcp.
     "cryptography>=50.0.0,<51.0",
@@ -51,6 +52,8 @@ dependencies = [
     # the older 2026.7.22 on some CI legs; the floor makes the fixed version
     # deterministic everywhere pip-audit looks.
     "certifi>=2026.10.19,<2027",
+    # Security floor for CVE-2026-114603 (opentelemetry-api via mcp, #499).
+    "opentelemetry-api>=1.45.1,<2.0",
 ]
 
 [project.optional-dependencies]
@@ -63,6 +66,10 @@ e2e = [
 embed = [
     "model2vec>=0.3,<1.0",
     "numpy>=1.24,<3.0",
+    # Security floor for CVE-2026-112940 (PyPI filelock via huggingface-hub, #499).
+    # Unrelated to omind.filelock, our own flock shim; nothing imports this one.
+    # 4.2.1 needs Python 3.11+, so 3.10 keeps the 3.x line (no fixed release exists there).
+    "filelock>=4.2.1,<5.0; python_version >= '3.11'",
 ]
 dev = [
     "pytest>=8.0",
@@ -77,8 +84,8 @@ dev = [
     # Exercise vector-index paths in CI without the model backend. NumPy 2.5's
     # stubs require newer syntax than mypy's configured Python 3.10 target.
     "numpy>=1.24,<2.5",
-    # Security floor for pip-audit/cachecontrol's msgpack edge.
-    "msgpack>=1.2.1,<2.0",
+    # Security floor for pip-audit/cachecontrol's msgpack edge (CVE-2026-114613, #499).
+    "msgpack>=1.2.3,<2.0",
     # Security floor for PYSEC-2026-3721.
     "pip>=26.2",
     "types-PyYAML",
