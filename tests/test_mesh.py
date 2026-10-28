@@ -932,3 +932,41 @@ def test_linux_proc_scan_attributes_git_to_the_repo(tmp_path: Path) -> None:
     (proc / "5").mkdir()
     (proc / "5" / "comm").write_text("git\n", encoding="utf-8")  # cwd unreadable
     assert mesh._linux_git_running(proc, repo.resolve()) is None
+
+
+def test_removal_is_identity_checked_against_a_recreated_lock(
+    omi_dir: Path, no_git_running: None
+) -> None:
+    """A lock git released and re-created after the stale judgement is a
+    different file: it is put back, never deleted (review, #501)."""
+    mesh.mesh_init(omi_dir, log=quiet)
+    path = _plant_lock(omi_dir, "HEAD.lock", STALE)
+    (judged,) = mesh.find_git_locks(omi_dir)
+    path.unlink()
+    path.write_bytes(b"fresh")
+    os.utime(path, (time.time(), time.time()))
+    assert mesh._remove_if_same(judged) is False
+    assert path.read_bytes() == b"fresh"
+    assert not list((omi_dir / ".git").glob("omind-stale-lock-*"))
+
+    (rejudged,) = mesh.find_git_locks(omi_dir)
+    assert mesh._remove_if_same(rejudged) is True
+    assert not path.exists()
+    assert not list((omi_dir / ".git").glob("omind-stale-lock-*"))
+
+
+def test_any_exception_in_a_pass_is_recorded(
+    omi_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    cfg = mesh.mesh_init(omi_dir, log=quiet)
+
+    def _corrupt(*_args: object, **_kw: object) -> mesh.SyncReport:
+        raise UnicodeDecodeError("utf-8", b"\xff", 0, 1, "corrupt tombstones")
+
+    monkeypatch.setattr(mesh, "_sync_pass", _corrupt)
+    with pytest.raises(UnicodeDecodeError):
+        mesh.sync(omi_dir, cfg.node_id, log=quiet)
+    state = mesh.read_sync_state(omi_dir)
+    assert state is not None
+    assert state["consecutive_failures"] == 1
+    assert "corrupt tombstones" in state["last_error"]

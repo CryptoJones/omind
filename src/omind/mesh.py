@@ -696,8 +696,8 @@ def _update_sync_state(omi_dir: Path, mutate: Callable[[dict[str, Any]], None]) 
             state = read_sync_state(omi_dir) or {}
             mutate(state)
             _atomic_write(path, json.dumps(state, indent=2) + "\n")
-    except Exception:
-        pass
+    except Exception:  # advisory state, fail-open: a sync never fails over it
+        return
 
 
 def _failure_count(state: dict[str, Any]) -> int:
@@ -780,8 +780,10 @@ def sync(
     omi_dir = Path(omi_dir).expanduser()
     try:
         return _sync_pass(omi_dir, node_id, only=only, log=log)
-    except MeshError as exc:
-        _record_sync_failure(omi_dir, _first_line(str(exc)))
+    except Exception as exc:
+        # Any exception, not only MeshError: a corrupt tombstone file or an
+        # index write error repeats every tick just the same (review, #501).
+        _record_sync_failure(omi_dir, _first_line(str(exc)) or type(exc).__name__)
         raise
 
 
@@ -983,6 +985,8 @@ class GitLock:
     age_seconds: float
     kind: str  # "ref" | "index" | "config"
     git_running: bool | None
+    #: (st_dev, st_ino, st_mtime_ns) when judged — removal proves it is the same file.
+    identity: tuple[int, int, int] = (0, 0, 0)
 
     @property
     def stale(self) -> bool:
@@ -1110,7 +1114,7 @@ def find_git_locks(omi_dir: Path, *, now: float | None = None) -> list[GitLock]:
         for root, _dirs, files in os.walk(refs):  # followlinks=False
             candidates.extend((Path(root) / f, "ref") for f in files if f.endswith(".lock"))
     clock = time.time() if now is None else now
-    found: list[tuple[Path, str, float]] = []
+    found: list[tuple[Path, str, float, tuple[int, int, int]]] = []
     for path, kind in candidates:
         try:
             st = path.lstat()
@@ -1118,11 +1122,14 @@ def find_git_locks(omi_dir: Path, *, now: float | None = None) -> list[GitLock]:
             continue  # absent, or released between the scan and the stat
         if not stat.S_ISREG(st.st_mode):
             continue  # never act on a symlink or directory named *.lock
-        found.append((path, kind, max(0.0, clock - st.st_mtime)))
+        ident = (st.st_dev, st.st_ino, st.st_mtime_ns)
+        found.append((path, kind, max(0.0, clock - st.st_mtime), ident))
     running: bool | None = None
-    if any(age >= STALE_LOCK_SECONDS for _, _, age in found):
+    if any(age >= STALE_LOCK_SECONDS for _, _, age, _ in found):
         running = _git_process_running(git_dir.parent)
-    return [GitLock(path, age, kind, running) for path, kind, age in sorted(found)]
+    return [
+        GitLock(path, age, kind, running, ident) for path, kind, age, ident in sorted(found)
+    ]
 
 
 def _fmt_age(seconds: float) -> str:
@@ -1152,6 +1159,30 @@ def _record_lock_event(omi_dir: Path, event: dict[str, Any]) -> None:
     _update_sync_state(omi_dir, mutate)
 
 
+def _remove_if_same(lock: GitLock) -> bool:
+    """Remove *lock* only if the file at its path is still the one judged stale.
+
+    A plain ``unlink(path)`` would race: git could release the old lock and
+    create a fresh one at the same path between the re-check and the unlink.
+    Instead the lock is atomically renamed aside (into ``.git/`` itself, where
+    the name cannot read as a ref), and its identity — device, inode, mtime —
+    compared with what was judged. A different file is put back with a
+    no-clobber hard link; if even that is impossible it is left beside the
+    path, never deleted. Returns whether the judged lock was removed.
+    """
+    git_dir = next(p for p in lock.path.parents if p.name == ".git")
+    aside = git_dir / f"omind-stale-lock-{secrets.token_hex(6)}"
+    os.replace(lock.path, aside)
+    st = aside.lstat()
+    if (st.st_dev, st.st_ino, st.st_mtime_ns) == lock.identity:
+        aside.unlink()
+        return True
+    with contextlib.suppress(OSError):
+        os.link(aside, lock.path)  # fails rather than clobber a newer lock
+        aside.unlink()
+    return False
+
+
 def heal_stale_ref_locks(omi_dir: Path, log: Logger = print) -> list[GitLock]:
     """Remove provably stale REF locks, then check the repo with ``git fsck``.
 
@@ -1163,13 +1194,17 @@ def heal_stale_ref_locks(omi_dir: Path, log: Logger = print) -> list[GitLock]:
     """
     omi_dir = Path(omi_dir).expanduser()
     removed: list[GitLock] = []
-    fsck_result = "not run"
     with OmiStore(omi_dir).write_lock():
         for lock in find_git_locks(omi_dir):
             if not lock.healable:
                 continue
             try:
-                lock.path.unlink()
+                if not _remove_if_same(lock):
+                    log(
+                        f"mesh-stale-lock: {_lock_label(omi_dir, lock)} changed while being "
+                        "removed; left in place"
+                    )
+                    continue
             except FileNotFoundError:
                 continue  # someone else cleared it
             except OSError as exc:

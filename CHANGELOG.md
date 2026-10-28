@@ -45,7 +45,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   - On a failed tick caused by a lock error, the daemon logs ONE line naming the
     stale lock. It self-heals only provably stale REF locks (`HEAD.lock`,
     `refs/**/*.lock`, `packed-refs.lock`), never `index.lock` or `config.lock`. It
-    re-checks each lock under the store write lock, then runs
+    re-checks each lock under the store write lock and removes it only if it is still
+    the same file (renamed aside and identity-checked, so a lock git re-created in the
+    meantime is put back), then runs
     `git fsck --connectivity-only`, records a `mesh-stale-lock` event (stderr and a
     doctor line), and retries the sync once.
   - All of this fails open: a detection or heal error falls back to the plain
