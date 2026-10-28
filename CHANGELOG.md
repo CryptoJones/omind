@@ -47,7 +47,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
     `refs/**/*.lock`, `packed-refs.lock`), never `index.lock` or `config.lock`. It
     re-checks each lock under the store write lock and removes it only if it is still
     the same file (renamed aside and identity-checked, so a lock git re-created in the
-    meantime is put back), then runs
+    meantime is put back with a no-clobber hard link; if even that fails, it is left,
+    never deleted, as `.git/omind-stale-lock-*` and the daemon log says so), then runs
     `git fsck --connectivity-only`, records a `mesh-stale-lock` event (stderr and a
     doctor line), and retries the sync once.
   - Every daemon tick also heals stale ref locks that never fail a local sync (a

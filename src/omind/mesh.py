@@ -1274,7 +1274,8 @@ def heal_stale_ref_locks(omi_dir: Path, log: Logger = print) -> list[GitLock]:
                 if not _remove_if_same(lock):
                     log(
                         f"mesh-stale-lock: {_lock_label(omi_dir, lock)} changed while being "
-                        "removed; left in place"
+                        "removed; put back (or, if that failed, left as "
+                        ".git/omind-stale-lock-*)"
                     )
                     continue
             except FileNotFoundError:
