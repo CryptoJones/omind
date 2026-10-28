@@ -7,11 +7,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Removed
-- **PyPI publishing (`publish.yml`) and the `#267` publish blocker.** omind is an MCP
-  server installed from source with `uv tool`, not a library distributed on PyPI, so the
-  trusted-publishing pipeline was dropped. Releases stay GitHub releases on `v<version>`
-  tags that the fleet installs from git; nothing uploads to a package index.
+## [10.3.4] - 2026-10-27
+
+### Added
+- **PyPI publishing ([#267](https://github.com/CryptoJones/omind/issues/267)).**
+  `publish.yml` is back and now authenticates with a PyPI API token (the
+  `PYPI_API_TOKEN` secret of the `pypi` environment) instead of trusted publishing.
+  Every published GitHub release builds the sdist and wheel, checks the tag matches the
+  packaged version, runs `twine check --strict`, and uploads to PyPI. This reverses the
+  won't-do in #488.
 
 ## [10.3.3] - 2026-10-26
 
