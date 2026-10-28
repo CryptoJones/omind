@@ -11,7 +11,14 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-_Nothing open right now._
+- [ ] **Priority 1 — Security: bump locked deps for 21 open Dependabot alerts** ([#499](https://github.com/CryptoJones/omind/issues/499)) — _security_ —
+  2 critical (brotli), 6 high (aiohttp, dnspython, filelock, msgpack), plus mcp and
+  opentelemetry-api. Relock `uv.lock` and raise the `pyproject.toml` security floors so PyPI
+  installs get the fixes too; `pip-audit` clean, then 10.3.7 and a fleet roll.
+- [ ] **Priority 2 — Mesh sync fails silently for weeks on a stale git ref lock** ([#498](https://github.com/CryptoJones/omind/issues/498)) — _bug_ —
+  telesto's daemon failed every tick from 2026-09-23 to 10-28 on a leftover `HEAD.lock` /
+  `refs/heads/main.lock` while `omind doctor` reported healthy. Detect stale locks and stale
+  last-sync in doctor; self-heal only when provably safe.
 
 ## Not planned
 
