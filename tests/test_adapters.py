@@ -801,3 +801,89 @@ def test_non_shell_tool_with_a_command_key_is_not_bash() -> None:
         {"tool_name": "read_file", "tool_input": {"command": "x", "path": "/a"}}
     )
     assert action["tool"] == "read_file"
+
+
+# --- #475: Antigravity send_command_input types into a running command ---
+
+
+def _agy_stdin_event(text: str, session: str, root: Path | None = None) -> dict[str, Any]:
+    event: dict[str, Any] = {
+        "toolCall": {"name": "send_command_input", "args": {"CommandId": "abc", "Input": text}},
+        "conversationId": session,
+    }
+    if root is not None:
+        event["workspacePaths"] = [str(root)]
+    return event
+
+
+@pytest.mark.parametrize("text", ["gh repo delete a/b\n", "gh repo delete a/b\r\n"])
+def test_agy_send_command_input_hard_rule_is_denied(
+    text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#475: a hard-rule command typed into a running shell is denied, the
+    same as when run_command starts it, trailing Enter or not."""
+    code = adapters.run_adapter(
+        io.StringIO(json.dumps(_agy_stdin_event(text, "agy-475-hard"))), harness="agy"
+    )
+    out = capsys.readouterr().out
+    assert code == 0
+    body = json.loads(out)
+    assert body["decision"] == "deny"
+    assert "delete a repo" in body["reason"]
+
+
+def test_agy_send_command_input_normalizes_to_bash() -> None:
+    from omind import harness as harness_mod
+
+    event = harness_mod.translate_event("agy", _agy_stdin_event("git commit -am x\n", "s"))
+    action = adapters.normalize_action(event)
+    assert action["tool"] == "Bash"
+    assert action["command"] == "git commit -am x"
+
+
+def test_agy_send_command_input_commit_hits_the_freshness_gate(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#475: `git commit` typed into a running shell meets the commit
+    freshness gate exactly as run_command's commit does."""
+    target = _bare_repo(tmp_path, "todo")
+    session = "agy-475-fresh"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+
+    def run(event: dict[str, Any]) -> tuple[bool, str]:
+        code = adapters.run_adapter(io.StringIO(json.dumps(event)), harness="agy")
+        captured = capsys.readouterr()
+        return not _denied(code, captured.out), captured.out + captured.err
+
+    allowed, text = run(_agy_stdin_event("git commit -am x\n", session, target))
+    assert not allowed, "a typed commit before any fetch must be blocked"
+    assert "freshness" in text
+    shell_allowed, shell_text = run(
+        {
+            "toolCall": {"name": "run_command", "args": {"CommandLine": "git commit -am x"}},
+            "conversationId": session,
+            "workspacePaths": [str(target)],
+        }
+    )
+    assert not shell_allowed and "freshness" in shell_text
+    guard.clear_gate(session)
+
+
+@pytest.mark.parametrize("text", ["y\n", "q", "\n", ""])
+def test_agy_send_command_input_harmless_text_is_allowed(
+    text: str, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#475: a keystroke answer to a prompt is not a repo action; it is
+    allowed once the turn has consulted memory, and never raises."""
+    session = f"agy-475-ok-{len(text)}"
+    guard.clear_gate(session)
+    guard.mark_consulted(session)
+    code = adapters.run_adapter(
+        io.StringIO(json.dumps(_agy_stdin_event(text, session))), harness="agy"
+    )
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out) == {"decision": "allow"}
+    assert "internal error" not in captured.err
+    guard.clear_gate(session)

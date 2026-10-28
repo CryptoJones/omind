@@ -583,6 +583,14 @@ def shell_command_text(tool_input: object) -> str:
     (Codex ``local_shell``) is joined with spaces. PreToolUse and the
     PostToolUse retraction both read it here, so a failed fetch is retracted
     under the same key it was granted under (#473).
+
+    Last, ``Input``: the text Antigravity's ``send_command_input`` types into a
+    command that is already running (#475). Its trailing ``\r``/``\n`` (the
+    Enter keystroke) is stripped so ``"git commit -am x\n"`` meets the same
+    rules and gates as the bare command. Each write is judged on its own: there
+    is no reassembly across writes, so a command split over several keystroke
+    writes is a known limit of this text-matching guard. Codex ``write_stdin``
+    is not read: it never fires PreToolUse, so no hook event carries it.
     """
     if not isinstance(tool_input, dict):
         return ""
@@ -594,6 +602,9 @@ def shell_command_text(tool_input: object) -> str:
             joined = " ".join(str(part) for part in value if part is not None).strip()
             if joined:
                 return joined
+    typed = tool_input.get("Input")
+    if isinstance(typed, str):
+        return typed.rstrip("\r\n")
     return ""
 
 
@@ -1404,6 +1415,7 @@ SHELL_TOOL_NAMES = frozenset(
         "shell_command",  # Codex
         "terminal",  # Hermes
         "run_command",  # Antigravity
+        "send_command_input",  # Antigravity, stdin to a running command
         "run_shell_command",  # Gemini CLI
         "run_terminal_command",  # Grok
     }
