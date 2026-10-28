@@ -2668,6 +2668,45 @@ def test_failed_fetch_is_retracted_for_every_shell_tool(
     assert not guard._git_fresh_for_repo(session, repo)
 
 
+@pytest.mark.parametrize(
+    ("tool_input", "expected"),
+    [
+        ({"CommandId": "abc", "Input": "git commit -am x\n"}, "git commit -am x"),
+        ({"Input": "gh repo delete a/b\r\n"}, "gh repo delete a/b"),
+        ({"Input": "y"}, "y"),
+        ({"Input": "\n"}, ""),
+        ({"Input": 7}, ""),
+        # command / CommandLine / cmd still win over Input.
+        ({"command": "ls", "Input": "gh repo delete a/b"}, "ls"),
+        ({"CommandLine": "ls", "Input": "gh repo delete a/b"}, "ls"),
+        ({"cmd": "ls", "Input": "gh repo delete a/b"}, "ls"),
+        # The existing keys keep their text as sent.
+        ({"command": "git status\n"}, "git status\n"),
+    ],
+)
+def test_shell_command_text_reads_antigravity_input(
+    tool_input: dict[str, object], expected: str
+) -> None:
+    """#475: Antigravity send_command_input's `Input` is shell text, with the
+    trailing Enter stripped, read only when no command key is present."""
+    assert guard.shell_command_text(tool_input) == expected
+
+
+def test_send_command_input_is_a_shell_tool() -> None:
+    assert "send_command_input" in guard.SHELL_TOOL_NAMES
+    assert "write_stdin" not in guard.SHELL_TOOL_NAMES  # never fires PreToolUse
+
+
+def test_omi_guard_fail_closed_regex_covers_every_shell_tool() -> None:
+    """The shell fallback's fail-closed tool list stays in step with
+    guard.SHELL_TOOL_NAMES, so no shell tool runs unchecked without the core."""
+    sh = importlib.resources.files("omind").joinpath("omi-guard.sh").read_text(encoding="utf-8")
+    match = re.search(r'"\(tool_name\|toolName\)".*?"\(([^)]*)\)"', sh)
+    assert match is not None
+    names = set(match.group(1).split("|"))
+    assert names >= guard.SHELL_TOOL_NAMES
+
+
 # ---------------------------------------------------------------------------
 # #296 — consult continuity: continuation prompts, retry carry, action budget
 # ---------------------------------------------------------------------------

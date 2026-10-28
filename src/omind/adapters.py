@@ -94,6 +94,9 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
             tool_input = args
     tool_input = tool_input if isinstance(tool_input, dict) else {}
     command = _derive_command(event, tool_input)
+    # #475: text typed into a running command is judged, but never grants
+    # commit freshness (guard.STDIN_TOOL_NAMES).
+    stdin_write = tool in guard.STDIN_TOOL_NAMES
     if command and tool in guard.SHELL_TOOL_NAMES:
         tool = "Bash"
     file_path = _first_str(
@@ -122,6 +125,7 @@ def normalize_action(event: dict[str, Any]) -> dict[str, Any]:
         # #394: the agent's shell cwd, so the target repo is resolved from where
         # the command runs, not from wherever this hook process started.
         "cwd": _first_str(event, ("cwd",)),
+        "stdin_write": stdin_write,
     }
 
 

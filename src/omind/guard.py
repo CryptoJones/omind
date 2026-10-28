@@ -583,6 +583,14 @@ def shell_command_text(tool_input: object) -> str:
     (Codex ``local_shell``) is joined with spaces. PreToolUse and the
     PostToolUse retraction both read it here, so a failed fetch is retracted
     under the same key it was granted under (#473).
+
+    Last, ``Input``: the text Antigravity's ``send_command_input`` types into a
+    command that is already running (#475). Its trailing ``\r``/``\n`` (the
+    Enter keystroke) is stripped so ``"git commit -am x\n"`` meets the same
+    rules and gates as the bare command. Each write is judged on its own: there
+    is no reassembly across writes, so a command split over several keystroke
+    writes is a known limit of this text-matching guard. Codex ``write_stdin``
+    is not read: it never fires PreToolUse, so no hook event carries it.
     """
     if not isinstance(tool_input, dict):
         return ""
@@ -594,6 +602,9 @@ def shell_command_text(tool_input: object) -> str:
             joined = " ".join(str(part) for part in value if part is not None).strip()
             if joined:
                 return joined
+    typed = tool_input.get("Input")
+    if isinstance(typed, str):
+        return typed.rstrip("\r\n")
     return ""
 
 
@@ -1404,10 +1415,18 @@ SHELL_TOOL_NAMES = frozenset(
         "shell_command",  # Codex
         "terminal",  # Hermes
         "run_command",  # Antigravity
+        "send_command_input",  # Antigravity, stdin to a running command
         "run_shell_command",  # Gemini CLI
         "run_terminal_command",  # Grok
     }
 )
+
+#: Shell tools that type into a command already running rather than start one
+#: (#475). Their text is judged like any shell command, but a fetch typed this
+#: way never grants commit freshness: the text may not reach a shell at all,
+#: and the tool's result never carries the fetch's exit code, so a failed
+#: fetch could not be retracted on PostToolUse.
+STDIN_TOOL_NAMES = frozenset({"send_command_input"})  # Antigravity
 _WRITE_TOOLS = frozenset(
     {
         "Edit",
@@ -4809,7 +4828,11 @@ def _soft_verdict(
     judging budget runs out; :func:`decide` then denies (#460)."""
     repo = _repo_root_for_action(action)
 
-    if repo is not None and _is_freshness_command(command):
+    if (
+        repo is not None
+        and not action.get("stdin_write")
+        and _is_freshness_command(command)
+    ):
         # Recorded optimistically here (PreToolUse cannot know the exit code);
         # a FAILED fetch is retracted by guard.record_freshness_outcome on
         # PostToolUse, so a fetch that exits 1 no longer satisfies the

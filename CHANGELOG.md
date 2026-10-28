@@ -7,6 +7,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.3.5] - 2026-10-28
+
+### Fixed
+- **Text typed into a running command in Antigravity was never judged
+  ([#475](https://github.com/CryptoJones/omind/issues/475)).** Antigravity's
+  `send_command_input` sends its `Input` to a command `run_command` left running,
+  so `gh repo delete …` or `git commit -am x` typed into an open shell skipped the
+  hard rules, the repo-work gate and the commit freshness gate. `send_command_input`
+  is now in `guard.SHELL_TOOL_NAMES` (and the `omi-guard.sh` fail-closed list), and
+  `guard.shell_command_text` reads `Input` after `command` / `CommandLine` / `cmd`,
+  with the trailing Enter (`\r` / `\n`) stripped, so the typed text meets the same
+  rules as the bare command. A fetch typed this way is allowed but never grants
+  commit freshness (`guard.STDIN_TOOL_NAMES`): the text may not reach a shell, and
+  the tool's result carries no exit code to retract a failed fetch with. Each write
+  is judged on its own; there is no reassembly across writes, so a command split
+  over several keystroke writes is a known limit. Codex `write_stdin` is not covered and cannot be: per the
+  [Codex hooks docs](https://learn.chatgpt.com/docs/hooks) it never fires PreToolUse.
+
 ## [10.3.4] - 2026-10-27
 
 ### Added
