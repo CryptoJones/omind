@@ -15,7 +15,7 @@ import os
 import shutil
 import sys
 import time
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -338,13 +338,13 @@ def test_purge_propagates_via_tombstone(pair: tuple[Path, str, Path, str]) -> No
 
 def test_expired_tombstone_stops_deleting_and_is_gc_d(tmp_path: Path) -> None:
     """A tombstone past its TTL must not delete a re-created note, and is GC'd (#127)."""
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     omi = tmp_path / "OMI"
     store = OmiStore(omi)
     store.create_note(NoteFields(title="Reborn", summary="fresh content"))
     tomb = omi / mesh.TOMBSTONES_FILENAME
-    old = (datetime.now(timezone.utc) - timedelta(days=mesh.TOMBSTONE_TTL_DAYS + 1)).isoformat()
+    old = (datetime.now(UTC) - timedelta(days=mesh.TOMBSTONE_TTL_DAYS + 1)).isoformat()
     tomb.write_text(f"{old}\tReborn.md\n", encoding="utf-8")
     with store.write_lock():
         mesh._apply_tombstones(omi, store)
@@ -354,13 +354,13 @@ def test_expired_tombstone_stops_deleting_and_is_gc_d(tmp_path: Path) -> None:
 
 def test_recent_tombstone_still_deletes(tmp_path: Path) -> None:
     """A dated tombstone within the TTL still applies."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     omi = tmp_path / "OMI"
     store = OmiStore(omi)
     store.create_note(NoteFields(title="Doomed", summary="s"))
     tomb = omi / mesh.TOMBSTONES_FILENAME
-    tomb.write_text(f"{datetime.now(timezone.utc).isoformat()}\tDoomed.md\n", encoding="utf-8")
+    tomb.write_text(f"{datetime.now(UTC).isoformat()}\tDoomed.md\n", encoding="utf-8")
     with store.write_lock():
         mesh._apply_tombstones(omi, store)
     assert not (omi / "Doomed.md").exists()
@@ -370,7 +370,7 @@ def test_tombstone_keeps_an_edit_newer_than_the_purge(tmp_path: Path) -> None:
     """A tombstone captures the purge-time Rev; a note whose live Rev dominates
     it was edited after the purge decision, so the edit survives and is
     reported instead of being destroyed silently (2026-08-27 review)."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     omi = tmp_path / "OMI"
     store = OmiStore(omi, node_id="test-a")  # stamped revs require a node id
@@ -381,7 +381,7 @@ def test_tombstone_keeps_an_edit_newer_than_the_purge(tmp_path: Path) -> None:
     # captured the purge-time rev.
     tomb = omi / mesh.TOMBSTONES_FILENAME
     tomb.write_text(
-        f"{datetime.now(timezone.utc).isoformat()}\tRaced.md\t{live_rev}\n",
+        f"{datetime.now(UTC).isoformat()}\tRaced.md\t{live_rev}\n",
         encoding="utf-8",
     )
     store.update_note(
@@ -396,14 +396,14 @@ def test_tombstone_keeps_an_edit_newer_than_the_purge(tmp_path: Path) -> None:
 
 def test_tombstone_without_a_rev_still_deletes(tmp_path: Path) -> None:
     """Legacy two-field tombstones keep the old unlink behavior."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     omi = tmp_path / "OMI"
     store = OmiStore(omi)
     fields = store.create_note(NoteFields(title="Legacy", summary="s"))
     tomb = omi / mesh.TOMBSTONES_FILENAME
     tomb.write_text(
-        f"{datetime.now(timezone.utc).isoformat()}\tLegacy.md\n", encoding="utf-8"
+        f"{datetime.now(UTC).isoformat()}\tLegacy.md\n", encoding="utf-8"
     )
     with store.write_lock():
         mesh._apply_tombstones(omi, store)
@@ -865,7 +865,7 @@ def test_failed_syncs_are_counted_and_doctor_warns_on_old_success(
     assert "last successful sync" in message
     assert "2 failed sync(s) in a row" in message
 
-    an_hour_ago = (datetime.now(timezone.utc) - timedelta(hours=1)).isoformat()
+    an_hour_ago = (datetime.now(UTC) - timedelta(hours=1)).isoformat()
     mesh._update_sync_state(a, lambda s: s.update(last_success=an_hour_ago))
     assert _doctor(a)["mesh_sync"][0] == "warn"
 
@@ -1034,7 +1034,7 @@ def _write_raw_state(omi: Path, text: str) -> None:
 
 def test_doctor_tolerates_malformed_sync_state(pair: tuple[Path, str, Path, str]) -> None:
     a, _id_a, _b, _ = pair
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     _write_raw_state(
         a,
         '{"last_success": 3, "consecutive_failures": 1e309, "peers": 5, '

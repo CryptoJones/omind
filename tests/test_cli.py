@@ -15,7 +15,7 @@ from omind.cli import build_parser, main
 def test_version_is_set() -> None:
     # Compare against pyproject's version (the single source of truth) so a
     # release bump can't leave __version__ behind — that happened in 2.0.1.
-    # (regex, not tomllib: CI's floor is 3.10)
+    # (regex; tomllib would do too now that the floor is 3.11)
     pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
     declared = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
     assert declared is not None

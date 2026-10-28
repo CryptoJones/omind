@@ -7,6 +7,34 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.4.0] - 2026-10-28
+
+### Removed
+- **Python 3.10 support
+  ([#502](https://github.com/CryptoJones/omind/issues/502)).** omind now requires
+  Python 3.11+ (`requires-python = ">=3.11"`). Python 3.10 reaches end of life this
+  month, no fleet host runs it (they run 3.12–3.14), and the fixed releases of
+  filelock (4.2.1+) and dnspython (2.9.0+) need 3.11+, so the 3.10 lock split could
+  only ever carry vulnerable versions. The 3.10 classifier, the 3.10 CI legs (the
+  Windows and macOS legs are now 3.11 + 3.14) and the 3.10-only `pip-audit
+  --ignore-vuln` exceptions are gone; mypy and ruff target 3.11.
+  - **Upgrading from a 3.10 install.** A `uv tool` install updates normally: uv
+    rebuilds the tool environment on a compatible Python it finds or downloads.
+    A pip install on 3.10 cannot take 10.4.0. `omind self-update` tries the
+    release in a throwaway venv first, so it refuses and leaves the working 3.10
+    install untouched. Reinstall on a newer Python, e.g.
+    `uv tool install --force omind`. From 10.4.0 on, that refusal names the Python
+    mismatch and the fix instead of pip's trailing `[notice] A new release of pip`
+    banner, and the trial venv no longer runs pip's version check.
+
+### Security
+- **The last 7 Dependabot alerts are cleared.** They were all on 3.10-only
+  `uv.lock` entries with no fixed release there: filelock 4.1.0 (1 high, 3 medium,
+  2 low) and dnspython 2.8.0 (1 high, `e2e` extra only). With the 3.10 split gone the
+  lock carries only filelock 4.2.4 and dnspython 2.9.0, the `embed` extra's
+  `filelock>=4.2.1,<5.0` floor no longer needs a `python_version >= '3.11'` marker,
+  and `pip-audit` runs with no ignores on every CI leg.
+
 ## [10.3.7] - 2026-10-28
 
 ### Security

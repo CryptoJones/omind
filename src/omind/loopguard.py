@@ -38,7 +38,7 @@ import contextlib
 import json
 import os
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 
@@ -64,7 +64,7 @@ def _path() -> Path:
 
 
 def _now(now: datetime | None) -> datetime:
-    return now if now is not None else datetime.now(timezone.utc)
+    return now if now is not None else datetime.now(UTC)
 
 
 def _clean_session(session: object) -> str | None:

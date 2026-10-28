@@ -590,7 +590,7 @@ _GIT_OPT_VALUE = r"""(?:\\.|[^\s"'\\]|"[^"]*"|'[^']*')+"""
 # branch and the generic `--long[=v]` one, so a run of them with no push after
 # backtracked exponentially (8.6 s at 24 options, #413 review 3). The generic
 # branch excludes the named options by lookahead; possessive quantifiers and
-# atomic groups would also do it, but need Python 3.11 and we support 3.10.
+# atomic groups (Python 3.11+) would also do it; the lookahead form predates them.
 _GIT_NAMED_OPTS = r"(?:git-dir|work-tree|namespace|super-prefix|config-env)"
 _GIT_GLOBAL_OPTS = (
     rf"(?:-[Cc][ \t]+{_GIT_OPT_VALUE}[ \t]+"

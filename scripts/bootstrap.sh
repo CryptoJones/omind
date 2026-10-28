@@ -9,7 +9,7 @@
 # shells out to git (the mesh replicates over it) and the `claude` CLI (to
 # register the MCP server). The dependencies this script handles are exactly:
 #
-#   - uv      : installs omind in an isolated venv and bootstraps Python >=3.10
+#   - uv      : installs omind in an isolated venv and bootstraps Python >=3.11
 #               (auto-installed here; it is user-local and needs no root)
 #   - git     : the mesh replicates the memory folder over git (checked)
 #   - claude  : the Claude Code CLI registers the server (checked; install guidance)

@@ -8,7 +8,7 @@ Every PR is cross-reviewed across models by [Flatline Roundtable](https://github
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?logo=apache)](LICENSE)
 [![GitHub](https://img.shields.io/badge/GitHub-CryptoJones%2Fomind-181717?logo=github&logoColor=white)](https://github.com/CryptoJones/omind)
 [![PyPI](https://img.shields.io/pypi/v/omind?logo=pypi&logoColor=white)](https://pypi.org/project/omind/)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Open Knowledge Format](https://img.shields.io/badge/format-OKF%20v0.1-4285F4?logo=googlecloud&logoColor=white)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 [![Version](https://img.shields.io/github/v/tag/CryptoJones/omind?label=version&color=orange)](https://github.com/CryptoJones/omind/tags)
 
@@ -96,7 +96,7 @@ scripts/bootstrap.sh                       # or: --remote codeberg, --vault PATH
 It refuses what it cannot safely do — an unsupported system, no `git`, an existing
 install that is still running on Windows, a release that does not install *and
 start* in a throwaway environment — before it installs or replaces omind. It
-auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
+auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.11 for
 you), checks for `claude` with install guidance if it is missing,
 then runs `omind setup` + `omind doctor`. Note: omind itself has **no Docker and
 no Node.js dependency** — it needs only `git` and an agent CLI (Claude Code on
@@ -107,7 +107,7 @@ agents* below).
 **Manual** — an isolated CLI install from [PyPI](https://pypi.org/project/omind/):
 
 ```bash
-# via uv (recommended — also provides a compatible Python if the system one is <3.10)
+# via uv (recommended — also provides a compatible Python if the system one is <3.11)
 uv tool install omind
 
 # or via pipx

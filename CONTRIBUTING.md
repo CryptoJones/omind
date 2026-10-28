@@ -19,8 +19,8 @@ Issues and pull requests on **either** are welcome. Commits land on both.
 
 ## Development setup
 
-Requires Python 3.10+ (CI runs 3.10–3.14 on Linux, plus 3.10 and 3.14 on
-Windows — omind is supported on both).
+Requires Python 3.11+ (CI runs 3.11–3.14 on Linux, plus 3.11 and 3.14 on
+Windows and macOS — omind is supported on all three).
 
 ```bash
 git clone https://github.com/CryptoJones/omind.git
@@ -91,7 +91,7 @@ the web app build on. Keep it framework-free.
   # SPDX-License-Identifier: Apache-2.0
   # Copyright 2026 Aaron K. Clark
   ```
-- **Python 3.10 floor.** No PEP 695 generic syntax (`def f[T]`) — use `TypeVar`.
+- **Python 3.11 floor.** No PEP 695 generic syntax (`def f[T]`) — use `TypeVar`.
 - **Path safety.** Anything that reads or writes a note must go through
   `OmiStore.safe_name` so path traversal stays impossible. There are tests that
   enforce this; don't route around them.
