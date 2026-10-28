@@ -336,20 +336,17 @@ def _fail_open_verdict(
     if action is None:
         action = {}
         try:
-            # Claude/Codex/Gemini ``tool_input``, Poolside's ``cmd``, agy's
-            # ``toolCall.args.CommandLine``, or a flat ``command``.
-            tool_input = event.get("tool_input")
+            # Claude/Codex/Gemini ``tool_input`` (Poolside's ``cmd`` too), agy's
+            # ``toolCall.args`` (``CommandLine``, or ``send_command_input``'s
+            # ``Input``, #496), or a flat ``command``. One extraction point,
+            # :func:`guard.shell_command_text`, so this fallback reads every key
+            # the normal path does and cannot drift from it.
             tool_call = event.get("toolCall")
             args = tool_call.get("args") if isinstance(tool_call, dict) else None
             command = ""
-            for source, key in (
-                (tool_input, "command"),
-                (tool_input, "cmd"),
-                (args, "CommandLine"),
-                (event, "command"),
-            ):
-                if isinstance(source, dict) and source.get(key):
-                    command = str(source[key])
+            for source in (event.get("tool_input"), args, event):
+                command = guard.shell_command_text(source)
+                if command:
                     break
             action = {
                 "tool": str(event.get("tool_name") or event.get("tool") or ""),
