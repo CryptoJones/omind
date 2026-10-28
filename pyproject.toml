@@ -1,9 +1,9 @@
 [project]
 name = "omind"
-version = "10.3.7"
+version = "10.4.0"
 description = "Reproduce the OMI/Obsidian memory integration for AI agents, plus a local web app to view, edit, and add memory entries."
 readme = "README.md"
-requires-python = ">=3.10"
+requires-python = ">=3.11"
 license = { text = "Apache-2.0" }
 authors = [{ name = "Aaron K. Clark", email = "akclark@thenetwerk.net" }]
 keywords = [
@@ -23,7 +23,6 @@ classifiers = [
     "License :: OSI Approved :: Apache Software License",
     "Programming Language :: Python :: 3",
     "Programming Language :: Python :: 3 :: Only",
-    "Programming Language :: Python :: 3.10",
     "Programming Language :: Python :: 3.11",
     "Programming Language :: Python :: 3.12",
     "Programming Language :: Python :: 3.13",
@@ -68,8 +67,7 @@ embed = [
     "numpy>=1.24,<3.0",
     # Security floor for CVE-2026-112940 (PyPI filelock via huggingface-hub, #499).
     # Unrelated to omind.filelock, our own flock shim; nothing imports this one.
-    # 4.2.1 needs Python 3.11+, so 3.10 keeps the 3.x line (no fixed release exists there).
-    "filelock>=4.2.1,<5.0; python_version >= '3.11'",
+    "filelock>=4.2.1,<5.0",
 ]
 dev = [
     "pytest>=8.0",
@@ -82,7 +80,7 @@ dev = [
     "httpx2>=2.12.0,<3.0",
     "pip-audit>=2.10.0",
     # Exercise vector-index paths in CI without the model backend. NumPy 2.5's
-    # stubs require newer syntax than mypy's configured Python 3.10 target.
+    # stubs require newer syntax than mypy's configured Python 3.11 target.
     "numpy>=1.24,<2.5",
     # Security floor for pip-audit/cachecontrol's msgpack edge (CVE-2026-114613, #499).
     "msgpack>=1.2.3,<2.0",
@@ -111,7 +109,7 @@ packages = ["src/omind"]
 exclude = ["src/omind/web/tailwind"]
 
 [tool.ruff]
-target-version = "py310"
+target-version = "py311"
 line-length = 100
 # docs/graph-demo holds illustrative, deliberately terse example scripts — not
 # package code, so they aren't held to the package's import/line-length rules.
@@ -121,7 +119,7 @@ extend-exclude = ["docs/graph-demo"]
 select = ["E", "F", "I", "N", "W", "UP", "B", "SIM"]
 
 [tool.mypy]
-python_version = "3.10"
+python_version = "3.11"
 strict = true
 
 # The [embed] extra is optional and may be absent in the type-check env; omind.embed
@@ -129,7 +127,7 @@ strict = true
 [[tool.mypy.overrides]]
 module = ["model2vec", "model2vec.*", "numpy", "numpy.*"]
 ignore_missing_imports = true
-# numpy's shipped stubs use 3.12+ `type` syntax; we target 3.10. Treat the optional
+# numpy's shipped stubs use 3.12+ `type` syntax; we target 3.11. Treat the optional
 # embed deps as Any (present or absent) rather than analyse their stubs.
 follow_imports = "skip"
 ignore_errors = true

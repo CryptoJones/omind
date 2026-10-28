@@ -67,6 +67,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-10-28 (v10.4.0)
+
+- [x] **Drop Python 3.10 support (EOL Oct 2026) to clear the last 7 Dependabot alerts** ([#502](https://github.com/CryptoJones/omind/issues/502)) — **v10.4.0** — _dependencies_ —
+  `requires-python = ">=3.11"`; the 3.10 lock split (filelock 4.1.0, dnspython 2.8.0, no fixed
+  release on 3.10) is gone, CI drops its 3.10 legs and pip-audit ignores, and a pip install still
+  on 3.10 gets a clear `self-update` refusal (nothing changed) instead of a broken install.
+
 ### Shipped — 2026-10-28 (v10.3.7)
 
 - [x] **Security: bump locked deps for 21 open Dependabot alerts** ([#499](https://github.com/CryptoJones/omind/issues/499)) — **v10.3.7** — _security_ —

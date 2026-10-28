@@ -30,7 +30,7 @@ import sys
 import time
 from collections.abc import Callable
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any
 from xml.sax.saxutils import escape as xml_escape
@@ -607,7 +607,7 @@ def _parse_tombstone(line: str) -> tuple[datetime | None, str, str]:
 
 
 def _as_utc(dt: datetime) -> datetime:
-    return dt if dt.tzinfo is not None else dt.replace(tzinfo=timezone.utc)
+    return dt if dt.tzinfo is not None else dt.replace(tzinfo=UTC)
 
 
 def _live_rev_newer(target: Path, purged_rev: str) -> bool:
@@ -635,7 +635,7 @@ def _apply_tombstones(omi_dir: Path, store: OmiStore, now: datetime | None = Non
     conflicts: list[str] = []
     if not tomb.is_file():
         return conflicts
-    cutoff = (now or datetime.now(timezone.utc)) - timedelta(days=TOMBSTONE_TTL_DAYS)
+    cutoff = (now or datetime.now(UTC)) - timedelta(days=TOMBSTONE_TTL_DAYS)
     kept: list[str] = []
     changed = False
     for raw in tomb.read_text(encoding="utf-8").splitlines():
@@ -678,7 +678,7 @@ def conflict_scan(omi_dir: Path) -> list[str]:
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _update_sync_state(omi_dir: Path, mutate: Callable[[dict[str, Any]], None]) -> None:
@@ -939,7 +939,7 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
             if target.is_file():
                 with contextlib.suppress(Exception):
                     rev = store.read_fields(target.name).rev
-            stamp = datetime.now(timezone.utc).isoformat(timespec="seconds")
+            stamp = datetime.now(UTC).isoformat(timespec="seconds")
             new_line = f"{stamp}\t{target.name}" + (f"\t{rev}" if rev else "")
             # Atomic: a torn tombstone file would un-purge every prior purge
             # mesh-wide once the truncation merged out to the peers.
@@ -1844,7 +1844,7 @@ def _diagnose_sync_age(state: dict[str, Any], interval: int, *, peered: bool) ->
     from omind.provision import CheckResult
 
     limit = STALE_SYNC_INTERVALS * interval
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     if not peered:
         then = _parse_ts(state.get("last_sync"))
         if then is None:
@@ -1891,7 +1891,7 @@ def _diagnose_lock_events(state: dict[str, Any]) -> list[Any]:
     if not isinstance(last, dict):
         return []
     when = _parse_ts(last.get("at"))
-    if when is None or datetime.now(timezone.utc) - when > timedelta(days=7):
+    if when is None or datetime.now(UTC) - when > timedelta(days=7):
         return []
     removed_raw = last.get("removed")
     removed_list = removed_raw if isinstance(removed_raw, list) else []

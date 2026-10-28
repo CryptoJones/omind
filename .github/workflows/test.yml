@@ -20,18 +20,18 @@ jobs:
       fail-fast: false
       matrix:
         os: [ubuntu-latest]
-        python-version: ["3.10", "3.11", "3.12", "3.13", "3.14"]
+        python-version: ["3.11", "3.12", "3.13", "3.14"]
         # Windows and macOS are supported deploy platforms (filelock shim /
         # .cmd-shim resolution on Windows; BSD userland, case-insensitive FS and
         # the ~/.local/bin PATH behavior on macOS). Exercise the oldest and
         # newest Python on each so platform-specific breakage can't ship green.
         include:
           - os: windows-latest
-            python-version: "3.10"
+            python-version: "3.11"
           - os: windows-latest
             python-version: "3.14"
           - os: macos-latest
-            python-version: "3.10"
+            python-version: "3.11"
           - os: macos-latest
             python-version: "3.14"
     steps:
@@ -39,26 +39,13 @@ jobs:
       - uses: actions/setup-python@6d4fd22b20465ccc0f7354476588e8df7c9ca0e0 # v7.1.0
         with:
           python-version: ${{ matrix.python-version }}
-      # setuptools too: the windows-latest Python 3.10 toolcache bundles a
-      # vulnerable 65.5.0 that pip-audit (rightly) flags.
+      # setuptools too: older windows-latest Python toolcaches bundle a
+      # vulnerable setuptools that pip-audit (rightly) flags.
       - run: python -m pip install -U pip setuptools
       - run: pip install -e .[dev]
       - run: ruff check .
       - run: mypy src
-      # filelock reaches this dev install only through pip-audit, for its own
-      # cachecontrol filecache. Its fix (4.2.1) requires Python >=3.11, so the
-      # 3.10 legs can never install a fixed version: ignore its six CVEs THERE
-      # only. Every other leg audits with no ignores, so a regression to a
-      # vulnerable filelock on 3.11+ still fails. pip-audit 2.10 has no
-      # package-level skip, hence the explicit IDs.
-      - if: matrix.python-version == '3.10'
-        run: >-
-          pip-audit
-          --ignore-vuln CVE-2026-112906 --ignore-vuln CVE-2026-112907
-          --ignore-vuln CVE-2026-112913 --ignore-vuln CVE-2026-112914
-          --ignore-vuln CVE-2026-112937 --ignore-vuln CVE-2026-112940
-      - if: matrix.python-version != '3.10'
-        run: pip-audit
+      - run: pip-audit
       - run: pytest -v --cov=omind --cov-report=term-missing
 
   wheel:

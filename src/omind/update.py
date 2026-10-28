@@ -247,8 +247,8 @@ def installed_extras(env: Path | None = None) -> list[str]:
     if env is not None and (env / _RECEIPT_NAME).is_file():
         receipt = env / _RECEIPT_NAME
     try:
-        # tomlkit, not tomllib: the latter is 3.11+ and this project floors at
-        # 3.10. tomlkit is already a runtime dependency.
+        # tomlkit (a runtime dependency) rather than tomllib: kept from the
+        # 3.10 era; either parses a uv receipt.
         import tomlkit
 
         data = tomlkit.parse(receipt.read_text(encoding="utf-8"))
@@ -372,8 +372,32 @@ def _env_processes(env: Path) -> list[str]:
 
 
 def _last_line(text: str | None) -> str:
-    lines = (text or "").strip().splitlines()
-    return lines[-1].strip() if lines else ""
+    """The last meaningful line. pip's ``[notice] A new release of pip…`` banner
+    trails its real error and used to stand in for it in the refusal."""
+    lines = [
+        line.strip()
+        for line in (text or "").splitlines()
+        if line.strip() and not line.strip().startswith("[notice]")
+    ]
+    return lines[-1] if lines else ""
+
+
+#: What pip and uv print when a release's ``requires-python`` excludes the
+#: interpreter (omind 10.4.0 dropped Python 3.10).
+_PYTHON_TOO_OLD = ("requires a different Python", "does not satisfy Python")
+
+
+def _install_failure(stderr: str | None, returncode: int) -> str:
+    """Why the trial install failed, phrased for the user."""
+    why = _last_line(stderr) or f"exit {returncode}"
+    if any(marker in (stderr or "") for marker in _PYTHON_TOO_OLD):
+        running = f"{sys.version_info.major}.{sys.version_info.minor}"
+        return (
+            f"it does not support this install's Python {running} ({why}). Reinstall "
+            "omind on a newer Python, e.g. `uv tool install --force omind` (uv provides "
+            "a compatible Python)"
+        )
+    return f"it does not install ({why})"
 
 
 def _reports_version(output: str | None, version: str) -> bool:
@@ -402,6 +426,7 @@ def _canary_install(
         if install.method == "pip":
             venv = Path(tmp) / "venv"
             python = venv / ("Scripts/python.exe" if _is_windows() else "bin/python")
+            env["PIP_DISABLE_PIP_VERSION_CHECK"] = "1"
             steps = [
                 [sys.executable, "-m", "venv", str(venv)],
                 [str(python), "-m", "pip", "install", "--quiet", cmd[-1]],
@@ -420,8 +445,7 @@ def _canary_install(
                     step, env=env, capture_output=True, text=True, timeout=timeout, check=False
                 )
                 if built.returncode != 0:
-                    why = _last_line(built.stderr) or f"exit {built.returncode}"
-                    return f"it does not install ({why})"
+                    return _install_failure(built.stderr, built.returncode)
             ran = subprocess.run(probe, capture_output=True, text=True, timeout=120, check=False)
         except subprocess.TimeoutExpired:
             return "the trial install timed out (network stall?)"
