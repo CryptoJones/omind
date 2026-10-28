@@ -441,6 +441,86 @@ def test_run_adapter_agy_fail_open_still_honours_hard_rules(
     assert json.loads(capsys.readouterr().out)["decision"] == "deny"
 
 
+def _agy_broken_transcript_event(
+    tmp_path: Path, args: dict[str, str], session: str, tool: str
+) -> dict[str, Any]:
+    """An agy event whose transcript makes ``translate_event`` raise (#420)."""
+    transcript = tmp_path / "agy.jsonl"
+    transcript.write_text('["USER_INPUT"]\n', encoding="utf-8")
+    return {
+        "toolCall": {"name": tool, "args": args},
+        "conversationId": session,
+        "transcriptPath": transcript.as_posix(),
+    }
+
+
+@pytest.mark.parametrize(
+    ("tool", "args", "decision"),
+    [
+        ("send_command_input", {"CommandId": "abc", "Input": "gh repo delete a/b\n"}, "deny"),
+        ("send_command_input", {"CommandId": "abc", "Input": "gh repo delete a/b\r\n"}, "deny"),
+        ("send_command_input", {"CommandId": "abc", "Input": "y\n"}, "allow"),
+        ("run_command", {"CommandLine": "gh repo delete a/b"}, "deny"),
+    ],
+)
+def test_run_adapter_agy_fail_open_fallback_reads_stdin_input(
+    tmp_path: Path,
+    capsys: pytest.CaptureFixture[str],
+    tool: str,
+    args: dict[str, str],
+    decision: str,
+) -> None:
+    """#496: the fail-open fallback derives the command through
+    guard.shell_command_text, so a send_command_input ``Input`` that hits the
+    translation error path still meets the hard rules, like ``CommandLine``."""
+    session = f"agy-496-{tool}-{decision}-{len(args)}"
+    payload = _agy_broken_transcript_event(tmp_path, args, session, tool)
+    code = adapters.run_adapter(io.StringIO(json.dumps(payload)), harness="agy")
+    captured = capsys.readouterr()
+    assert code == 0
+    assert json.loads(captured.out)["decision"] == decision
+    assert "internal error in guard adapter translate" in captured.err
+    events = _adapter_error_events(session)
+    assert len(events) == 1
+    assert events[0]["outcome"] == ("fail-open" if decision == "allow" else "error")
+
+
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"command": "gh repo delete a/b", "tool_input": {"Input": "y\n"}},
+        {
+            "tool_input": {"Input": "y\n"},
+            "toolCall": {"args": {"CommandLine": "gh repo delete a/b"}},
+        },
+        {"tool_input": {"command": "gh repo delete a/b", "Input": "y\n"}},
+    ],
+)
+def test_adapter_fail_open_verdict_command_beats_typed_input(event: dict[str, Any]) -> None:
+    """#496 review: a real command key in any source outranks typed ``Input``,
+    as in ``_derive_command``, so a harmless keystroke cannot mask a hard rule."""
+    verdict = adapters._fail_open_verdict(
+        event, None, RuntimeError("boom"), None, stage="adapter translate"
+    )
+    assert not verdict.allow
+
+
+def test_adapter_fail_open_verdict_never_raises_on_odd_shapes() -> None:
+    """The fallback's best-effort read tolerates any raw event shape (#496)."""
+    exc = RuntimeError("boom")
+    events: list[Any] = [
+        {},
+        {"toolCall": "nope"},
+        {"toolCall": {"args": ["x"]}},
+        {"tool_input": {"command": 7}},
+        {"toolCall": {"args": {"Input": 5}}},
+        None,
+    ]
+    for event in events:
+        verdict = adapters._fail_open_verdict(event, None, exc, None, stage="adapter translate")
+        assert verdict.allow
+
+
 def test_run_adapter_opencode_fails_open_when_normalize_raises(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ) -> None:

@@ -7,6 +7,26 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.3.6] - 2026-10-28
+
+### Fixed
+- **The guard's fail-open fallback ignored text typed through Antigravity's
+  `send_command_input` ([#496](https://github.com/CryptoJones/omind/issues/496)).**
+  Follow-up to #475. When translating, normalizing, checking or rendering an event
+  raised, `adapters._fail_open_verdict` read the command from its own key list
+  (`command`, `cmd`, agy `CommandLine`, flat `command`) and never `Input`, so a
+  hard-rule command typed into a running shell on that error path was allowed. The
+  fallback now derives the command through `guard.shell_command_text` (from
+  `tool_input`, then agy's `toolCall.args`, then the flat event): one extraction
+  point shared with the normal path. It still never raises.
+
+### Changed
+- **README header ([#436](https://github.com/CryptoJones/omind/issues/436),
+  merged in [#495](https://github.com/CryptoJones/omind/pull/495) after the v10.3.5
+  tag, so first released here).** The centred Nebraska banner, links to Flatline Roundtable and conveyor in the first
+  lines, the install section led by `uv tool install omind` (on PyPI since 10.3.4;
+  the git install is kept), and the stale Codeberg badge dropped.
+
 ## [10.3.5] - 2026-10-28
 
 ### Fixed
