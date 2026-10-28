@@ -1420,6 +1420,13 @@ SHELL_TOOL_NAMES = frozenset(
         "run_terminal_command",  # Grok
     }
 )
+
+#: Shell tools that type into a command already running rather than start one
+#: (#475). Their text is judged like any shell command, but a fetch typed this
+#: way never grants commit freshness: the text may not reach a shell at all,
+#: and the tool's result never carries the fetch's exit code, so a failed
+#: fetch could not be retracted on PostToolUse.
+STDIN_TOOL_NAMES = frozenset({"send_command_input"})  # Antigravity
 _WRITE_TOOLS = frozenset(
     {
         "Edit",
@@ -4821,7 +4828,11 @@ def _soft_verdict(
     judging budget runs out; :func:`decide` then denies (#460)."""
     repo = _repo_root_for_action(action)
 
-    if repo is not None and _is_freshness_command(command):
+    if (
+        repo is not None
+        and not action.get("stdin_write")
+        and _is_freshness_command(command)
+    ):
         # Recorded optimistically here (PreToolUse cannot know the exit code);
         # a FAILED fetch is retracted by guard.record_freshness_outcome on
         # PostToolUse, so a fetch that exits 1 no longer satisfies the

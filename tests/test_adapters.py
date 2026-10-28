@@ -29,6 +29,7 @@ def test_normalize_claude_shape() -> None:
         "consult_target": "",
         "consult_kind": "search",
         "cwd": "",
+        "stdin_write": False,
     }
 
 
@@ -867,6 +868,37 @@ def test_agy_send_command_input_commit_hits_the_freshness_gate(
         }
     )
     assert not shell_allowed and "freshness" in shell_text
+    guard.clear_gate(session)
+
+
+def test_agy_typed_fetch_never_grants_commit_freshness(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#475 review: a fetch typed into a running command may never reach a
+    shell, and its result carries no exit code to retract a failure with, so
+    it is allowed but does not free the next commit. A run_command fetch does."""
+    target = _bare_repo(tmp_path, "todo")
+    session = "agy-475-typed-fetch"
+    guard.clear_gate(session)
+    guard.record_consult(session, kind="read", target=guard.GIT_RULES_NOTE, relevant=True)
+
+    def run(event: dict[str, Any]) -> tuple[bool, str]:
+        code = adapters.run_adapter(io.StringIO(json.dumps(event)), harness="agy")
+        captured = capsys.readouterr()
+        return not _denied(code, captured.out), captured.out + captured.err
+
+    fetch = "git fetch --all --prune"
+    assert run(_agy_stdin_event(fetch + "\n", session, target))[0]
+    assert not guard._fresh_repos(session)
+    allowed, text = run(_agy_stdin_event("git commit -am x\n", session, target))
+    assert not allowed and "freshness" in text
+    shell_fetch = {
+        "toolCall": {"name": "run_command", "args": {"CommandLine": fetch}},
+        "conversationId": session,
+        "workspacePaths": [str(target)],
+    }
+    assert run(shell_fetch)[0]
+    assert run(_agy_stdin_event("git commit -am x\n", session, target))[0]
     guard.clear_gate(session)
 
 
