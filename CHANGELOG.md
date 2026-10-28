@@ -7,6 +7,70 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.3.7] - 2026-10-28
+
+### Security
+- **Dependency floors for 21 Dependabot alerts
+  ([#499](https://github.com/CryptoJones/omind/issues/499)).** `uv.lock` is relocked
+  to the patched brotli 1.2.1 / brotlicffi 1.2.1.0, aiohttp 3.14.5, dnspython 2.9.0,
+  filelock 4.2.4, msgpack 1.2.4, mcp 2.3.0, multidict 7.2.1 and opentelemetry-api
+  1.45.1. `uv.lock` does not reach PyPI installs, so `pyproject.toml` raises the
+  floors on what the runtime tree pulls in: `mcp>=2.2.0,<3.0`,
+  `opentelemetry-api>=1.45.1,<2.0` (via mcp), `filelock>=4.2.1,<5.0` in the `embed`
+  extra (via huggingface-hub), and `msgpack>=1.2.3,<2.0` in `dev`. aiohttp, brotli,
+  dnspython and multidict only arrive through the `e2e` test extra (runpod), so the
+  lock covers them. filelock 4.2.1 and dnspython 2.9.0 need Python 3.11+, so the
+  3.10 lock split keeps the 3.x / 2.8 lines; no fixed release exists there.
+  The PyPI `filelock` is unrelated to `omind.filelock`, and nothing imports it.
+
+### Fixed
+- **Mesh sync failed silently for weeks on a stale git ref lock
+  ([#498](https://github.com/CryptoJones/omind/issues/498)).** A crash left
+  `.git/HEAD.lock` and `refs/heads/main.lock` on telesto, and every daemon tick for
+  five weeks logged only `sync failed: ... cannot lock ref 'HEAD'` while
+  `omind doctor` looked healthy.
+  - `omind doctor` reports `[✗]` for a stale git lock under `.git/` (`index.lock`,
+    `HEAD.lock`, `packed-refs.lock`, `config.lock`, `refs/**/*.lock`) with its path
+    and age. A lock is stale only when it is older than `STALE_LOCK_SECONDS` (10 min)
+    AND no live git process is using the repo. Linux attributes git processes to the
+    repo through `/proc` (cwd and argv). macOS and Windows can only prove that no
+    git process is running at all; any git process there means "can't tell", and the
+    lock is treated as in use.
+  - The last successful sync, the consecutive-failure count and the last error are
+    recorded in the state dir (never the vault), written under a sibling `.lock`.
+    On a node with peers, doctor warns (`[!]`) when the last successful sync is
+    older than 2 daemon intervals and names the failures. A sync counts as
+    successful when it reaches at least one peer, so one offline laptop does not
+    flag the node.
+  - On a failed tick caused by a lock error, the daemon logs ONE line naming the
+    stale lock. It self-heals only provably stale REF locks (`HEAD.lock`,
+    `refs/**/*.lock`, `packed-refs.lock`), never `index.lock` or `config.lock`. It
+    re-checks each lock under the store write lock and removes it only if it is still
+    the same file (renamed aside and identity-checked, so a lock git re-created in the
+    meantime is put back with a no-clobber hard link; if even that fails, it is left,
+    never deleted, as `.git/omind-stale-lock-*` and the daemon log says so), then runs
+    `git fsck --connectivity-only`, records a `mesh-stale-lock` event (stderr and a
+    doctor line), and retries the sync once.
+  - Every daemon tick also heals stale ref locks that never fail a local sync (a
+    lock on `refs/omind/<peer>` or an unused branch), under the same guards.
+  - All of this fails open: any exception in a tick (not only a git error) becomes
+    one `sync failed` line and is recorded, so the daemon never dies into a service
+    restart loop; `diagnose_mesh` never raises, and a malformed state file (an
+    infinite failure count, a non-list field) becomes a warn line at worst.
+  - Hardening from the Flatline Roundtable review of #501:
+    - A symlinked `.git/refs` root is never walked (with `refs -> .`, `index.lock`
+      read as a ref lock and was removed), and every ref lock's real path must stay
+      inside the real `refs/` directory (git-new-workdir links refs to another repo).
+    - On Linux a git process aimed at the repo through `GIT_DIR`, `GIT_WORK_TREE`,
+      `GIT_COMMON_DIR` or `GIT_INDEX_FILE` counts as live; an unreadable environment
+      makes the answer "unknown", never "none".
+    - A lock dated more than 60s in the future is reported (warn) and never healed.
+    - Doctor fails `mesh_sync` (non-zero exit) when the last success is over 24h old
+      and syncs are still failing. A stale `config.lock` warns rather than fails.
+    - `omind mesh sync --peer <typo>` syncs nothing and no longer counts as success.
+    - The state keeps only the last self-heal (`last_lock_event`), not a list.
+    - The 3.10-only filelock CVE ignores in CI now apply to the 3.10 legs only.
+
 ## [10.3.6] - 2026-10-28
 
 ### Fixed

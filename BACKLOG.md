@@ -11,14 +11,7 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **Priority 1 — Security: bump locked deps for 21 open Dependabot alerts** ([#499](https://github.com/CryptoJones/omind/issues/499)) — _security_ —
-  2 critical (brotli), 6 high (aiohttp, dnspython, filelock, msgpack), plus mcp and
-  opentelemetry-api. Relock `uv.lock` and raise the `pyproject.toml` security floors so PyPI
-  installs get the fixes too; `pip-audit` clean, then 10.3.7 and a fleet roll.
-- [ ] **Priority 2 — Mesh sync fails silently for weeks on a stale git ref lock** ([#498](https://github.com/CryptoJones/omind/issues/498)) — _bug_ —
-  telesto's daemon failed every tick from 2026-09-23 to 10-28 on a leftover `HEAD.lock` /
-  `refs/heads/main.lock` while `omind doctor` reported healthy. Detect stale locks and stale
-  last-sync in doctor; self-heal only when provably safe.
+_Nothing open right now._
 
 ## Not planned
 
@@ -73,6 +66,19 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-28 (v10.3.7)
+
+- [x] **Security: bump locked deps for 21 open Dependabot alerts** ([#499](https://github.com/CryptoJones/omind/issues/499)) — **v10.3.7** — _security_ —
+  `uv.lock` relocked (brotli, brotlicffi, aiohttp, dnspython, filelock, msgpack, mcp, multidict,
+  opentelemetry-api) and `pyproject.toml` floors raised so PyPI installs get the fixes too:
+  `mcp>=2.2.0`, `opentelemetry-api>=1.45.1`, `filelock>=4.2.1` (embed extra, Python 3.11+),
+  `msgpack>=1.2.3` (dev). `pip-audit` clean.
+- [x] **Mesh sync fails silently for weeks on a stale git ref lock** ([#498](https://github.com/CryptoJones/omind/issues/498)) — **v10.3.7** — _bug_ —
+  doctor fails on a stale git `*.lock` under `.git/` (path + age) and warns when the last
+  successful sync is older than 2 intervals, naming the consecutive failures. The daemon logs one
+  clear line and self-heals provably stale REF locks (never `index.lock`) under the write lock,
+  then runs `git fsck --connectivity-only` and records a `mesh-stale-lock` event.
 
 ### Shipped — 2026-10-28 (v10.3.6)
 
