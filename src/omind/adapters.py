@@ -340,14 +340,23 @@ def _fail_open_verdict(
             # ``toolCall.args`` (``CommandLine``, or ``send_command_input``'s
             # ``Input``, #496), or a flat ``command``. One extraction point,
             # :func:`guard.shell_command_text`, so this fallback reads every key
-            # the normal path does and cannot drift from it.
+            # the normal path does and cannot drift from it. A real command key
+            # in ANY source beats typed ``Input`` (the weakest key, as in
+            # :func:`_derive_command`): the first pass hides ``Input``, so a
+            # harmless keystroke can never mask a hard-rule ``command``.
             tool_call = event.get("toolCall")
             args = tool_call.get("args") if isinstance(tool_call, dict) else None
+            sources = [s for s in (event.get("tool_input"), args, event) if isinstance(s, dict)]
             command = ""
-            for source in (event.get("tool_input"), args, event):
+            for source in [{k: v for k, v in s.items() if k != "Input"} for s in sources]:
                 command = guard.shell_command_text(source)
                 if command:
                     break
+            if not command:
+                for source in sources:
+                    command = guard.shell_command_text(source)
+                    if command:
+                        break
             action = {
                 "tool": str(event.get("tool_name") or event.get("tool") or ""),
                 "command": command,

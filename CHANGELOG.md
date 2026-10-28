@@ -21,8 +21,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   point shared with the normal path. It still never raises.
 
 ### Changed
-- **README header ([#436](https://github.com/CryptoJones/omind/issues/436)).** The
-  centred Nebraska banner, links to Flatline Roundtable and conveyor in the first
+- **README header ([#436](https://github.com/CryptoJones/omind/issues/436),
+  merged in [#495](https://github.com/CryptoJones/omind/pull/495) after the v10.3.5
+  tag, so first released here).** The centred Nebraska banner, links to Flatline Roundtable and conveyor in the first
   lines, the install section led by `uv tool install omind` (on PyPI since 10.3.4;
   the git install is kept), and the stale Codeberg badge dropped.
 

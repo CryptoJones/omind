@@ -485,6 +485,26 @@ def test_run_adapter_agy_fail_open_fallback_reads_stdin_input(
     assert events[0]["outcome"] == ("fail-open" if decision == "allow" else "error")
 
 
+@pytest.mark.parametrize(
+    "event",
+    [
+        {"command": "gh repo delete a/b", "tool_input": {"Input": "y\n"}},
+        {
+            "tool_input": {"Input": "y\n"},
+            "toolCall": {"args": {"CommandLine": "gh repo delete a/b"}},
+        },
+        {"tool_input": {"command": "gh repo delete a/b", "Input": "y\n"}},
+    ],
+)
+def test_adapter_fail_open_verdict_command_beats_typed_input(event: dict[str, Any]) -> None:
+    """#496 review: a real command key in any source outranks typed ``Input``,
+    as in ``_derive_command``, so a harmless keystroke cannot mask a hard rule."""
+    verdict = adapters._fail_open_verdict(
+        event, None, RuntimeError("boom"), None, stage="adapter translate"
+    )
+    assert not verdict.allow
+
+
 def test_adapter_fail_open_verdict_never_raises_on_odd_shapes() -> None:
     """The fallback's best-effort read tolerates any raw event shape (#496)."""
     exc = RuntimeError("boom")
