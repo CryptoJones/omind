@@ -16,7 +16,7 @@ the exact order of operations._
   (`Input`) send text to a shell that is already running, so the hard rules and the freshness gate
   never judge it. Verify the tool names against live payloads first.
 - [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
-  prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
+  prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner, leads the install section with `uv tool install omind` (PyPI since 10.3.4; git install kept), and drops the stale Codeberg badge.
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
