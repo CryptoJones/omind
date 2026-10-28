@@ -1469,7 +1469,10 @@ def run_daemon(
             except OSError:
                 signal_mtime = None
             if _should_sync(now, last_sync, signal_mtime, cfg):
-                _sync_tick(omi_dir, cfg.node_id, log)
+                # Last line of defence: even the logger can raise (BrokenPipeError
+                # on a closed stdout), and nothing in one tick may end the daemon.
+                with contextlib.suppress(Exception):
+                    _sync_tick(omi_dir, cfg.node_id, log)
                 last_sync = time.time()
             time.sleep(1)
     except KeyboardInterrupt:

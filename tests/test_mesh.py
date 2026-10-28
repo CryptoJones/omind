@@ -1207,3 +1207,19 @@ def test_lock_error_pattern_covers_git_s_wordings() -> None:
     ):
         assert mesh._LOCK_ERROR_RE.search(message), message
     assert not mesh._LOCK_ERROR_RE.search("fatal: could not read from remote repository")
+
+
+def test_daemon_survives_a_tick_that_raises(
+    omi_dir: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Even a logger failure (BrokenPipeError on a closed stdout) must not end the loop."""
+    cfg = mesh.mesh_init(omi_dir, log=quiet)
+    ticks = {"n": 0}
+
+    def _raising_tick(*_args: object) -> None:
+        ticks["n"] += 1
+        raise BrokenPipeError("stdout closed")
+
+    monkeypatch.setattr(mesh, "_sync_tick", _raising_tick)
+    assert mesh.run_daemon(omi_dir, cfg, log=quiet, _max_tick_seconds=1.5) == 0
+    assert ticks["n"] >= 1
