@@ -7,14 +7,14 @@ and the dissent recorded. One lane (MasterControl) repeatedly cited invented
 `file:line` specifics — flagged by the readers, discounted here. Raw transcripts:
 `~/.local/share/flatline-roundtable/transcripts/`.
 
-## 1. Agent identity — SHIPPED (`feat/agent-identity`)
+## 1. Agent identity — SHIPPED (v8.11.0, `b7cf52b`)
 
 Metadata-only `Agent:` line (never in the Rev), optional/best-effort, advisory
 only (never consumed for ranking/access/trust), 64-char slug cap, merge follows
 the Rev winner and BLANKS on the equal-rev tiebreak. Implemented; 1,010 tests
 green.
 
-## 2. Usefulness feedback loop — ratified, not started
+## 2. Usefulness feedback loop — SHIPPED (v8.11.0, `466f7bf`)
 
 - Counts live in a **separate state-dir table**, never inside the search-index DB
   (11/11: a schema bump must never wipe usage history); joined at query time.
@@ -31,7 +31,7 @@ green.
   — never blend the two effects (double-counting).
 - Every weight visible in `search --explain` (counted and filtered reads).
 
-## 3. Sleep-time janitor (`omind maintain`) — ratified, not started
+## 3. Sleep-time janitor (`omind maintain`) — SHIPPED (v9.2.1, `d95e958`, PR #288)
 
 - **Consolidation merges are never auto-applied** — unanimous; propose-and-review
   is permanent.
@@ -49,7 +49,7 @@ green.
   → resolved conservative: **opt-in `--rollup`**, not in the default apply set.
 - Fleet: one designated machine per vault; PID/flock mutex against double-janitor.
 
-## 4. Write-time near-duplicate warnings — ratified, not started
+## 4. Write-time near-duplicate warnings — SHIPPED (v8.11.0, `b63ca61`)
 
 - Advisory, fail-open, never blocks the write, **on by default** — unanimous.
 - **create-only for v1** (8/11: edits fire far more often and aren't dups; the
@@ -62,7 +62,7 @@ green.
 - **Exclude archived notes** (7/4) and notes already carrying `Superseded by:`
   (Cortana's refinement). Top-3 candidates.
 
-## 5. Scoped writes + scratch tier — ratified, not started
+## 5. Scoped writes + scratch tier — SHIPPED (v9.2.1, `2fd47c2` interlock, `d969929` scratch tier, PR #287)
 
 - Docs reframed (unanimous): scope becomes a **guard-enforced operational
   interlock against accidents** — and the doc must say explicitly that it is

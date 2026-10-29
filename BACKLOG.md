@@ -644,11 +644,11 @@ filed and linked below; they close when the fix branch merges._
 
 _(Feature roadmap from the same review — agent identity, usefulness feedback
 loop, sleep-time consolidation, write-time dedup, scoped writes — is Part 2 of
-the report. Agent identity is SHIPPED on `feat/agent-identity`; the other four
-are design-ratified by the FlatlineRoundtable panel (zero REJECTs, majority
-rulings on every split) in
-[docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md)
-and await implementation.)_
+the report. All five have SHIPPED: agent identity, the usefulness feedback loop
+and write-time near-duplicate warnings in v8.11.0; the sleep-time janitor
+(`omind maintain`) and scoped writes + scratch tier in v9.2.1. Each followed the
+FlatlineRoundtable design rulings (zero REJECTs, majority rulings on every split)
+in [docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md).)_
 
 ### Windows fresh-install test (2026-08-15, first fully-cold install)
 
