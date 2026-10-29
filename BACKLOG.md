@@ -11,7 +11,15 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-_Nothing open right now._
+### Epic: search ranks the same on every machine, and a newer title-only match can't beat a full-body match ([#505](https://github.com/CryptoJones/omind/issues/505))
+
+Found 2026-10-28: two `test_name_timelines` decoy cases pass on CI and fail locally,
+because the index is built in raw filesystem order and the recency leg lets a newer
+note's title-only chunk outrank a note whose body matches every query word. Full
+analysis on the epic.
+
+- [ ] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — _bug_
+- [ ] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — _bug_ — after #506
 
 ## Not planned
 
