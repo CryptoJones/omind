@@ -7,6 +7,35 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.4.2] - 2026-10-31
+
+### Fixed
+- **A newer note that only shared the query's title could outrank an older
+  note whose body matched every query word
+  ([#507](https://github.com/CryptoJones/omind/issues/507), closes epic
+  [#505](https://github.com/CryptoJones/omind/issues/505)).** The recency leg
+  ranked notes newest-first but credited each note's `ord = 0` title chunk,
+  whatever chunk had actually matched. With two same-titled notes the decoy's
+  tied title match plus the recency boost beat the real answer's full-body match.
+  - The boost now goes to a note's best-ranked content chunk: its first chunk
+    in the keyword list, otherwise in the vector list. A note's keyword credit
+    and recency credit are no longer split across two chunks.
+  - Candidates are, as before, the notes whose *title* chunk a content leg
+    returned: recency breaks ties among notes that are about the query. When any
+    candidate also holds a chunk matching *every* query word, only those
+    candidates receive the boost. That is what drops the title-only decoy.
+  - Epic #505 decision 4 wanted every matched note admitted when the all-words
+    grade was empty. Measured on the reference vault that cost a bench case (a
+    day-old note at keyword rank 88 took the rank-1 boost: recall@5 80.0 → 76.7,
+    MRR 0.6616 → 0.6604), and so did decision 7's fallback (no gate at all).
+    The narrower rule above ranks all 30 cases identically to 10.4.1.
+  - Recency still only reorders: a note no content leg returned has no best
+    chunk and cannot be added. `_W_RECENCY` and `RRF_K` are unchanged.
+  - `omind search --explain` now reports `recency=N` beside the keyword and
+    semantic ranks; `Hit.recency_rank` was declared but never filled in.
+  - The strict `xfail` that 10.4.1 left on the decoy case is gone; the case
+    passes under both indexing orders.
+
 ## [10.4.1] - 2026-10-31
 
 ### Fixed

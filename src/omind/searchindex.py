@@ -1078,7 +1078,7 @@ class SearchIndex:
                 return self._listing(db, allowed, limit)
             scope = _scope(query, limit)
             expr = _fts_query(query)  # the OR form; also snips the excerpts
-            keyword = self._keyword_leg(db, query, allowed, scope.depth)
+            keyword, all_words = self._keyword_leg(db, query, allowed, scope.depth)
             vector = self._vector_leg(db, query, allowed, scope.depth)
             matched = set(keyword) | set(vector)
             if not matched:
@@ -1087,7 +1087,16 @@ class SearchIndex:
             # note. Left unrestricted it made every query return the whole vault
             # newest-first — the exact failure this index exists to end.
             recency = [
-                cid for cid in self._recency_leg(db, allowed, scope.depth) if cid in matched
+                cid
+                for cid in self._recency_leg(
+                    db,
+                    allowed,
+                    scope.depth,
+                    keyword=keyword,
+                    vector=vector,
+                    all_words=all_words,
+                )
+                if cid in matched
             ]
             fused = _fuse(
                 [(_W_KEYWORD, keyword), (_W_VECTOR, vector), (_W_RECENCY, recency)]
@@ -1103,6 +1112,7 @@ class SearchIndex:
             ranks = {
                 "keyword": {cid: i + 1 for i, cid in enumerate(keyword)},
                 "vector": {cid: i + 1 for i, cid in enumerate(vector)},
+                "recency": {cid: i + 1 for i, cid in enumerate(recency)},
             }
             return self._materialize(
                 db, query, expr, fused, ranks, scope.limit, scope.excerpt_chars, useful
@@ -1133,11 +1143,16 @@ class SearchIndex:
 
     def _keyword_leg(
         self, db: sqlite3.Connection, query: str, allowed: set[str] | None, depth: int
-    ) -> list[int]:
+    ) -> tuple[list[int], set[int]]:
         """BM25 over the FTS index, graded: chunks matching every query word
-        first, then chunks matching any of them."""
+        first, then chunks matching any of them.
+
+        Returns the ranked chunk ids and, separately, the ids of the top grade
+        (every query word matched). The recency leg uses that set as its gate
+        (#507), so it is returned from here rather than computed twice."""
         ranked: list[int] = []
         seen: set[int] = set()
+        all_words: set[int] = set()
         for require_all in (True, False):
             expr = _fts_query(query, require_all=require_all)
             if not expr:
@@ -1146,9 +1161,12 @@ class SearchIndex:
                 if chunk_id not in seen:
                     seen.add(chunk_id)
                     ranked.append(chunk_id)
+            if require_all:
+                all_words = set(ranked)
             if len(ranked) >= depth:
                 break
-        return ranked[:depth]
+        head = ranked[:depth]
+        return head, all_words & set(head)
 
     @staticmethod
     def _bm25(
@@ -1363,17 +1381,62 @@ class SearchIndex:
         return weights
 
     def _recency_leg(
-        self, db: sqlite3.Connection, allowed: set[str] | None, depth: int
+        self,
+        db: sqlite3.Connection,
+        allowed: set[str] | None,
+        depth: int,
+        *,
+        keyword: list[int],
+        vector: list[int],
+        all_words: set[int],
     ) -> list[int]:
+        """Newest-first over the notes whose *name* the content legs matched,
+        credited to each note's best content chunk.
+
+        Recency is a note-level signal, but RRF fuses chunks. The boost used to
+        land on a note's ``ord = 0`` title chunk whatever chunk had actually
+        matched, so a newer note whose *title alone* shared the query could
+        outrank an older note whose body matched every word (#507). Now:
+
+        - a note is a candidate when its title chunk was returned by a content
+          leg, exactly as before: recency breaks ties among notes that are
+          *about* the query, it does not reward every passing mention. (Letting
+          every matched note in — epic #505 decision 4 — cost one bench case:
+          a day-old note at keyword rank 88 took the rank-1 boost.)
+        - when any candidate also holds a chunk matching *every* query word
+          (``all_words``), only those candidates receive the boost. That is what
+          drops the title-only decoy.
+        - the boost goes to the note's best-ranked content chunk — its first
+          chunk in the keyword list, otherwise in the vector list — so a note's
+          keyword credit and recency credit are no longer split across two
+          chunks.
+        - it still only reorders. A note no content leg returned has no best
+          chunk and cannot be added here.
+        """
+        matched = set(keyword) | set(vector)
+        owners = self._owners(db)
+        best: dict[str, int] = {}
+        for chunk_id in (*keyword, *vector):
+            name = owners.get(chunk_id)
+            if name is not None:
+                best.setdefault(name, chunk_id)
+        if not best:
+            return []
         rows = db.execute(
             "SELECT c.id AS id, c.filename AS filename FROM chunks c"
             " JOIN notes n ON n.filename = c.filename"
             " WHERE c.ord = 0 ORDER BY n.created DESC, n.filename LIMIT ?",
             (depth * 3,),
         )
-        return [
-            int(r["id"]) for r in rows if allowed is None or str(r["filename"]) in allowed
+        newest = [
+            (int(r["id"]), str(r["filename"]))
+            for r in rows
+            if allowed is None or str(r["filename"]) in allowed
         ][:depth]
+        candidates = [name for title_id, name in newest if title_id in matched and name in best]
+        strong = {owners[cid] for cid in all_words if cid in owners}
+        graded = [name for name in candidates if name in strong]
+        return [best[name] for name in (graded or candidates)]
 
     def _weight_generated(
         self, db: sqlite3.Connection, fused: list[tuple[int, float]]
@@ -1530,6 +1593,7 @@ class SearchIndex:
                     agent=str(row["agent"] or ""),
                     keyword_rank=ranks["keyword"].get(chunk_id, 0),
                     vector_rank=ranks["vector"].get(chunk_id, 0),
+                    recency_rank=ranks.get("recency", {}).get(chunk_id, 0),
                     usefulness_weight=use.weight if use is not None else 1.0,
                     useful_reads=use.useful_reads if use is not None else 0,
                     filtered_reads=use.filtered_reads if use is not None else 0,

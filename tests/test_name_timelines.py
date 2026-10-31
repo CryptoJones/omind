@@ -567,11 +567,11 @@ def test_preflight_names_resolve_through_recall(
         ),
         # #507: the Kp12 pair again, but the NEWER off-topic decoy's filename
         # sorts first. #506 breaks the title chunks' exact BM25 tie on filename,
-        # so the decoy's title chunk takes the tied keyword rank, and the
-        # recency boost (credited to a note's title chunk) carries it to the
-        # top, whichever order the vault was indexed in. Strict: this case must
-        # keep failing until #507 moves the boost onto the matched chunk.
-        pytest.param(
+        # so the decoy's title chunk takes the tied keyword rank; the recency
+        # boost used to land on that title chunk and carry the decoy to the
+        # top. Now the boost goes to A's matched Details chunk and the decoy,
+        # which matches no chunk on every query word, gets none.
+        (
             [
                 (
                     "Kp12 deploy A.md",
@@ -588,9 +588,6 @@ def test_preflight_names_resolve_through_recall(
             ],
             "Kp12 deploy steps ansible playbook frobnicate",
             "Kp12 deploy A.md",
-            marks=pytest.mark.xfail(
-                strict=True, reason="#507: recency lifts a newer title-only decoy"
-            ),
         ),
     ],
 )
