@@ -19,7 +19,7 @@ note's title-only chunk outrank a note whose body matches every query word. Full
 analysis on the epic.
 
 - [x] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — **v10.4.1** — _bug_
-- [ ] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — _bug_ — after #506
+- [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ — after #506
 
 ## Not planned
 
@@ -74,6 +74,17 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-31 (v10.4.2)
+
+- [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ —
+  the recency boost is credited to a note's best matched content chunk (first in the keyword list,
+  else the vector list) instead of its `ord = 0` title chunk. Candidates stay the notes whose title
+  chunk a content leg returned; when any of them holds a chunk matching every query word, only those
+  receive the boost. (Epic decision 4's wider gate, and decision 7's no-gate fallback, each cost one
+  bench case on the reference vault; this rule ranks all 30 identically to 10.4.1.) Weights unchanged;
+  recency still never adds a note. `Hit.recency_rank` is filled in and `omind search --explain`
+  prints it. The strict `xfail` from v10.4.1 is removed. Last child of epic #505.
 
 ### Shipped — 2026-10-31 (v10.4.1)
 
