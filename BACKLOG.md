@@ -18,7 +18,7 @@ because the index is built in raw filesystem order and the recency leg lets a ne
 note's title-only chunk outrank a note whose body matches every query word. Full
 analysis on the epic.
 
-- [ ] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — _bug_
+- [x] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — **v10.4.1** — _bug_
 - [ ] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — _bug_ — after #506
 
 ## Not planned
@@ -74,6 +74,15 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-31 (v10.4.1)
+
+- [x] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — **v10.4.1** — _bug_ —
+  `SearchIndex._note_paths` iterates `sorted(glob)`, and `_bm25` orders by
+  `bm25(...), c.filename, c.ord` before its `LIMIT`, so exact ties no longer break on rowid (that is,
+  on the order ext4 happened to list the vault). Applies to existing indexes at query time; no
+  rebuild. Tests: one vault indexed A→Z and Z→A ranks identically; the decoy cases run under both
+  orders. Child of epic #505; #507 (the recency-boost half) stays open behind a strict `xfail`.
 
 ### Shipped — 2026-10-28 (v10.4.0)
 

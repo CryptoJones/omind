@@ -717,7 +717,10 @@ class SearchIndex:
 
         if not self.omi_dir.is_dir():
             return
-        for path in self.omi_dir.glob("*.md"):
+        # Sorted, not raw directory order: ext4 lists a directory by a
+        # per-filesystem hash seed, so an unsorted glob gave every machine its
+        # own rowids and therefore its own BM25 tie-breaks (#506).
+        for path in sorted(self.omi_dir.glob("*.md")):
             if _is_reserved(path.name) or path.name.startswith("."):
                 continue
             yield path
@@ -1152,13 +1155,18 @@ class SearchIndex:
         db: sqlite3.Connection, expr: str, allowed: set[str] | None, depth: int
     ) -> list[int]:
         """Chunk ids for one MATCH expression, best BM25 first. Column weights put
-        a title/tag match well above a body mention of the same word."""
+        a title/tag match well above a body mention of the same word.
+
+        Exact BM25 ties (two notes with the same title, say) break on
+        ``(filename, ord)`` rather than on rowid, so the ranking no longer
+        depends on the order the notes happened to be indexed in. Being in the
+        SQL, this applies to indexes built before the change too (#506)."""
         try:
             rows = db.execute(
                 "SELECT f.rowid AS id, c.filename AS filename FROM chunks_fts f"
                 " JOIN chunks c ON c.id = f.rowid"
                 " WHERE chunks_fts MATCH ?"
-                " ORDER BY bm25(chunks_fts, 5.0, 2.0, 4.0, 1.0, 1.0)"
+                " ORDER BY bm25(chunks_fts, 5.0, 2.0, 4.0, 1.0, 1.0), c.filename, c.ord"
                 " LIMIT ?",
                 (expr, depth * 3),
             )

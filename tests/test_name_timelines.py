@@ -7,6 +7,7 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Iterator
 from pathlib import Path
 
 import pytest
@@ -80,6 +81,30 @@ def _fillers(omi: Path) -> None:
 
 def _refresh(omi: Path) -> None:
     assert searchindex.SearchIndex(omi).refresh(vectors=False) is not None
+
+
+@pytest.fixture(params=["a-to-z", "z-to-a"])
+def glob_order(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -> str:
+    """Index the vault in a forced A→Z or Z→A order (#506).
+
+    Stands in for the filesystem: ext4 lists a directory by a per-filesystem
+    hash seed, so CI and a local box used to build the index in different
+    orders and get different BM25 tie-breaks. Patches ``_note_paths`` itself,
+    not ``Path.glob``, so the rowids really do differ between the two runs."""
+    reverse = request.param == "z-to-a"
+
+    def paths(self: searchindex.SearchIndex) -> Iterator[Path]:
+        from omind.store import _is_reserved
+
+        found = [
+            p
+            for p in self.omi_dir.glob("*.md")
+            if not (_is_reserved(p.name) or p.name.startswith("."))
+        ]
+        yield from sorted(found, reverse=reverse)
+
+    monkeypatch.setattr(searchindex.SearchIndex, "_note_paths", paths)
+    return request.param
 
 
 @pytest.fixture
@@ -540,11 +565,39 @@ def test_preflight_names_resolve_through_recall(
             "Mx55 backup policy restic nightly glacier",
             "Old name.md",
         ),
+        # #507: the Kp12 pair again, but the NEWER off-topic decoy's filename
+        # sorts first. #506 breaks the title chunks' exact BM25 tie on filename,
+        # so the decoy's title chunk takes the tied keyword rank, and the
+        # recency boost (credited to a note's title chunk) carries it to the
+        # top, whichever order the vault was indexed in. Strict: this case must
+        # keep failing until #507 moves the boost onto the matched chunk.
+        pytest.param(
+            [
+                (
+                    "Kp12 deploy A.md",
+                    "Kp12 deploy steps",
+                    "Kp12 deploy steps via ansible playbook frobnicate.",
+                    "2026-09-01",
+                ),
+                (
+                    "Kp12 deploy 0.md",
+                    "Kp12 deploy steps",
+                    "unrelated garden tomatoes.",
+                    "2026-09-30",
+                ),
+            ],
+            "Kp12 deploy steps ansible playbook frobnicate",
+            "Kp12 deploy A.md",
+            marks=pytest.mark.xfail(
+                strict=True, reason="#507: recency lifts a newer title-only decoy"
+            ),
+        ),
     ],
 )
 def test_preflight_names_the_ranked_note_not_a_newer_decoy(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
+    glob_order: str,
     notes: list[tuple[str, str, str, str]],
     prompt: str,
     expected: str,
@@ -552,6 +605,8 @@ def test_preflight_names_the_ranked_note_not_a_newer_decoy(
 ) -> None:
     # #416 round 2: re-resolving the top title picked the NEWEST note whose
     # title, filename or stem matched — a decoy, not the note retrieval ranked.
+    # #506: and it must come out the same whichever order the filesystem lists
+    # the vault in (``glob_order`` runs it both ways).
     from omind import recall
 
     omi = tmp_path / "OMI"

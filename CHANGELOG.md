@@ -7,6 +7,28 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.4.1] - 2026-10-31
+
+### Fixed
+- **Search ranked differently on different machines
+  ([#506](https://github.com/CryptoJones/omind/issues/506), part of epic
+  [#505](https://github.com/CryptoJones/omind/issues/505)).** The index was built in
+  raw `glob()` order, which on ext4 follows a per-filesystem hash seed, so the same
+  vault got different rowids on different hosts, and FTS5 broke exact BM25 ties
+  (two notes sharing a title, say) on rowid. Two `test_name_timelines` decoy cases
+  passed on CI and failed on a local ext4 box for that reason alone.
+  - `SearchIndex` now indexes the vault in sorted filename order.
+  - `_bm25` breaks ties on `(filename, ord)` in SQL, before the `LIMIT`, so the
+    ranking is independent of rowid at query time. Indexes built before this
+    release get the deterministic tie-break without a rebuild.
+  - A new test indexes one vault A→Z and Z→A and asserts identical ranked lists;
+    the decoy cases now run under both orders.
+  - Still open, deliberately: a newer note whose *title alone* matches can still
+    outrank an older note whose body matches every query word, because the
+    recency boost lands on a note's title chunk. That is
+    [#507](https://github.com/CryptoJones/omind/issues/507); a strict `xfail`
+    keeps the case visible until it lands.
+
 ## [10.4.0] - 2026-10-28
 
 ### Removed
