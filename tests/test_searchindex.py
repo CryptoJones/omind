@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -193,6 +193,63 @@ def test_relevance_beats_recency(omi: Path) -> None:
     idx = searchindex.SearchIndex(omi)
     hits = idx.search("kubernetes ingress") or []
     assert [h.filename for h in hits] == ["On Topic.md"]
+
+
+def _forced_order(reverse: bool) -> Callable[[searchindex.SearchIndex], Iterator[Path]]:
+    """A ``SearchIndex._note_paths`` that lists the vault in one fixed order,
+    standing in for a filesystem that happens to list it that way."""
+
+    def paths(self: searchindex.SearchIndex) -> Iterator[Path]:
+        from omind.store import _is_reserved
+
+        found = [
+            p
+            for p in self.omi_dir.glob("*.md")
+            if not (_is_reserved(p.name) or p.name.startswith("."))
+        ]
+        yield from sorted(found, reverse=reverse)
+
+    return paths
+
+
+def test_ranking_is_the_same_whatever_order_the_vault_is_indexed_in(
+    omi: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#506: ext4 lists a directory by a per-filesystem hash seed, so the same
+    vault got different rowids on different machines, and FTS5 broke exact
+    BM25 ties on rowid. Two notes sharing a title tie exactly on their title
+    chunk; the ranked list must not depend on which was indexed first."""
+    twins = (
+        "# Twin deploy steps\n\n## Metadata\n- Created: 2026-06-01\n- Tags: #ops\n\n"
+        "## Summary\nTwin deploy steps\n\n## Details\n{details}\n"
+    )
+    (omi / "Twin A.md").write_text(twins.format(details="garden tomatoes."), encoding="utf-8")
+    (omi / "Twin B.md").write_text(twins.format(details="kitchen recipes."), encoding="utf-8")
+    (omi / "Twin C.md").write_text(twins.format(details="bicycle tyres."), encoding="utf-8")
+    for number in range(4):
+        _note(omi, f"Filler {number}", f"plain filler {number}", ["f"])
+
+    runs: list[list[tuple[str, str, float, int]]] = []
+    first_rowids: list[list[str]] = []
+    for reverse in (False, True):
+        monkeypatch.setattr(searchindex.SearchIndex, "_note_paths", _forced_order(reverse))
+        idx = searchindex.SearchIndex(omi)
+        idx.drop()
+        assert idx.refresh(vectors=False) is not None
+        db = idx._connect()
+        assert db is not None
+        first_rowids.append(
+            [str(r["filename"]) for r in db.execute("SELECT filename FROM chunks ORDER BY id")]
+        )
+        hits = idx.search("twin deploy steps") or []
+        # Exact ties break on filename, not on whoever got the lower rowid.
+        assert [h.filename for h in hits][:3] == ["Twin A.md", "Twin B.md", "Twin C.md"]
+        runs.append([(h.filename, h.heading, h.score, h.keyword_rank) for h in hits])
+        idx.close()
+    # The two builds really did assign different rowids…
+    assert first_rowids[0] != first_rowids[1]
+    # …and the ranking came out identical anyway.
+    assert runs[0] == runs[1]
 
 
 def test_recency_only_reorders_matches_it_never_adds_notes(omi: Path) -> None:
