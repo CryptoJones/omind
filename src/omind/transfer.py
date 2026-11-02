@@ -22,11 +22,8 @@ Imports never delete. Path traversal is rejected on both formats.
 
 from __future__ import annotations
 
-import contextlib
 import json
-import os
 import tarfile
-import tempfile
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from pathlib import Path, PurePosixPath
@@ -237,7 +234,7 @@ def _classify_and_write(
     note carrying a stale rev would otherwise lose the next merge.
     """
     if not target.exists():
-        _atomic_write_bytes(target, _stamp_if_note(target, data, store))
+        paths.atomic_write_bytes(target, _stamp_if_note(target, data, store))
         result.added.append(label)
         return
     existing = target.read_bytes()
@@ -247,7 +244,7 @@ def _classify_and_write(
     if existing.replace(b"\r\n", b"\n") == data.replace(b"\r\n", b"\n"):
         result.unchanged.append(label)
     elif force:
-        _atomic_write_bytes(target, _stamp_if_note(target, data, store))
+        paths.atomic_write_bytes(target, _stamp_if_note(target, data, store))
         result.overwritten.append(label)
     else:
         result.conflicts.append(label)
@@ -267,23 +264,6 @@ def _stamp_if_note(target: Path, data: bytes, store: OmiStore) -> bytes:
     except UnicodeDecodeError:
         return data
     return store._stamped(target, text).encode("utf-8")
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Bytes twin of ``store._atomic_write``: same-dir temp file + os.replace."""
-    directory = path.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 
 def _import_json(

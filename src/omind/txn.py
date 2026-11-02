@@ -40,7 +40,6 @@ import contextlib
 import hashlib
 import json
 import os
-import tempfile
 import time
 import uuid
 from dataclasses import dataclass, field
@@ -59,7 +58,7 @@ COMMITTED = "committed"
 def _sha(text: str) -> str:
     """Identity of a note's *content*, independent of line-ending translation.
 
-    ``_atomic_write`` writes in text mode, so on Windows every ``\n`` reaches
+    The note writer wrote in text mode, so on Windows every ``\n`` reaches
     the disk as ``\r\n``. Hashing the raw bytes therefore never matched what we
     had just written, every file looked like somebody else's edit, and recovery
     refused to roll back anything at all — the feature was inert on Windows and
@@ -81,40 +80,6 @@ def _fsync_path(path: Path) -> None:
             os.fsync(fd)
         finally:
             os.close(fd)
-
-
-def _fsync_dir(directory: Path) -> None:
-    with contextlib.suppress(OSError, AttributeError):
-        fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(fd)
-        finally:
-            os.close(fd)
-
-
-def _atomic_write_bytes(path: Path, data: bytes) -> None:
-    """Restore exact bytes: same-dir temp + ``os.replace``, binary mode.
-
-    Deliberately NOT the store's text-mode ``_atomic_write``. A pre-image is
-    bytes, and routing it through a text writer re-translates line endings — on
-    Windows, restoring ``b"old A\r\n"`` that way produced ``b"old A\r\r\n"``,
-    growing a blank line into the note on every rollback. Recovery must put back
-    exactly what was there, byte for byte.
-    """
-    directory = path.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-recover-", suffix=".md")
-    try:
-        with os.fdopen(fd, "wb") as fh:
-            fh.write(data)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-        _fsync_dir(directory)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
 
 
 class TransactionError(Exception):
@@ -232,12 +197,7 @@ class Transaction:
             "updated": time.time(),
             "entries": [entry.to_json() for entry in self._entries],
         }
-        journal = self._journal_path()
-        tmp = journal.with_suffix(".tmp")
-        tmp.write_text(json.dumps(payload, indent=2), encoding="utf-8")
-        _fsync_path(tmp)
-        os.replace(tmp, journal)
-        _fsync_dir(journal.parent)
+        paths.atomic_write_text(self._journal_path(), json.dumps(payload, indent=2))
 
     # -- lifecycle ----------------------------------------------------------
 
@@ -255,7 +215,7 @@ class Transaction:
         # Durability: fsync the PARENT too, so the new directory entry itself
         # survives power loss. Without it the fsynced pre-images can outlive
         # the journal that makes them recoverable (2026-08-27 review).
-        _fsync_dir(directory.parent)
+        paths.fsync_dir(directory.parent)
         for index, entry in enumerate(self._entries):
             entry.new_sha = _sha(entry.content) if entry.content is not None else ""
             try:
@@ -270,7 +230,7 @@ class Transaction:
             preimage = self._preimage_path(index)
             preimage.write_bytes(prior)
             _fsync_path(preimage)
-        _fsync_dir(directory)
+        paths.fsync_dir(directory)
         self._record(PREPARED)
         self._prepared = True
 
@@ -364,7 +324,7 @@ def _rollback_journal(directory: Path) -> RecoveryReport:
         if removal and existed and current_sha == "":
             # We deleted it; put it back from the pre-image.
             try:
-                _atomic_write_bytes(path, (directory / f"{index:04d}.pre").read_bytes())
+                paths.atomic_write_bytes(path, (directory / f"{index:04d}.pre").read_bytes())
             except OSError:
                 report.conflicts.append(path.name)
                 continue
@@ -384,7 +344,7 @@ def _rollback_journal(directory: Path) -> RecoveryReport:
         if existed:
             preimage = directory / f"{index:04d}.pre"
             try:
-                _atomic_write_bytes(path, preimage.read_bytes())
+                paths.atomic_write_bytes(path, preimage.read_bytes())
             except OSError:
                 report.conflicts.append(path.name)
                 continue

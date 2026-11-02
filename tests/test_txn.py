@@ -15,7 +15,8 @@ from pathlib import Path
 import pytest
 
 from omind import txn
-from omind.store import NoteFields, OmiStore, _atomic_write
+from omind.paths import atomic_write_text
+from omind.store import NoteFields, OmiStore
 
 
 @pytest.fixture
@@ -26,7 +27,7 @@ def omi(tmp_path: Path) -> Path:
 
 
 def _write(path: Path, text: str) -> None:
-    _atomic_write(path, text)
+    atomic_write_text(path, text)
 
 
 def test_commit_applies_every_write_and_leaves_no_journal(omi: Path) -> None:
@@ -36,7 +37,7 @@ def test_commit_applies_every_write_and_leaves_no_journal(omi: Path) -> None:
     t.write(a, "new A\n")
     t.write(b, "new B\n")
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
     t.commit()
 
     assert a.read_text() == "new A\n"
@@ -76,7 +77,7 @@ def test_an_interrupted_apply_is_rolled_back(omi: Path) -> None:
         if written >= 1:
             raise KeyboardInterrupt("power loss")
         written += 1
-        _atomic_write(path, content)
+        atomic_write_text(path, content)
 
     with pytest.raises(KeyboardInterrupt):
         t.apply(dying_writer)
@@ -101,7 +102,7 @@ def test_recovery_refuses_to_clobber_an_edit_made_after_the_crash(omi: Path) -> 
     t = txn.Transaction(omi)
     t.write(a, "new A\n")
     t.prepare()
-    t.apply(_atomic_write)  # applied, but the process died before commit()
+    t.apply(atomic_write_text)  # applied, but the process died before commit()
 
     a.write_text("a human fixed this by hand\n", encoding="utf-8")
 
@@ -119,7 +120,7 @@ def test_recovery_is_idempotent(omi: Path) -> None:
     t = txn.Transaction(omi)
     t.write(a, "new A\n")
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
 
     assert txn.recover(omi)[0].clean
     assert a.read_text() == "old A\n"
@@ -134,7 +135,7 @@ def test_a_committed_transaction_is_never_rolled_back(omi: Path) -> None:
     t = txn.Transaction(omi)
     t.write(a, "new A\n")
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
     t._record(txn.COMMITTED)  # commit record fsynced; cleanup did not run
 
     assert txn.pending(omi) == []
@@ -148,7 +149,7 @@ def test_dry_run_reports_without_changing_anything(omi: Path) -> None:
     t = txn.Transaction(omi)
     t.write(a, "new A\n")
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
 
     reports = txn.recover(omi, dry_run=True)
     assert len(reports) == 1 and reports[0].skipped == ["A.md"]
@@ -185,7 +186,7 @@ def test_consolidate_apply_rolls_back_a_failed_merge(omi: Path, monkeypatch) -> 
         def half(path: Path, content: str) -> None:
             if calls["n"] and path.name == "Source Two.md":
                 raise OSError("disk full")
-            _atomic_write(path, content)
+            atomic_write_text(path, content)
 
         real(self, half)
 
@@ -212,7 +213,7 @@ def test_recover_cli_reports_and_exits_nonzero_on_conflict(
     t = txn.Transaction(omi)
     t.write(a, "new A\n")
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
     a.write_text("hand-edited\n", encoding="utf-8")
 
     code = main(["recover", "--vault", str(omi.parent), "--folder", omi.name])
@@ -264,7 +265,7 @@ def test_rollback_recognizes_its_own_write_after_line_ending_translation(
 ) -> None:
     """CRLF on disk must not read as "somebody else edited this" (Windows).
 
-    `_atomic_write` writes in text mode, so on Windows every `\\n` lands as
+    The note writer wrote in text mode, so on Windows every `\\n` lands as
     `\\r\\n`. Hashing raw bytes made the file we had just written match neither
     the pre-image nor our intended content, so recovery classified *everything*
     as a conflict and rolled back nothing — the feature was inert on Windows and
@@ -290,7 +291,7 @@ def test_rollback_never_routes_a_preimage_through_the_text_writer(
 ) -> None:
     """A pre-image is bytes and must be restored as bytes (Windows).
 
-    The store's `_atomic_write` is TEXT mode, so on Windows it translates every
+    The store's old note writer was TEXT mode, so on Windows it translates every
     `\n` to `\r\n`. Restoring a CRLF pre-image through it translated a second
     time — `b"old A\r\n"` was written back as `b"old A\r\r\n"`, so every
     rollback silently grew a blank line in the note it was restoring. Both
@@ -300,7 +301,7 @@ def test_rollback_never_routes_a_preimage_through_the_text_writer(
     nothing here. Instead: install a writer that translates the way Windows
     does, and assert recovery never touches it.
     """
-    from omind import store
+    from omind import paths
 
     def windows_like_text_writer(path: Path, text: str) -> None:
         Path(path).write_bytes(text.replace("\n", "\r\n").encode("utf-8"))
@@ -314,7 +315,7 @@ def test_rollback_never_routes_a_preimage_through_the_text_writer(
     t.prepare()
     a.write_bytes(b"new A\r\n")  # what a Windows writer leaves behind
 
-    monkeypatch.setattr(store, "_atomic_write", windows_like_text_writer)
+    monkeypatch.setattr(paths, "atomic_write_text", windows_like_text_writer)
     assert txn.recover(omi)[0].clean
     assert a.read_bytes() == original  # byte-identical, not merely equivalent
 
@@ -330,7 +331,7 @@ def test_a_journaled_removal_is_rolled_back(omi: Path) -> None:
     t.write(keeper, "# Target\n\n- entry one\n")
     t.remove(doomed)
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
     assert not doomed.exists()  # the move happened
 
     assert txn.recover(omi)[0].clean  # ...then the process died before commit
@@ -342,6 +343,6 @@ def test_removing_a_file_that_never_existed_is_not_a_conflict(omi: Path) -> None
     t = txn.Transaction(omi)
     t.remove(omi / "Ghost.md")
     t.prepare()
-    t.apply(_atomic_write)
+    t.apply(atomic_write_text)
     report = txn.recover(omi)[0]
     assert report.clean and report.skipped == ["Ghost.md"]

@@ -38,9 +38,9 @@ from xml.sax.saxutils import escape as xml_escape
 from omind import filelock
 from omind.backup import config_dir
 from omind.clock import Rev
-from omind.paths import sync_state_path
+from omind.paths import atomic_write_text, sync_state_path
 from omind.proc import run_command
-from omind.store import OmiStore, _atomic_write, parse_note
+from omind.store import OmiStore, parse_note
 
 Logger = Callable[[str], None]
 
@@ -59,7 +59,7 @@ GIT_TIMEOUT = 120.0
 #: ``* -text`` is load-bearing, not tidiness. Git for Windows ships
 #: ``core.autocrlf=true`` at the *system* level, so without this line a Windows
 #: peer would get CRLF working-tree checkouts of every note. omind writes LF on
-#: every platform (``store._atomic_write``), so the vault would then disagree
+#: every platform (``paths.atomic_write_text``), so the vault would then disagree
 #: with itself: ``note_version`` digests — raw-byte hashes — would differ across
 #: the fleet for identical notes, and every index would rebuild on that peer.
 #: ``-text`` disables git's translation repo-wide and overrides ``autocrlf``.
@@ -193,7 +193,7 @@ def _save_node_config_unlocked(omi_dir: Path, cfg: NodeConfig) -> None:
     }
     # Atomic: a torn node.json breaks every later mesh command — or worse,
     # loses this folder's entry and mints a new node_id on the next setup.
-    _atomic_write(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
+    atomic_write_text(path, json.dumps(data, indent=2, sort_keys=True) + "\n")
 
 
 def new_node_id() -> str:
@@ -660,7 +660,7 @@ def _apply_tombstones(omi_dir: Path, store: OmiStore, now: datetime | None = Non
                 continue
             target.unlink()
     if changed:
-        _atomic_write(tomb, ("\n".join(kept) + "\n") if kept else "")
+        atomic_write_text(tomb, ("\n".join(kept) + "\n") if kept else "")
     return conflicts
 
 
@@ -696,7 +696,7 @@ def _update_sync_state(omi_dir: Path, mutate: Callable[[dict[str, Any]], None]) 
         with filelock.exclusive(path.with_name(path.name + ".lock")):
             state = read_sync_state(omi_dir) or {}
             mutate(state)
-            _atomic_write(path, json.dumps(state, indent=2) + "\n")
+            atomic_write_text(path, json.dumps(state, indent=2) + "\n")
     except Exception:  # advisory state, fail-open: a sync never fails over it
         return
 
@@ -943,7 +943,7 @@ def purge(omi_dir: Path, name: str, node_id: str, log: Logger = print) -> None:
             new_line = f"{stamp}\t{target.name}" + (f"\t{rev}" if rev else "")
             # Atomic: a torn tombstone file would un-purge every prior purge
             # mesh-wide once the truncation merged out to the peers.
-            _atomic_write(tomb, "\n".join([*existing, new_line]) + "\n")
+            atomic_write_text(tomb, "\n".join([*existing, new_line]) + "\n")
         if target.is_file():
             target.unlink()
         store.update_index_locked()
