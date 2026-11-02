@@ -1,18 +1,16 @@
-# omind
+<p align="center"><em>Proudly Made in Nebraska. Go Big Red! 🌽 <a href="https://xkcd.com/2347/">https://xkcd.com/2347/</a></em></p>
 
+# omind
 OMI/Obsidian memory tooling for AI agents: reproduce the integration on any machine, plus a local web app to view, edit, and add memory entries.
+Every PR is cross-reviewed across models by [Flatline Roundtable](https://github.com/CryptoJones/FlatlineRoundtable), and [conveyor](https://github.com/samarmstrong/conveyor) runs omind's backlog factory ([how](https://github.com/CryptoJones/omind/blob/main/docs/conveyor-factory.md)).
 
 [![Tests](https://github.com/CryptoJones/omind/actions/workflows/test.yml/badge.svg)](https://github.com/CryptoJones/omind/actions/workflows/test.yml)
 [![License](https://img.shields.io/badge/License-Apache_2.0-blue.svg?logo=apache)](LICENSE)
-[![Codeberg](https://img.shields.io/badge/Codeberg-CryptoJones%2Fomind-2185D0?logo=codeberg&logoColor=white)](https://codeberg.org/CryptoJones/omind)
 [![GitHub](https://img.shields.io/badge/GitHub-CryptoJones%2Fomind-181717?logo=github&logoColor=white)](https://github.com/CryptoJones/omind)
-[![Python](https://img.shields.io/badge/Python-3.10%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
+[![PyPI](https://img.shields.io/pypi/v/omind?logo=pypi&logoColor=white)](https://pypi.org/project/omind/)
+[![Python](https://img.shields.io/badge/Python-3.11%2B-3776AB?logo=python&logoColor=white)](https://www.python.org/)
 [![Open Knowledge Format](https://img.shields.io/badge/format-OKF%20v0.1-4285F4?logo=googlecloud&logoColor=white)](https://github.com/GoogleCloudPlatform/knowledge-catalog/tree/main/okf)
 [![Version](https://img.shields.io/github/v/tag/CryptoJones/omind?label=version&color=orange)](https://github.com/CryptoJones/omind/tags)
-
-> Mirrored on both [GitHub](https://github.com/CryptoJones/omind) and
-> [Codeberg](https://codeberg.org/CryptoJones/omind). Issues filed on
-> either are welcome; commits are pushed to both.
 
 ---
 
@@ -98,7 +96,7 @@ scripts/bootstrap.sh                       # or: --remote codeberg, --vault PATH
 It refuses what it cannot safely do — an unsupported system, no `git`, an existing
 install that is still running on Windows, a release that does not install *and
 start* in a throwaway environment — before it installs or replaces omind. It
-auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.10 for
+auto-installs `uv` (user-local, no root — and it bootstraps Python ≥3.11 for
 you), checks for `claude` with install guidance if it is missing,
 then runs `omind setup` + `omind doctor`. Note: omind itself has **no Docker and
 no Node.js dependency** — it needs only `git` and an agent CLI (Claude Code on
@@ -106,17 +104,25 @@ the default path; Hermes, OpenClaw, OpenCode, and Codex are each wired with
 `omind setup --agent <name>` once their own CLI is installed — see *Other
 agents* below).
 
-**Manual** — an isolated CLI install straight from the git remote:
+**Manual** — an isolated CLI install from [PyPI](https://pypi.org/project/omind/):
 
 ```bash
-# via uv (recommended — also provides a compatible Python if the system one is <3.10)
-uv tool install git+https://github.com/CryptoJones/omind.git
+# via uv (recommended — also provides a compatible Python if the system one is <3.11)
+uv tool install omind
 
 # or via pipx
+pipx install omind
+```
+
+**From source / latest `main`** — the same isolated install straight from the git remote:
+
+```bash
+uv tool install git+https://github.com/CryptoJones/omind.git
+# or
 pipx install git+https://github.com/CryptoJones/omind.git
 ```
 
-Either puts the `omind` command on your `PATH` in its own virtualenv. Codeberg
+Any of these puts the `omind` command on your `PATH` in its own virtualenv. Codeberg
 works too — swap in `git+https://codeberg.org/CryptoJones/omind.git`.
 
 For development, install editable from a clone (see [CONTRIBUTING.md](CONTRIBUTING.md)):

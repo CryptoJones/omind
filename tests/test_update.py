@@ -316,6 +316,48 @@ def test_pip_install_that_fails_its_trial_is_refused(monkeypatch: pytest.MonkeyP
     assert any("does not install" in line and "No matching distribution" in line for line in out)
 
 
+def test_pip_trial_on_a_python_the_release_dropped_says_so(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """omind 10.4.0 dropped Python 3.10. A pip install on 3.10 must be refused with
+    the reason and the way out, not pip's trailing "[notice] new pip" banner."""
+    _updatable(monkeypatch)
+    monkeypatch.setattr(update, "detect_install", lambda: InstallInfo("pip", "x"))
+    envs: list[dict[str, str]] = []
+
+    def fake_run(cmd: list[str], *args: object, **kwargs: object) -> _Proc:
+        if "--force-reinstall" in cmd:
+            raise AssertionError("the live install must not be touched after a failed trial")
+        if cmd[1:3] == ["-m", "pip"]:
+            env = kwargs.get("env")
+            envs.append(dict(env) if isinstance(env, dict) else {})
+            return _Proc(
+                returncode=1,
+                stderr=(
+                    "ERROR: Package 'omind' requires a different Python: 3.10.21 not in "
+                    "'>=3.11'\n\n[notice] A new release of pip is available: 23.0.1 -> 26.2\n"
+                    "[notice] To update, run: python -m pip install --upgrade pip\n"
+                ),
+            )
+        return _Proc()
+
+    monkeypatch.setattr(update.subprocess, "run", fake_run)
+    out: list[str] = []
+    assert self_update(log=out.append) == 1
+    text = "\n".join(out)
+    assert "nothing was changed" in text
+    assert "does not support this install's Python" in text
+    assert "requires a different Python" in text and "[notice]" not in text
+    assert "uv tool install --force omind" in text
+    assert envs and envs[0].get("PIP_DISABLE_PIP_VERSION_CHECK") == "1"
+
+
+def test_last_line_skips_pip_notices() -> None:
+    assert update._last_line("ERROR: boom\n[notice] new pip\n") == "ERROR: boom"
+    assert update._last_line("[notice] only\n") == ""
+    assert update._last_line(None) == ""
+
+
 @pytest.mark.parametrize(
     ("output", "reports"),
     [

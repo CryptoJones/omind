@@ -15,7 +15,7 @@ from omind.cli import build_parser, main
 def test_version_is_set() -> None:
     # Compare against pyproject's version (the single source of truth) so a
     # release bump can't leave __version__ behind — that happened in 2.0.1.
-    # (regex, not tomllib: CI's floor is 3.10)
+    # (regex; tomllib would do too now that the floor is 3.11)
     pyproject = (Path(__file__).parent.parent / "pyproject.toml").read_text(encoding="utf-8")
     declared = re.search(r'^version = "([^"]+)"', pyproject, re.MULTILINE)
     assert declared is not None
@@ -253,6 +253,25 @@ def test_search_finds_notes(tmp_path: Path, capsys: pytest.CaptureFixture[str]) 
     # a miss prints "no matches"
     assert main(["search", "zzznotthere", "--vault", str(tmp_path), "--folder", "OMI"]) == 0
     assert "no matches" in capsys.readouterr().out
+
+
+def test_search_explain_reports_the_recency_rank(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """#507: ``--explain`` names every leg that moved a result, recency included.
+    ``Hit.recency_rank`` existed but was never filled in, so the line showed only
+    keyword and semantic ranks."""
+    from omind.store import NoteFields, OmiStore
+
+    OmiStore(tmp_path / "OMI").create_note(
+        NoteFields(title="Codeberg Note", summary="about codeberg releases")
+    )
+    args = ["search", "codeberg", "--explain", "--vault", str(tmp_path), "--folder", "OMI"]
+    assert main(args) == 0
+    out = capsys.readouterr().out
+    assert "Codeberg Note" in out
+    assert "keyword=1" in out
+    assert "recency=1" in out
 
 
 def test_dedup_hint_warns_about_a_similar_existing_note(

@@ -225,7 +225,7 @@ def hard_time_limit(seconds: float = 5.0) -> Iterator[None]:
 
 
 #: How much slower pure-Python code runs under a line tracer. CI runs every
-#: test under coverage, which costs the guard's walk 2-3x on Python 3.10-3.12
+#: test under coverage, which costs the guard's walk 2-3x on Python 3.11-3.12
 #: (#445: the 100,000-repeat judges take 0.15-0.33 s untraced, up to 1 s
 #: traced on a CI runner).
 TRACER_SLOWDOWN = 3.0

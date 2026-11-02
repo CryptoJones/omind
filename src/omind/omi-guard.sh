@@ -48,7 +48,7 @@ if ! command -v jq >/dev/null 2>&1; then
   # snake_case, and any use_tool / CallMcpTool dispatcher (it can wrap a
   # shell call) is a Bash command here. With neither jq nor the core it must
   # not run unchecked.
-  if printf '%s' "$input" | grep -Eq '"(tool_name|toolName)"[[:space:]]*:[[:space:]]*"(Bash|bash|shell|local_shell|exec_command|shell_command|terminal|run_command|run_shell_command|run_terminal_command|use_tool|CallMcpTool)"'; then
+  if printf '%s' "$input" | grep -Eq '"(tool_name|toolName)"[[:space:]]*:[[:space:]]*"(Bash|bash|shell|local_shell|exec_command|shell_command|terminal|run_command|send_command_input|run_shell_command|run_terminal_command|use_tool|CallMcpTool)"'; then
     printf 'omi-guard: omind core unreachable too — BLOCKING this Bash command (fail-closed).\n' >&2
     exit 2
   fi

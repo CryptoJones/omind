@@ -37,7 +37,15 @@ Two rules keep the result honest:
 
 - **Recency re-ranks; it never adds.** A note that matched nothing cannot ride
   the recency leg into your results. (Before the index, search sorted purely by
-  date, so the newest notes came back regardless of relevance.)
+  date, so the newest notes came back regardless of relevance.) It is also
+  reserved for notes whose *title* the query matched — it breaks ties among
+  notes that are about the query, it does not reward a passing mention in a
+  long body. The boost is credited to the note's best *matched* chunk, not its
+  title chunk, and when any of those notes holds a chunk matching every query
+  word only such notes receive it — so a newer note that merely shares a title
+  cannot outrank an older note whose body answers the whole query.
+  `omind search --explain` shows the recency rank beside the keyword and
+  semantic ranks.
 - **Credential notes are de-prioritised** unless your query is itself about
   credentials — the same rule the consult gate applies. Search must never steer
   an agent toward the secrets notes.

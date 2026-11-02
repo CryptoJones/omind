@@ -130,9 +130,13 @@ found 35 issues; all are fixed in the working tree. The classes worth rememberin
 
 ### Where to pick up
 
-The feature roadmap (agent identity/attribution, a usefulness feedback loop,
-sleep-time consolidation, write-time dedup, scoped writes) is Part 2 of the review
-report — none of it is started.
+The feature roadmap from Part 2 of the review report has **all shipped**: agent
+identity (`Agent:` stamp), the usefulness feedback loop (`access.py`), and
+write-time near-duplicate warnings in v8.11.0; the sleep-time janitor
+(`omind maintain`), the scoped-write interlock (`scope_guard.py`), and the
+scratch tier in v9.2.1. Design rulings are in
+[docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md).
+For anything still open, read BACKLOG.md.
 
 ---
 

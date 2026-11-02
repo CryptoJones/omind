@@ -34,7 +34,7 @@ import shutil
 import subprocess
 import tempfile
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from omind import filelock, paths
@@ -343,7 +343,7 @@ def _warn_unencrypted_once(omi_dir: Path, log: Logger) -> None:
 
 def _rsync_backup(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
     dest = _rsync_destination(config.repo).rstrip("/")
-    stamp = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H%M%SZ")
+    stamp = datetime.now(UTC).strftime("%Y-%m-%dT%H%M%SZ")
     cmd = ["rsync", "-a", "--delete"]
     if config.last_snapshot:
         # Hard-link unchanged files against the previous snapshot (sibling dir).
@@ -357,7 +357,7 @@ def _rsync_backup(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
 
 def _record_success(config: BackupConfig, omi_dir: Path, log: Logger) -> None:
     config.consecutive_failures = 0
-    config.last_success = datetime.now(timezone.utc).isoformat()
+    config.last_success = datetime.now(UTC).isoformat()
     save_config(config)
     with contextlib.suppress(NoteNotFoundError):
         OmiStore(omi_dir).delete_note(FAILING_NOTE_FILENAME)
@@ -501,8 +501,8 @@ def _hours_since(iso: str) -> float | None:
     except ValueError:
         return None
     if then.tzinfo is None:
-        then = then.replace(tzinfo=timezone.utc)
-    return (datetime.now(timezone.utc) - then).total_seconds() / 3600.0
+        then = then.replace(tzinfo=UTC)
+    return (datetime.now(UTC) - then).total_seconds() / 3600.0
 
 
 def diagnose_backup(config: SetupConfig) -> list[CheckResult]:

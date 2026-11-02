@@ -7,11 +7,196 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.4.2] - 2026-10-31
+
+### Fixed
+- **A newer note that only shared the query's title could outrank an older
+  note whose body matched every query word
+  ([#507](https://github.com/CryptoJones/omind/issues/507), closes epic
+  [#505](https://github.com/CryptoJones/omind/issues/505)).** The recency leg
+  ranked notes newest-first but credited each note's `ord = 0` title chunk,
+  whatever chunk had actually matched. With two same-titled notes the decoy's
+  tied title match plus the recency boost beat the real answer's full-body match.
+  - The boost now goes to a note's best-ranked content chunk: its first chunk
+    in the keyword list, otherwise in the vector list. A note's keyword credit
+    and recency credit are no longer split across two chunks.
+  - Candidates are, as before, the notes whose *title* chunk a content leg
+    returned: recency breaks ties among notes that are about the query. When any
+    candidate also holds a chunk matching *every* query word, only those
+    candidates receive the boost. That is what drops the title-only decoy.
+  - Epic #505 decision 4 wanted every matched note admitted when the all-words
+    grade was empty. Measured on the reference vault that cost a bench case (a
+    day-old note at keyword rank 88 took the rank-1 boost: recall@5 80.0 → 76.7,
+    MRR 0.6616 → 0.6604), and so did decision 7's fallback (no gate at all).
+    The narrower rule above ranks all 30 cases identically to 10.4.1.
+  - Recency still only reorders: a note no content leg returned has no best
+    chunk and cannot be added. `_W_RECENCY` and `RRF_K` are unchanged.
+  - `omind search --explain` now reports `recency=N` beside the keyword and
+    semantic ranks; `Hit.recency_rank` was declared but never filled in.
+  - The strict `xfail` that 10.4.1 left on the decoy case is gone; the case
+    passes under both indexing orders.
+
+## [10.4.1] - 2026-10-31
+
+### Fixed
+- **Search ranked differently on different machines
+  ([#506](https://github.com/CryptoJones/omind/issues/506), part of epic
+  [#505](https://github.com/CryptoJones/omind/issues/505)).** The index was built in
+  raw `glob()` order, which on ext4 follows a per-filesystem hash seed, so the same
+  vault got different rowids on different hosts, and FTS5 broke exact BM25 ties
+  (two notes sharing a title, say) on rowid. Two `test_name_timelines` decoy cases
+  passed on CI and failed on a local ext4 box for that reason alone.
+  - `SearchIndex` now indexes the vault in sorted filename order.
+  - `_bm25` breaks ties on `(filename, ord)` in SQL, before the `LIMIT`, so the
+    ranking is independent of rowid at query time. Indexes built before this
+    release get the deterministic tie-break without a rebuild.
+  - A new test indexes one vault A→Z and Z→A and asserts identical ranked lists;
+    the decoy cases now run under both orders.
+  - Still open, deliberately: a newer note whose *title alone* matches can still
+    outrank an older note whose body matches every query word, because the
+    recency boost lands on a note's title chunk. That is
+    [#507](https://github.com/CryptoJones/omind/issues/507); a strict `xfail`
+    keeps the case visible until it lands.
+
+## [10.4.0] - 2026-10-28
+
 ### Removed
-- **PyPI publishing (`publish.yml`) and the `#267` publish blocker.** omind is an MCP
-  server installed from source with `uv tool`, not a library distributed on PyPI, so the
-  trusted-publishing pipeline was dropped. Releases stay GitHub releases on `v<version>`
-  tags that the fleet installs from git; nothing uploads to a package index.
+- **Python 3.10 support
+  ([#502](https://github.com/CryptoJones/omind/issues/502)).** omind now requires
+  Python 3.11+ (`requires-python = ">=3.11"`). Python 3.10 reaches end of life this
+  month, no fleet host runs it (they run 3.12–3.14), and the fixed releases of
+  filelock (4.2.1+) and dnspython (2.9.0+) need 3.11+, so the 3.10 lock split could
+  only ever carry vulnerable versions. The 3.10 classifier, the 3.10 CI legs (the
+  Windows and macOS legs are now 3.11 + 3.14) and the 3.10-only `pip-audit
+  --ignore-vuln` exceptions are gone; mypy and ruff target 3.11.
+  - **Upgrading from a 3.10 install.** A `uv tool` install updates normally: uv
+    rebuilds the tool environment on a compatible Python it finds or downloads.
+    A pip install on 3.10 cannot take 10.4.0. `omind self-update` tries the
+    release in a throwaway venv first, so it refuses and leaves the working 3.10
+    install untouched. Reinstall on a newer Python, e.g.
+    `uv tool install --force omind`. From 10.4.0 on, that refusal names the Python
+    mismatch and the fix instead of pip's trailing `[notice] A new release of pip`
+    banner, and the trial venv no longer runs pip's version check.
+
+### Security
+- **The last 7 Dependabot alerts are cleared.** They were all on 3.10-only
+  `uv.lock` entries with no fixed release there: filelock 4.1.0 (1 high, 3 medium,
+  2 low) and dnspython 2.8.0 (1 high, `e2e` extra only). With the 3.10 split gone the
+  lock carries only filelock 4.2.4 and dnspython 2.9.0, the `embed` extra's
+  `filelock>=4.2.1,<5.0` floor no longer needs a `python_version >= '3.11'` marker,
+  and `pip-audit` runs with no ignores on every CI leg.
+
+## [10.3.7] - 2026-10-28
+
+### Security
+- **Dependency floors for 21 Dependabot alerts
+  ([#499](https://github.com/CryptoJones/omind/issues/499)).** `uv.lock` is relocked
+  to the patched brotli 1.2.1 / brotlicffi 1.2.1.0, aiohttp 3.14.5, dnspython 2.9.0,
+  filelock 4.2.4, msgpack 1.2.4, mcp 2.3.0, multidict 7.2.1 and opentelemetry-api
+  1.45.1. `uv.lock` does not reach PyPI installs, so `pyproject.toml` raises the
+  floors on what the runtime tree pulls in: `mcp>=2.2.0,<3.0`,
+  `opentelemetry-api>=1.45.1,<2.0` (via mcp), `filelock>=4.2.1,<5.0` in the `embed`
+  extra (via huggingface-hub), and `msgpack>=1.2.3,<2.0` in `dev`. aiohttp, brotli,
+  dnspython and multidict only arrive through the `e2e` test extra (runpod), so the
+  lock covers them. filelock 4.2.1 and dnspython 2.9.0 need Python 3.11+, so the
+  3.10 lock split keeps the 3.x / 2.8 lines; no fixed release exists there.
+  The PyPI `filelock` is unrelated to `omind.filelock`, and nothing imports it.
+
+### Fixed
+- **Mesh sync failed silently for weeks on a stale git ref lock
+  ([#498](https://github.com/CryptoJones/omind/issues/498)).** A crash left
+  `.git/HEAD.lock` and `refs/heads/main.lock` on telesto, and every daemon tick for
+  five weeks logged only `sync failed: ... cannot lock ref 'HEAD'` while
+  `omind doctor` looked healthy.
+  - `omind doctor` reports `[✗]` for a stale git lock under `.git/` (`index.lock`,
+    `HEAD.lock`, `packed-refs.lock`, `config.lock`, `refs/**/*.lock`) with its path
+    and age. A lock is stale only when it is older than `STALE_LOCK_SECONDS` (10 min)
+    AND no live git process is using the repo. Linux attributes git processes to the
+    repo through `/proc` (cwd and argv). macOS and Windows can only prove that no
+    git process is running at all; any git process there means "can't tell", and the
+    lock is treated as in use.
+  - The last successful sync, the consecutive-failure count and the last error are
+    recorded in the state dir (never the vault), written under a sibling `.lock`.
+    On a node with peers, doctor warns (`[!]`) when the last successful sync is
+    older than 2 daemon intervals and names the failures. A sync counts as
+    successful when it reaches at least one peer, so one offline laptop does not
+    flag the node.
+  - On a failed tick caused by a lock error, the daemon logs ONE line naming the
+    stale lock. It self-heals only provably stale REF locks (`HEAD.lock`,
+    `refs/**/*.lock`, `packed-refs.lock`), never `index.lock` or `config.lock`. It
+    re-checks each lock under the store write lock and removes it only if it is still
+    the same file (renamed aside and identity-checked, so a lock git re-created in the
+    meantime is put back with a no-clobber hard link; if even that fails, it is left,
+    never deleted, as `.git/omind-stale-lock-*` and the daemon log says so), then runs
+    `git fsck --connectivity-only`, records a `mesh-stale-lock` event (stderr and a
+    doctor line), and retries the sync once.
+  - Every daemon tick also heals stale ref locks that never fail a local sync (a
+    lock on `refs/omind/<peer>` or an unused branch), under the same guards.
+  - All of this fails open: any exception in a tick (not only a git error) becomes
+    one `sync failed` line and is recorded, so the daemon never dies into a service
+    restart loop; `diagnose_mesh` never raises, and a malformed state file (an
+    infinite failure count, a non-list field) becomes a warn line at worst.
+  - Hardening from the Flatline Roundtable review of #501:
+    - A symlinked `.git/refs` root is never walked (with `refs -> .`, `index.lock`
+      read as a ref lock and was removed), and every ref lock's real path must stay
+      inside the real `refs/` directory (git-new-workdir links refs to another repo).
+    - On Linux a git process aimed at the repo through `GIT_DIR`, `GIT_WORK_TREE`,
+      `GIT_COMMON_DIR` or `GIT_INDEX_FILE` counts as live; an unreadable environment
+      makes the answer "unknown", never "none".
+    - A lock dated more than 60s in the future is reported (warn) and never healed.
+    - Doctor fails `mesh_sync` (non-zero exit) when the last success is over 24h old
+      and syncs are still failing. A stale `config.lock` warns rather than fails.
+    - `omind mesh sync --peer <typo>` syncs nothing and no longer counts as success.
+    - The state keeps only the last self-heal (`last_lock_event`), not a list.
+    - The 3.10-only filelock CVE ignores in CI now apply to the 3.10 legs only.
+
+## [10.3.6] - 2026-10-28
+
+### Fixed
+- **The guard's fail-open fallback ignored text typed through Antigravity's
+  `send_command_input` ([#496](https://github.com/CryptoJones/omind/issues/496)).**
+  Follow-up to #475. When translating, normalizing, checking or rendering an event
+  raised, `adapters._fail_open_verdict` read the command from its own key list
+  (`command`, `cmd`, agy `CommandLine`, flat `command`) and never `Input`, so a
+  hard-rule command typed into a running shell on that error path was allowed. The
+  fallback now derives the command through `guard.shell_command_text` (from
+  `tool_input`, then agy's `toolCall.args`, then the flat event): one extraction
+  point shared with the normal path. It still never raises.
+
+### Changed
+- **README header ([#436](https://github.com/CryptoJones/omind/issues/436),
+  merged in [#495](https://github.com/CryptoJones/omind/pull/495) after the v10.3.5
+  tag, so first released here).** The centred Nebraska banner, links to Flatline Roundtable and conveyor in the first
+  lines, the install section led by `uv tool install omind` (on PyPI since 10.3.4;
+  the git install is kept), and the stale Codeberg badge dropped.
+
+## [10.3.5] - 2026-10-28
+
+### Fixed
+- **Text typed into a running command in Antigravity was never judged
+  ([#475](https://github.com/CryptoJones/omind/issues/475)).** Antigravity's
+  `send_command_input` sends its `Input` to a command `run_command` left running,
+  so `gh repo delete …` or `git commit -am x` typed into an open shell skipped the
+  hard rules, the repo-work gate and the commit freshness gate. `send_command_input`
+  is now in `guard.SHELL_TOOL_NAMES` (and the `omi-guard.sh` fail-closed list), and
+  `guard.shell_command_text` reads `Input` after `command` / `CommandLine` / `cmd`,
+  with the trailing Enter (`\r` / `\n`) stripped, so the typed text meets the same
+  rules as the bare command. A fetch typed this way is allowed but never grants
+  commit freshness (`guard.STDIN_TOOL_NAMES`): the text may not reach a shell, and
+  the tool's result carries no exit code to retract a failed fetch with. Each write
+  is judged on its own; there is no reassembly across writes, so a command split
+  over several keystroke writes is a known limit. Codex `write_stdin` is not covered and cannot be: per the
+  [Codex hooks docs](https://learn.chatgpt.com/docs/hooks) it never fires PreToolUse.
+
+## [10.3.4] - 2026-10-27
+
+### Added
+- **PyPI publishing ([#267](https://github.com/CryptoJones/omind/issues/267)).**
+  `publish.yml` is back and now authenticates with a PyPI API token (the
+  `PYPI_API_TOKEN` secret of the `pypi` environment) instead of trusted publishing.
+  Every published GitHub release builds the sdist and wheel, checks the tag matches the
+  packaged version, runs `twine check --strict`, and uploads to PyPI. This reverses the
+  won't-do in #488.
 
 ## [10.3.3] - 2026-10-26
 

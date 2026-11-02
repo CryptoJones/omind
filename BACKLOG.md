@@ -11,12 +11,16 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — _bug_ —
-  follow-up from the #474 review: Codex `write_stdin` (`chars`) and Antigravity `send_command_input`
-  (`Input`) send text to a shell that is already running, so the hard rules and the freshness gate
-  never judge it. Verify the tool names against live payloads first.
-- [ ] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — _docs_ —
-  prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner and drops the stale Codeberg badge.
+### Epic: search ranks the same on every machine, and a newer title-only match can't beat a full-body match ([#505](https://github.com/CryptoJones/omind/issues/505))
+
+Found 2026-10-28: two `test_name_timelines` decoy cases pass on CI and fail locally,
+because the index is built in raw filesystem order and the recency leg lets a newer
+note's title-only chunk outrank a note whose body matches every query word. Full
+analysis on the epic.
+
+- [x] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — **v10.4.1** — _bug_
+- [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ — after #506
+
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -70,6 +74,66 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-10-31 (v10.4.2)
+
+- [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ —
+  the recency boost is credited to a note's best matched content chunk (first in the keyword list,
+  else the vector list) instead of its `ord = 0` title chunk. Candidates stay the notes whose title
+  chunk a content leg returned; when any of them holds a chunk matching every query word, only those
+  receive the boost. (Epic decision 4's wider gate, and decision 7's no-gate fallback, each cost one
+  bench case on the reference vault; this rule ranks all 30 identically to 10.4.1.) Weights unchanged;
+  recency still never adds a note. `Hit.recency_rank` is filled in and `omind search --explain`
+  prints it. The strict `xfail` from v10.4.1 is removed. Last child of epic #505.
+
+### Shipped — 2026-10-31 (v10.4.1)
+
+- [x] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — **v10.4.1** — _bug_ —
+  `SearchIndex._note_paths` iterates `sorted(glob)`, and `_bm25` orders by
+  `bm25(...), c.filename, c.ord` before its `LIMIT`, so exact ties no longer break on rowid (that is,
+  on the order ext4 happened to list the vault). Applies to existing indexes at query time; no
+  rebuild. Tests: one vault indexed A→Z and Z→A ranks identically; the decoy cases run under both
+  orders. Child of epic #505; #507 (the recency-boost half) stays open behind a strict `xfail`.
+
+### Shipped — 2026-10-28 (v10.4.0)
+
+- [x] **Drop Python 3.10 support (EOL Oct 2026) to clear the last 7 Dependabot alerts** ([#502](https://github.com/CryptoJones/omind/issues/502)) — **v10.4.0** — _dependencies_ —
+  `requires-python = ">=3.11"`; the 3.10 lock split (filelock 4.1.0, dnspython 2.8.0, no fixed
+  release on 3.10) is gone, and CI drops its 3.10 legs and pip-audit ignores. A pip install still
+  on 3.10 runs its old (≤10.3.7) updater, whose throwaway-venv trial refuses 10.4.0 and changes
+  nothing, though its message may show pip's `[notice]` banner instead of the cause. Reinstall on a
+  newer Python with `uv tool install --force omind`. uv-tool installs move to a compatible Python on
+  their own. From 10.4.0 on, the refusal names the Python mismatch and that fix.
+
+### Shipped — 2026-10-28 (v10.3.7)
+
+- [x] **Security: bump locked deps for 21 open Dependabot alerts** ([#499](https://github.com/CryptoJones/omind/issues/499)) — **v10.3.7** — _security_ —
+  `uv.lock` relocked (brotli, brotlicffi, aiohttp, dnspython, filelock, msgpack, mcp, multidict,
+  opentelemetry-api) and `pyproject.toml` floors raised so PyPI installs get the fixes too:
+  `mcp>=2.2.0`, `opentelemetry-api>=1.45.1`, `filelock>=4.2.1` (embed extra, Python 3.11+),
+  `msgpack>=1.2.3` (dev). `pip-audit` clean.
+- [x] **Mesh sync fails silently for weeks on a stale git ref lock** ([#498](https://github.com/CryptoJones/omind/issues/498)) — **v10.3.7** — _bug_ —
+  doctor fails on a stale git `*.lock` under `.git/` (path + age) and warns when the last
+  successful sync is older than 2 intervals, naming the consecutive failures. The daemon logs one
+  clear line and self-heals provably stale REF locks (never `index.lock`) under the write lock,
+  then runs `git fsck --connectivity-only` and records a `mesh-stale-lock` event.
+
+### Shipped — 2026-10-28 (v10.3.6)
+
+- [x] **Guard fail-open fallback ignores Antigravity send_command_input Input (follow-up to #475)** ([#496](https://github.com/CryptoJones/omind/issues/496)) — **v10.3.6** — _bug_ —
+  `adapters._fail_open_verdict` now derives the command through `guard.shell_command_text`, so a
+  `send_command_input` `Input` that hits the adapter error path still meets the hard rules.
+- [x] **README: link Flatline Roundtable and conveyor in the first lines** ([#436](https://github.com/CryptoJones/omind/issues/436)) — **v10.3.6** — _docs_ —
+  prerequisites: #429 (merged) and #428 (conveyor deployed on dl380 2026-10-02). Also adds the Nebraska banner, leads the install section with `uv tool install omind` (PyPI since 10.3.4; git install kept), and drops the stale Codeberg badge.
+
+### Shipped — 2026-10-28 (v10.3.5)
+
+- [x] **Guard does not see commands typed into an already-running shell** ([#475](https://github.com/CryptoJones/omind/issues/475)) — **v10.3.5** — _bug_ —
+  **Antigravity is fixed:** `send_command_input` is a shell tool and its `Input` text (trailing
+  Enter stripped) is judged by the hard rules, the repo-work gate and the commit freshness gate,
+  like `run_command`. Each write is judged on its own; a command split across keystroke writes is
+  a known limit. **Codex `write_stdin` cannot be intercepted:** it never fires PreToolUse
+  ([Codex hooks docs](https://learn.chatgpt.com/docs/hooks)), so no hook event carries its text.
 
 ### Shipped — 2026-10-26 (v10.3.3)
 
@@ -608,11 +672,11 @@ filed and linked below; they close when the fix branch merges._
 
 _(Feature roadmap from the same review — agent identity, usefulness feedback
 loop, sleep-time consolidation, write-time dedup, scoped writes — is Part 2 of
-the report. Agent identity is SHIPPED on `feat/agent-identity`; the other four
-are design-ratified by the FlatlineRoundtable panel (zero REJECTs, majority
-rulings on every split) in
-[docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md)
-and await implementation.)_
+the report. All five have SHIPPED: agent identity, the usefulness feedback loop
+and write-time near-duplicate warnings in v8.11.0; the sleep-time janitor
+(`omind maintain`) and scoped writes + scratch tier in v9.2.1. Each followed the
+FlatlineRoundtable design rulings (zero REJECTs, majority rulings on every split)
+in [docs/design/2026-08-27-roadmap-consensus.md](docs/design/2026-08-27-roadmap-consensus.md).)_
 
 ### Windows fresh-install test (2026-08-15, first fully-cold install)
 
@@ -946,6 +1010,7 @@ _Added 2026-10-02 so every closed issue has a line here. Details live on each is
 - [x] Guard current-turn authorization does not unblock global hook mutations ([#121](https://github.com/CryptoJones/omind/issues/121))
 - [x] Guard should block side effects from capability questions without explicit authorization ([#122](https://github.com/CryptoJones/omind/issues/122))
 - [x] guard: git -C freshness misattributed to cwd; single-slot marker; consult-gate blocks provably-inert commands ([#147](https://github.com/CryptoJones/omind/issues/147))
+- [x] First PyPI publish of omind package — live as 10.3.4, uploaded by `publish.yml` with the `PYPI_API_TOKEN` environment secret ([#267](https://github.com/CryptoJones/omind/issues/267))
 - [x] verifier: credit guard-demanded note reads; stop scoring vault writes as consults; log judgement context on off-topic denials ([#148](https://github.com/CryptoJones/omind/issues/148))
 - [x] omind guard locked on new repos with no remotes because pulls / fetches are not possible ([#149](https://github.com/CryptoJones/omind/issues/149))
 

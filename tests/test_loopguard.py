@@ -4,14 +4,14 @@ from __future__ import annotations
 
 import io
 import json
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 import pytest
 
 from omind import hooks, loopguard
 
-_T0 = datetime(2026, 6, 24, 12, 0, 0, tzinfo=timezone.utc)
+_T0 = datetime(2026, 6, 24, 12, 0, 0, tzinfo=UTC)
 
 
 @pytest.fixture(autouse=True)

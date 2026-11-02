@@ -1414,7 +1414,8 @@ def _run_search_explain(omi_dir: Path, args: argparse.Namespace) -> int:
         where = f"#{hit.heading}" if hit.heading else " (title/name)"
         print(
             f"{rank}. {hit.filename}{where}  score={hit.score:.5f} "
-            f"keyword={hit.keyword_rank or '-'} semantic={hit.vector_rank or '-'}"
+            f"keyword={hit.keyword_rank or '-'} semantic={hit.vector_rank or '-'} "
+            f"recency={hit.recency_rank or '-'}"
         )
         # Usefulness (item #2): always show the reads behind the weight — both
         # the counted (organic) and filtered (hook/re-read) tallies — so a

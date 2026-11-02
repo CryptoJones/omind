@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import sqlite3
 import time
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -193,6 +193,131 @@ def test_relevance_beats_recency(omi: Path) -> None:
     idx = searchindex.SearchIndex(omi)
     hits = idx.search("kubernetes ingress") or []
     assert [h.filename for h in hits] == ["On Topic.md"]
+
+
+def _forced_order(reverse: bool) -> Callable[[searchindex.SearchIndex], Iterator[Path]]:
+    """A ``SearchIndex._note_paths`` that lists the vault in one fixed order,
+    standing in for a filesystem that happens to list it that way."""
+
+    def paths(self: searchindex.SearchIndex) -> Iterator[Path]:
+        from omind.store import _is_reserved
+
+        found = [
+            p
+            for p in self.omi_dir.glob("*.md")
+            if not (_is_reserved(p.name) or p.name.startswith("."))
+        ]
+        yield from sorted(found, reverse=reverse)
+
+    return paths
+
+
+def test_ranking_is_the_same_whatever_order_the_vault_is_indexed_in(
+    omi: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#506: ext4 lists a directory by a per-filesystem hash seed, so the same
+    vault got different rowids on different machines, and FTS5 broke exact
+    BM25 ties on rowid. Two notes sharing a title tie exactly on their title
+    chunk; the ranked list must not depend on which was indexed first."""
+    twins = (
+        "# Twin deploy steps\n\n## Metadata\n- Created: 2026-06-01\n- Tags: #ops\n\n"
+        "## Summary\nTwin deploy steps\n\n## Details\n{details}\n"
+    )
+    (omi / "Twin A.md").write_text(twins.format(details="garden tomatoes."), encoding="utf-8")
+    (omi / "Twin B.md").write_text(twins.format(details="kitchen recipes."), encoding="utf-8")
+    (omi / "Twin C.md").write_text(twins.format(details="bicycle tyres."), encoding="utf-8")
+    for number in range(4):
+        _note(omi, f"Filler {number}", f"plain filler {number}", ["f"])
+
+    runs: list[list[tuple[str, str, float, int]]] = []
+    first_rowids: list[list[str]] = []
+    for reverse in (False, True):
+        monkeypatch.setattr(searchindex.SearchIndex, "_note_paths", _forced_order(reverse))
+        idx = searchindex.SearchIndex(omi)
+        idx.drop()
+        assert idx.refresh(vectors=False) is not None
+        db = idx._connect()
+        assert db is not None
+        first_rowids.append(
+            [str(r["filename"]) for r in db.execute("SELECT filename FROM chunks ORDER BY id")]
+        )
+        hits = idx.search("twin deploy steps") or []
+        # Exact ties break on filename, not on whoever got the lower rowid.
+        assert [h.filename for h in hits][:3] == ["Twin A.md", "Twin B.md", "Twin C.md"]
+        runs.append([(h.filename, h.heading, h.score, h.keyword_rank) for h in hits])
+        idx.close()
+    # The two builds really did assign different rowids…
+    assert first_rowids[0] != first_rowids[1]
+    # …and the ranking came out identical anyway.
+    assert runs[0] == runs[1]
+
+
+def _twin(omi: Path, filename: str, title: str, details: str, created: str) -> None:
+    (omi / filename).write_text(
+        f"# {title}\n\n## Metadata\n- Created: {created}\n- Tags: #ops\n\n"
+        f"## Summary\n{title}\n\n## Details\n{details}\n",
+        encoding="utf-8",
+    )
+
+
+def test_recency_credits_the_matched_chunk_and_skips_a_title_only_decoy(omi: Path) -> None:
+    """#507: two notes share a title. The older one's body matches every query
+    word; the newer one is about tomatoes. The recency boost used to land on
+    each note's title chunk, so the newer decoy's tied title match plus the
+    boost beat the real answer. The boost now goes to a note's best content
+    chunk, and only to notes holding a chunk that matched every query word."""
+    _twin(
+        omi,
+        "Kp12 deploy A.md",
+        "Kp12 deploy steps",
+        "Kp12 deploy steps via ansible playbook frobnicate.",
+        "2026-09-01",
+    )
+    # Filename sorts first, so with #506's tie-break its title chunk takes the
+    # tied keyword rank — the arrangement that made the old boost decisive.
+    _twin(omi, "Kp12 deploy 0.md", "Kp12 deploy steps", "unrelated garden tomatoes.", "2026-09-30")
+    for number in range(4):
+        _note(omi, f"Filler {number}", f"plain filler {number}", ["f"])
+    idx = searchindex.SearchIndex(omi)
+    hits = idx.search("Kp12 deploy steps ansible playbook frobnicate") or []
+    assert [h.filename for h in hits][:2] == ["Kp12 deploy A.md", "Kp12 deploy 0.md"]
+    winner, decoy = hits[0], hits[1]
+    # The boost was credited to the chunk that matched, not the title chunk…
+    assert winner.heading == "Details"
+    assert winner.recency_rank == 1
+    assert winner.keyword_rank == 1
+    # …and the decoy, which matches no chunk on every word, got no boost at all.
+    assert decoy.recency_rank == 0
+
+
+def test_recency_boosts_every_name_match_when_no_chunk_matches_all_words(omi: Path) -> None:
+    """#507: the all-words gate only applies when something passed it. Two
+    notes are each *named* for one word of a two-word query and no chunk holds
+    both; both are boosted, newest first, and ``recency_rank`` reports the order."""
+    _note(omi, "Zebra", "zebra stripes", ["a"], created="2026-01-01")
+    _note(omi, "Giraffe", "giraffe spots", ["a"], created="2026-06-01")
+    _note(omi, "Other", "nothing relevant here", ["b"], created="2026-09-01")
+    idx = searchindex.SearchIndex(omi)
+    by_name = {h.filename: h for h in idx.search("zebra giraffe") or []}
+    assert set(by_name) == {"Zebra.md", "Giraffe.md"}
+    assert by_name["Giraffe.md"].recency_rank == 1
+    assert by_name["Zebra.md"].recency_rank == 2
+
+
+def test_recency_ignores_a_note_the_query_names_nowhere_in_its_title(omi: Path) -> None:
+    """Recency breaks ties among notes that are *about* the query, as it always
+    did: a body-only mention earns no boost, and ``--explain`` shows a dash for
+    it rather than a made-up position. (Admitting every matched note cost a
+    bench case — a day-old note at keyword rank 88 took the rank-1 boost.)"""
+    _note(omi, "Target", "the specific thing", ["t"], created="2026-02-02")
+    _note(omi, "Specific", "the thing itself", ["t"], created="2020-01-01")
+    idx = searchindex.SearchIndex(omi)
+    by_name = {h.filename: h for h in idx.search("specific") or []}
+    assert set(by_name) == {"Target.md", "Specific.md"}
+    assert by_name["Target.md"].recency_rank == 0  # body-only: no boost
+    assert by_name["Specific.md"].recency_rank == 1  # named for the query
+    assert by_name["Specific.md"].keyword_rank == 1
+    assert by_name["Target.md"].vector_rank == 0
 
 
 def test_recency_only_reorders_matches_it_never_adds_notes(omi: Path) -> None:

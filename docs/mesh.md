@@ -239,7 +239,18 @@ This is strictly simpler than tombstoning every delete, and it is reversible.
 | `omind mesh clone <url>` | Seed a fresh node from a peer. |
 | `omind mesh purge <note>` | Rare, deliberate hard-delete-with-tombstone. The default "delete" only disables; this is the exception. |
 | `omind setup` | Register the **local** node with Claude Code (stdio). |
-| `omind doctor` | Extended: git health, merge driver installed, per-peer ahead/behind, last-sync time, unresolved-conflict list. |
+| `omind doctor` | Extended: git health, merge driver installed, per-peer ahead/behind, last successful sync and consecutive failures, stale git `*.lock` files (path + age), the last `mesh-stale-lock` self-heal, unresolved-conflict list. |
+
+### Stale git locks
+
+A git command that dies mid-write can leave a lock file under `.git/` (`HEAD.lock`,
+`refs/heads/main.lock`, `index.lock`, ...), and every later git command that needs it
+fails. `omind doctor` reports one older than 10 minutes with its path and age, and the
+mesh daemon removes stale **ref** locks itself (never `index.lock` or `config.lock`),
+then runs `git fsck --connectivity-only` and records a `mesh-stale-lock` event.
+Self-heal assumes the vault's `.git` lives on a local disk used by one host (not shared
+between machines over NFS/SMB, where another host's git is invisible here), and on
+macOS and Windows it only heals when no git process is running at all.
 
 ## Testing
 

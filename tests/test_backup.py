@@ -12,7 +12,7 @@ from __future__ import annotations
 
 import os
 import subprocess
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path, PurePosixPath
 
 import pytest
@@ -362,14 +362,14 @@ def test_doctor_warns_when_not_configured(restic_present: None, tmp_path: Path) 
 
 
 def test_doctor_ok_when_last_success_fresh(restic_present: None, tmp_path: Path) -> None:
-    _configure(last_success=datetime.now(timezone.utc).isoformat())
+    _configure(last_success=datetime.now(UTC).isoformat())
     results = {r.key: r for r in diagnose_backup(_doctor_config(tmp_path))}
     assert results["backup"].level == "ok"
     assert "backup_tool" not in results  # restic present: no degradation warning
 
 
 def test_doctor_warns_when_last_success_stale(restic_present: None, tmp_path: Path) -> None:
-    stale = (datetime.now(timezone.utc) - timedelta(hours=72)).isoformat()
+    stale = (datetime.now(UTC) - timedelta(hours=72)).isoformat()
     _configure(last_success=stale)
     results = {r.key: r for r in diagnose_backup(_doctor_config(tmp_path))}
     assert results["backup"].level == "warn"
@@ -388,14 +388,14 @@ def test_doctor_fails_at_three_consecutive_failures(
 ) -> None:
     _configure(
         consecutive_failures=3,
-        last_success=datetime.now(timezone.utc).isoformat(),  # freshness can't mask it
+        last_success=datetime.now(UTC).isoformat(),  # freshness can't mask it
     )
     results = {r.key: r for r in diagnose_backup(_doctor_config(tmp_path))}
     assert results["backup"].level == "fail"
 
 
 def test_doctor_warns_on_restic_degradation(restic_absent: None, tmp_path: Path) -> None:
-    _configure(last_success=datetime.now(timezone.utc).isoformat())
+    _configure(last_success=datetime.now(UTC).isoformat())
     results = {r.key: r for r in diagnose_backup(_doctor_config(tmp_path))}
     assert results["backup"].level == "ok"
     assert results["backup_tool"].level == "warn"
