@@ -129,7 +129,7 @@ def _read_failed(event: dict[str, Any]) -> bool:
         response = event.get("tool_response")
         if guard._tool_outcome_failed(response):
             return True
-        if str(event.get("tool_name") or "").startswith("mcp__omi__"):
+        if str(event.get("tool_name") or "").startswith(guard._OMI_TOOL_PREFIXES):
             blob = response if isinstance(response, str) else json.dumps(response, default=str)
             # A successful read always carries the note's ``filename``; requiring
             # its absence keeps a note that merely QUOTES the error (e.g. one
@@ -430,7 +430,7 @@ def consult_target(event: dict[str, Any], omi_dir: Path | str) -> tuple[str, str
     tool = str(event.get("tool_name") or "")
     ti = event.get("tool_input")
     ti = ti if isinstance(ti, dict) else {}
-    if tool.startswith("mcp__omi__"):
+    if tool.startswith(guard._OMI_TOOL_PREFIXES):
         # A vault WRITE (create/edit/delete/restore) is an act, not a consult of
         # memory — scoring one for relevance produced off-topic denials over
         # ordinary note maintenance (#148). Writes are ordinary gated actions;

@@ -75,6 +75,13 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 
 ## Done
 
+### Shipped — 2026-11-22 (v10.4.3)
+
+- [x] **omi-guard: OMI MCP read-note consults are never recorded under OpenCode, so the git-rules consult gate can never be cleared** ([#513](https://github.com/CryptoJones/omind/issues/513)) — **v10.4.3** — _bug_ —
+  the OpenCode plugin calls `omind guard verify` from `tool.execute.after` after an `omi_*` tool,
+  and `verify.consult_target` treats that spelling as an OMI consult. A full `read-note` writes
+  the session ack the repo-work gate checks.
+
 ### Shipped — 2026-10-31 (v10.4.2)
 
 - [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ —

@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.4.3] - 2026-11-22
+
+### Fixed
+- **OpenCode never recorded an OMI `read-note`, so the git-rules consult gate
+  could not be cleared
+  ([#513](https://github.com/CryptoJones/omind/issues/513)).** The OpenCode
+  plugin had no `tool.execute.after` hook, so `omind guard verify` never ran
+  and the session ack was never written. A successful `omi_*` tool now calls
+  `guard verify` with the Claude `mcp__omi__` tool name and the arguments
+  captured on `tool.execute.before`. `verify.consult_target` also accepts
+  OpenCode's `omi_` / `omi__` spelling directly, including a failed read.
+
 ## [10.4.2] - 2026-10-31
 
 ### Fixed
