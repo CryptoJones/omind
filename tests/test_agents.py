@@ -1014,6 +1014,7 @@ def test_opencode_setup_registers_mcp_and_guard_plugin(tmp_path: Path) -> None:
     # Windows path's backslashes appear doubled in the file.
     assert json.dumps(str(config.omi_dir)) in body
     assert "tool.execute.before" in body and "--harness opencode" in body
+    assert "tool.execute.after" in body and "guard verify" in body
 
 
 def test_codex_setup_installs_guard_hooks(tmp_path: Path) -> None:

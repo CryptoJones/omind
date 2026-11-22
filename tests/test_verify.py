@@ -42,6 +42,16 @@ def test_consult_target_extraction(tmp_path: Path) -> None:
     assert verify.consult_target(outside, omi) is None
     bash = {"tool_name": "Bash", "tool_input": {"command": "ls"}}
     assert verify.consult_target(bash, omi) is None
+    # OpenCode spells the same server `omi_<tool>` (#513).
+    assert verify.consult_target(
+        {"tool_name": "omi_read-note", "tool_input": {"name": "Note"}}, omi
+    ) == ("read", "Note")
+    assert (
+        verify.consult_target(
+            {"tool_name": "omi_create-note", "tool_input": {"name": "Note"}}, omi
+        )
+        is None
+    )
 
 
 def test_index_and_scaffolding_reads_are_not_consults(tmp_path: Path) -> None:
@@ -883,6 +893,37 @@ def _demanded_event(session: str, tool: str, tool_input: dict, result: dict) -> 
 def _armed(session: str) -> None:
     guard.begin_turn(session, "commit and push the repo work")
     guard.record_demanded_note(session, guard.GIT_RULES_NOTE)
+
+
+def test_opencode_tool_spelling_full_read_clears_the_git_rules_gate(tmp_path: Path) -> None:
+    """#513: OpenCode's `omi_read-note` is a consult. A full raw read records the
+    session ack the repo-work gate checks."""
+    omi = _omi(tmp_path)
+    (omi / f"{guard.GIT_RULES_NOTE}.md").write_text(
+        f"# {guard.GIT_RULES_NOTE}\n\nfull note\n", encoding="utf-8"
+    )
+    session = "v513-oc"
+    _armed(session)
+    verify.verify_consult(
+        {
+            "session_id": session,
+            "tool_name": "omi_read-note",
+            "tool_input": {
+                "name": guard.GIT_RULES_NOTE,
+                "representation": "raw",
+                "max_chars": 65536,
+            },
+            "tool_response": {
+                "filename": f"{guard.GIT_RULES_NOTE}.md",
+                "version": "9-abc",
+                "raw": "full note",
+            },
+        },
+        omi,
+        require=True,
+        out=io.StringIO(),
+    )
+    assert guard._has_consulted_git_rules(session, omi)
 
 
 def test_recall_at_the_recall_cap_still_truncated_does_not_clear(tmp_path: Path) -> None:
