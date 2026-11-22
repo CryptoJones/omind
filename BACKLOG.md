@@ -11,15 +11,7 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-### Epic: search ranks the same on every machine, and a newer title-only match can't beat a full-body match ([#505](https://github.com/CryptoJones/omind/issues/505))
-
-Found 2026-10-28: two `test_name_timelines` decoy cases pass on CI and fail locally,
-because the index is built in raw filesystem order and the recency leg lets a newer
-note's title-only chunk outrank a note whose body matches every query word. Full
-analysis on the epic.
-
-- [x] **Index the vault in a deterministic order and break BM25 ties on a stable key** ([#506](https://github.com/CryptoJones/omind/issues/506)) — **v10.4.1** — _bug_
-- [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ — after #506
+Nothing is open. Epic #505 closed on 2026-10-31; its children are under Done.
 
 ## Not planned
 
@@ -83,6 +75,10 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
   the session ack the repo-work gate checks.
 
 ### Shipped — 2026-10-31 (v10.4.2)
+
+#### ✅ Epic: search ranks the same on every machine, and a newer title-only match can't beat a full-body match ([#505](https://github.com/CryptoJones/omind/issues/505))
+
+_Done 2026-10-31: both children shipped (#506 in v10.4.1, #507 in v10.4.2) and the epic is closed. Found 2026-10-28: two `test_name_timelines` decoy cases passed on CI and failed locally, because the index was built in raw filesystem order and the recency leg let a newer note's title-only chunk outrank a note whose body matched every query word._
 
 - [x] **Recency must not lift a newer note's title-only match above a note whose body matches every query word** ([#507](https://github.com/CryptoJones/omind/issues/507)) — **v10.4.2** — _bug_ —
   the recency boost is credited to a note's best matched content chunk (first in the keyword list,
