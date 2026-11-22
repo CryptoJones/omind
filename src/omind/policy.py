@@ -888,12 +888,9 @@ def _mutate_learned(fn: Callable[[list[Rule]], list[Rule]]) -> None:
         try:
             filelock.lock_fd(fd)
             new_rules = fn(load_learned())
-            tmp = path.parent / "policy.json.tmp"
-            tmp.write_text(
-                json.dumps([_rule_to_dict(r) for r in new_rules], indent=2) + "\n",
-                encoding="utf-8",
+            paths.atomic_write_text(
+                path, json.dumps([_rule_to_dict(r) for r in new_rules], indent=2) + "\n"
             )
-            os.replace(tmp, path)
         finally:
             filelock.unlock_fd(fd)
             os.close(fd)

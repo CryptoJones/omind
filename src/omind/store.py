@@ -17,7 +17,6 @@ import hashlib
 import importlib
 import os
 import re
-import tempfile
 import threading
 from collections.abc import Callable, Iterator
 from dataclasses import asdict, dataclass, field, replace
@@ -33,6 +32,7 @@ from omind.paths import (
     INDEX_FILENAME,
     JOURNAL_PREFIX,
     RESERVED_FILENAMES,
+    atomic_write_text,
     sync_signal_path,
 )
 from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
@@ -40,7 +40,7 @@ from omind.seeds import INDEX_INTRO, INDEX_RECENT_COMMENT, INDEX_RECENT_HEADING
 # Inter-process write lock for an OMI folder. Concurrent Claude Code sessions
 # (and the web app, cron) are separate processes, so an advisory ``flock`` on a
 # shared file is what serializes their writes. Readers never take it — atomic
-# renames (see :func:`_atomic_write`) keep every read consistent.
+# renames (see :func:`atomic_write_text`) keep every read consistent.
 LOCK_FILENAME = ".omi.lock"
 
 #: Scratch-tier marker (item #5 part 2). A note whose filename ends in this is
@@ -62,57 +62,6 @@ _INDEX_DESC_LIMIT = 100
 # descriptions generated from note summaries) from an old bare-link one whose
 # `— description` annotations were written by hand and need migrating.
 _INDEX_GENERATED_MARKER = "<!-- entry descriptions are generated from note Summary sections -->"
-
-
-def _atomic_write(path: Path, text: str) -> None:
-    """Write ``text`` to ``path`` atomically: same-dir temp file + ``os.replace``.
-
-    On POSIX ``os.replace`` is an atomic rename, so a concurrent reader sees
-    either the old file or the new one in full — never a half-written file. The
-    parent directory is fsynced after the rename so the rename itself is durable
-    across a power loss, not just the file's data blocks.
-
-    ``newline="\n"`` is load-bearing. The default (``None``) translates every
-    ``\n`` to ``os.linesep`` on write, so the same note was written as LF on
-    POSIX and CRLF on Windows — and *nothing in the code could see it*, because
-    reads translate back. Four bugs came out of that one property: the
-    compliance log's rotation, and both halves of the transaction journal
-    (identity hashes that never matched what had just been written, and
-    pre-image restores that grew a blank line on every rollback). Every one of
-    them passed a green Linux run and failed only on the Windows legs.
-
-    With an explicit newline the bytes are identical on every OS, which also
-    makes note digests, mesh merges, and git diffs platform-stable. Existing
-    CRLF files keep their bytes until something rewrites them; Obsidian, git,
-    and every parser here read LF fine on Windows.
-    """
-    directory = path.parent
-    directory.mkdir(parents=True, exist_ok=True)
-    fd, tmp = tempfile.mkstemp(dir=directory, prefix=".tmp-", suffix=".md")
-    try:
-        with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as fh:
-            fh.write(text)
-            fh.flush()
-            os.fsync(fh.fileno())
-        os.replace(tmp, path)
-        _fsync_dir(directory)
-    except BaseException:
-        with contextlib.suppress(OSError):
-            os.unlink(tmp)
-        raise
-
-
-def _fsync_dir(directory: Path) -> None:
-    """Best-effort fsync of a directory so a rename into it is durable.
-
-    Silently skipped where the platform can't open a directory fd (Windows).
-    """
-    with contextlib.suppress(OSError, AttributeError):
-        dir_fd = os.open(directory, os.O_RDONLY)
-        try:
-            os.fsync(dir_fd)
-        finally:
-            os.close(dir_fd)
 
 
 def _read_text(path: Path) -> str:
@@ -1491,7 +1440,7 @@ class OmiStore:
                     )
             if self.node_id is not None and not _is_reserved(path.name):
                 content = self._stamped(path, content)
-            _atomic_write(path, content)
+            atomic_write_text(path, content)
             self._write_index()
         self._signal_write()
         return path.name
@@ -1525,7 +1474,7 @@ class OmiStore:
             content = transform(_read_text(path))
             if self.node_id is not None and not _is_reserved(path.name):
                 content = self._stamped(path, content)
-            _atomic_write(path, content)
+            atomic_write_text(path, content)
             self._write_index()
         self._signal_write()
         return path.name
@@ -1631,7 +1580,7 @@ class OmiStore:
                 transaction.write(path, archived)
             transaction.prepare()
             try:
-                transaction.apply(_atomic_write)
+                transaction.apply(atomic_write_text)
             except BaseException:
                 # Put back what we managed to change before re-raising, so the
                 # in-process failure needs no `omind recover` at all.
@@ -1794,7 +1743,7 @@ class OmiStore:
             lines.append(f"- [[{stem}]] — {description}" if description else f"- [[{stem}]]")
         if len(notes) > RECENT_LIMIT:
             lines.extend(["", f"*({len(notes)} notes total)*"])
-        _atomic_write(index_path, "\n".join(lines).rstrip() + "\n")
+        atomic_write_text(index_path, "\n".join(lines).rstrip() + "\n")
 
     def _migrate_index_descriptions(self, existing: str) -> None:
         """Copy hand-written index descriptions into empty note Summaries.
@@ -1832,4 +1781,4 @@ class OmiStore:
             # precondition for a non-convergent merge (see omind.merge).
             if self.node_id is not None:
                 migrated = self._stamped(path, migrated)
-            _atomic_write(path, migrated)
+            atomic_write_text(path, migrated)

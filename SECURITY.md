@@ -17,7 +17,7 @@ Controls in place:
 
 - **Path-traversal protection** — `store.safe_name()` rejects illegal characters
   and validates every note path against the OMI root.
-- **Atomic, single-writer writes** — `_atomic_write()` (tempfile + `os.replace`)
+- **Atomic, single-writer writes** — `paths.atomic_write_bytes()` (tempfile + `os.replace`)
   plus an advisory `flock` serialize concurrent writers; edits use a
   compare-and-swap `expected_version` to detect concurrent changes.
 - **No committed secrets** — backup passwords and mesh node IDs are generated at
