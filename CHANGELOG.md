@@ -7,6 +7,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+- **OpenCode V2 could not load the OMI-guard plugin
+  ([#517](https://github.com/CryptoJones/omind/issues/517)).** V2 replaced the V1
+  hook-object plugin API with a default export carrying `id` + `setup()` and
+  removed the Bun `$` shell helper. The guard is now a single dual-entrypoint
+  file — V1 calls `server()`, V2 calls `setup()` — that spawns omind through
+  portable `node:child_process`. It also passes the harness directory as `cwd`
+  so repo-scoped note rules (e.g. `no-direct-push-public-main`) apply under
+  OpenCode, and keeps the MCP registration in the V1 shape that V2 normalizes.
+  The file stays in `~/.config/opencode/plugin/`, which V2 also discovers;
+  duplicating it into `plugins/` would trip V2's duplicate-plugin-ID check.
+
 ## [10.4.3] - 2026-11-22
 
 ### Fixed

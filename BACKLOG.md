@@ -11,7 +11,11 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-Nothing is open. Epic #505 closed on 2026-10-31; its children are under Done.
+- [ ] **omi-guard plugin does not load under OpenCode V2 (plugin API + Bun `$` removal)** ([#517](https://github.com/CryptoJones/omind/issues/517)) — _bug_ —
+  V2 requires a `Plugin.define`-style default export with `ctx.tool.hook()` and no longer
+  provides the Bun `$` helper; the adapter also needs the harness `cwd` for repo-scoped
+  note rules. Fix in progress: dual V1/V2 entrypoint in one plugin file, portable
+  `node:child_process` spawn, and `cwd` from the plugin context.
 
 ## Not planned
 

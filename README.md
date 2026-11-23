@@ -572,7 +572,9 @@ omind setup --agent codex    --vault "$HOME/Documents/Obsidian Vault"   # OpenAI
 
 The **OMI-compliance guard** (hard-blocks + the per-turn consult gate) enforces
 across harnesses, not just Claude Code: Hermes via its `pre_tool_call` hook,
-OpenCode via a `tool.execute.before` plugin, and **Codex CLI** (>= 0.117) via its
+OpenCode via a dual V1/V2 plugin (V1 `tool.execute.before`; V2
+`ctx.tool.hook("execute.before")` in `~/.config/opencode/plugin/omi-guard.js`),
+and **Codex CLI** (>= 0.117) via its
 Claude-schema `PreToolUse`/`PermissionRequest` command hooks in
 `~/.codex/hooks.json` — so a rule learned under one agent blocks under all of
 them. `omind setup --agent codex` also persists Codex `[hooks.state]` trust for
@@ -629,8 +631,10 @@ treatment:
 2. Registers the `omi` MCP server where the agent looks for it: `mcp_servers` in
    `~/.hermes/config.yaml` (Hermes), `mcp.servers` in `~/.openclaw/openclaw.json`
    (OpenClaw — legacy `~/.clawdbot` / `~/.moltbot` installs detected too), or the
-   `mcp` block in `~/.config/opencode/opencode.json` (OpenCode). Only omind's own
-   entry is ever touched; a config file that doesn't parse is never overwritten.
+   `mcp` block in `~/.config/opencode/opencode.json` (OpenCode — V2 still reads
+   this V1 shape and normalizes it in memory, so one entry serves both clients).
+   Only omind's own entry is ever touched; a config file that doesn't parse is
+   never overwritten.
 3. Installs an `omind-omi-memory` skill that teaches the agent to **read** memory
    through the MCP tools and **write** it through `omind note` — the single-writer
    path that keeps concurrently running agents from corrupting the folder (see
