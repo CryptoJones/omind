@@ -172,7 +172,11 @@ def opencode_config_path() -> Path:
 
 
 def opencode_guard_plugin_path() -> Path:
-    """Where omind writes the OMI-guard OpenCode plugin (a plugin/ entry)."""
+    """Where omind writes the OMI-guard plugin.
+
+    V1 auto-loads global plugins from ``~/.config/opencode/plugin/``; V2 also
+    discovers that directory (alongside ``plugins/``), so one file serves both.
+    """
     return opencode_config_dir() / "plugin" / "omi-guard.js"
 
 
@@ -1383,13 +1387,22 @@ class PoolsideProvisioner(AgentProvisioner):
 
 
 class OpenCodeProvisioner(AgentProvisioner):
-    """Wire OpenCode: the ``omi`` MCP server in ``opencode.json`` + the OMI-guard
-    plugin. OpenCode auto-loads any module under ``~/.config/opencode/plugin/``;
-    the plugin's ``tool.execute.before`` hook throws on a hard-rule deny."""
+    """Wire OpenCode V1 and V2: the ``omi`` MCP server in ``opencode.json`` plus
+    the OMI-guard plugin. One file in ``~/.config/opencode/plugin/`` serves both
+    (V2 discovers that directory too); the plugin exports both hook APIs, so it
+    blocks hard-rule denies in either client.
+
+    The MCP entry deliberately keeps V1's shape (``mcp.<name>`` + ``enabled``):
+    V1 cannot read V2's ``mcp.servers`` form, while V2 normalizes V1 config in
+    memory. One shape is the only one both clients understand.
+    """
 
     AGENT_LABEL = "OpenCode"
     INSTALL_HINT = "Install OpenCode (`npm i -g opencode-ai`), then re-run."
-    DONE_MESSAGE = "Done. Restart OpenCode to load the OMI memory + guard plugin."
+    DONE_MESSAGE = (
+        "Done. Reload OpenCode (V2 reloads on save; restart V1) to load the "
+        "OMI memory + guard plugin."
+    )
 
     def agent_root(self) -> Path:
         return opencode_config_dir()
@@ -1448,8 +1461,13 @@ class OpenCodeProvisioner(AgentProvisioner):
         self.install_guard()
 
     def install_guard(self) -> None:
-        """Write the OMI-guard plugin into OpenCode's auto-loaded ``plugin/`` dir,
-        substituting the omind binary + OMI folder. Managed (refreshed on drift)."""
+        """Write the dual V1/V2 OMI-guard plugin to OpenCode's global plugin dir.
+
+        The file lives in ``plugin/`` (singular) because V1 discovers only that
+        directory and V2 discovers it as well as ``plugins/``. A single copy
+        avoids V2's duplicate-plugin-ID rejection; the plugin itself exports
+        both V1 and V2 entrypoints. Managed (refreshed on drift).
+        """
         dest = opencode_guard_plugin_path()
         try:
             content = (

@@ -557,6 +557,26 @@ def test_js_guard_templates_define_every_spawn_helper_they_call(name: str) -> No
     assert called <= defined, f"{name}: called but undefined: {called - defined}"
 
 
+def test_opencode_plugin_template_is_dual_v1_v2(tmp_path: Path) -> None:
+    """V2 removed the Bun `$` helper and only calls ``setup()``; V1 only knows
+    ``server()``. One rendered file must expose both APIs without `$`."""
+    from importlib.resources import files
+
+    body = files("omind").joinpath("omi-guard.opencode.js").read_text(encoding="utf-8")
+    assert "export default {" in body
+    assert "async setup(ctx)" in body and "async server(" in body
+    assert 'ctx.tool.hook("execute.before"' in body
+    assert 'ctx.tool.hook("execute.after"' in body
+    assert '"tool.execute.before"' in body and '"tool.execute.after"' in body
+    # V2's plugin context has no `$`; both versions spawn via node:child_process.
+    assert 'from "node:child_process"' in body
+    assert not re.search(r"\$\`", body)
+    rendered = agents._substitute_omind(
+        body, {"__OMI_DIR__": str(tmp_path)}, escape=agents._js_string
+    )
+    _node_check(tmp_path, "opencode-dual", rendered)
+
+
 _SPACED_POSIX = "/home/Jane Doe/.local/bin/omind"
 
 
@@ -1007,14 +1027,20 @@ def test_opencode_setup_registers_mcp_and_guard_plugin(tmp_path: Path) -> None:
     assert omi["type"] == "local" and omi["enabled"] is True
     assert "node" in omi["command"] and str(config.vault) in omi["command"]
 
-    # The guard plugin is written into OpenCode's auto-loaded plugin/ dir.
+    # One dual-entrypoint plugin in V1's plugin/ dir: V1 loads it natively and
+    # V2 discovers the same dir (it also scans plugins/; a copy there would be
+    # rejected as a duplicate plugin ID).
     body = agents.opencode_guard_plugin_path().read_text(encoding="utf-8")
     assert "__OMIND_BIN__" not in body and "__OMI_DIR__" not in body
     # Placeholders are JSON-escaped into JS string literals (#418 review), so a
     # Windows path's backslashes appear doubled in the file.
     assert json.dumps(str(config.omi_dir)) in body
+    # V1 server() hooks and V2 ctx.tool.hook() both live in the one file.
     assert "tool.execute.before" in body and "--harness opencode" in body
     assert "tool.execute.after" in body and "guard verify" in body
+    assert "async server(" in body and "async setup(ctx)" in body
+    assert "export const OmiGuard" in body  # older V1 named-function exports
+    assert 'ctx.tool.hook("execute.before"' in body
 
 
 def test_codex_setup_installs_guard_hooks(tmp_path: Path) -> None:

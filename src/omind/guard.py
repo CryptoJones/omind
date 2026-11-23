@@ -1489,7 +1489,8 @@ _GLOBAL_CONFIG_FILES = frozenset(
         ".hermes/config.yaml",
         ".hermes/AGENTS.md",
         ".config/opencode/opencode.json",
-        ".config/opencode/plugin/omi-guard.js",
+        ".config/opencode/plugin/omi-guard.js",  # OpenCode V1
+        ".config/opencode/plugins/omi-guard.js",  # OpenCode V2
         ".gemini/settings.json",
         ".gemini/config/mcp_config.json",
         ".gemini/config/hooks.json",
