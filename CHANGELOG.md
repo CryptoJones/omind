@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [10.4.4] - 2026-11-23
+
 ### Fixed
 - **OpenCode V2 could not load the OMI-guard plugin
   ([#517](https://github.com/CryptoJones/omind/issues/517)).** V2 replaced the V1
