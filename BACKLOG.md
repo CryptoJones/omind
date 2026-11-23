@@ -11,12 +11,6 @@ _Mirrors the [GitHub Issues tab](https://github.com/CryptoJones/omind/issues).
 All open items are sequenced by priority (Priority 1 to 7) so future agents know
 the exact order of operations._
 
-- [ ] **omi-guard plugin does not load under OpenCode V2 (plugin API + Bun `$` removal)** ([#517](https://github.com/CryptoJones/omind/issues/517)) — _bug_ —
-  V2 requires a `Plugin.define`-style default export with `ctx.tool.hook()` and no longer
-  provides the Bun `$` helper; the adapter also needs the harness `cwd` for repo-scoped
-  note rules. Fix in progress: dual V1/V2 entrypoint in one plugin file, portable
-  `node:child_process` spawn, and `cwd` from the plugin context.
-
 ## Not planned
 
 _Closed as not planned or rejected. Kept for the record; nothing here is pending, so these items have no checkbox._
@@ -70,6 +64,14 @@ _Closed as not planned or rejected. Kept for the record; nothing here is pending
 - **Adopt an external memory framework (Mem0 / Cognee / Zep) as the storage layer** — _rejected_ — evaluated during the 2026-07-24 survey. Every one of them wants to own storage, and omind's whole premise is that the Markdown vault is the source of truth: plain files, git-replicated across the mesh, readable in Obsidian, with no service to run. The techniques are worth copying; the dependency is not.
 
 ## Done
+
+### Shipped — 2026-11-23 (v10.4.4)
+
+- [x] **omi-guard plugin does not load under OpenCode V2 (plugin API + Bun `$` removal)** ([#517](https://github.com/CryptoJones/omind/issues/517)) — **v10.4.4** — _bug_ —
+  one dual-entrypoint plugin file serves V1 and V2: V1 `server()`/named export,
+  V2 `ctx.tool.hook()` via `setup()`; portable `node:child_process` replaces the
+  removed Bun `$`; the adapter receives the harness `cwd` so repo-scoped note rules
+  apply. Single install in `plugin/`, which V2 discovers too.
 
 ### Shipped — 2026-11-22 (v10.4.3)
 
